@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import logging
+import asyncio
 import os
 import re
 import sys
@@ -14,7 +15,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 # Logging setup
 # Configuring OUR logger to avoid using discords default logger
-logger = logging.getLogger('sancho')
+logger = logging.getLogger('')
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
 
@@ -146,25 +147,35 @@ async def on_message(message):
             await ctx.send("Sorry, I didn't understand your query, please use .help to help format your query, if the problem persists, please contact the author.")
             logger.warning(f"NLP dispatcher: No matching patterns found for '{message.content}' from '{ctx.author}.")
 
-# Cogs (Modular command implementations)
-# Each cog is in its own file for modularity and easier maintenance
+# Main routine to load cogs and start the bot
+# Each cog is in it's own file in the cogs/ directory
 
-if __name__ == '__main__':
+async def main():
+    """Main entry point to load cogs and start the bot."""
     logger.info("Sancho starting...")
 
-    # Load cogs
+    # Load all cogs from the cogs directory
     for filename in os.listdir('./cogs'):
+        # Do not load __init__.py or non-python files
+        if filename.startswith('__'):
+            continue
+
         if filename.endswith('.py'):
             extension = f'cogs.{filename[:-3]}'
             try:
-                bot.load_extension(extension) # type: ignore # This is fine, pyright is just being dumb, we're passing the error handling to the except block
+                await bot.load_extension(extension)
                 logger.info(f'Loaded extension: {extension}')
             except Exception as e:
-                logger.error(f'Failed to load extension {extension}.', exc_info=e)
-
-
-    # Run the bot
+                logger.error(f'Failed to load extension {extension}.', exc_info=True)
+        
+    # Start the bot
     try:
-        bot.run(TOKEN)
+        await bot.start(TOKEN)
     except Exception as e:
-        logger.critical("Failed to start the bot.", exc_info=e)
+        logger.critical(f"Sancho encountered a critical error: {e}", exc_info=True)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Sancho is shutting down due to keyboard interrupt.")
