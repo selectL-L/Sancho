@@ -7,18 +7,12 @@ class DiceRoller(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command()
     async def roll(self, ctx, *, roll_string: str):
-        """
-        Rolls dice with support for advantage/disadvantage and modifiers.
-        """
+        """Rolls dice with support for advantage/disadvantage and modifiers."""
         try:
-            # Clean up the input string
             clean_string = roll_string.lower().replace('roll', '').replace('dice', '').strip()
-            
             has_advantage = 'advantage' in clean_string
             has_disadvantage = 'disadvantage' in clean_string
-            
             clean_string = clean_string.replace('with advantage', '').replace('with disadvantage', '').strip()
 
             dice_match = re.search(r'(\d+)?d(\d+)', clean_string)
@@ -26,11 +20,18 @@ class DiceRoller(commands.Cog):
                 await ctx.send("I couldn't find a valid dice format like `2d6` or `d20` in your request.")
                 return
 
-            num_dice = int(dice_match.group(1)) if dice_match.group(1) else 1
-            num_sides = int(dice_match.group(2))
+            num_dice_str = dice_match.group(1)
+            num_sides_str = dice_match.group(2)
+            
+            num_dice = int(num_dice_str) if num_dice_str else 1
+            num_sides = int(num_sides_str) if num_sides_str else 0
 
-            if num_dice > 100:
-                raise ValueError("I can't roll more than 100 dice at once!")
+            if num_dice < 1 or num_sides < 1:
+                await ctx.send("You can't roll zero or negative dice or sides!")
+                return
+            if num_dice > 1000 or num_sides > 10000:
+                await ctx.send("Please keep dice under 1000 and sides under 10000!")
+                return
 
             modifier_match = re.search(r'([+-])\s*(\d+)', clean_string)
             modifier = 0
@@ -69,10 +70,9 @@ class DiceRoller(commands.Cog):
             await ctx.send(response)
 
         except Exception as e:
-            await ctx.send(f"I had trouble understanding that roll. Please try a format like `d20+5` or `2d6 with advantage`.")
-            # Also log the error to the console for debugging
-            print(f"Error in dice roller: {e}")
+            # This is a fallback for unexpected errors during parsing
+            await ctx.send("I had trouble understanding that roll. Please try a format like `d20+5` or `2d6 with advantage`.")
+            raise e # Re-raise the exception so the main error handler can log it
 
-# Setup function to add the cog to the bot
 async def setup(bot):
     await bot.add_cog(DiceRoller(bot))

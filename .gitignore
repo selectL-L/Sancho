@@ -208,6 +208,7 @@ __marimo__/
 
 # Local files created by various tools
 info.env
+reminders.db
 
 # Log files
 *.log
