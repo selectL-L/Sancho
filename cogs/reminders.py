@@ -5,7 +5,7 @@ import time
 import dateparser
 import re
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 log = logging.getLogger('RemindersCog')
 DB_FILE = 'reminders.db'
@@ -33,7 +33,7 @@ class Reminders(commands.Cog):
             await db.commit()
         log.info("Reminders database initialized and table ensured.")
 
-    @tasks.loop(seconds=10)
+    @tasks.loop(seconds=15)
     async def check_reminders(self):
         try:
             async with aiosqlite.connect(DB_FILE) as db:
@@ -64,76 +64,96 @@ class Reminders(commands.Cog):
         await self.bot.wait_until_ready()
         await self._setup_database()
 
-    async def remind(self, ctx, *, query: str):
-        """Sets a reminder using a multi-pass regex and validation approach."""
-        
-        log.info("--- Starting Reminder Parsing ---")
-        log.info(f"Initial Query: '{query}'")
-        
-        # This regex removes common polite words from the start or end of the query.
-        sanitized_query = re.sub(r'^\s*(please|thank you|thanks)\s*|\s*(please|thank you|thanks)[.,!?]*\s*$', '', query, flags=re.IGNORECASE).strip()
+    def _parse_reminder(self, query: str) -> Optional[Tuple[str, str]]:
+        """
+        Attempts to parse a query into a (message, time_string) tuple by finding the
+        longest possible valid time phrase from the beginning or end of the query.
+        Returns None if parsing fails.
+        """
+        log.info(f"--- Starting New Parser ---")
+        log.info(f"Original Query: '{query}'")
+
+        # 1. Pre-processing: Handle Discord timestamps <t:12345:F>
+        discord_ts_match = re.search(r'<t:(\d+):[a-zA-Z]>', query)
+        if discord_ts_match:
+            ts = discord_ts_match.group(1)
+            # Replace with a string dateparser understands unambiguously
+            query = query.replace(discord_ts_match.group(0), f'at timestamp {ts}')
+            log.info(f"Converted Discord timestamp. New Query: '{query}'")
+
+        # 2. Sanitization: Remove trigger words
+        sanitized_query = re.sub(r'^(remind me to|remind me|remember to|remember)\s*', '', query, flags=re.IGNORECASE).strip()
         log.info(f"Sanitized Query: '{sanitized_query}'")
 
-        # Define the patterns to try, from most specific to most general.
-        # Each pattern must have a 'time' and 'message' capture group.
-        patterns = [
-            # Pattern 1: "remind me <TIME> to <MESSAGE>" (e.g., "remind me in 5 minutes to do laundry")
-            re.compile(r'remind me\s+(?P<time>.*?)\s+to\s+(?P<message>.*)', re.IGNORECASE),
+        words = sanitized_query.split()
+        if not words:
+            return None
+
+        # STRATEGY 1: Time phrase is at the END. Find the longest valid phrase.
+        # e.g., "do my laundry in 5 minutes"
+        log.info("--- Strategy 1: Searching for longest time phrase at the end ---")
+        for i in range(len(words)):
+            potential_time = ' '.join(words[i:])
+            potential_message = ' '.join(words[:i])
             
-            # Pattern 2: "remind me to <MESSAGE> <TIME>" (e.g., "remind me to do laundry in 5 minutes")
-            # This looks for a message followed by a common time preposition.
-            re.compile(r'remind me to\s+(?P<message>.*?)\s+(in|on|at)\s+(?P<time>.*)', re.IGNORECASE),
-        ]
-
-        time_str = None
-        reminder_message = None
-        dt_object = None
-
-        for i, pattern in enumerate(patterns):
-            log.info(f"--- Trying Pattern #{i+1} ---")
-            match = pattern.match(sanitized_query)
-            if not match:
-                log.info("Pattern did not match.")
-                continue
-
-            groups = match.groupdict()
-            potential_time = groups.get('time', '').strip()
-            potential_message = groups.get('message', '').strip()
-            
-            # For pattern 2, the preposition is not part of the time string itself.
-            if i == 1: # If we are on the second pattern
-                preposition = match.group(2) # The (in|on|at) group
-                potential_time = f"{preposition} {potential_time}"
-
-            log.info(f"Potential Time: '{potential_time}' | Potential Message: '{potential_message}'")
-
-            # Validate the extracted time string with dateparser
+            log.debug(f"Trying split: MESSAGE='{potential_message}' | TIME='{potential_time}'")
             parsed_time = dateparser.parse(potential_time, settings={'PREFER_DATES_FROM': 'future'})
             if parsed_time:
-                log.info(f"SUCCESS: Dateparser validated '{potential_time}'. This is the correct pattern.")
-                time_str = potential_time
-                reminder_message = potential_message
-                break # Stop searching for patterns
-            else:
-                log.info("Dateparser could not validate the potential time. Trying next pattern.")
+                log.info(f"SUCCESS: Dateparser validated '{potential_time}'.")
+                # Final cleanup on message
+                final_message = potential_message.strip()
+                if final_message.lower().endswith(' to'):
+                    final_message = final_message[:-3].strip()
+                return (final_message, potential_time.strip())
 
-        # If after all patterns, we still haven't found a valid time
-        if not time_str or not reminder_message:
-            log.warning("Parsing failed: No pattern produced a valid time and message.")
+        # STRATEGY 2: Time phrase is at the BEGINNING. Find the longest valid phrase.
+        # e.g., "in 5 minutes to do my laundry"
+        log.info("--- Strategy 2: Searching for longest time phrase at the beginning ---")
+        for i in range(len(words), 0, -1):
+            potential_time = ' '.join(words[:i])
+            potential_message = ' '.join(words[i:])
+
+            log.debug(f"Trying split: TIME='{potential_time}' | MESSAGE='{potential_message}'")
+            parsed_time = dateparser.parse(potential_time, settings={'PREFER_DATES_FROM': 'future'})
+            if parsed_time:
+                log.info(f"SUCCESS: Dateparser validated '{potential_time}'.")
+                # Final cleanup on message
+                final_message = potential_message.strip()
+                if final_message.lower().startswith('to '):
+                    final_message = final_message[3:].strip()
+                return (final_message, potential_time.strip())
+        
+        log.warning("Parsing failed: No strategy produced a valid time and message.")
+        return None
+
+    async def remind(self, ctx, *, query: str):
+        parsed_result = self._parse_reminder(query)
+
+        if not parsed_result:
             await ctx.send(
-                "I couldn't understand that format. Please try one of these:\n"
-                "- `.sancho remind me <message> in <time>`\n"
-                "- `.sancho remind me in <time> to <message>`"
+                "I had trouble understanding that reminder. Please try a different phrasing, like:\n"
+                "- `.sancho remind me to do the laundry in 2 hours`\n"
+                "- `.sancho remind me on Friday at 8pm to call Bob`"
             )
             return
 
-        log.info(f"Final Parsed Time String: '{time_str}'")
-        log.info(f"Final Parsed Message: '{reminder_message}'")
+        reminder_message, time_str = parsed_result
+        log.info(f"--- Final Parse Results ---")
+        log.info(f"Message: '{reminder_message}'")
+        log.info(f"Time String: '{time_str}'")
 
-        # Get the final, timezone-aware datetime object.
+        if not reminder_message:
+            await ctx.send("You need to provide a message for the reminder!")
+            return
+
         dt_object = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': True})
 
-        reminder_timestamp = int(dt_object.timestamp()) # type: ignore 
+        if not dt_object:
+            log.error(f"Dateparser failed on a string that was previously validated: '{time_str}'")
+            await ctx.send("Sorry, something went wrong trying to understand that time. Please try again.")
+            return
+
+        reminder_timestamp = int(dt_object.timestamp())
         current_time = int(time.time())
 
         if reminder_timestamp <= current_time:

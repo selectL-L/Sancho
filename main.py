@@ -46,7 +46,7 @@ bot = commands.Bot(command_prefix='.sancho ', intents=intent, log_handler=None)
 #
 NLP_COMMANDS = [
     ((r'\broll\b', r'\bdice\b'), 'DiceRoller', 'roll', False),
-    ((r'\bremind\b', r'\breminder\b'), 'Reminders', 'remind', False),
+    ((r'\bremind\b', r'\breminder\b', r'\bremember\b'), 'Reminders', 'remind', False),
 ]
 
 # --- Main Bot Logic ---
