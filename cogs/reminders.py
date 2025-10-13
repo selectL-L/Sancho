@@ -6,13 +6,12 @@ import dateparser
 import re
 import logging
 from typing import Optional
+from utils.base_cog import BaseCog
 
-log = logging.getLogger('RemindersCog')
-
-class Reminders(commands.Cog):
+class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
     def __init__(self, bot: commands.Bot, db_path: str):
-        self.bot = bot
+        super().__init__(bot)
         self.db_path = db_path
         self.check_reminders.start()
 
@@ -47,64 +46,104 @@ class Reminders(commands.Cog):
                         if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
                             await channel.send(f"{user.mention}, you asked me to remind you: '{msg}'")
                     except (discord.NotFound, discord.Forbidden) as e:
-                        log.warning(f"Failed to send reminder {rid} (user/channel not found or permissions error). Deleting. Error: {e}")
+                        self.logger.warning(f"Failed to send reminder {rid} (user/channel not found or permissions error). Deleting. Error: {e}")
                     
                     await db.execute("DELETE FROM reminders WHERE id = ?", (rid,))
                 await db.commit()
         except Exception as e:
-            log.error(f"Unexpected error in reminder check loop: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error in reminder check loop: {e}", exc_info=True)
 
     @check_reminders.before_loop
     async def before_check_reminders(self) -> None:
         await self.bot.wait_until_ready()
         await self._setup_database()
 
-    def _parse_reminder(self, query: str) -> tuple[str, str] | None:
-        """Parses a query into a (message, time_string) tuple."""
-        sanitized = re.sub(r'^(remind me to|remind me|remember to|remember)\s*', '', query, flags=re.IGNORECASE).strip()
-        words = sanitized.split()
-        if not words: return None
-
-        # Strategy: Find the longest possible valid time phrase at the end of the string.
-        for i in range(len(words)):
-            time_str = ' '.join(words[i:])
-            msg_str = ' '.join(words[:i])
-            if dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'}):
-                # We found the longest valid time string. The rest is the message.
-                return (msg_str.removesuffix(' to').strip(), time_str)
+    def _parse_reminder(self, query: str) -> tuple[str | None, str] | None:
+        """
+        Parses a query to separate the reminder message from the time string.
+        It looks for common time-related prepositions to make a split.
+        """
+        # Keywords that typically precede a time description. Ordered by likely precedence.
+        time_keywords = [' on ', ' at ', ' in ', ' for ', ' next ', ' tomorrow', ' tonight']
         
+        # Sanitize the initial trigger words like "remind me to"
+        sanitized_query = re.sub(r'^(remind me to|remind me|remember to|remember)\s*', '', query, flags=re.IGNORECASE).strip()
+
+        # --- Strategy 1: Find a time keyword to split the message and time string ---
+        for keyword in time_keywords:
+            # Use rpartition to find the last occurrence of the keyword
+            message_part, sep, time_part = sanitized_query.rpartition(keyword)
+            
+            if not sep:  # Keyword not found
+                continue
+
+            # Reconstruct the time string with the keyword, as partition removes it
+            time_string = sep.strip() + ' ' + time_part.strip()
+            
+            # Check if the parsed time string is valid
+            if dateparser.parse(time_string, settings={'PREFER_DATES_FROM': 'future'}):
+                self.logger.info(f"Successfully parsed reminder. Message: '{message_part}', Time: '{time_string}'")
+                return (message_part.strip(), time_string)
+
+        # --- Strategy 2: If no keywords, assume the whole string is the time (e.g., "tomorrow 5pm") ---
+        # This is a fallback for simple cases like ".sancho remind me tomorrow 5pm to take out trash"
+        # (which would fail above) or when the message is at the end.
+        # We try parsing the whole sanitized query. If it's a valid date, there's no message part.
+        if dateparser.parse(sanitized_query, settings={'PREFER_DATES_FROM': 'future'}):
+             self.logger.warning("Query was parsed entirely as a time string. No reminder message found.")
+             return (None, sanitized_query) # No message, just time
+
+        # If all strategies fail, return None
+        self.logger.warning(f"Failed to parse reminder query: '{query}'")
         return None
 
     async def remind(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all reminder requests."""
-        parsed = self._parse_reminder(query)
-        if not parsed or not parsed[0]:
-            await ctx.send("I couldn't understand that. Please tell me *what* to remind you of and *when* (e.g., `...in 1 hour`).")
-            return
-
-        reminder_message, time_str = parsed
-        dt_object = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': True})
-
-        if not dt_object:
-            await ctx.send("Sorry, I couldn't understand that time. Please try again.")
-            return
-
-        timestamp = int(dt_object.timestamp())
-        if timestamp <= int(time.time()):
-            await ctx.send("You can't set a reminder in the past!")
-            return
-
         try:
+            parsed = self._parse_reminder(query)
+            
+            # Case 1: Parsing completely failed
+            if not parsed:
+                await ctx.send("I couldn't understand that reminder. Please try a different phrasing, like:\n"
+                             "• `.sancho remind me to take out the trash in 2 hours`\n"
+                             "• `.sancho remind me on Friday at 8pm to call Bob`")
+                return
+
+            reminder_message, time_str = parsed
+
+            # Case 2: Parser found a time, but no message
+            if not reminder_message:
+                await ctx.send("You need to provide a message for the reminder! What should I remind you about?")
+                return
+
+            dt_object = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RETURN_AS_TIMEZONE_AWARE': True})
+            
+            # This check is technically redundant if _parse_reminder is correct, but it's a good safeguard.
+            if not dt_object:
+                self.logger.error(f"Dateparser failed on a string that was previously validated: '{time_str}'")
+                await ctx.send("Sorry, something went wrong trying to understand that time. Please try again.")
+                return
+
+            timestamp = int(dt_object.timestamp())
+            if timestamp <= int(time.time()):
+                await ctx.send("You can't set a reminder in the past!")
+                return
+
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
                     "INSERT INTO reminders (user_id, channel_id, reminder_time, message, created_at) VALUES (?, ?, ?, ?, ?)",
                     (ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()))
                 )
                 await db.commit()
+            
             await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'")
+            self.logger.info(f"Reminder set for user {ctx.author.id} at {timestamp}.")
+
         except aiosqlite.Error as e:
-            log.error(f"Database error setting reminder: {e}")
-            await ctx.send("Sorry, a database error occurred.")
+            self.logger.error(f"Database error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("Sorry, a database error occurred while setting your reminder.")
+        # Any other unexpected exceptions will be caught by the global handler in main.py.
+
 
 async def setup(bot: commands.Bot, **kwargs) -> None:
     """Standard setup, receiving the database path via kwargs from main.py."""
