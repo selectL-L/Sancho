@@ -11,8 +11,18 @@ import logging
 def get_application_path() -> str:
     """Returns the base path for the application, whether running from source or bundled."""
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # Running as a bundled executable
         return os.path.dirname(sys.executable)
+    # Running as a script
     return os.path.dirname(os.path.abspath(__file__))
+
+def discover_cogs(cogs_path: str) -> list[str]:
+    """Scans the cogs directory and returns a list of cog module names."""
+    cogs = []
+    for filename in os.listdir(cogs_path):
+        if filename.endswith('.py') and not filename.startswith('__'):
+            cogs.append(f'cogs.{filename[:-3]}')
+    return cogs
 
 # --- Core Paths ---
 APP_PATH = get_application_path()
@@ -23,6 +33,19 @@ COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # --- Bot Configuration ---
 BOT_PREFIX = ".sancho "
+
+# Dynamically discover cogs and create a static list for the application to use.
+# This list is used by both main.py (at runtime) and build.py (at build time).
+try:
+    COGS_TO_LOAD = discover_cogs(COGS_PATH)
+except FileNotFoundError:
+    # This handles the case where the script is run from a location where the cogs/ dir isn't present
+    # (like the PyInstaller executable context), preventing a crash.
+    # The build script ensures the necessary modules are frozen anyway, so we can use a placeholder.
+    COGS_TO_LOAD = [
+        'cogs.dice_roller',
+        'cogs.reminders'
+    ]
 
 # --- Logging Configuration ---
 LOG_LEVEL = logging.INFO
