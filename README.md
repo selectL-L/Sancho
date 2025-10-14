@@ -8,7 +8,7 @@ This is a small, personal bot built to handle commands in a more natural way. In
 
 Sancho is currently equipped with a couple of handy features (more to come!):
 
-*   **A pretty slick Dice Roller:** You can throw complex dice notations at it, and it'll figure it out. Stuff like `.sancho roll (2d6+5)*3` or `.sancho roll 4d20kh3 with advantage`.
+*   **A half decent Dice Roller:** You can throw complex dice notations at it, and it'll figure it out. Stuff like `.sancho roll (2d6+5)*3` or `.sancho roll 4d20kh3 with advantage`.
 *   **Natural Language Reminders:** Set reminders just by talking to the bot (still doesn't work super well (yet)). For example: `.sancho remind me in 2 hours to check on my laundry`. It also supports custom timezones so you don't have to do any conversions.
 
 ## How to Use It
