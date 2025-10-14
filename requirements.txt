@@ -1,0 +1,18 @@
+# Core library for interacting with the Discord API.
+discord.py
+
+# Used for loading environment variables (e.g., bot token) from an info.env file.
+python-dotenv
+
+# Asynchronous driver for SQLite, used by the Reminders cog.
+aiosqlite
+
+# For parsing natural language dates and times in the Reminders cog.
+dateparser
+
+# Provides timezone information, used by the Reminders cog.
+pytz
+
+# Required by the build.py script to locate library data files.
+# Does not need to be bundled with the final executable.
+# pip install setuptools

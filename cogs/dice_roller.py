@@ -2,112 +2,223 @@ import discord
 from discord.ext import commands
 import random
 import re
+import ast
+import operator as op
+from typing import Optional
+import re as _re
+from utils.base_cog import BaseCog
 
-# A strict regex to find all valid dice notations (e.g., 3d6, 4d6kh3, 2d20)
+# --- Secure Expression Evaluator ---
+
+ALLOWED_OPERATORS = {
+    ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+    ast.Div: op.truediv, ast.USub: op.neg, ast.Pow: op.pow
+}
+
+def safe_eval_math(expr: str) -> float:
+    """Safely evaluates a mathematical string expression using an AST walker."""
+    tree = ast.parse(expr, mode='eval').body
+
+    def _eval_node(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant):
+            if not isinstance(node.value, (int, float)):
+                raise ValueError("Only numeric values are allowed.")
+            return node.value
+        elif isinstance(node, ast.Num):  # Legacy support for Python < 3.8
+            # node.n can be a variety of constants; validate its type before
+            # converting to float so Pylance can narrow the type safely.
+            value = node.n
+            if not isinstance(value, (int, float)):
+                raise ValueError("Only numeric values are allowed.")
+            return float(value)
+        elif isinstance(node, (ast.BinOp, ast.UnaryOp)):
+            op_type = type(node.op)
+            if op_type not in ALLOWED_OPERATORS:
+                raise ValueError(f"Operator not allowed: {op_type.__name__}")
+            if isinstance(node, ast.BinOp):
+                left = _eval_node(node.left)
+                right = _eval_node(node.right)
+                return ALLOWED_OPERATORS[op_type](left, right)
+            else: # UnaryOp
+                operand = _eval_node(node.operand)
+                return ALLOWED_OPERATORS[op_type](operand)
+        raise TypeError(f"Unsupported node type: {type(node).__name__}")
+    
+    return _eval_node(tree)
+
+# --- Dice Roller Cog ---
+
 DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
-# A whitelist of characters allowed in the final mathematical expression
-SAFE_EVAL_WHITELIST = re.compile(r'^[0-9+\-/*().\s]+$')
+BRACKETED_DICE_REGEX = re.compile(r'\(([^()]*?)\)d(\d+)', re.IGNORECASE)
 
-class DiceRoller(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
+class DiceRoller(BaseCog):
+    """A cog for handling complex dice rolling commands."""
+    def __init__(self, bot: commands.Bot):
+        super().__init__(bot)
 
-    def _roll_and_parse_notation(self, match: re.Match) -> tuple[int, str]:
-        """Parses a single dice notation, rolls the dice, and returns the sum and a description."""
-        num_dice = int(match.group(1)) if match.group(1) else 1
-        num_sides = int(match.group(2))
+    def _roll_and_parse_notation(self, match: _re.Match[str], advantage: bool = False, disadvantage: bool = False) -> tuple[int, str]:
+        """
+        Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
+        Handles advantage and disadvantage for the given roll.
+        """
+        num_dice_str = match.group(1)
+        num_sides_str = match.group(2)
+
+        if not num_dice_str or not num_sides_str:
+            raise ValueError("Invalid dice notation format.")
+
+        num_dice = int(num_dice_str)
+        num_sides = int(num_sides_str)
+        
         keep_mode = (match.group(3) or '').lower()
         keep_count = int(match.group(4)) if match.group(4) else 0
 
-        # --- Input Validation ---
-        if num_dice < 1 or num_sides < 1:
-            raise ValueError("Dice and sides must be positive numbers.")
-        if num_dice > 1000 or num_sides > 10000:
-            raise ValueError("Dice or side count is too high.")
+        if not (1 <= num_dice <= 300 and 1 <= num_sides <= 5000):
+            raise ValueError("Dice or side count is out of range (1-300 dice, 1-5000 sides).")
         if keep_count and keep_count > num_dice:
             raise ValueError("Cannot keep more dice than are rolled.")
 
-        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
-        
-        description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
-        kept_rolls = rolls.copy()
+        # --- Advantage/Disadvantage Logic ---
+        if advantage or disadvantage:
+            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
+            rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+            sum1, sum2 = sum(rolls1), sum(rolls2)
 
-        if keep_mode == 'kh' and keep_count > 0:
-            kept_rolls = sorted(rolls, reverse=True)[:keep_count]
-            discarded = sorted(rolls, reverse=True)[keep_count:]
-            description += f" -> kept **{', '.join(map(str, kept_rolls))}**"
-            if discarded:
-                description += f" (discarded {', '.join(map(str, discarded))})"
-        elif keep_mode == 'kl' and keep_count > 0:
-            kept_rolls = sorted(rolls)[:keep_count]
-            discarded = sorted(rolls)[keep_count:]
-            description += f" -> kept **{', '.join(map(str, kept_rolls))}**"
-            if discarded:
-                description += f" (discarded {', '.join(map(str, discarded))})"
+            if advantage:
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
+            else: # Disadvantage
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
+
+            description = (f"{match.group(0)} (Adv/Dis): Rolled `{', '.join(map(str, chosen_rolls))}` (Σ={chosen_sum}) "
+                           f"and `{', '.join(map(str, other_rolls))}` (Σ={other_sum}). Kept **{chosen_sum}**.")
+            return chosen_sum, description
+
+        # --- Standard Roll Logic ---
+        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
+        description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
+        
+        kept_rolls = rolls
+        if keep_mode in ('kh', 'kl') and keep_count > 0:
+            sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
+            kept_rolls = sorted_rolls[:keep_count]
+            discarded = sorted_rolls[keep_count:]
+            description += f" -> kept **{', '.join(map(str, kept_rolls))}** (discarded {', '.join(map(str, discarded))})"
 
         return sum(kept_rolls), description
 
-    async def roll(self, ctx, *, roll_string: str):
-        """A powerful dice roller that supports complex mathematical expressions."""
-        query = roll_string.lower().replace('roll', '').replace('x', '*').strip()
-
-        # Handle advantage/disadvantage separately as they are not part of the math
-        has_advantage = 'advantage' in query
-        has_disadvantage = 'disadvantage' in query
-        # Sanitize the query to prevent the roller from raising an error
-        query = query.replace('with advantage', '').replace('advantage', '')
-        query = query.replace('with disadvantage', '').replace('disadvantage', '')
-        query = query.strip()
-
-        if has_advantage and has_disadvantage:
-            await ctx.send("You can't roll with both advantage and disadvantage at the same time!")
-            return
-
-        try:
-            roll_descriptions = []
+    def _preprocess_parentheses(self, query: str) -> str:
+        """
+        Recursively evaluates and replaces simple mathematical expressions within parentheses.
+        Example: '2d(6+8)' -> '2d14', '(2+2)d6' -> '4d6'
+        """
+        # This regex finds the innermost parentheses that do not contain other parentheses.
+        PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
+        
+        # Loop until no more parentheses can be resolved.
+        while match := PARENTHESES_REGEX.search(query):
+            expression = match.group(1)
             
-            # --- Advantage/Disadvantage Logic ---
-            if has_advantage or has_disadvantage:
-                first_roll_match = DICE_NOTATION_REGEX.search(query)
-                if not first_roll_match:
-                    await ctx.send("I couldn't find a dice roll to apply advantage/disadvantage to.")
-                    return
-                
-                sum1, desc1 = self._roll_and_parse_notation(first_roll_match)
-                sum2, desc2 = self._roll_and_parse_notation(first_roll_match)
-                
-                chosen_sum = max(sum1, sum2) if has_advantage else min(sum1, sum2)
-                roll_descriptions.append(f"Advantage Rolls:\n- {desc1} (Total: {sum1})\n- {desc2} (Total: {sum2})")
-                
-                # Replace only the first occurrence of the dice roll with its result
-                query = query.replace(first_roll_match.group(0), str(chosen_sum), 1)
+            # Skip if it looks like a dice roll itself, as that's handled later.
+            if 'd' in expression:
+                # To prevent infinite loops, we need to break if we can't resolve anything.
+                # A simple way is to replace the parens with a temporary marker to avoid re-matching.
+                # But for now, we'll assume expressions with 'd' are complex and will be handled later or fail.
+                # A better implementation might replace the parens with a placeholder and restore them later.
+                # For now, we just break the loop if we find an unresolvable expression.
+                # This is a simplification; a truly robust solution would require a full parser.
+                # Let's just try to evaluate and if it fails, we move on.
+                pass
 
-            # --- Main Parsing Loop for all other dice ---
-            # This loop finds all dice notations, rolls them, and replaces them with their sum.
-            while match := DICE_NOTATION_REGEX.search(query):
-                roll_sum, description = self._roll_and_parse_notation(match)
-                roll_descriptions.append(description)
-                query = query.replace(match.group(0), str(roll_sum), 1)
+            try:
+                # Safely evaluate the mathematical expression inside the brackets.
+                result = safe_eval_math(expression)
+                # Format as integer if possible, otherwise as a float.
+                result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
+                
+                # Replace the bracketed part (including parentheses) with the calculated result.
+                query = query.replace(match.group(0), result_str, 1)
+                self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
+            except (ValueError, TypeError, SyntaxError):
+                # This expression is not simple math (e.g., it might be part of a complex string).
+                # We'll break the loop to avoid getting stuck on it.
+                # This is a safe fallback. The rest of the roller can try to parse it.
+                self.logger.warning(f"Could not resolve expression in parentheses '{expression}', moving on.")
+                break
+        return query
 
-            # --- Safe Evaluation ---
-            if not SAFE_EVAL_WHITELIST.match(query):
-                await ctx.send("Your roll contains invalid characters. Only numbers and `+ - * / ( )` are allowed.")
+    async def roll(self, ctx: commands.Context, *, query: str) -> None:
+        """The NLP handler for all dice rolling requests."""
+        try:
+            # --- 1. Sanitize and Detect Keywords ---
+            processed_query = " ".join(query.lower().split()).replace('x', '*')
+            
+            # Use regex to remove keywords safely to avoid mangling words
+            adv = bool(re.search(r'\b(advantage|adv)\b', processed_query))
+            dis = bool(re.search(r'\b(disadvantage|dis)\b', processed_query))
+            
+            # Remove keywords for clean processing
+            processed_query = re.sub(r'\broll\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
+
+            if adv and dis:
+                await ctx.send("Cannot roll with both advantage and disadvantage.")
                 return
 
-            final_result = eval(query)
+            # --- 2. Pre-process Parentheses ---
+            processed_query = self._preprocess_parentheses(processed_query)
 
-            # --- Build and Send Response ---
-            response_message = f"{ctx.author.mention}, you rolled: **{final_result}**\n"
-            if roll_descriptions:
-                response_message += "\n".join(roll_descriptions)
+            # --- 3. Resolve All Dice Rolls ---
+            roll_descriptions = []
+            final_query = processed_query
             
-            await ctx.send(response_message)
+            # Loop to find and replace all dice notations
+            while match := DICE_NOTATION_REGEX.search(final_query):
+                roll_sum, description = self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
+                roll_descriptions.append(description)
+                # Replace the matched dice notation with its calculated sum
+                final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
-        except ValueError as e:
+            # --- 4. Final Calculation ---
+            if not final_query.strip():
+                # This happens if the query was just "roll 1d6" and nothing else.
+                # The result is already in the description.
+                if len(roll_descriptions) == 1:
+                     # Extract the sum from the description for a clean final result
+                    match = re.search(r': `.*`.*-> kept \*\*(.*?)\*\*|: ` (.*) `', roll_descriptions[0])
+                    if match:
+                        result_str = next((g for g in match.groups() if g is not None), "N/A")
+                        result_display = result_str.split(' ')[0] # Handle cases with extra text
+                    else:
+                        result_display = "N/A" # Fallback
+                    
+                    response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
+                    if len(response) > 4000:
+                        await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                        return
+                    await ctx.send(response)
+                    return
+                else:
+                    await ctx.send("Please specify what to roll!")
+                    return
+            
+            # Evaluate the final mathematical expression
+            result = safe_eval_math(final_query)
+            result_display = int(result) if result == int(result) else f"{result:.2f}"
+            
+            response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
+            if len(response) > 4000:
+                await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                return
+            await ctx.send(response)
+
+        except (ValueError, TypeError, SyntaxError) as e:
+            # These are expected errors from parsing or rolling, so we can give a direct response.
             await ctx.send(f"Error: {e}")
-        except Exception as e:
-            await ctx.send("I couldn't understand that roll. Please check your format.")
-            raise e
+            self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
+        # Any other exceptions will be caught by the global error handler in main.py
+        # which will log the full traceback and notify the user.
 
-async def setup(bot):
+async def setup(bot: commands.Bot) -> None:
+    """Standard setup function for the cog."""
     await bot.add_cog(DiceRoller(bot))
