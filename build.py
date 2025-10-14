@@ -52,6 +52,16 @@ def main():
     except ImportError:
         print("dateparser library not found. Please ensure it is installed in your environment.") # This is a critical error, the bot won't run without it (so we immediatly exit after)
         sys.exit(1)
+
+    # Do the same for pytz, which is also critical for timezone handling
+    try:
+        import pytz
+        pytz_path = os.path.dirname(pytz.__file__)
+        command.extend(['--add-data', f'{pytz_path}{os.pathsep}pytz'])
+        print(f"found pytz at: {pytz_path}")
+    except ImportError:
+        print("pytz library not found. Please ensure it is installed in your environment.")
+        sys.exit(1)
     
     # Now we add the discovered cogs as hidden imports
     for cog in discovered_cogs:

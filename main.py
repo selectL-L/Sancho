@@ -12,6 +12,7 @@ from collections.abc import Callable
 # --- 1. Setup and Configuration ---
 import config
 from utils.logging_config import setup_logging
+from utils.bot_class import SanchoBot
 
 # Set up logging BEFORE anything else
 setup_logging()
@@ -30,7 +31,9 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
+bot = SanchoBot(command_prefix=config.BOT_PREFIX, intents=intents)
+bot.db_path = config.DB_PATH  # Attach db_path to the bot instance
+
 
 # --- 3. Core Bot Events ---
 
@@ -131,11 +134,7 @@ async def main() -> None:
             if filename.endswith('.py') and not filename.startswith('__'):
                 extension = f'cogs.{filename[:-3]}'
                 try:
-                    # Pass dependencies to specific cogs if needed.
-                    if extension == 'cogs.reminders':
-                        await bot.load_extension(extension, package=config.DB_PATH)
-                    else:
-                        await bot.load_extension(extension)
+                    await bot.load_extension(extension)
                     logging.info(f"Successfully loaded extension: {extension}")
                 except Exception:
                     logging.error(f'Failed to load extension {extension}.', exc_info=True)

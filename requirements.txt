@@ -10,6 +10,9 @@ aiosqlite
 # For parsing natural language dates and times in the Reminders cog.
 dateparser
 
+# Provides timezone information, used by the Reminders cog.
+pytz
+
 # Required by the build.py script to locate library data files.
 # Does not need to be bundled with the final executable.
 # pip install setuptools

@@ -12,7 +12,7 @@ from utils.base_cog import BaseCog
 
 ALLOWED_OPERATORS = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
-    ast.Div: op.truediv, ast.USub: op.neg
+    ast.Div: op.truediv, ast.USub: op.neg, ast.Pow: op.pow
 }
 
 def safe_eval_math(expr: str) -> float:
@@ -73,8 +73,8 @@ class DiceRoller(BaseCog):
         keep_mode = (match.group(3) or '').lower()
         keep_count = int(match.group(4)) if match.group(4) else 0
 
-        if not (1 <= num_dice <= 1000 and 1 <= num_sides <= 10000):
-            raise ValueError("Dice or side count is out of range (1-1000 dice, 1-10000 sides).")
+        if not (1 <= num_dice <= 300 and 1 <= num_sides <= 5000):
+            raise ValueError("Dice or side count is out of range (1-300 dice, 1-5000 sides).")
         if keep_count and keep_count > num_dice:
             raise ValueError("Cannot keep more dice than are rolled.")
 
@@ -108,24 +108,44 @@ class DiceRoller(BaseCog):
 
         return sum(kept_rolls), description
 
-    def _preprocess_bracketed_dice(self, query: str) -> str:
+    def _preprocess_parentheses(self, query: str) -> str:
         """
-        Recursively evaluates and replaces bracketed dice expressions like (2*3)d6.
+        Recursively evaluates and replaces simple mathematical expressions within parentheses.
+        Example: '2d(6+8)' -> '2d14', '(2+2)d6' -> '4d6'
         """
-        while match := BRACKETED_DICE_REGEX.search(query):
-            expression_in_brackets = match.group(1)
+        # This regex finds the innermost parentheses that do not contain other parentheses.
+        PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
+        
+        # Loop until no more parentheses can be resolved.
+        while match := PARENTHESES_REGEX.search(query):
+            expression = match.group(1)
+            
+            # Skip if it looks like a dice roll itself, as that's handled later.
+            if 'd' in expression:
+                # To prevent infinite loops, we need to break if we can't resolve anything.
+                # A simple way is to replace the parens with a temporary marker to avoid re-matching.
+                # But for now, we'll assume expressions with 'd' are complex and will be handled later or fail.
+                # A better implementation might replace the parens with a placeholder and restore them later.
+                # For now, we just break the loop if we find an unresolvable expression.
+                # This is a simplification; a truly robust solution would require a full parser.
+                # Let's just try to evaluate and if it fails, we move on.
+                pass
+
             try:
-                # Safely evaluate the mathematical expression inside the brackets
-                num_dice = int(safe_eval_math(expression_in_brackets))
-                if num_dice <= 0:
-                    raise ValueError("Number of dice from brackets must be positive.")
+                # Safely evaluate the mathematical expression inside the brackets.
+                result = safe_eval_math(expression)
+                # Format as integer if possible, otherwise as a float.
+                result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
                 
-                # Replace the bracketed part with the calculated number of dice
-                replacement = f"{num_dice}d{match.group(2)}"
-                query = query.replace(match.group(0), replacement, 1)
-                self.logger.info(f"Pre-processed bracketed dice: '{match.group(0)}' -> '{replacement}'")
-            except (ValueError, TypeError, SyntaxError) as e:
-                raise ValueError(f"Invalid expression in dice brackets '{expression_in_brackets}': {e}")
+                # Replace the bracketed part (including parentheses) with the calculated result.
+                query = query.replace(match.group(0), result_str, 1)
+                self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
+            except (ValueError, TypeError, SyntaxError):
+                # This expression is not simple math (e.g., it might be part of a complex string).
+                # We'll break the loop to avoid getting stuck on it.
+                # This is a safe fallback. The rest of the roller can try to parse it.
+                self.logger.warning(f"Could not resolve expression in parentheses '{expression}', moving on.")
+                break
         return query
 
     async def roll(self, ctx: commands.Context, *, query: str) -> None:
@@ -145,8 +165,8 @@ class DiceRoller(BaseCog):
                 await ctx.send("Cannot roll with both advantage and disadvantage.")
                 return
 
-            # --- 2. Pre-process Bracketed Dice ---
-            processed_query = self._preprocess_bracketed_dice(processed_query)
+            # --- 2. Pre-process Parentheses ---
+            processed_query = self._preprocess_parentheses(processed_query)
 
             # --- 3. Resolve All Dice Rolls ---
             roll_descriptions = []
@@ -173,6 +193,9 @@ class DiceRoller(BaseCog):
                         result_display = "N/A" # Fallback
                     
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
+                    if len(response) > 4000:
+                        await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                        return
                     await ctx.send(response)
                     return
                 else:
@@ -184,6 +207,9 @@ class DiceRoller(BaseCog):
             result_display = int(result) if result == int(result) else f"{result:.2f}"
             
             response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
+            if len(response) > 4000:
+                await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                return
             await ctx.send(response)
 
         except (ValueError, TypeError, SyntaxError) as e:
