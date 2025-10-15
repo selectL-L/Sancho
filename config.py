@@ -43,7 +43,7 @@ except FileNotFoundError:
     # (like the PyInstaller executable context), preventing a crash.
     # The build script ensures the necessary modules are frozen anyway, so we can use a placeholder.
     COGS_TO_LOAD = [
-        'cogs.dice_roller',
+        'cogs.math',
         'cogs.reminders'
     ]
 
@@ -57,8 +57,11 @@ LOG_BACKUP_COUNT = 5
 # To add a new command, add a tuple to this list.
 # Format: ( (keywords), 'CogClassName', 'method_name' )
 NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
-    # Dice rolling
-    ((r'\broll\b', r'\bdice\b'), 'DiceRoller', 'roll'),
+    # Dice rolling (should be checked before basic calculation)
+    ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
+
+    # Basic calculation
+    ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     
     # Deleting reminders (catches "delete/remove reminder 1", etc.)
     # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
