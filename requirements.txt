@@ -16,3 +16,6 @@ pytz
 # Required by the build.py script to locate library data files.
 # Does not need to be bundled with the final executable.
 # pip install setuptools
+
+# For image manipulation in the Image cog.
+Pillow

@@ -151,7 +151,7 @@ class Math(BaseCog):
             adv = bool(re.search(r'\b(advantage|adv)\b', processed_query))
             dis = bool(re.search(r'\b(disadvantage|dis)\b', processed_query))
             
-            processed_query = re.sub(r'\broll\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
+            processed_query = re.sub(r'\broll\b|\ba\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
 
             if adv and dis:
                 await ctx.send("Cannot roll with both advantage and disadvantage.")
