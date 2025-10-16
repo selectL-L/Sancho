@@ -46,7 +46,8 @@ except FileNotFoundError:
         'cogs.math',
         'cogs.reminders',
         'cogs.image',
-        'cogs.fun'
+        'cogs.fun',
+        'cogs.skills'
     ]
 
 # --- Logging Configuration ---
@@ -65,6 +66,11 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     # Basic calculation
     ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     
+    # --- Skill Commands ---
+    # This should be checked before more general "skill" queries if any are added.
+    ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b'), 'Skills', 'save_skill_nlp'),
+    ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
+
     # Deleting reminders (catches "delete/remove reminder 1", etc.)
     # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
     ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
