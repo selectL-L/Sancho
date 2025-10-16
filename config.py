@@ -44,7 +44,9 @@ except FileNotFoundError:
     # The build script ensures the necessary modules are frozen anyway, so we can use a placeholder.
     COGS_TO_LOAD = [
         'cogs.math',
-        'cogs.reminders'
+        'cogs.reminders',
+        'cogs.image',
+        'cogs.fun'
     ]
 
 # --- Logging Configuration ---
@@ -72,4 +74,15 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
 
     # Checking reminders (catches "check my reminders", "show reminders", etc.)
     ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders'), 'Reminders', 'check_reminders_nlp'),
+
+    # --- Image Commands ---
+    # Resize image
+    ((r'\bresize\b', r'\bscale\b'), 'Image', 'resize'),
+
+    # Convert image format
+    ((r'\bconvert\b', r'\bchange to\b'), 'Image', 'convert'),
+
+    # --- Fun Commands ---
+    # 8-Ball
+    ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
 ]
