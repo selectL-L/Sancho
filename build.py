@@ -1,38 +1,50 @@
 import os
 import subprocess
 import sys
+import argparse
+from config import COGS_TO_LOAD
 
 # This script will automate the Pyinstaller build process for us.
 # It's job is to find all the cogs in the cogs directory, and then
 # add them as --hidden-imports to the Pyinstaller command.
 # The only reason this exists is because Pyinstaller wants a static list to build from
 
-def find_cogs(cogs_dir: str) -> list[str]:
-    """ Finds all the cogs in the cogs directory and returns a list of their module names. """
-    cogs = []
-    for filename in os.listdir(cogs_dir):
-        # We don't want to include __init__.py or any non-python files (such as .pyc files)
-        if filename.endswith('.py') and not filename.startswith('__'):
-            # Format for pythons import system (e.g. cogs.reminder)
-            cogs.append(f'cogs.{filename[:-3]}')
-    return cogs
-
 def main():
     """Runs pyinstaller with the appropriate hidden imports."""
+    
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="Sancho Pyinstaller Build Script")
+    
+    # Determine the default platform
+    current_platform = 'windows'
+    if sys.platform == 'linux':
+        current_platform = 'linux'
+    elif sys.platform == 'darwin':
+        current_platform = 'macos'
+
+    parser.add_argument(
+        '--target', 
+        choices=['windows', 'linux', 'macos'], 
+        default=current_platform,
+        help="The target operating system. Defaults to the current OS."
+    )
+    args = parser.parse_args()
+
+    # Determine the correct path separator for the target OS
+    path_separator = ';' if args.target == 'windows' else ':'
+    
     project_root = os.path.dirname(os.path.abspath(__file__))
-    cogs_directory = os.path.join(project_root, 'cogs')
 
-    print("--- Sancho Pyinstaller Build Script ---") # I didn't add a "tm" here even though I REALLY wanted to.
+    print(f"--- Sancho Pyinstaller Build Script (Target: {args.target}) ---")
 
-    # First, discover all the cogs with the method we defined above
-    discovered_cogs = find_cogs(cogs_directory)
-    if not discovered_cogs:
-        print("No cogs found in the cogs directory. Exiting.") # Okay so if we hit an error like this, we probably have a bigger problem
+    # The list of cogs is now imported directly from config.py
+    if not COGS_TO_LOAD:
+        print("Could not discover any cogs from config.py. Exiting.")
         sys.exit(1)
     
     # Then build the pyinstaller command
     command = [
-        'pyinstaller',
+        sys.executable, '-m', 'PyInstaller',
         '--onefile',  # Create a one-file bundled executable
         '--name', 'sancho',  # Name of the output executable
         '--clean',  # Clean up previous builds before building (This REALLY hurt last time I forgot it)
@@ -40,14 +52,14 @@ def main():
     ]
 
     # Add data files (such as the ENV file)
-    command.extend(['--add-data', f'info.env{os.pathsep}.' ])
+    command.extend(['--add-data', f'info.env{path_separator}.' ])
 
     # This section is a little sensitive to your environment so if you're not building it exactly like I am uhm, sorry I guess?
     # It looks for the dateparser library and handles the neccesary hidden imports and data files (which is WHY it's specific to your environment)
     try:
         import dateparser as dp
         dateparser_path = os.path.dirname(dp.__file__)
-        command.extend(['--add-data', f'{dateparser_path}{os.pathsep}dateparser'])
+        command.extend(['--add-data', f'{dateparser_path}{path_separator}dateparser'])
         print(f"found dateparser at: {dateparser_path}") # I know wher emy dateparser is, but most won't so this is just to help with debugging
     except ImportError:
         print("dateparser library not found. Please ensure it is installed in your environment.") # This is a critical error, the bot won't run without it (so we immediatly exit after)
@@ -57,14 +69,14 @@ def main():
     try:
         import pytz
         pytz_path = os.path.dirname(pytz.__file__)
-        command.extend(['--add-data', f'{pytz_path}{os.pathsep}pytz'])
+        command.extend(['--add-data', f'{pytz_path}{path_separator}pytz'])
         print(f"found pytz at: {pytz_path}")
     except ImportError:
         print("pytz library not found. Please ensure it is installed in your environment.")
         sys.exit(1)
     
     # Now we add the discovered cogs as hidden imports
-    for cog in discovered_cogs:
+    for cog in COGS_TO_LOAD:
         command.extend(['--hidden-import', cog])
     
     # Add the main script to be bundled

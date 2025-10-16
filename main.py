@@ -129,15 +129,13 @@ async def main() -> None:
     """The main entry point for starting the bot."""
     logging.info("Sancho is starting...")
     async with bot:
-        # Dynamically discover and load cogs from the 'cogs' directory.
-        for filename in os.listdir(config.COGS_PATH):
-            if filename.endswith('.py') and not filename.startswith('__'):
-                extension = f'cogs.{filename[:-3]}'
-                try:
-                    await bot.load_extension(extension)
-                    logging.info(f"Successfully loaded extension: {extension}")
-                except Exception:
-                    logging.error(f'Failed to load extension {extension}.', exc_info=True)
+        # Load cogs from the static list in the config file.
+        for extension in config.COGS_TO_LOAD:
+            try:
+                await bot.load_extension(extension)
+                logging.info(f"Successfully loaded extension: {extension}")
+            except Exception:
+                logging.error(f'Failed to load extension {extension}.', exc_info=True)
         
         if TOKEN is None:
             raise ValueError("TOKEN cannot be None.")

@@ -25,8 +25,6 @@ def safe_eval_math(expr: str) -> float:
                 raise ValueError("Only numeric values are allowed.")
             return node.value
         elif isinstance(node, ast.Num):  # Legacy support for Python < 3.8
-            # node.n can be a variety of constants; validate its type before
-            # converting to float so Pylance can narrow the type safely.
             value = node.n
             if not isinstance(value, (int, float)):
                 raise ValueError("Only numeric values are allowed.")
@@ -46,28 +44,43 @@ def safe_eval_math(expr: str) -> float:
     
     return _eval_node(tree)
 
-# --- Dice Roller Cog ---
+# --- Math Cog ---
 
 DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
-BRACKETED_DICE_REGEX = re.compile(r'\(([^()]*?)\)d(\d+)', re.IGNORECASE)
 
-class DiceRoller(BaseCog):
-    """A cog for handling complex dice rolling commands."""
+class Math(BaseCog):
+    """A cog for handling complex dice rolling and mathematical calculations."""
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
+
+    async def calculate(self, ctx: commands.Context, *, query: str) -> None:
+        """The NLP handler for all basic math calculation requests."""
+        try:
+            # Clean the query for evaluation
+            processed_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+            # Remove keywords
+            processed_query = re.sub(r'\b(calculate|calc|compute|evaluate)\b', '', processed_query).strip()
+
+            if not processed_query:
+                await ctx.send("Please provide a mathematical expression to calculate.")
+                return
+
+            result = safe_eval_math(processed_query)
+            result_display = int(result) if result == int(result) else f"{result:.2f}"
+            
+            await ctx.send(f"{ctx.author.mention}, the result is: **{result_display}**")
+
+        except (ValueError, TypeError, SyntaxError) as e:
+            await ctx.send(f"Error: {e}")
+            self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
     def _roll_and_parse_notation(self, match: _re.Match[str], advantage: bool = False, disadvantage: bool = False) -> tuple[int, str]:
         """
         Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
         Handles advantage and disadvantage for the given roll.
         """
-        num_dice_str = match.group(1)
-        num_sides_str = match.group(2)
-
-        if not num_dice_str or not num_sides_str:
-            raise ValueError("Invalid dice notation format.")
-
-        num_dice = int(num_dice_str)
+        num_dice_str, num_sides_str = match.group(1), match.group(2)
+        num_dice = int(num_dice_str) if num_dice_str else 1
         num_sides = int(num_sides_str)
         
         keep_mode = (match.group(3) or '').lower()
@@ -111,39 +124,20 @@ class DiceRoller(BaseCog):
     def _preprocess_parentheses(self, query: str) -> str:
         """
         Recursively evaluates and replaces simple mathematical expressions within parentheses.
-        Example: '2d(6+8)' -> '2d14', '(2+2)d6' -> '4d6'
         """
-        # This regex finds the innermost parentheses that do not contain other parentheses.
         PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
         
-        # Loop until no more parentheses can be resolved.
         while match := PARENTHESES_REGEX.search(query):
             expression = match.group(1)
-            
-            # Skip if it looks like a dice roll itself, as that's handled later.
             if 'd' in expression:
-                # To prevent infinite loops, we need to break if we can't resolve anything.
-                # A simple way is to replace the parens with a temporary marker to avoid re-matching.
-                # But for now, we'll assume expressions with 'd' are complex and will be handled later or fail.
-                # A better implementation might replace the parens with a placeholder and restore them later.
-                # For now, we just break the loop if we find an unresolvable expression.
-                # This is a simplification; a truly robust solution would require a full parser.
-                # Let's just try to evaluate and if it fails, we move on.
-                pass
+                break 
 
             try:
-                # Safely evaluate the mathematical expression inside the brackets.
                 result = safe_eval_math(expression)
-                # Format as integer if possible, otherwise as a float.
                 result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
-                
-                # Replace the bracketed part (including parentheses) with the calculated result.
                 query = query.replace(match.group(0), result_str, 1)
                 self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
             except (ValueError, TypeError, SyntaxError):
-                # This expression is not simple math (e.g., it might be part of a complex string).
-                # We'll break the loop to avoid getting stuck on it.
-                # This is a safe fallback. The rest of the roller can try to parse it.
                 self.logger.warning(f"Could not resolve expression in parentheses '{expression}', moving on.")
                 break
         return query
@@ -152,14 +146,12 @@ class DiceRoller(BaseCog):
         """The NLP handler for all dice rolling requests."""
         try:
             # --- 1. Sanitize and Detect Keywords ---
-            processed_query = " ".join(query.lower().split()).replace('x', '*')
+            processed_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
             
-            # Use regex to remove keywords safely to avoid mangling words
             adv = bool(re.search(r'\b(advantage|adv)\b', processed_query))
             dis = bool(re.search(r'\b(disadvantage|dis)\b', processed_query))
             
-            # Remove keywords for clean processing
-            processed_query = re.sub(r'\broll\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
+            processed_query = re.sub(r'\broll\b|\ba\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
 
             if adv and dis:
                 await ctx.send("Cannot roll with both advantage and disadvantage.")
@@ -172,29 +164,23 @@ class DiceRoller(BaseCog):
             roll_descriptions = []
             final_query = processed_query
             
-            # Loop to find and replace all dice notations
             while match := DICE_NOTATION_REGEX.search(final_query):
                 roll_sum, description = self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
                 roll_descriptions.append(description)
-                # Replace the matched dice notation with its calculated sum
                 final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
             # --- 4. Final Calculation ---
             if not final_query.strip():
-                # This happens if the query was just "roll 1d6" and nothing else.
-                # The result is already in the description.
                 if len(roll_descriptions) == 1:
-                     # Extract the sum from the description for a clean final result
-                    match = re.search(r': `.*`.*-> kept \*\*(.*?)\*\*|: ` (.*) `', roll_descriptions[0])
+                    match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `', roll_descriptions[0])
+                    result_display = "N/A"
                     if match:
                         result_str = next((g for g in match.groups() if g is not None), "N/A")
-                        result_display = result_str.split(' ')[0] # Handle cases with extra text
-                    else:
-                        result_display = "N/A" # Fallback
+                        result_display = result_str.split(' ')[0]
                     
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
                     if len(response) > 4000:
-                        await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                        await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
                         return
                     await ctx.send(response)
                     return
@@ -202,23 +188,19 @@ class DiceRoller(BaseCog):
                     await ctx.send("Please specify what to roll!")
                     return
             
-            # Evaluate the final mathematical expression
             result = safe_eval_math(final_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
             
             response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
             if len(response) > 4000:
-                await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display. Please try a smaller roll.")
+                await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
                 return
             await ctx.send(response)
 
         except (ValueError, TypeError, SyntaxError) as e:
-            # These are expected errors from parsing or rolling, so we can give a direct response.
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
-        # Any other exceptions will be caught by the global error handler in main.py
-        # which will log the full traceback and notify the user.
 
 async def setup(bot: commands.Bot) -> None:
     """Standard setup function for the cog."""
-    await bot.add_cog(DiceRoller(bot))
+    await bot.add_cog(Math(bot))
