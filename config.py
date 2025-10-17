@@ -5,6 +5,7 @@ All paths, constants, and other settings should be defined here.
 import os
 import sys
 import logging
+from dotenv import load_dotenv
 
 # --- Pathing ---
 
@@ -32,7 +33,12 @@ DB_PATH = os.path.join(APP_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # --- Bot Configuration ---
-BOT_PREFIX = ".sancho "
+load_dotenv(dotenv_path=ENV_PATH)
+
+TOKEN = os.getenv('DISCORD_TOKEN')
+raw_owner_id = os.getenv('OWNER_ID')
+OWNER_ID = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
+BOT_PREFIX = [".sancho ", ".s "]
 
 # Dynamically discover cogs and create a static list for the application to use.
 # This list is used by both main.py (at runtime) and build.py (at build time).
@@ -60,6 +66,9 @@ LOG_BACKUP_COUNT = 5
 # To add a new command, add a tuple to this list.
 # Format: ( (keywords), 'CogClassName', 'method_name' )
 NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
+    # Limbus Company coin flip
+    ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
+
     # Dice rolling (should be checked before basic calculation)
     ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
 

@@ -5,7 +5,6 @@ import asyncio
 import os
 import re
 import sys
-from dotenv import load_dotenv
 from typing import Optional, Any
 from collections.abc import Callable
 
@@ -18,11 +17,7 @@ from utils.database import DatabaseManager
 # Set up logging BEFORE anything else
 setup_logging()
 
-# Load environment variables from the .env file
-load_dotenv(dotenv_path=config.ENV_PATH)
-TOKEN = os.getenv('DISCORD_TOKEN')
-
-if not TOKEN:
+if not config.TOKEN:
     logging.critical(f"DISCORD_TOKEN not found in {config.ENV_PATH}. The bot cannot start.")
     sys.exit("Critical error: DISCORD_TOKEN not found.")
 
@@ -92,10 +87,19 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # NLP processing starts here.
-    if not message.content.startswith(config.BOT_PREFIX):
+    # Determine if a valid prefix is being used for an NLP command.
+    prefix_used = None
+    for p in config.BOT_PREFIX:
+        if message.content.startswith(p):
+            prefix_used = p
+            break
+
+    # If no valid prefix was found, it's not an NLP command.
+    if not prefix_used:
         return
 
-    query = message.content[len(config.BOT_PREFIX):].strip()
+    # Extract the query by removing the detected prefix.
+    query = message.content[len(prefix_used):].strip()
     if not query:
         return # Ignore empty commands
 
@@ -143,9 +147,9 @@ async def main() -> None:
             except Exception:
                 logging.error(f'Failed to load extension {extension}.', exc_info=True)
         
-        if TOKEN is None:
+        if config.TOKEN is None:
             raise ValueError("TOKEN cannot be None.")
-        await bot.start(TOKEN)
+        await bot.start(config.TOKEN)
 
 if __name__ == '__main__':
     try:
