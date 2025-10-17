@@ -7,7 +7,7 @@ import re
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
-from cogs.math import Math, DICE_NOTATION_REGEX, safe_eval_math
+from .math import Math, DICE_NOTATION_REGEX, safe_eval_math
 
 class Skills(BaseCog):
     """A cog for creating, managing, and using custom skills with dice rolls."""
@@ -232,7 +232,7 @@ class Skills(BaseCog):
         else:
             await ctx.send("Something went wrong. I couldn't delete that skill.")
 
-    @commands.command(name="setskilllimit")
+    @commands.command(name="setskilllimit", hidden=True)
     @commands.has_permissions(administrator=True)
     async def set_skill_limit_command(self, ctx: commands.Context, limit: int):
         """Sets the maximum number of skills a user can have."""
@@ -243,7 +243,7 @@ class Skills(BaseCog):
         await self.db.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
 
-    @commands.command(name="setuserskilllimit")
+    @commands.command(name="setuserskilllimit", hidden=True)
     @commands.has_permissions(administrator=True)
     async def set_user_skill_limit_command(self, ctx: commands.Context, user: discord.Member, limit: int):
         """Sets the maximum number of skills a specific user can have."""
