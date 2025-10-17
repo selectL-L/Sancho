@@ -184,7 +184,8 @@ class Math(BaseCog):
                 await ctx.send("Please provide a mathematical expression to calculate.")
                 return
 
-            result = safe_eval_math(processed_query)
+            # Run the potentially blocking evaluation in a separate thread
+            result = await asyncio.to_thread(safe_eval_math, processed_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
             
             await ctx.send(f"{ctx.author.mention}, the result is: **{result_display}**")
@@ -193,10 +194,10 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
-    def _roll_and_parse_notation(self, match: _re.Match[str], advantage: bool = False, disadvantage: bool = False) -> tuple[int, str]:
+    async def _roll_and_parse_notation(self, match: _re.Match[str], advantage: bool = False, disadvantage: bool = False) -> tuple[int, str]:
         """
         Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
-        Handles advantage and disadvantage for the given roll.
+        Handles advantage and disadvantage for the given roll. This is run in a thread to avoid blocking.
         """
         num_dice_str, num_sides_str = match.group(1), match.group(2)
         num_dice = int(num_dice_str) if num_dice_str else 1
@@ -210,10 +211,18 @@ class Math(BaseCog):
         if keep_count and keep_count > num_dice:
             raise ValueError("Cannot keep more dice than are rolled.")
 
-        # --- Advantage/Disadvantage Logic ---
-        if advantage or disadvantage:
+        def _roll_dice_thread() -> tuple[list[int], list[int] | None]:
+            """Synchronous function to handle the random number generation."""
             rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
-            rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+            if advantage or disadvantage:
+                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+                return rolls1, rolls2
+            return rolls1, None
+
+        rolls1, rolls2 = await asyncio.to_thread(_roll_dice_thread)
+
+        # --- Advantage/Disadvantage Logic ---
+        if (advantage or disadvantage) and rolls2 is not None:
             sum1, sum2 = sum(rolls1), sum(rolls2)
 
             if advantage:
@@ -228,7 +237,7 @@ class Math(BaseCog):
             return chosen_sum, description
 
         # --- Standard Roll Logic ---
-        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
+        rolls = rolls1
         description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
         
         kept_rolls = rolls
@@ -240,7 +249,7 @@ class Math(BaseCog):
 
         return sum(kept_rolls), description
 
-    def _preprocess_parentheses(self, query: str) -> str:
+    async def _preprocess_parentheses(self, query: str) -> str:
         """
         Recursively evaluates and replaces simple mathematical expressions within parentheses.
         """
@@ -252,7 +261,8 @@ class Math(BaseCog):
                 break 
 
             try:
-                result = safe_eval_math(expression)
+                # Run the potentially blocking evaluation in a separate thread
+                result = await asyncio.to_thread(safe_eval_math, expression)
                 result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
                 query = query.replace(match.group(0), result_str, 1)
                 self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
@@ -277,14 +287,14 @@ class Math(BaseCog):
                 return
 
             # --- 2. Pre-process Parentheses ---
-            processed_query = self._preprocess_parentheses(processed_query)
+            processed_query = await self._preprocess_parentheses(processed_query)
 
             # --- 3. Resolve All Dice Rolls ---
             roll_descriptions = []
             final_query = processed_query
             
             while match := DICE_NOTATION_REGEX.search(final_query):
-                roll_sum, description = self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
+                roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
                 roll_descriptions.append(description)
                 final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
