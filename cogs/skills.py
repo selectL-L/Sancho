@@ -60,8 +60,11 @@ class Skills(BaseCog):
 
         try:
             # 1. Get Skill Name
-            await ctx.send(f"What would you like to name this skill? After registering this one, you will have **{self.db.skill_limit - current_skills_count - 1}** skill slot(s) remaining.")
+            await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nAfter this one, you will have **{self.db.skill_limit - current_skills_count - 1}** skill slot(s) remaining.")
             name_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            if name_msg.content.strip().lower() == 'exit':
+                await ctx.send("Skill creation cancelled.")
+                return
             skill_name = name_msg.content.strip()
 
             if skill_name.lower() == 'list':
@@ -75,6 +78,9 @@ class Skills(BaseCog):
             # 2. Get Aliases
             await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")
             aliases_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            if aliases_msg.content.strip().lower() == 'exit':
+                await ctx.send("Skill creation cancelled.")
+                return
             aliases_raw = aliases_msg.content.strip().lower()
             aliases = []
             if aliases_raw != 'none':
@@ -92,6 +98,9 @@ class Skills(BaseCog):
             while True:
                 await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `1d20kh1`)")
                 roll_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                if roll_msg.content.strip().lower() == 'exit':
+                    await ctx.send("Skill creation cancelled.")
+                    return
                 dice_roll = roll_msg.content.strip()
 
                 match = DICE_NOTATION_REGEX.search(dice_roll)
@@ -116,6 +125,9 @@ class Skills(BaseCog):
             # 4. Get Skill Type
             await ctx.send(f"Is this an `attack` or a `defense` skill?")
             type_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            if type_msg.content.strip().lower() == 'exit':
+                await ctx.send("Skill creation cancelled.")
+                return
             skill_type = type_msg.content.strip().lower()
             if skill_type not in ['attack', 'defense']:
                 await ctx.send("That's not a valid skill type. Please choose `attack` or `defense`. Aborting.")
