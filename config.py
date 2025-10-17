@@ -28,7 +28,7 @@ def discover_cogs(cogs_path: str) -> list[str]:
 APP_PATH = get_application_path()
 ENV_PATH = os.path.join(APP_PATH, 'info.env')
 LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
-DB_PATH = os.path.join(APP_PATH, 'reminders.db')
+DB_PATH = os.path.join(APP_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # --- Bot Configuration ---
