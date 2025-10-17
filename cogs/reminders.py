@@ -227,7 +227,7 @@ class Reminders(BaseCog):
             self.logger.error(f"Error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, an error occurred while setting your reminder.")
 
-    @commands.command(name="remindme", help="Sets a reminder. Usage: .remindme <subject> / <time>")
+    @commands.command(name="remindme", help="A structured command to set a reminder. For natural language, just say 'Sancho, remind me...'")
     async def remindme_command(self, ctx: commands.Context, *, query: str):
         """A structured command for setting a reminder."""
         try:
@@ -310,7 +310,7 @@ class Reminders(BaseCog):
         response_lines.append("```")
         return "\n".join(response_lines)
 
-    @commands.command(name="checkreminders", help="Checks your pending reminders.")
+    @commands.command(name="checkreminders", help="Shows a list of your upcoming reminders.")
     async def checkreminders_command(self, ctx: commands.Context):
         """Static command to list a user's reminders."""
         try:
@@ -325,7 +325,7 @@ class Reminders(BaseCog):
         self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         await self.checkreminders_command(ctx)
 
-    @commands.command(name="reminderdelete", aliases=["remdelete"], help="Deletes reminders by number. Use .checkreminders to see numbers.")
+    @commands.command(name="reminderdelete", aliases=["remdelete"], help="Deletes reminders by their number. Use '.checkreminders' to see the list.")
     async def reminderdelete_command(self, ctx: commands.Context, *, numbers_str: str):
         """Deletes one or more reminders by their # number from the list."""
         try:
@@ -390,7 +390,7 @@ class Reminders(BaseCog):
         numbers_str = ",".join(numbers_found)
         await self.reminderdelete_command(ctx, numbers_str=numbers_str)
 
-    @commands.command(name="timezone", help="Sets your timezone for reminders. E.g., UTC, EST, PST, GMT+5")
+    @commands.command(name="timezone", help="Sets your timezone for reminders (e.g., UTC, EST, PST, GMT+5). Affects how reminder times are interpreted.")
     async def timezone_command(self, ctx: commands.Context, timezone_str: str):
         """Sets the user's preferred timezone for parsing dates."""
         

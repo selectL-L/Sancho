@@ -118,3 +118,7 @@ class Image(BaseCog):
         except Exception as e:
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to convert that image.")
+
+async def setup(bot: SanchoBot):
+    """Sets up the Image cog."""
+    await bot.add_cog(Image(bot))
