@@ -4,6 +4,7 @@ import random
 import re
 import ast
 import operator as op
+import asyncio
 from typing import Optional
 import re as _re
 from utils.base_cog import BaseCog
@@ -52,6 +53,124 @@ class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
     def __init__(self, bot: commands.Bot):
         super().__init__(bot)
+
+    async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str):
+        """
+        Handles Limbus Company-style rolls using a sequential parser.
+        It finds and consumes parameters one by one to avoid conflicts.
+        If any are missing, it falls back to an interactive conversation.
+        """
+        def check(m: discord.Message) -> bool:
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            # --- 1. Sequential Parsing ---
+            work_query = f" {query.lower()} "  # Pad with spaces for easier regex
+            base_power, coin_power, num_coins, sp = None, None, None, None
+
+            # Parser for SP
+            sp_match = re.search(r'(?:at\s+)?(-?\d+)\s+sp\b', work_query, re.IGNORECASE)
+            if sp_match:
+                sp = int(sp_match.group(1))
+                work_query = work_query.replace(sp_match.group(0), " ", 1)
+            else:
+                sp = 0 # Default to 0 if not provided
+
+            # Parser for Base Power
+            base_match = re.search(r'(?:(\d+)\s+\b(base\s*power|bp)\b|\b(base\s*power|bp)\b\s+(\d+))', work_query, re.IGNORECASE)
+            if base_match:
+                base_power = int(base_match.group(1) or base_match.group(4))
+                work_query = work_query.replace(base_match.group(0), " ", 1)
+
+            # Parser for Coin Power
+            cp_match = re.search(r'(?:([+-]?\d+)\s+\b(coin\s*power|cp)\b|\b(coin\s*power|cp)\b\s+([+-]?\d+))', work_query, re.IGNORECASE)
+            if cp_match:
+                coin_power = int(cp_match.group(1) or cp_match.group(4))
+                work_query = work_query.replace(cp_match.group(0), " ", 1)
+
+            # Parser for Number of Coins
+            num_match = re.search(r'(?:(\d+)\s+\b(coins?|coin\s*count)\b|\b(coins?|coin\s*count)\b\s+(\d+))', work_query, re.IGNORECASE)
+            if num_match:
+                num_coins = int(num_match.group(1) or num_match.group(4))
+                work_query = work_query.replace(num_match.group(0), " ", 1)
+
+            # Parser for Modifier (any remaining signed number)
+            mod_match = re.search(r'\s([+-]\d+)\s', work_query)
+            modifier = int(mod_match.group(1)) if mod_match else 0
+
+            # --- 2. Fallback to interactive mode if values are missing ---
+            interactive_fallback_needed = any(v is None for v in [base_power, coin_power, num_coins])
+            if interactive_fallback_needed:
+                await ctx.send(
+                    "Switching to interactive mode, please input your values below.\n"
+                    "*If you provided all the info, please let my author know something is broken!*"
+                )
+
+            if base_power is None:
+                await ctx.send("Base power?")
+                msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                base_power = int(msg.content)
+
+            if coin_power is None:
+                await ctx.send("Coin power?")
+                msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                coin_power = int(msg.content)
+
+            if num_coins is None:
+                await ctx.send("How many coins?")
+                msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                num_coins = int(msg.content)
+
+            # --- 3. Validation ---
+            if not (1 <= num_coins <= 15):
+                raise ValueError("Coin count must be between 1 and 15.")
+            if not (-50 <= coin_power <= 50):
+                raise ValueError("Coin value must be between -50 and 50.")
+            if not (-100 <= base_power <= 100) or not (-100 <= modifier <= 100):
+                raise ValueError("Base power and modifiers must be between -100 and 100.")
+            if not (-45 <= sp <= 45):
+                raise ValueError("SP must be between -45 and 45.")
+
+            # --- 4. Simulate Coin Flips ---
+            heads_prob = 0.5 + (0.01 * sp)
+            heads_count = 0
+            coin_results_display = []
+            for _ in range(num_coins):
+                if random.random() < heads_prob: # True for Heads
+                    heads_count += 1
+                    coin_results_display.append("H")
+                else: # Tails
+                    coin_results_display.append("T")
+            
+            coin_total = heads_count * coin_power
+            final_result = base_power + coin_total + modifier
+
+            # --- 5. Format and Send Response ---
+            coin_part_str = f"{heads_count}H {len(coin_results_display) - heads_count}T"
+            coin_value_str = f"+{coin_power}" if coin_power >= 0 else str(coin_power)
+            
+            sp_info = f" at **{sp} SP** (Heads Chance: **{heads_prob:.0%}**)" if sp != 0 else ""
+
+            description = (
+                f"Flipping {num_coins} coins{sp_info} (Value: {coin_value_str}): `{' '.join(coin_results_display)}`\n"
+                f"Result: {coin_part_str} -> **{coin_total}**"
+            )
+
+            response = (
+                f"{ctx.author.mention}, your roll result is: **{final_result}**\n"
+                f"Calculation: `(Base) {base_power} + (Coins) {coin_total} + (Mods) {modifier}`\n"
+                f"{description}"
+            )
+            await ctx.send(response)
+            self.logger.info(f"Limbus roll by {ctx.author}. Result: {final_result}")
+
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to answer, so I cancelled the roll.")
+        except (ValueError, TypeError) as e:
+            await ctx.send(f"Invalid input: {e}. Please enter a valid number.")
+        except Exception as e:
+            await ctx.send(f"An unexpected error occurred: {e}")
+            self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
 
     async def calculate(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all basic math calculation requests."""
@@ -179,7 +298,7 @@ class Math(BaseCog):
                         result_display = result_str.split(' ')[0]
                     
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
-                    if len(response) > 4000:
+                    if len(response) > 3500:
                         await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
                         return
                     await ctx.send(response)
@@ -192,7 +311,7 @@ class Math(BaseCog):
             result_display = int(result) if result == int(result) else f"{result:.2f}"
             
             response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
-            if len(response) > 4000:
+            if len(response) > 3500:
                 await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
                 return
             await ctx.send(response)
