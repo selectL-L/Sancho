@@ -1,21 +1,21 @@
 import discord
 from discord.ext import commands, tasks
-import aiosqlite
 import time
 import dateparser
 import re
 import logging
-from typing import Optional, cast, Any
+from typing import Optional, cast, Any, List
 import pytz
 from datetime import datetime
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
+from utils.database import DatabaseManager
 
 class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.db_path = bot.db_path
+        self.db: DatabaseManager = bot.db_manager # type: ignore
         self.check_reminders.start()
 
     async def cog_unload(self) -> None:
@@ -24,62 +24,39 @@ class Reminders(BaseCog):
         # matches the base class (a coroutine).
         self.check_reminders.cancel()
 
-    async def _setup_database(self) -> None:
-        """Ensures the reminders and user_timezones tables exist."""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Main table for reminders
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS reminders (
-                    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
-                    reminder_time INTEGER NOT NULL, message TEXT NOT NULL, created_at INTEGER NOT NULL
-                )''')
-            # New table for storing user-specific timezones
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_timezones (
-                    user_id INTEGER PRIMARY KEY,
-                    timezone TEXT NOT NULL
-                )''')
-            await db.commit()
-        self.logger.info("Reminders and Timezones database tables initialized.")
-
     async def _get_user_timezone(self, user_id: int) -> str:
         """Fetches a user's timezone, defaulting to UTC."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT timezone FROM user_timezones WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
-            if row:
-                return row[0]
-            return "UTC"
+        tz = await self.db.get_user_timezone(user_id)
+        return tz or "UTC"
 
     @tasks.loop(seconds=15)
     async def check_reminders(self) -> None:
         """Periodically checks for and sends due reminders."""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                current_time = int(time.time())
-                cursor = await db.execute('SELECT id, user_id, channel_id, message FROM reminders WHERE reminder_time <= ?', (current_time,))
-                reminders_to_delete = []
-                for rid, uid, cid, msg in await cursor.fetchall():
-                    try:
-                        user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
-                        channel = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
-                        if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
-                            await channel.send(f"{user.mention}, you asked me to remind you: '{msg}'")
-                    except (discord.NotFound, discord.Forbidden) as e:
-                        self.logger.warning(f"Failed to send reminder {rid} (user/channel not found or permissions error). Deleting. Error: {e}")
-                    
-                    reminders_to_delete.append((rid,))
+            current_time = int(time.time())
+            due_reminders = await self.db.get_due_reminders(current_time)
+            
+            reminders_to_delete_ids: List[int] = []
+            for reminder in due_reminders:
+                try:
+                    user = self.bot.get_user(reminder['user_id']) or await self.bot.fetch_user(reminder['user_id'])
+                    channel = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
+                    if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+                        await channel.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'")
+                except (discord.NotFound, discord.Forbidden) as e:
+                    self.logger.warning(f"Failed to send reminder {reminder['id']} (user/channel not found or permissions error). Deleting. Error: {e}")
                 
-                if reminders_to_delete:
-                    await db.executemany("DELETE FROM reminders WHERE id = ?", reminders_to_delete)
-                    await db.commit()
+                reminders_to_delete_ids.append(reminder['id'])
+            
+            if reminders_to_delete_ids:
+                await self.db.delete_reminders(reminders_to_delete_ids)
         except Exception as e:
             self.logger.error(f"Unexpected error in reminder check loop: {e}", exc_info=True)
 
     @check_reminders.before_loop
     async def before_check_reminders(self) -> None:
         await self.bot.wait_until_ready()
-        await self._setup_database()
+        # No setup needed here anymore
 
     def _parse_reminder(self, query: str) -> tuple[str | None, str] | None:
         """
@@ -158,20 +135,16 @@ class Reminders(BaseCog):
                 await ctx.send("You can't set a reminder in the past!")
                 return
 
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    "INSERT INTO reminders (user_id, channel_id, reminder_time, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()))
-                )
-                await db.commit()
+            await self.db.add_reminder(
+                ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time())
+            )
             
             await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'")
             self.logger.info(f"Reminder set for user {ctx.author.id} at {timestamp}.")
 
-        except aiosqlite.Error as e:
-            self.logger.error(f"Database error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
-            await ctx.send("Sorry, a database error occurred while setting your reminder.")
-        # Any other unexpected exceptions will be caught by the global handler in main.py.
+        except Exception as e:
+            self.logger.error(f"Error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("Sorry, an error occurred while setting your reminder.")
 
     @commands.command(name="remindme", help="Sets a reminder. Usage: .remindme <subject> / <time>")
     async def remindme_command(self, ctx: commands.Context, *, query: str):
@@ -228,33 +201,20 @@ class Reminders(BaseCog):
                 return
 
             # --- Database Insertion ---
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    "INSERT INTO reminders (user_id, channel_id, reminder_time, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (ctx.author.id, ctx.channel.id, timestamp, subject, int(time.time()))
-                )
-                await db.commit()
+            await self.db.add_reminder(
+                ctx.author.id, ctx.channel.id, timestamp, subject, int(time.time())
+            )
 
             await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{subject}'")
             self.logger.info(f"Reminder set via command for user {ctx.author.id} at {timestamp}.")
 
-        except aiosqlite.Error as e:
-            self.logger.error(f"Database error in remindme command for user {ctx.author.id}: {e}", exc_info=True)
-            await ctx.send("Sorry, a database error occurred while setting your reminder.")
         except Exception as e:
             self.logger.error(f"Unexpected error in remindme command: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred. The issue has been logged.")
 
     async def _check_user_reminders(self, user_id: int) -> str:
         """Helper function to fetch and format a user's reminders."""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Use a row factory to get dict-like rows
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT id, reminder_time, message FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
-                (user_id,)
-            )
-            reminders = await cursor.fetchall()
+        reminders = await self.db.get_user_reminders(user_id)
 
         if not reminders:
             return "You have no pending reminders."
@@ -281,7 +241,6 @@ class Reminders(BaseCog):
 
     async def check_reminders_nlp(self, ctx: commands.Context, *, query: str):
         """NLP handler for checking reminders."""
-        # The query is unused here, but required by the dispatcher
         self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         await self.checkreminders_command(ctx)
 
@@ -290,23 +249,17 @@ class Reminders(BaseCog):
         """Deletes one or more reminders by their # number from the list."""
         try:
             # 1. Get the user's current reminders to map # to db ID
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute(
-                    "SELECT id FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
-                    (ctx.author.id,)
-                )
-                user_reminders_ids = [row[0] for row in await cursor.fetchall()]
+            user_reminders = await self.db.get_user_reminders(ctx.author.id)
+            user_reminders_ids = [r['id'] for r in user_reminders]
 
             if not user_reminders_ids:
                 await ctx.send("You have no reminders to delete.")
                 return
 
-            # 2. Parse the input numbers
             ids_to_delete = []
             invalid_numbers = []
             valid_numbers_deleted = []
 
-            # Split by comma and handle potential spaces
             input_numbers = [num.strip() for num in numbers_str.split(',')]
 
             for num_str in input_numbers:
@@ -315,7 +268,6 @@ class Reminders(BaseCog):
                     continue
                 
                 user_facing_num = int(num_str)
-                # User numbers are 1-based, list indices are 0-based
                 if 1 <= user_facing_num <= len(user_reminders_ids):
                     db_id = user_reminders_ids[user_facing_num - 1]
                     if db_id not in ids_to_delete:
@@ -324,17 +276,12 @@ class Reminders(BaseCog):
                 else:
                     invalid_numbers.append(num_str)
 
-            # 3. Perform deletion
             if not ids_to_delete:
                 await ctx.send(f"No valid reminder numbers provided. I couldn't find reminders for: {', '.join(invalid_numbers)}.")
                 return
 
-            async with aiosqlite.connect(self.db_path) as db:
-                # Create a list of tuples for executemany
-                await db.executemany("DELETE FROM reminders WHERE id = ?", [(id,) for id in ids_to_delete])
-                await db.commit()
+            await self.db.delete_reminders(ids_to_delete)
 
-            # 4. Report results
             deleted_count = len(ids_to_delete)
             response_parts = [f"Successfully deleted {deleted_count} reminder(s): `#{', #'.join(map(str, sorted(valid_numbers_deleted)))}`"]
             
@@ -344,9 +291,6 @@ class Reminders(BaseCog):
             await ctx.send("\n".join(response_parts))
             self.logger.info(f"User {ctx.author.id} deleted {deleted_count} reminders. IDs: {ids_to_delete}")
 
-        except aiosqlite.Error as e:
-            self.logger.error(f"Database error deleting reminders for user {ctx.author.id}: {e}", exc_info=True)
-            await ctx.send("A database error occurred while deleting reminders.")
         except Exception as e:
             self.logger.error(f"Unexpected error in reminderdelete command: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
@@ -369,61 +313,52 @@ class Reminders(BaseCog):
     async def timezone_command(self, ctx: commands.Context, timezone_str: str):
         """Sets the user's preferred timezone for parsing dates."""
         
-        # --- Timezone Abbreviation and Offset Mapping ---
-        # Provides a mapping from common, non-standard abbreviations to IANA timezones.
         TIMEZONE_ABBREVIATIONS = {
-            "bst": "Europe/London",      # British Summer Time
-            "ist": "Asia/Kolkata",       # Indian Standard Time
-            "cst": "America/Chicago",    # Central Standard Time (US)
-            "mst": "America/Denver",     # Mountain Standard Time (US)
-            "pst": "America/Los_Angeles",# Pacific Standard Time (US)
-            "est": "America/New_York",   # Eastern Standard Time (US)
+            "bst": "Europe/London", "ist": "Asia/Kolkata", "cst": "America/Chicago",
+            "mst": "America/Denver", "pst": "America/Los_Angeles", "est": "America/New_York",
         }
 
         tz_to_check = timezone_str.lower()
         final_tz_str = None
 
-        # 1. Check for common abbreviations
         if tz_to_check in TIMEZONE_ABBREVIATIONS:
             final_tz_str = TIMEZONE_ABBREVIATIONS[tz_to_check]
         
-        # 2. Check for GMT/UTC offset format (e.g., GMT+5, UTC-8)
         if not final_tz_str:
             match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check)
             if match:
                 sign = match.group(2)
                 offset = int(match.group(3))
-                # pytz uses inverted signs for Etc/GMT (e.g., GMT+5 is Etc/GMT-5)
                 inverted_sign = '-' if sign == '+' else '+'
                 final_tz_str = f"Etc/GMT{inverted_sign}{offset}"
 
-        # 3. If no match yet, use the original string for a direct pytz lookup
         if not final_tz_str:
             final_tz_str = timezone_str
 
         try:
-            # Validate the final timezone string using pytz
             tz = pytz.timezone(final_tz_str)
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    "INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)",
-                    (ctx.author.id, tz.zone)
-                )
-                await db.commit()
+            
+            # The .zone attribute can be None for some timezone objects (e.g., from GMT offsets)
+            # We must ensure we have a valid string to store.
+            zone_to_store = tz.zone
+            if zone_to_store is None:
+                # Fallback for tz objects without a .zone, like Etc/GMT+5
+                # In these cases, the original string is often the best representation.
+                zone_to_store = final_tz_str
+                self.logger.info(f"Timezone object had no '.zone' attribute. Using '{final_tz_str}' for storage.")
+
+            await self.db.set_user_timezone(ctx.author.id, zone_to_store)
             
             now = datetime.now(tz)
             await ctx.send(
-                f"Your timezone has been set to `{tz.zone}`.\n"
+                f"Your timezone has been set to `{zone_to_store}`.\n"
                 f"The current time in your timezone is `{now.strftime('%Y-%m-%d %H:%M:%S')}`."
             )
-            self.logger.info(f"Timezone for user {ctx.author.id} set from '{timezone_str}' to '{tz.zone}'.")
+            self.logger.info(f"Timezone for user {ctx.author.id} set from '{timezone_str}' to '{zone_to_store}'.")
 
         except pytz.UnknownTimeZoneError:
             self.logger.warning(f"Failed to set timezone for user {ctx.author.id}: Unrecognized timezone '{timezone_str}'.")
             await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")
-        except aiosqlite.Error as e:
-            self.logger.error(f"Database error setting timezone for user {ctx.author.id}: {e}", exc_info=True)
-            await ctx.send("A database error occurred while setting your timezone.")
         except Exception as e:
             self.logger.error(f"Unexpected error in timezone command: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
