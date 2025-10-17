@@ -7,6 +7,8 @@ import logging
 from typing import Optional, cast, Any, List
 import pytz
 from datetime import datetime
+import asyncio
+
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
@@ -58,7 +60,7 @@ class Reminders(BaseCog):
         await self.bot.wait_until_ready()
         # No setup needed here anymore
 
-    def _parse_reminder(self, query: str) -> tuple[str | None, str] | None:
+    async def _parse_reminder(self, query: str) -> tuple[str | None, str] | None:
         """
         Parses a query to separate the reminder message from the time string.
         It looks for common time-related prepositions to make a split.
@@ -80,16 +82,14 @@ class Reminders(BaseCog):
             # Reconstruct the time string with the keyword, as partition removes it
             time_string = sep.strip() + ' ' + time_part.strip()
             
-            # Check if the parsed time string is valid
-            if dateparser.parse(time_string, settings={'PREFER_DATES_FROM': 'future'}):
+            # Check if the parsed time string is valid by running it in a thread
+            if await asyncio.to_thread(dateparser.parse, time_string, settings={'PREFER_DATES_FROM': 'future'}):
                 self.logger.info(f"Successfully parsed reminder. Message: '{message_part}', Time: '{time_string}'")
                 return (message_part.strip(), time_string)
 
         # --- Strategy 2: If no keywords, assume the whole string is the time (e.g., "tomorrow 5pm") ---
-        # This is a fallback for simple cases like ".sancho remind me tomorrow 5pm to take out trash"
-        # (which would fail above) or when the message is at the end.
         # We try parsing the whole sanitized query. If it's a valid date, there's no message part.
-        if dateparser.parse(sanitized_query, settings={'PREFER_DATES_FROM': 'future'}):
+        if await asyncio.to_thread(dateparser.parse, sanitized_query, settings={'PREFER_DATES_FROM': 'future'}):
              self.logger.warning("Query was parsed entirely as a time string. No reminder message found.")
              return (None, sanitized_query) # No message, just time
 
@@ -97,24 +97,85 @@ class Reminders(BaseCog):
         self.logger.warning(f"Failed to parse reminder query: '{query}'")
         return None
 
+    async def _interactive_reminder_flow(self, ctx: commands.Context, initial_message: str = "", initial_time: str = "") -> None:
+        """Guides the user through creating a reminder interactively."""
+        
+        def check(m: discord.Message) -> bool:
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            # 1. Get Reminder Message
+            reminder_message = initial_message
+            if not reminder_message:
+                await ctx.send("What should I remind you about? You can say `exit` to cancel.")
+                msg = await self.bot.wait_for('message', check=check, timeout=120.0)
+                if msg.content.lower() == 'exit':
+                    await ctx.send("Reminder creation cancelled.")
+                    return
+                reminder_message = msg.content
+
+            # 2. Get Reminder Time
+            time_str = initial_time
+            dt_object = None
+            user_tz = await self._get_user_timezone(ctx.author.id)
+            date_settings = {
+                'PREFER_DATES_FROM': 'future',
+                'TIMEZONE': user_tz,
+                'RETURN_AS_TIMEZONE_AWARE': True
+            }
+
+            while True:
+                if not time_str:
+                    await ctx.send(f"When should I remind you about '{reminder_message}'? (e.g., 'in 2 hours', 'tomorrow at 5pm')")
+                    msg = await self.bot.wait_for('message', check=check, timeout=120.0)
+                    if msg.content.lower() == 'exit':
+                        await ctx.send("Reminder creation cancelled.")
+                        return
+                    time_str = msg.content
+                
+                dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                if dt_object and dt_object.timestamp() > time.time():
+                    break
+                else:
+                    await ctx.send(f"I couldn't understand that time or it's in the past. Please try another format. Your timezone is set to `{user_tz}`.")
+                    time_str = "" # Reset to re-ask
+
+            # 3. Confirmation
+            timestamp = int(dt_object.timestamp())
+            await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'. Is this correct? (`yes`/`no`)")
+            
+            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            if msg.content.lower() in ['yes', 'y']:
+                await self.db.add_reminder(ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()))
+                await ctx.send("✅ Reminder saved!")
+                self.logger.info(f"Reminder set for user {ctx.author.id} at {timestamp}.")
+            else:
+                await ctx.send("Reminder cancelled. You can start over if you wish.")
+
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Reminder creation cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error in interactive reminder flow for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred while creating the reminder.")
+
     async def remind(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all reminder requests."""
         try:
-            parsed = self._parse_reminder(query)
+            # Naked command check
+            sanitized_query = re.sub(r'^(remind me to|remind me|remember to|remember|set reminder)\s*', '', query, flags=re.IGNORECASE).strip()
+            if not sanitized_query:
+                await self._interactive_reminder_flow(ctx)
+                return
+
+            parsed = await self._parse_reminder(query)
             
-            # Case 1: Parsing completely failed
-            if not parsed:
-                await ctx.send("I couldn't understand that reminder. Please try a different phrasing, like:\n"
-                             "• `.sancho remind me to take out the trash in 2 hours`\n"
-                             "• `.sancho remind me on Friday at 8pm to call Bob`")
+            if not parsed or not parsed[0] or not parsed[1]:
+                self.logger.info(f"Could not fully parse reminder '{query}'. Starting interactive flow.")
+                initial_msg = sanitized_query if not parsed or not parsed[1] else parsed[0]
+                await self._interactive_reminder_flow(ctx, initial_message=initial_msg or "")
                 return
 
             reminder_message, time_str = parsed
-
-            # Case 2: Parser found a time, but no message
-            if not reminder_message:
-                await ctx.send("You need to provide a message for the reminder! What should I remind you about?")
-                return
 
             user_tz = await self._get_user_timezone(ctx.author.id)
             date_settings = {
@@ -122,26 +183,46 @@ class Reminders(BaseCog):
                 'TIMEZONE': user_tz,
                 'RETURN_AS_TIMEZONE_AWARE': True
             }
-            dt_object = dateparser.parse(time_str, settings=cast(Any, date_settings))
+            dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
             
-            # This check is technically redundant if _parse_reminder is correct, but it's a good safeguard.
             if not dt_object:
-                self.logger.error(f"Dateparser failed on a string that was previously validated: '{time_str}'")
-                await ctx.send("Sorry, something went wrong trying to understand that time. Please try again.")
+                self.logger.error(f"Dateparser failed on a string that was previously validated: '{time_str}'. Starting interactive flow.")
+                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "")
                 return
 
             timestamp = int(dt_object.timestamp())
             if timestamp <= int(time.time()):
-                await ctx.send("You can't set a reminder in the past!")
+                await ctx.send("You can't set a reminder in the past! Please try again.")
+                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "")
                 return
 
-            await self.db.add_reminder(
-                ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time())
+            # --- Confirmation Step ---
+            def check(m: discord.Message) -> bool:
+                return m.author == ctx.author and m.channel == ctx.channel
+
+            await ctx.send(
+                f"Okay, I have a reminder for you to '{reminder_message}' on <t:{timestamp}:F>.\n"
+                "Is this correct? (`yes` to confirm, `edit` to change, or `no` to cancel)"
             )
             
-            await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'")
-            self.logger.info(f"Reminder set for user {ctx.author.id} at {timestamp}.")
+            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            
+            if msg.content.lower() in ['yes', 'y']:
+                if reminder_message:
+                    await self.db.add_reminder(ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()))
+                    await ctx.send("✅ Reminder saved!")
+                    self.logger.info(f"Reminder set for user {ctx.author.id} at {timestamp}.")
+                else:
+                    # This case should ideally not be hit if parsing and flow are correct
+                    await ctx.send("Something went wrong, the reminder message was lost. Please try again.")
+            elif msg.content.lower() == 'edit':
+                await ctx.send("Let's edit the reminder.")
+                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_time=time_str)
+            else:
+                await ctx.send("Reminder cancelled.")
 
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Reminder creation cancelled.")
         except Exception as e:
             self.logger.error(f"Error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, an error occurred while setting your reminder.")
@@ -188,7 +269,7 @@ class Reminders(BaseCog):
                     'TIMEZONE': user_tz,
                     'RETURN_AS_TIMEZONE_AWARE': True
                 }
-                dt_object = dateparser.parse(time_str, settings=cast(Any, date_settings))
+                dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
                 if dt_object:
                     timestamp = int(dt_object.timestamp())
                     self.logger.info(f"Parsed time string '{time_str}' to timestamp: {timestamp} using timezone {user_tz}")

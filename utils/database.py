@@ -41,6 +41,14 @@ class DatabaseManager:
                     user_id INTEGER PRIMARY KEY,
                     timezone TEXT NOT NULL
                 )''')
+            # User-specific config table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_config (
+                    user_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    PRIMARY KEY(user_id, key)
+                )''')
             # Skill Limit Config Table
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS config (
@@ -72,6 +80,28 @@ class DatabaseManager:
             await db.commit()
         self.skill_limit = limit
         logger.info(f"Global skill limit set to {limit}.")
+
+    async def set_user_skill_limit(self, user_id: int, limit: int) -> None:
+        """Sets a skill limit for a specific user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, 'skill_limit', ?)",
+                (user_id, str(limit))
+            )
+            await db.commit()
+        logger.info(f"Skill limit for user {user_id} set to {limit}.")
+
+    async def get_user_skill_limit(self, user_id: int) -> int:
+        """Gets a user's skill limit, falling back to the global limit."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM user_config WHERE user_id = ? AND key = 'skill_limit'",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row and row[0].isdigit():
+                return int(row[0])
+        return self.skill_limit
 
     async def count_user_skills(self, user_id: int) -> int:
         """Counts the number of skills a user has."""

@@ -18,6 +18,12 @@ class Skills(BaseCog):
 
     def _evaluate_max_roll(self, dice_roll: str) -> int:
         """Evaluates the maximum possible result of a dice expression."""
+        # This function is called from an async context, but it's complex to make it async
+        # due to the nature of the `save_skill_nlp` conversation flow.
+        # Given that the complexity of dice rolls here is limited by validation
+        # (10 dice, 40 sides), the risk of a significant block is low.
+        # We will accept this as a low-risk synchronous call to avoid major refactoring.
+        
         # Replace dice notation with max values (e.g., 2d6 -> 2*6)
         def max_dice_value(match: re.Match) -> str:
             num_dice = int(match.group(1) or 1)
@@ -41,9 +47,10 @@ class Skills(BaseCog):
         
         user_skills = await self.db.get_user_skills(ctx.author.id)
         current_skills_count = len(user_skills)
+        user_skill_limit = await self.db.get_user_skill_limit(ctx.author.id)
 
-        if current_skills_count >= self.db.skill_limit:
-            await ctx.send(f"You have reached your skill limit of **{self.db.skill_limit}** skills. Please delete a skill before adding a new one.")
+        if current_skills_count >= user_skill_limit:
+            await ctx.send(f"You have reached your skill limit of **{user_skill_limit}** skills. Please delete a skill before adding a new one.")
             return
 
         # --- Pre-gather all existing names and aliases for duplicate checking ---
@@ -60,7 +67,7 @@ class Skills(BaseCog):
 
         try:
             # 1. Get Skill Name
-            await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nAfter this one, you will have **{self.db.skill_limit - current_skills_count - 1}** skill slot(s) remaining.")
+            await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nAfter this one, you will have **{user_skill_limit - current_skills_count - 1}** skill slot(s) remaining.")
             name_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
             if name_msg.content.strip().lower() == 'exit':
                 await ctx.send("Skill creation cancelled.")
@@ -198,7 +205,8 @@ class Skills(BaseCog):
             description.append(f"**{i}. {skill['name'].title()}**{aliases_display}\n   - Roll: `{skill['dice_roll']}` | Type: `{skill['skill_type']}` | ID: `{skill['id']}`")
         
         embed.description = "\n".join(description)
-        embed.set_footer(text=f"You are using {len(skills)}/{self.db.skill_limit} skill slots. Use '.sancho delete skill <number>' to remove one.")
+        user_skill_limit = await self.db.get_user_skill_limit(ctx.author.id)
+        embed.set_footer(text=f"You are using {len(skills)}/{user_skill_limit} skill slots. Use '.sancho delete skill <number>' to remove one.")
         await ctx.send(embed=embed)
 
     async def delete_skill_nlp(self, ctx: commands.Context, *, query: str):
@@ -234,6 +242,17 @@ class Skills(BaseCog):
         
         await self.db.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
+
+    @commands.command(name="setuserskilllimit")
+    @commands.has_permissions(administrator=True)
+    async def set_user_skill_limit_command(self, ctx: commands.Context, user: discord.Member, limit: int):
+        """Sets the maximum number of skills a specific user can have."""
+        if not (0 < limit <= 100):
+            await ctx.send("Please provide a limit between 1 and 100.")
+            return
+        
+        await self.db.set_user_skill_limit(user.id, limit)
+        await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
 async def setup(bot: SanchoBot) -> None:
     """Standard setup function for the cog."""

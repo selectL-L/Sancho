@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import io
 import re
+import asyncio
 from PIL import Image as PILImage
 from typing import Optional, Tuple
 
@@ -46,20 +47,28 @@ class Image(BaseCog):
             await ctx.send("Please attach an image or reply to a message with an image to resize.")
             return
 
+        def _processing_thread(image_bytes: bytes, size: tuple[int, int]) -> io.BytesIO:
+            """Contains the synchronous, blocking image processing code."""
+            with PILImage.open(io.BytesIO(image_bytes)) as img:
+                img = img.resize(size)
+                
+                buffer = io.BytesIO()
+                # Preserve original format, but save as PNG if format is unknown
+                original_format = img.format or 'PNG'
+                img.save(buffer, format=original_format)
+                buffer.seek(0)
+                return buffer
+
         try:
             async with ctx.typing():
                 image_bytes = await attachment.read()
-                with PILImage.open(io.BytesIO(image_bytes)) as img:
-                    img = img.resize(new_size)
-                    
-                    buffer = io.BytesIO()
-                    # Preserve original format, but save as PNG if format is unknown (e.g. from copy-paste)
-                    original_format = img.format or 'PNG'
-                    img.save(buffer, format=original_format)
-                    buffer.seek(0)
-                    
-                    filename = f"resized_{attachment.filename}"
-                    await ctx.send(f"Here is the image resized to {new_size[0]}x{new_size[1]}:", file=discord.File(buffer, filename=filename))
+                
+                # Run the blocking code in a separate thread
+                buffer = await asyncio.to_thread(_processing_thread, image_bytes, new_size)
+                
+                filename = f"resized_{attachment.filename}"
+                await ctx.send(f"Here is the image resized to {new_size[0]}x{new_size[1]}:", file=discord.File(buffer, filename=filename))
+            
             self.logger.info(f"Resized image for {ctx.author} to {new_size[0]}x{new_size[1]}.")
         except Exception as e:
             self.logger.error(f"Failed to resize image: {e}", exc_info=True)
@@ -80,28 +89,32 @@ class Image(BaseCog):
             await ctx.send("Please attach an image or reply to a message with an image to convert.")
             return
 
+        def _processing_thread(image_bytes: bytes, format_str: str) -> io.BytesIO:
+            """Contains the synchronous, blocking image conversion code."""
+            with PILImage.open(io.BytesIO(image_bytes)) as img:
+                # Handle RGBA for formats that don't support it (like JPEG)
+                if format_str == 'JPEG' and img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+
+                buffer = io.BytesIO()
+                img.save(buffer, format=format_str)
+                buffer.seek(0)
+                return buffer
+
         try:
             async with ctx.typing():
                 image_bytes = await attachment.read()
-                with PILImage.open(io.BytesIO(image_bytes)) as img:
-                    # Handle RGBA for formats that don't support it (like JPEG)
-                    if target_format == 'JPEG' and img.mode in ('RGBA', 'P'):
-                        img = img.convert('RGB')
 
-                    buffer = io.BytesIO()
-                    img.save(buffer, format=target_format)
-                    buffer.seek(0)
-                    
-                    # Create a new filename with the correct extension
-                    base_filename = attachment.filename.rsplit('.', 1)[0]
-                    new_filename = f"{base_filename}.{target_format.lower()}"
+                # Run the blocking code in a separate thread
+                buffer = await asyncio.to_thread(_processing_thread, image_bytes, target_format)
+                
+                # Create a new filename with the correct extension
+                base_filename = attachment.filename.rsplit('.', 1)[0]
+                new_filename = f"{base_filename}.{target_format.lower()}"
 
-                    await ctx.send(f"Here is the image converted to {target_format}:", file=discord.File(buffer, filename=new_filename))
+                await ctx.send(f"Here is the image converted to {target_format}:", file=discord.File(buffer, filename=new_filename))
+            
             self.logger.info(f"Converted image for {ctx.author} to {target_format}.")
         except Exception as e:
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to convert that image.")
-
-async def setup(bot: SanchoBot) -> None:
-    """Standard setup function for the cog."""
-    await bot.add_cog(Image(bot))
