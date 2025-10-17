@@ -209,7 +209,6 @@ __marimo__/
 # Local files created by various tools
 info.env
 *.db
-sanchobase.db
 
 # SQLite database files
 *.sqlite
@@ -217,3 +216,6 @@ sanchobase.db
 
 # Log files
 *.log
+
+# GitHub specific
+/.github
