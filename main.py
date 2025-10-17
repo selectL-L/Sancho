@@ -13,6 +13,7 @@ from collections.abc import Callable
 import config
 from utils.logging_config import setup_logging
 from utils.bot_class import SanchoBot
+from utils.database import DatabaseManager
 
 # Set up logging BEFORE anything else
 setup_logging()
@@ -33,6 +34,7 @@ intents.message_content = True
 
 bot = SanchoBot(command_prefix=config.BOT_PREFIX, intents=intents)
 bot.db_path = config.DB_PATH  # Attach db_path to the bot instance
+bot.db_manager = DatabaseManager(bot.db_path) # Attach the database manager
 
 
 # --- 3. Core Bot Events ---
@@ -129,6 +131,10 @@ async def main() -> None:
     """The main entry point for starting the bot."""
     logging.info("Sancho is starting...")
     async with bot:
+        # Setup the database tables and load configs
+        await bot.db_manager.setup_databases()
+        await bot.db_manager.load_skill_limit()
+
         # Load cogs from the static list in the config file.
         for extension in config.COGS_TO_LOAD:
             try:

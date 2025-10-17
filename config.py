@@ -67,8 +67,12 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     
     # --- Skill Commands ---
-    # This should be checked before more general "skill" queries if any are added.
-    ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b'), 'Skills', 'save_skill_nlp'),
+    ((r'\b(delete|remove)\s.*skill\b',), 'Skills', 'delete_skill_nlp'),
+    # This pattern now handles "skill list", "list skills", and "skilllist"
+    ((r'\b(list|show|check)\s.*skill(s)?\b', r'\bskill\s.*(list|show|check)\b', r'\bskilllist\b'), 'Skills', 'list_skills_nlp'),
+    # This should be checked before more general "skill" queries.
+    ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b', r'create.*skill'), 'Skills', 'save_skill_nlp'),
+    # This is the general "use skill" command, and should be last.
     ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
 
     # Deleting reminders (catches "delete/remove reminder 1", etc.)
