@@ -3,7 +3,6 @@ from discord.ext import commands, tasks
 import time
 import dateparser
 import re
-import logging
 from typing import Optional, cast, Any, List
 import pytz
 from datetime import datetime
@@ -227,107 +226,51 @@ class Reminders(BaseCog):
             self.logger.error(f"Error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, an error occurred while setting your reminder.")
 
-    @commands.command(name="remindme", help="A structured command to set a reminder. For natural language, just say 'Sancho, remind me...'")
-    async def remindme_command(self, ctx: commands.Context, *, query: str):
-        """A structured command for setting a reminder."""
+    async def check_reminders_nlp(self, ctx: commands.Context, *, query: str):
+        """NLP handler for checking reminders."""
+        self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         try:
-            if '/' not in query:
-                await ctx.send(
-                    "The `.remindme` command is not an NLP command. It requires a specific format: \n"
-                    "` .remindme <subject> / <time>`\n\n"
-                    "If you'd like to use NLP, you can start a message with keywords like `reminder` or `remind me`."
-                )
+            reminders = await self.db.get_user_reminders(ctx.author.id)
+
+            if not reminders:
+                await ctx.send("You have no pending reminders.")
                 return
 
-            parts = query.split('/')
-            if len(parts) != 2:
-                await ctx.send("Invalid format. Please use: `.remindme <subject> / <time>`")
-                return
-
-            subject = parts[0].strip()
-            time_str = parts[1].strip()
-
-            if not subject:
-                await ctx.send("You must provide a subject for the reminder.")
-                return
-            if not time_str:
-                await ctx.send("You must provide a time for the reminder.")
-                return
-
-            # --- Time Parsing ---
-            timestamp = None
-            # Strategy 1: Check for Discord timestamp format
-            match = re.match(r'<t:(\d+):[a-zA-Z]>', time_str)
-            if match:
-                timestamp = int(match.group(1))
-                self.logger.info(f"Parsed Discord timestamp: {timestamp}")
-            else:
-                # Strategy 2: Fallback to dateparser with user's timezone
-                user_tz = await self._get_user_timezone(ctx.author.id)
-                date_settings = {
-                    'PREFER_DATES_FROM': 'future',
-                    'TIMEZONE': user_tz,
-                    'RETURN_AS_TIMEZONE_AWARE': True
-                }
-                dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
-                if dt_object:
-                    timestamp = int(dt_object.timestamp())
-                    self.logger.info(f"Parsed time string '{time_str}' to timestamp: {timestamp} using timezone {user_tz}")
-                else:
-                    await ctx.send(f"Sorry, I couldn't understand the time '{time_str}'. Please try a different format.")
-                    return
-
-            if timestamp <= int(time.time()):
-                await ctx.send("You can't set a reminder in the past!")
-                return
-
-            # --- Database Insertion ---
-            await self.db.add_reminder(
-                ctx.author.id, ctx.channel.id, timestamp, subject, int(time.time())
+            user_tz_str = await self._get_user_timezone(ctx.author.id)
+            
+            embed = discord.Embed(
+                title=f"{ctx.author.display_name}'s Reminders",
+                color=discord.Color.blue()
             )
+            embed.set_footer(text=f"Your timezone is set to {user_tz_str}. Use 'delete reminder <#>' to remove one.")
 
-            await ctx.send(f"Okay, I will remind you on <t:{timestamp}:F> to '{subject}'")
-            self.logger.info(f"Reminder set via command for user {ctx.author.id} at {timestamp}.")
-
-        except Exception as e:
-            self.logger.error(f"Unexpected error in remindme command: {e}", exc_info=True)
-            await ctx.send("An unexpected error occurred. The issue has been logged.")
-
-    async def _check_user_reminders(self, user_id: int) -> str:
-        """Helper function to fetch and format a user's reminders."""
-        reminders = await self.db.get_user_reminders(user_id)
-
-        if not reminders:
-            return "You have no pending reminders."
-
-        user_tz_str = await self._get_user_timezone(user_id)
-        
-        response_lines = [f"Your reminders (Timezone: `{user_tz_str}`):", "```"]
-        for i, reminder in enumerate(reminders, 1):
-            # Format using Discord's timestamp for dynamic, client-side time display
-            response_lines.append(f"#{i} (ID: {reminder['id']}) - \"{reminder['message']}\" - Due: <t:{reminder['reminder_time']}:F>")
-        
-        response_lines.append("```")
-        return "\n".join(response_lines)
-
-    @commands.command(name="checkreminders", help="Shows a list of your upcoming reminders.")
-    async def checkreminders_command(self, ctx: commands.Context):
-        """Static command to list a user's reminders."""
-        try:
-            response = await self._check_user_reminders(ctx.author.id)
-            await ctx.send(response)
+            description_lines = []
+            for i, reminder in enumerate(reminders, 1):
+                # Format using Discord's timestamp for dynamic, client-side time display
+                description_lines.append(
+                    f"**#{i} (ID: {reminder['id']})** - \"{reminder['message']}\"\n"
+                    f"Due: <t:{reminder['reminder_time']}:F>"
+                )
+            
+            embed.description = "\n\n".join(description_lines)
+            await ctx.send(embed=embed)
         except Exception as e:
             self.logger.error(f"Error checking reminders for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An error occurred while fetching your reminders.")
 
-    async def check_reminders_nlp(self, ctx: commands.Context, *, query: str):
-        """NLP handler for checking reminders."""
-        self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
-        await self.checkreminders_command(ctx)
-
-    @commands.command(name="reminderdelete", aliases=["remdelete"], help="Deletes reminders by their number. Use '.checkreminders' to see the list.")
-    async def reminderdelete_command(self, ctx: commands.Context, *, numbers_str: str):
-        """Deletes one or more reminders by their # number from the list."""
+    async def delete_reminders_nlp(self, ctx: commands.Context, *, query: str):
+        """NLP handler for deleting reminders."""
+        self.logger.info(f"Handling NLP request for deleting reminders from user {ctx.author.id}: '{query}'")
+        
+        # Find all numbers in the query string
+        numbers_found = re.findall(r'\d+', query)
+        
+        if not numbers_found:
+            await ctx.send("I see you want to delete a reminder, but you didn't specify which one. Please provide the reminder number (e.g., 'delete reminder 1').")
+            return
+            
+        numbers_str = ",".join(numbers_found)
+        
         try:
             # 1. Get the user's current reminders to map # to db ID
             user_reminders = await self.db.get_user_reminders(ctx.author.id)
@@ -373,27 +316,18 @@ class Reminders(BaseCog):
             self.logger.info(f"User {ctx.author.id} deleted {deleted_count} reminders. IDs: {ids_to_delete}")
 
         except Exception as e:
-            self.logger.error(f"Unexpected error in reminderdelete command: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error in reminderdelete NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
 
-    async def delete_reminders_nlp(self, ctx: commands.Context, *, query: str):
-        """NLP handler for deleting reminders."""
-        self.logger.info(f"Handling NLP request for deleting reminders from user {ctx.author.id}: '{query}'")
-        
-        # Find all numbers in the query string
-        numbers_found = re.findall(r'\d+', query)
-        
-        if not numbers_found:
-            await ctx.send("I see you want to delete a reminder, but you didn't specify which one. Please provide the reminder number (e.g., 'delete reminder 1').")
-            return
-            
-        numbers_str = ",".join(numbers_found)
-        await self.reminderdelete_command(ctx, numbers_str=numbers_str)
+    async def set_timezone_nlp(self, ctx: commands.Context, *, query: str):
+        """NLP handler for setting a user's timezone."""
+        # Clean the query to get just the timezone string
+        timezone_str = re.sub(r'\b(set|change)\b|\b(timezone|tz)\b', '', query, flags=re.IGNORECASE).strip()
 
-    @commands.command(name="timezone", help="Sets your timezone for reminders (e.g., UTC, EST, PST, GMT+5). Affects how reminder times are interpreted.")
-    async def timezone_command(self, ctx: commands.Context, timezone_str: str):
-        """Sets the user's preferred timezone for parsing dates."""
-        
+        if not timezone_str:
+            await ctx.send("Please provide a timezone to set. For example: `set timezone EST` or `tz US/Eastern`.")
+            return
+
         TIMEZONE_ABBREVIATIONS = {
             "bst": "Europe/London", "ist": "Asia/Kolkata", "cst": "America/Chicago",
             "mst": "America/Denver", "pst": "America/Los_Angeles", "est": "America/New_York",
@@ -410,24 +344,23 @@ class Reminders(BaseCog):
             if match:
                 sign = match.group(2)
                 offset = int(match.group(3))
+                # For pytz, the sign is inverted for Etc/GMT zones.
+                # GMT-5 is Etc/GMT+5.
                 inverted_sign = '-' if sign == '+' else '+'
                 final_tz_str = f"Etc/GMT{inverted_sign}{offset}"
+                # But we want to show the user the logical name
+                display_tz_str = f"GMT{sign}{offset}"
 
         if not final_tz_str:
             final_tz_str = timezone_str
+            display_tz_str = timezone_str
 
         try:
             tz = pytz.timezone(final_tz_str)
             
-            # The .zone attribute can be None for some timezone objects (e.g., from GMT offsets)
-            # We must ensure we have a valid string to store.
-            zone_to_store = tz.zone
-            if zone_to_store is None:
-                # Fallback for tz objects without a .zone, like Etc/GMT+5
-                # In these cases, the original string is often the best representation.
-                zone_to_store = final_tz_str
-                self.logger.info(f"Timezone object had no '.zone' attribute. Using '{final_tz_str}' for storage.")
-
+            # Use the display name for storage and confirmation, but the real one for calculation.
+            zone_to_store = display_tz_str if 'display_tz_str' in locals() else final_tz_str
+            
             await self.db.set_user_timezone(ctx.author.id, zone_to_store)
             
             now = datetime.now(tz)
@@ -441,7 +374,7 @@ class Reminders(BaseCog):
             self.logger.warning(f"Failed to set timezone for user {ctx.author.id}: Unrecognized timezone '{timezone_str}'.")
             await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")
         except Exception as e:
-            self.logger.error(f"Unexpected error in timezone command: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
 
 
