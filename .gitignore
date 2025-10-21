@@ -206,9 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Local files created by various tools
+# Local files created/required by various tools
 info.env
-*.db
 
 # SQLite database files
 *.sqlite
@@ -217,5 +216,7 @@ info.env
 # Log files
 *.log
 
-# GitHub specific
+# Local paths
 /.github
+/.vscode
+/assets

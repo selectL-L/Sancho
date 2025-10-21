@@ -48,6 +48,7 @@ def safe_eval_math(expr: str) -> float:
 # --- Math Cog ---
 
 DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
+COIN_FLIP_REGEX = re.compile(r'(\d*)c', re.IGNORECASE)
 
 class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
@@ -73,9 +74,7 @@ class Math(BaseCog):
             if sp_match:
                 sp = int(sp_match.group(1))
                 work_query = work_query.replace(sp_match.group(0), " ", 1)
-            else:
-                sp = 0 # Default to 0 if not provided
-
+            
             # Parser for Base Power
             base_match = re.search(r'(?:(\d+)\s+\b(base\s*power|bp)\b|\b(base\s*power|bp)\b\s+(\d+))', work_query, re.IGNORECASE)
             if base_match:
@@ -99,7 +98,7 @@ class Math(BaseCog):
             modifier = int(mod_match.group(1)) if mod_match else 0
 
             # --- 2. Fallback to interactive mode if values are missing ---
-            interactive_fallback_needed = any(v is None for v in [base_power, coin_power, num_coins])
+            interactive_fallback_needed = any(v is None for v in [base_power, coin_power, num_coins, sp])
             if interactive_fallback_needed:
                 await ctx.send(
                     "Switching to interactive mode, please input your values below.\n"
@@ -120,6 +119,11 @@ class Math(BaseCog):
                 await ctx.send("How many coins?")
                 msg = await self.bot.wait_for('message', check=check, timeout=30.0)
                 num_coins = int(msg.content)
+            
+            if sp is None:
+                await ctx.send("SP? (optional, press enter to skip)")
+                msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                sp = int(msg.content) if msg.content else 0
 
             # --- 3. Validation ---
             if not (1 <= num_coins <= 15):
@@ -257,7 +261,7 @@ class Math(BaseCog):
         
         while match := PARENTHESES_REGEX.search(query):
             expression = match.group(1)
-            if 'd' in expression:
+            if 'd' in expression or 'c' in expression:
                 break 
 
             try:
@@ -271,6 +275,42 @@ class Math(BaseCog):
                 break
         return query
 
+    async def _roll_and_parse_coins(self, match: _re.Match[str], sp: int) -> tuple[int, str]:
+        """
+        Parses a regex match for a coin flip, flips the coins with SP influence, and returns the sum and a description.
+        """
+        num_coins_str = match.group(1)
+        num_coins = int(num_coins_str) if num_coins_str else 1
+
+        if not (1 <= num_coins <= 40):
+            raise ValueError("Coin count is out of range (1-40 coins).")
+
+        heads_prob = sp / 100.0
+        
+        def _flip_coins_thread() -> list[int]:
+            """Synchronous function to handle the random number generation for coin flips."""
+            return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
+
+        flips = await asyncio.to_thread(_flip_coins_thread)
+        heads_count = sum(flips)
+        
+        flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
+        
+        description = f"{match.group(0)}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T)"
+        return heads_count, description
+
+    async def get_roll_result(self, dice_notation: str) -> int:
+        """
+        A simple utility to roll dice and get only the integer result back.
+        Does not handle complex expressions, advantage, or send messages.
+        """
+        match = DICE_NOTATION_REGEX.fullmatch(dice_notation.strip())
+        if not match:
+            raise ValueError(f"Invalid simple dice notation provided: '{dice_notation}'")
+        
+        roll_sum, _ = await self._roll_and_parse_notation(match)
+        return roll_sum
+
     async def roll(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all dice rolling requests."""
         try:
@@ -280,6 +320,15 @@ class Math(BaseCog):
             adv = bool(re.search(r'\b(advantage|adv)\b', processed_query))
             dis = bool(re.search(r'\b(disadvantage|dis)\b', processed_query))
             
+            # Extract SP
+            sp = 50 # Default to 50%
+            sp_match = re.search(r'\b(at)\s+(\d+)\b', processed_query)
+            if sp_match:
+                sp = int(sp_match.group(2))
+                if not (0 <= sp <= 100):
+                    raise ValueError("SP must be between 0 and 100.")
+                processed_query = processed_query.replace(sp_match.group(0), '', 1)
+
             processed_query = re.sub(r'\broll\b|\ba\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
 
             if adv and dis:
@@ -289,10 +338,17 @@ class Math(BaseCog):
             # --- 2. Pre-process Parentheses ---
             processed_query = await self._preprocess_parentheses(processed_query)
 
-            # --- 3. Resolve All Dice Rolls ---
+            # --- 3. Resolve All Rolls (Coins then Dice) ---
             roll_descriptions = []
             final_query = processed_query
             
+            # Resolve coin flips first
+            while match := COIN_FLIP_REGEX.search(final_query):
+                roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
+                roll_descriptions.append(description)
+                final_query = final_query.replace(match.group(0), str(roll_sum), 1)
+
+            # Then resolve dice rolls
             while match := DICE_NOTATION_REGEX.search(final_query):
                 roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
                 roll_descriptions.append(description)
@@ -301,12 +357,17 @@ class Math(BaseCog):
             # --- 4. Final Calculation ---
             if not final_query.strip():
                 if len(roll_descriptions) == 1:
-                    match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `', roll_descriptions[0])
+                    match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `|: `(.*?)`', roll_descriptions[0])
                     result_display = "N/A"
                     if match:
                         result_str = next((g for g in match.groups() if g is not None), "N/A")
-                        result_display = result_str.split(' ')[0]
-                    
+                        # For dice, it's a list. For coins, it's a sum.
+                        try:
+                            result_display = str(sum(map(int, result_str.split(','))))
+                        except (ValueError, TypeError):
+                             # This will handle the coin flip case where the result is already a sum
+                            result_display = result_str.split(' ')[0]
+
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
                     if len(response) > 3500:
                         await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
