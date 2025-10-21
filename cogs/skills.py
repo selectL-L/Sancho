@@ -255,17 +255,10 @@ class Skills(BaseCog):
         
         self.logger.info(f"Executing skill '{found_skill['name']}' for {ctx.author.id}. Original query: '{query}', constructed roll: '{final_roll_query}'")
 
-        # Use the Math cog's roll method
-        await math_cog.roll(ctx, query=final_roll_query)
+        # Use the Math cog's roll method, passing skill info for custom formatting
+        await math_cog.roll(ctx, query=final_roll_query, skill_info=found_skill)
 
-        # 5. Add interactive message if replying to another user.
-        if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
-            target_user = ctx.message.reference.resolved.author
-            if target_user != ctx.author and not target_user.bot:
-                if found_skill['skill_type'] == 'attack':
-                    await ctx.send(f"{ctx.author.mention} attacked {target_user.mention} with **{found_skill['name']}**!")
-                elif found_skill['skill_type'] == 'defense':
-                    await ctx.send(f"{ctx.author.mention} defended against {target_user.mention} using **{found_skill['name']}**!")
+        # The response formatting is now handled entirely within the Math cog.
 
     async def list_skills_nlp(self, ctx: commands.Context, *, query: str):
         """NLP handler for listing a user's skills."""
