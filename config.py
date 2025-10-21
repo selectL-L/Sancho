@@ -27,9 +27,10 @@ def discover_cogs(cogs_path: str) -> list[str]:
 
 # --- Core Paths ---
 APP_PATH = get_application_path()
+ASSETS_PATH = os.path.join(APP_PATH, 'assets')
 ENV_PATH = os.path.join(APP_PATH, 'info.env')
 LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
-DB_PATH = os.path.join(APP_PATH, 'sanchobase.db')
+DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # --- Bot Configuration ---
@@ -104,4 +105,6 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     # --- Fun Commands ---
     # 8-Ball
     ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
+    # BOD
+    ((r'\bbod\b',), 'Fun', 'bod'),
 ]

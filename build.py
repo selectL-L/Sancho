@@ -89,7 +89,7 @@ def main():
 
     try:
         subprocess.run(command, check=True, text=True, capture_output=False) # We don't capture it because we want to see the output in real time (in case of errors)
-        print("\n --- Build completed successfully! ---") # Maybe a little too cheerful, but it's a good sign I guess.
+        print("\n --- Build completed successfully! ---")
         print(f"You can find the built executable in the '{os.path.join(project_root, 'dist')}'.")
     except subprocess.CalledProcessError as e:
         print("\n --- Build failed! ---")
