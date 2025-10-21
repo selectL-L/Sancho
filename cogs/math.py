@@ -311,7 +311,7 @@ class Math(BaseCog):
         roll_sum, _ = await self._roll_and_parse_notation(match)
         return roll_sum
 
-    async def roll(self, ctx: commands.Context, *, query: str) -> None:
+    async def roll(self, ctx: commands.Context, *, query: str, skill_info: Optional[dict] = None) -> None:
         """The NLP handler for all dice rolling requests."""
         try:
             # --- 1. Sanitize and Detect Keywords ---
@@ -380,8 +380,33 @@ class Math(BaseCog):
             
             result = safe_eval_math(final_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
+
+            # --- 5. Format Response ---
+            response_parts = []
+            # If a skill was used, format the header accordingly.
+            if skill_info:
+                display_formula = query.replace('(', '').replace(')', '').strip()
+                
+                # Case 1: Replying to another user (targeted skill)
+                if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
+                    target_user = ctx.message.reference.resolved.author
+                    if target_user != ctx.author and not target_user.bot:
+                        if skill_info['skill_type'] == 'attack':
+                            header = f"{ctx.author.mention} attacked {target_user.mention} with **{skill_info['name'].title()}**"
+                        else: # defense
+                            header = f"{ctx.author.mention} defended against {target_user.mention} with **{skill_info['name'].title()}**"
+                        response_parts.append(header)
+                        response_parts.append(f"`{display_formula}`")
+                
+                # Case 2: Skill used without a target
+                else:
+                    response_parts.append(f"**{skill_info['name'].title()}**")
+                    response_parts.append(f"`{display_formula}`")
+
+            response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
+            response_parts.extend(roll_descriptions)
             
-            response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
+            response = "\n".join(response_parts)
             if len(response) > 3500:
                 await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
                 return
