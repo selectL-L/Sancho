@@ -90,10 +90,13 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
 
     # Setting reminders
-    ((r'\bremind\b', r'\breminder\b', r'\bremember\b'), 'Reminders', 'remind'),
+    ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s.*reminder'), 'Reminders', 'remind'),
 
     # Checking reminders (catches "check my reminders", "show reminders", etc.)
-    ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders'), 'Reminders', 'check_reminders_nlp'),
+    ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
+
+    # Setting user timezone
+    ((r'\b(set|change)\s.*timezone\b', r'\b(set|change)\s.*tz\b', r'\btz\b'), 'Reminders', 'set_timezone_nlp'),
 
     # --- Image Commands ---
     # Resize image
