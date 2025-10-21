@@ -86,7 +86,7 @@ class Help(BaseCog):
         if command.aliases:
             embed.add_field(name="Aliases", value=", ".join(f"`{alias}`" for alias in command.aliases), inline=False)
         
-        usage = f"{example_prefix.strip()}{command.name}"
+        usage = f"{example_prefix.strip()} {command.name}"
         if command.signature:
             usage += f" {command.signature}"
         embed.add_field(name="Usage", value=f"`{usage}`", inline=False)
