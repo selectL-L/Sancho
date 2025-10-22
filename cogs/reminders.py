@@ -95,17 +95,21 @@ class Reminders(BaseCog):
                 self.logger.info(f"Sent reminder {reminder['id']} to user {user.id}.")
 
         except asyncio.CancelledError:
-            self.logger.info(f"Reminder task {reminder['id']} was cancelled.")
-            # When cancelled, we must ensure it's removed from the database so it doesn't get rescheduled on restart.
-            await self.db.delete_reminders([reminder['id']])
+            self.logger.info(f"Reminder task {reminder['id']} was cancelled during cog unload.")
+            # No need to delete from DB here, as cog_unload is meant to be temporary.
+            # The reminder will be rescheduled on next cog_load.
         except (discord.NotFound, discord.Forbidden) as e:
             self.logger.warning(f"Failed to send reminder {reminder['id']} (user/channel not found or permissions error). Error: {e}")
+            # If we can't find the user/channel, we should probably delete the reminder.
+            await self.db.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Unexpected error in reminder task {reminder['id']}: {e}", exc_info=True)
         finally:
             # This block now only triggers the next step.
             self.scheduled_tasks.pop(reminder['id'], None)
-            self.bot.loop.create_task(self._reschedule_or_cleanup(reminder))
+            # IMPORTANT: Only try to reschedule if the bot is not shutting down.
+            if not self.bot.is_closed():
+                self.bot.loop.create_task(self._reschedule_or_cleanup(reminder))
 
     async def _reschedule_or_cleanup(self, reminder: dict[str, Any]) -> None:
         """Handles the logic for rescheduling a recurring reminder or deleting a one-off."""
@@ -154,23 +158,76 @@ class Reminders(BaseCog):
         tz = await self.db.get_user_timezone(user_id)
         return tz or "UTC"
 
+    def _format_recurrence_rule(self, rule_str: str) -> str:
+        """Formats an rrule string into a human-readable format."""
+        if not rule_str:
+            return ""
+
+        try:
+            rule = rrulestr(rule_str)
+            # The rrule._freq attribute is an integer constant.
+            # We can map it back to a human-readable string.
+            freq_map = {YEARLY: "year", MONTHLY: "month", WEEKLY: "week", DAILY: "day", HOURLY: "hour", MINUTELY: "minute"}
+            freq = freq_map.get(rule._freq, "time")
+            
+            interval = rule._interval
+            
+            # Handle simple cases
+            if interval == 1:
+                period = f"every {freq}"
+            else:
+                period = f"every {interval} {freq}s"
+
+            # Handle specific days of the week
+            if rule._byweekday:
+                day_map = {0: 'Monday', 1: 'Tuesday', 2: 'Wednesday', 3: 'Thursday', 4: 'Friday', 5: 'Saturday', 6: 'Sunday'}
+                days = [day_map[d] for d in rule._byweekday]
+                if sorted(days) == ['Friday', 'Monday', 'Thursday', 'Tuesday', 'Wednesday']:
+                    return "Repeats every weekday"
+                else:
+                    return f"Repeats every {', '.join(days)}"
+
+            if freq == "day" and interval == 1: return "Repeats every day"
+            
+            return f"Repeats {period}"
+
+        except Exception as e:
+            self.logger.error(f"Failed to parse rrule string '{rule_str}': {e}")
+            return f"Repeats: {rule_str}" # Fallback to raw rule
+
     async def _parse_reminder(self, query: str) -> tuple[str | None, str, str | None] | None:
         """
-        Parses a query to separate the reminder message from the time string.
-        It looks for common time-related prepositions to make a split.
+        Parses a query to separate the reminder message from the time string using a multi-stage approach.
         Returns a tuple of (message, time_string, recurrence_rule).
         """
-        # Keywords that typically precede a time description. Ordered by likely precedence.
-        time_keywords = [' on ', ' at ', ' in ', ' for ', ' next ', ' tomorrow', ' tonight']
+        # --- Stage 1: Initial Sanitization ---
+        # The NLP command registry has already matched one of the trigger words.
+        # This first pass removes the trigger phrase from the beginning of the query.
+        # These patterns are based on the NLP_COMMANDS in config.py
+        trigger_patterns = [
+            r'\bremind\b',
+            r'\breminder\b',
+            r'\bremember\b',
+            r'set\s+a\s+reminder',
+            r'set\s.*reminder'
+        ]
+        # Combine patterns into a single regex to find the first match at the start of the string.
+        # This ensures we only strip the part that triggered the command.
+        combined_pattern = r'^\s*(' + '|'.join(f'({p})' for p in trigger_patterns) + r')\s*'
         
-        # Sanitize the initial trigger words like "remind me to"
-        sanitized_query = re.sub(r'^(remind me to|remind me|remember to|remember)\s*', '', query, flags=re.IGNORECASE).strip()
+        sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
+        
+        # Further cleanup: if "me" or "to" are at the start, remove them.
+        sanitized_query = re.sub(r'^(me|to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
+        sanitized_query = re.sub(r'^(to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
 
-        # --- Strategy 1: Detect and parse recurrence ---
+        if not sanitized_query:
+            return None
+
+        # --- Stage 2: Detect and Extract Recurrence ---
         recurrence_rule = None
-        # More robust regex to capture "every day", "every 2 weeks", "every weekday", etc.
         recurrence_match = re.search(
-            r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday))\b',
+            r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
             sanitized_query,
             re.IGNORECASE
         )
@@ -178,8 +235,15 @@ class Reminders(BaseCog):
             groups = recurrence_match.groupdict()
             interval = int(groups.get('interval') or 1)
             
-            if groups.get('weekday'):
-                recurrence_rule = f"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+            if groups.get('weekday') == 'weekday':
+                recurrence_rule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+            elif groups.get('day_name'):
+                day_map = {'sunday': 'SU', 'monday': 'MO', 'tuesday': 'TU', 'wednesday': 'WE', 'thursday': 'TH', 'friday': 'FR', 'saturday': 'SA'}
+                day = day_map[groups['day_name'].lower()]
+                recurrence_rule = f"FREQ=WEEKLY;BYDAY={day};INTERVAL={interval}"
+            elif groups.get('month_day'):
+                day_of_month = int(groups['month_day'])
+                recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
             else:
                 freq_map = {
                     'second': 'SECONDLY', 'minute': 'MINUTELY', 'hour': 'HOURLY',
@@ -195,23 +259,42 @@ class Reminders(BaseCog):
                 # Remove the recurrence part from the query to not confuse dateparser for the first occurrence
                 sanitized_query = sanitized_query.replace(recurrence_match.group(0), '', 1).strip()
 
-        # --- Strategy 2: Find a time keyword to split the message and time string ---
+        # --- Stage 3: Intelligent Split with Keywords ---
+        time_keywords = [' on ', ' at ', ' in ', ' for ', ' next ', ' tomorrow', ' tonight']
         for keyword in time_keywords:
-            message_part, sep, time_part = sanitized_query.rpartition(keyword)
-            if not sep: continue
+            if keyword in sanitized_query:
+                message_part, sep, time_part = sanitized_query.rpartition(keyword)
+                time_string = sep.strip() + ' ' + time_part.strip()
+                
+                # Validate that the extracted part is a parsable date
+                if await asyncio.to_thread(dateparser.parse, time_string, settings={'PREFER_DATES_FROM': 'future'}):
+                    self.logger.info(f"Parsed via keyword split. Message: '{message_part}', Time: '{time_string}', Recurrence: {recurrence_rule}")
+                    return (message_part.strip(), time_string, recurrence_rule)
 
-            time_string = sep.strip() + ' ' + time_part.strip()
-            if await asyncio.to_thread(dateparser.parse, time_string, settings={'PREFER_DATES_FROM': 'future'}):
-                self.logger.info(f"Parsed reminder. Message: '{message_part}', Time: '{time_string}', Recurrence: {recurrence_rule}")
-                return (message_part.strip(), time_string, recurrence_rule)
+        # --- Stage 4: Time at the Front ---
+        # Check if the beginning of the query is a time
+        words = sanitized_query.split()
+        for i in range(len(words), 0, -1):
+            potential_time = ' '.join(words[:i])
+            if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
+                message_part = ' '.join(words[i:])
+                self.logger.info(f"Parsed with time at front. Message: '{message_part}', Time: '{potential_time}', Recurrence: {recurrence_rule}")
+                return (message_part.strip() or None, potential_time, recurrence_rule)
 
-        # --- Strategy 3: If no keywords, assume the whole string is the time ---
-        if await asyncio.to_thread(dateparser.parse, sanitized_query, settings={'PREFER_DATES_FROM': 'future'}):
-             self.logger.warning("Query was parsed entirely as a time string. No reminder message found.")
-             return (None, sanitized_query, recurrence_rule)
+        # --- Stage 5: Time at the Back ---
+        # Check if the end of the query is a time
+        for i in range(len(words)):
+            potential_time = ' '.join(words[i:])
+            if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
+                message_part = ' '.join(words[:i])
+                self.logger.info(f"Parsed with time at back. Message: '{message_part}', Time: '{potential_time}', Recurrence: {recurrence_rule}")
+                return (message_part.strip() or None, potential_time, recurrence_rule)
 
-        self.logger.warning(f"Failed to parse reminder query: '{query}'")
-        return None
+        # --- Stage 6: Fallback ---
+        # If no time is found anywhere, assume the whole query is the message.
+        # This will trigger the interactive flow later.
+        self.logger.warning(f"Could not find a time string in '{sanitized_query}'. Assuming it's all a message.")
+        return (sanitized_query, "", recurrence_rule)
 
     async def _interactive_reminder_flow(self, ctx: commands.Context, initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
         """Guides the user through creating a reminder interactively."""
@@ -253,14 +336,22 @@ class Reminders(BaseCog):
                 # Check for recurrence in the time string if not already provided
                 if not recurrence_rule:
                     recurrence_match = re.search(
-                        r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday))\b',
+                        r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
                         time_str, re.IGNORECASE
                     )
                     if recurrence_match:
                         groups = recurrence_match.groupdict()
                         interval = int(groups.get('interval') or 1)
-                        if groups.get('weekday'):
+                        
+                        if groups.get('weekday') == 'weekday':
                             recurrence_rule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+                        elif groups.get('day_name'):
+                            day_map = {'sunday': 'SU', 'monday': 'MO', 'tuesday': 'TU', 'wednesday': 'WE', 'thursday': 'TH', 'friday': 'FR', 'saturday': 'SA'}
+                            day = day_map[groups['day_name'].lower()]
+                            recurrence_rule = f"FREQ=WEEKLY;BYDAY={day};INTERVAL={interval}"
+                        elif groups.get('month_day'):
+                            day_of_month = int(groups['month_day'])
+                            recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
                         else:
                             freq_map = {
                                 'second': 'SECONDLY', 'minute': 'MINUTELY', 'hour': 'HOURLY',
@@ -270,9 +361,10 @@ class Reminders(BaseCog):
                             freq = freq_map.get(freq_str)
                             if freq:
                                 recurrence_rule = f"FREQ={freq};INTERVAL={interval}"
-
+                        
                         if recurrence_rule:
-                            # Clean the time string for dateparser
+                            self.logger.info(f"Detected recurrence rule in interactive flow: {recurrence_rule}")
+                            # Strip the recurrence part to help dateparser
                             time_str = time_str.replace(recurrence_match.group(0), '', 1).strip()
 
                 dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
@@ -331,18 +423,17 @@ class Reminders(BaseCog):
     async def remind(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all reminder requests."""
         try:
-            sanitized_query = re.sub(r'^(remind me to|remind me|remember to|remember|set reminder)\s*', '', query, flags=re.IGNORECASE).strip()
-            if not sanitized_query:
+            if not query.strip():
                 await self._interactive_reminder_flow(ctx)
                 return
 
             parsed = await self._parse_reminder(query)
             
+            # If parsing fails to find a message or a time, start the interactive flow from scratch.
             if not parsed or not parsed[0] or not parsed[1]:
-                self.logger.info(f"Could not fully parse reminder '{query}'. Starting interactive flow.")
-                initial_msg = sanitized_query if not parsed or not parsed[1] else parsed[0]
-                initial_recurrence = parsed[2] if parsed else None
-                await self._interactive_reminder_flow(ctx, initial_message=initial_msg or "", initial_recurrence=initial_recurrence)
+                self.logger.info(f"Failed to understand '{query}'. Starting interactive flow.")
+                await ctx.send("I'm sorry, I couldn't understand the reminder. Let's set it up step-by-step.")
+                await self._interactive_reminder_flow(ctx) # No context retained
                 return
 
             reminder_message, time_str, recurrence_rule = parsed
@@ -355,14 +446,17 @@ class Reminders(BaseCog):
             }
             dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
             
+            # This check is a safeguard, but _parse_reminder should have validated the time string.
             if not dt_object:
-                self.logger.error(f"Dateparser failed on a string that was previously validated: '{time_str}'. Starting interactive flow.")
-                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_recurrence=recurrence_rule)
+                self.logger.error(f"Dateparser failed on a validated string: '{time_str}'. Starting interactive flow.")
+                await ctx.send("I'm sorry, I got confused about the time. Let's set it up step-by-step.")
+                await self._interactive_reminder_flow(ctx) # No context retained
                 return
 
             timestamp = int(dt_object.timestamp())
             if timestamp <= int(time.time()):
                 await ctx.send("You can't set a reminder in the past! Please try again.")
+                # We retain context here because the user's intent was clear, just the time was wrong.
                 await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_recurrence=recurrence_rule)
                 return
 
@@ -399,7 +493,8 @@ class Reminders(BaseCog):
                     await ctx.send("✅ Reminder saved and scheduled!")
                     self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
                 else:
-                    await ctx.send("Something went wrong, the reminder message was lost. Please try again.")
+                    # This case should ideally not be hit if parsing is correct.
+                    await ctx.send("I seem to have lost the reminder message. Please try again.")
             elif msg.content.lower() == 'edit':
                 await ctx.send("Let's edit the reminder.")
                 await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_time=time_str, initial_recurrence=recurrence_rule)
@@ -433,10 +528,14 @@ class Reminders(BaseCog):
             description_lines = []
             for i, reminder in enumerate(reminders, 1):
                 # Format using Discord's timestamp for dynamic, client-side time display
-                description_lines.append(
+                line = (
                     f"**#{i} (ID: {reminder['id']})** - \"{reminder['message']}\"\n"
                     f"Due: <t:{reminder['reminder_time']}:F>"
                 )
+                if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
+                    rule_text = self._format_recurrence_rule(reminder['recurrence_rule'])
+                    line += f"\n*{rule_text}*"
+                description_lines.append(line)
             
             embed.description = "\n\n".join(description_lines)
             await ctx.send(embed=embed)

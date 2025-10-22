@@ -90,7 +90,7 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
     ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
     # Setting reminders
-    ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s.*reminder'), 'Reminders', 'remind'),
+    ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s+a\s+reminder', r'set\s.*reminder'), 'Reminders', 'remind'),
     # Checking reminders (catches "check my reminders", "show reminders", etc.)
     ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
     # Setting user timezone
