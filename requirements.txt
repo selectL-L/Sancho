@@ -10,6 +10,9 @@ aiosqlite
 # For parsing natural language dates and times in the Reminders cog.
 dateparser
 
+# For handling recurrence rules in repeating reminders.
+python-dateutil
+
 # Provides timezone information, used by the Reminders cog.
 pytz
 

@@ -67,12 +67,12 @@ LOG_BACKUP_COUNT = 5
 # To add a new command, add a tuple to this list.
 # Format: ( (keywords), 'CogClassName', 'method_name' )
 NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
+
+    # --- Math Commands ---
     # Limbus Company coin flip
     ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
-
     # Dice rolling (should be checked before basic calculation)
     ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
-
     # Basic calculation
     ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     
@@ -85,16 +85,14 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     # This is the general "use skill" command, and should be last.
     ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
 
+    # --- Reminder Commands ---
     # Deleting reminders (catches "delete/remove reminder 1", etc.)
     # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
     ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
-
     # Setting reminders
     ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s.*reminder'), 'Reminders', 'remind'),
-
     # Checking reminders (catches "check my reminders", "show reminders", etc.)
     ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
-
     # Setting user timezone
     ((r'\b(set|change)\s.*timezone\b', r'\b(set|change)\s.*tz\b', r'\btz\b'), 'Reminders', 'set_timezone_nlp'),
 
