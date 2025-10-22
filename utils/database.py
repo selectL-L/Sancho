@@ -1,6 +1,7 @@
 # NOTE: All list-like data stored as strings in this database,
 # such as skill aliases, should be separated by a pipe character (|).
 
+import time
 import aiosqlite
 import logging
 from typing import Optional, List, Dict, Any
@@ -32,8 +33,14 @@ class DatabaseManager:
             # Reminders Table
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS reminders (
-                    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
-                    reminder_time INTEGER NOT NULL, message TEXT NOT NULL, created_at INTEGER NOT NULL
+                    id INTEGER PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    reminder_time INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    is_recurring INTEGER NOT NULL DEFAULT 0,
+                    recurrence_rule TEXT
                 )''')
             # User Timezones Table
             await db.execute('''
@@ -160,12 +167,29 @@ class DatabaseManager:
             await db.commit()
             return cursor.rowcount
 
-    async def add_reminder(self, user_id: int, channel_id: int, reminder_time: int, message: str, created_at: int) -> None:
-        """Adds a reminder to the database."""
+    async def add_reminder(
+        self, user_id: int, channel_id: int, reminder_time: int, message: str,
+        created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None
+    ) -> int:
+        """Adds a reminder to the database and returns the new reminder's ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO reminders
+                (user_id, channel_id, reminder_time, message, created_at, is_recurring, recurrence_rule)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, channel_id, reminder_time, message, created_at, 1 if is_recurring else 0, recurrence_rule)
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def update_reminder_time(self, reminder_id: int, new_time: int) -> None:
+        """Updates the reminder_time for a specific reminder."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO reminders (user_id, channel_id, reminder_time, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                (user_id, channel_id, reminder_time, message, created_at)
+                "UPDATE reminders SET reminder_time = ? WHERE id = ?",
+                (new_time, reminder_id)
             )
             await db.commit()
 
@@ -177,8 +201,18 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_all_pending_reminders(self) -> List[Dict[str, Any]]:
+        """Fetches all reminders that are not yet due."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM reminders")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
     async def delete_reminders(self, reminder_ids: List[int]) -> None:
         """Deletes reminders by their IDs."""
+        if not reminder_ids:
+            return
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(f"DELETE FROM reminders WHERE id IN ({','.join('?' for _ in reminder_ids)})", reminder_ids)
             await db.commit()
@@ -188,11 +222,19 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT id, reminder_time, message FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
+                "SELECT * FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
                 (user_id,)
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def get_reminder_by_id(self, reminder_id: int) -> Optional[Dict[str, Any]]:
+        """Fetches a single reminder by its ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
 
     async def get_user_timezone(self, user_id: int) -> Optional[str]:
         """Fetches a user's timezone."""
