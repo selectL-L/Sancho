@@ -34,6 +34,27 @@ DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # --- Bot Configuration ---
+
+def check_and_create_env_file():
+    """
+    Checks for the existence of the info.env file.
+    If it doesn't exist, it creates a template file and exits.
+    """
+    if not os.path.exists(ENV_PATH):
+        logging.warning(f"'{os.path.basename(ENV_PATH)}' not found. Creating a new one.")
+        with open(ENV_PATH, 'w') as f:
+            f.write("DISCORD_TOKEN=\n")
+            f.write("OWNER_ID=\n")
+        # This message is critical for the user to see on first run.
+        print(f"'{os.path.basename(ENV_PATH)}' was not found.")
+        print(f"A new one has been created at: {ENV_PATH}")
+        print("\nPlease open this file and add your bot's DISCORD_TOKEN.")
+        print("The OWNER_ID is optional but recommended.")
+        sys.exit("Exiting: Bot token not configured.")
+
+# Check/create the .env file before trying to load it.
+check_and_create_env_file()
+
 load_dotenv(dotenv_path=ENV_PATH)
 
 TOKEN = os.getenv('DISCORD_TOKEN')
