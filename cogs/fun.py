@@ -1,3 +1,9 @@
+"""
+cogs/fun.py
+
+This cog contains miscellaneous "fun" commands that don't fit into other categories.
+It includes commands like a magic 8-ball and other simple, interactive features.
+"""
 import discord
 from discord.ext import commands
 import random
@@ -8,14 +14,24 @@ from utils.bot_class import SanchoBot
 import config
 
 class Fun(BaseCog):
-    """A cog for fun, miscellaneous commands."""
+    """
+    A cog for fun, miscellaneous commands.
+    """
 
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
+        # Load the 8-ball responses from the assets file upon initialization.
         self.responses = self._load_8ball_responses()
 
     def _load_8ball_responses(self) -> list[str]:
-        """Loads 8-ball responses from the 8ball.txt file."""
+        """
+        Loads the magic 8-ball responses from the `8ball.txt` file located
+        in the assets directory.
+
+        Returns:
+            list[str]: A list of response strings. Returns a default list
+                       if the file is not found or is empty.
+        """
         responses_path = os.path.join(config.ASSETS_PATH, '8ball.txt')
         try:
             with open(responses_path, 'r', encoding='utf-8') as f:
@@ -30,8 +46,15 @@ class Fun(BaseCog):
 
     async def bod(self, ctx: commands.Context, query: str):
         """
-        Rolls a 1d4. On 1-3, sends a common image. On 4, sends a rare image.
+        A special command that rolls a 1d4. On a result of 1-3, it sends a
+        common "fail" image. On a 4, it sends a rare "complete" image.
+        This command depends on the `Math` cog to perform the dice roll.
+
+        Args:
+            ctx (commands.Context): The context of the command.
+            query (str): The user's query, which is not used in this command.
         """
+        # Get the Math cog to perform the dice roll.
         math_cog = self.bot.get_cog('Math')
         if not math_cog:
             await ctx.reply("I can't find my dice right now. Please try again later.")
@@ -39,8 +62,10 @@ class Fun(BaseCog):
             return
 
         try:
+            # Use the Math cog's internal method to get a clean roll result.
             roll_result = await math_cog.get_roll_result("1d4")
             
+            # Send a different image based on the roll result.
             if roll_result <= 3:
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_fail.jpg')
                 await ctx.reply(f"You rolled a {roll_result}", file=discord.File(file_path))
@@ -57,11 +82,18 @@ class Fun(BaseCog):
 
 
     async def eight_ball(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for the 8-ball command."""
+        """
+        NLP handler for the 8-ball command. It picks a random response from the
+        pre-loaded list and sends it to the channel.
+
+        Args:
+            ctx (commands.Context): The context of the command.
+            query (str): The user's question for the 8-ball.
+        """
         response = random.choice(self.responses)
         await ctx.reply(response)
         self.logger.info(f"8ball command used by {ctx.author} with query '{query}'. Response: '{response}'")
 
 async def setup(bot: SanchoBot) -> None:
-    """Standard setup function for the cog."""
+    """Standard setup function to add the cog to the bot."""
     await bot.add_cog(Fun(bot))

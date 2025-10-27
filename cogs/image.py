@@ -1,10 +1,22 @@
+"""
+cogs/image.py
+
+This cog contains commands for basic image manipulation, such as resizing
+and converting formats. It uses the Pillow (PIL) library for processing.
+
+A key feature of this cog is the use of `asyncio.to_thread` to run the
+synchronous, blocking image processing functions in a separate thread. This
+prevents the bot's main event loop from being blocked, ensuring the bot
+remains responsive while handling potentially time-consuming image operations.
+(And trust me, this is a requirement)
+"""
 import discord
 from discord.ext import commands
 import io
 import re
 import asyncio
 from PIL import Image as PILImage
-from typing import Optional, Tuple
+from typing import Optional
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -22,7 +34,7 @@ class Image(BaseCog):
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 return attachment
 
-        # 2. If it's a reply, check the referenced message's attachments
+        # 2. If it's a reply, check the referenced message's attachments.
         if message.reference and isinstance(message.reference.resolved, discord.Message):
             for attachment in message.reference.resolved.attachments:
                 if attachment.content_type and attachment.content_type.startswith('image/'):
@@ -31,13 +43,18 @@ class Image(BaseCog):
         return None
 
     async def resize(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for resizing an image."""
+        """
+        NLP handler for resizing an image. It parses dimensions (e.g., "500x500")
+        from the query and resizes the attached or replied-to image.
+        """
+        # Parse dimensions like "500x500" or "500 x 500" from the query.
         match = re.search(r'(\d+)\s*x\s*(\d+)', query)
         if not match:
             await ctx.send("I couldn't find the dimensions. Please specify the size like `500x500`.")
             return
 
         new_size = (int(match.group(1)), int(match.group(2)))
+        # Enforce size limits to prevent abuse.
         if not (0 < new_size[0] <= 4000 and 0 < new_size[1] <= 4000):
             await ctx.send("Invalid dimensions. Both width and height must be between 1 and 4000 pixels.")
             return
@@ -48,22 +65,25 @@ class Image(BaseCog):
             return
 
         def _processing_thread(image_bytes: bytes, size: tuple[int, int]) -> io.BytesIO:
-            """Contains the synchronous, blocking image processing code."""
+            """
+            Contains the synchronous, blocking image processing code. This function
+            is intended to be run in a separate thread.
+            """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
                 img = img.resize(size)
                 
                 buffer = io.BytesIO()
-                # Preserve original format, but save as PNG if format is unknown
+                # Preserve the original format if possible, otherwise default to PNG.
                 original_format = img.format or 'PNG'
                 img.save(buffer, format=original_format)
                 buffer.seek(0)
                 return buffer
 
         try:
-            async with ctx.typing():
+            async with ctx.typing(): # Show a "typing..." indicator.
                 image_bytes = await attachment.read()
                 
-                # Run the blocking code in a separate thread
+                # Run the blocking image processing in a separate thread.
                 buffer = await asyncio.to_thread(_processing_thread, image_bytes, new_size)
                 
                 filename = f"resized_{attachment.filename}"
@@ -75,7 +95,10 @@ class Image(BaseCog):
             await ctx.send("Sorry, I encountered an error trying to resize that image.")
 
     async def convert(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for converting an image's format."""
+        """
+        NLP handler for converting an image's format. It parses the target format
+        (e.g., "to png") from the query and converts the image.
+        """
         supported_formats = {"png", "jpeg", "webp", "gif", "bmp"}
         match = re.search(r'\bto\s+(' + '|'.join(supported_formats) + r')\b', query, re.IGNORECASE)
         if not match:
@@ -90,9 +113,12 @@ class Image(BaseCog):
             return
 
         def _processing_thread(image_bytes: bytes, format_str: str) -> io.BytesIO:
-            """Contains the synchronous, blocking image conversion code."""
+            """
+            Contains the synchronous, blocking image conversion code. This function
+            is intended to be run in a separate thread.
+            """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
-                # Handle RGBA for formats that don't support it (like JPEG)
+                # Handle transparency for formats that don't support it (like JPEG).
                 if format_str == 'JPEG' and img.mode in ('RGBA', 'P'):
                     img = img.convert('RGB')
 
@@ -105,10 +131,10 @@ class Image(BaseCog):
             async with ctx.typing():
                 image_bytes = await attachment.read()
 
-                # Run the blocking code in a separate thread
+                # Run the blocking image processing in a separate thread.
                 buffer = await asyncio.to_thread(_processing_thread, image_bytes, target_format)
                 
-                # Create a new filename with the correct extension
+                # Create a new filename with the correct extension.
                 base_filename = attachment.filename.rsplit('.', 1)[0]
                 new_filename = f"{base_filename}.{target_format.lower()}"
 
