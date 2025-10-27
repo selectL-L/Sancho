@@ -17,9 +17,21 @@ from utils.database import DatabaseManager
 # Set up logging BEFORE anything else
 setup_logging()
 
+# --- Configuration Validation ---
 if not config.TOKEN:
-    logging.critical(f"DISCORD_TOKEN not found in {config.ENV_PATH}. The bot cannot start.")
-    sys.exit("Critical error: DISCORD_TOKEN not found.")
+    logging.critical(
+        f"DISCORD_TOKEN is missing from '{os.path.basename(config.ENV_PATH)}'. "
+        "This is required for the bot to run."
+    )
+    print(f"Error: DISCORD_TOKEN not found in {config.ENV_PATH}.")
+    print("Please add your bot's token to the file.")
+    sys.exit("Critical error: DISCORD_TOKEN not configured.")
+
+if not config.OWNER_ID:
+    logging.warning(
+        f"OWNER_ID not found or invalid in '{os.path.basename(config.ENV_PATH)}'. "
+        "The bot will run, but owner-specific commands will not be available."
+    )
 
 # --- 2. Bot Initialization ---
 
