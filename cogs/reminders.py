@@ -1,3 +1,25 @@
+"""
+cogs/reminders.py
+
+This cog is responsible for all reminder-related functionality. It allows users
+to set, view, and delete reminders using natural language.
+
+Key Features:
+- Natural Language Parsing: Uses `dateparser` and custom regex to understand
+  time expressions like "in 5 minutes", "tomorrow at 3pm", or "on Friday".
+- Recurring Reminders: Supports setting reminders that repeat, such as "every day"
+  or "every Tuesday", by generating and storing `rrule` strings.
+- Timezone Awareness: Allows users to set their timezone to ensure reminders
+  are delivered at the correct local time.
+- Persistent Storage: Saves all reminders to the database, ensuring they survive
+  bot restarts.
+- Dynamic Scheduling: On cog load, it fetches all pending reminders from the
+  database and schedules them as `asyncio.Task` instances. This ensures the
+  bot can be updated without losing reminders.
+- Interactive Flow: If the initial NLP parsing fails, it guides the user
+  through a step-by-step process to create a reminder.
+(Damn I'm eloquent)
+"""
 import discord
 from discord.ext import commands, tasks
 import time
@@ -19,14 +41,19 @@ class Reminders(BaseCog):
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
         self.db: DatabaseManager = bot.db_manager # type: ignore
+        # Stores active reminder tasks, mapping reminder ID to the asyncio.Task instance.
+        # This allows us to cancel reminders if they are deleted or the cog is reloaded.
         self.scheduled_tasks: dict[int, asyncio.Task[None]] = {}
 
     async def cog_load(self) -> None:
+        """Schedules all pending reminders from the database when the cog is loaded."""
         self.logger.info("Scheduling existing reminders from database...")
+        # Use create_task to run this in the background without blocking cog loading.
         self.bot.loop.create_task(self._schedule_existing_reminders())
 
     async def cog_unload(self) -> None:
-        # Cancel all running reminder tasks when the cog is unloaded
+        """Cancels all running reminder tasks when the cog is unloaded."""
+        # This prevents reminders from firing while the cog is inactive or being reloaded.
         for task in self.scheduled_tasks.values():
             task.cancel()
         self.scheduled_tasks.clear()
@@ -48,12 +75,15 @@ class Reminders(BaseCog):
         reminder_id = reminder['id']
         
         # If a task for this reminder already exists, cancel it before creating a new one.
+        # This is important for rescheduling recurring reminders or handling reloads.
         if reminder_id in self.scheduled_tasks:
             self.scheduled_tasks[reminder_id].cancel()
 
+        # Calculate the delay until the reminder is due.
         delay = reminder['reminder_time'] - time.time()
         
         if delay > 0:
+            # Create a new asyncio task that will fire after the calculated delay.
             task = self.bot.loop.create_task(self._send_reminder_after_delay(delay, reminder))
             self.scheduled_tasks[reminder_id] = task
             self.logger.info(f"Scheduled reminder {reminder_id} to be sent in {delay:.2f} seconds.")
@@ -79,14 +109,17 @@ class Reminders(BaseCog):
     async def _send_reminder_after_delay(self, delay: float, reminder: dict[str, Any]) -> None:
         """Waits for a specified delay, then sends the reminder and triggers cleanup/rescheduling."""
         try:
+            # Only sleep if the reminder is in the future. Overdue reminders run immediately.
             if delay > 0:
                 await asyncio.sleep(delay)
 
+            # Fetch the user and channel to send the reminder to.
             user = self.bot.get_user(reminder['user_id']) or await self.bot.fetch_user(reminder['user_id'])
             channel = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
 
             if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
                 overdue_message = ""
+                # If the reminder was overdue, add a note indicating how long ago it was due.
                 if delay <= 0:
                     overdue_seconds = time.time() - reminder['reminder_time']
                     overdue_message = f" (This was due {self._format_overdue_time(overdue_seconds)})"
@@ -95,19 +128,22 @@ class Reminders(BaseCog):
                 self.logger.info(f"Sent reminder {reminder['id']} to user {user.id}.")
 
         except asyncio.CancelledError:
+            # This is expected when the cog is unloaded. The reminder is not deleted from the DB
+            # and will be rescheduled on the next cog load.
             self.logger.info(f"Reminder task {reminder['id']} was cancelled during cog unload.")
             # No need to delete from DB here, as cog_unload is meant to be temporary.
             # The reminder will be rescheduled on next cog_load.
         except (discord.NotFound, discord.Forbidden) as e:
             self.logger.warning(f"Failed to send reminder {reminder['id']} (user/channel not found or permissions error). Error: {e}")
-            # If we can't find the user/channel, we should probably delete the reminder.
+            # If we can't find the user/channel, the reminder is unserviceable. Delete it.
             await self.db.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Unexpected error in reminder task {reminder['id']}: {e}", exc_info=True)
         finally:
-            # This block now only triggers the next step.
+            # Clean up the completed/cancelled task from our tracking dictionary.
             self.scheduled_tasks.pop(reminder['id'], None)
             # IMPORTANT: Only try to reschedule if the bot is not shutting down.
+            # This prevents errors during a full bot shutdown sequence.
             if not self.bot.is_closed():
                 self.bot.loop.create_task(self._reschedule_or_cleanup(reminder))
 
@@ -125,31 +161,38 @@ class Reminders(BaseCog):
         if reminder_data.get('is_recurring') and reminder_data.get('recurrence_rule'):
             self.logger.info(f"Reminder {reminder_id} is recurring. Calculating next occurrence.")
             try:
+                # Get user's timezone to correctly calculate the next occurrence.
                 user_tz_str = await self._get_user_timezone(reminder_data['user_id'])
                 user_tz = pytz.timezone(user_tz_str)
                 
+                # Use the original creation time as the start date for the recurrence rule.
                 start_date = datetime.fromtimestamp(reminder_data['created_at'], tz=user_tz)
                 rule = rrulestr(reminder_data['recurrence_rule'], dtstart=start_date)
                 
+                # Find the next occurrence *after* the one that just fired.
                 current_reminder_time_aware = datetime.fromtimestamp(reminder_data['reminder_time'], tz=user_tz)
                 next_occurrence = rule.after(current_reminder_time_aware)
 
                 if next_occurrence:
+                    # Update the database with the new time for the next reminder.
                     next_timestamp = int(next_occurrence.timestamp())
                     await self.db.update_reminder_time(reminder_id, next_timestamp)
                     
+                    # Create a new asyncio task for the next occurrence.
                     next_reminder = reminder_data.copy()
                     next_reminder['reminder_time'] = next_timestamp
                     self._schedule_reminder_task(next_reminder)
                     self.logger.info(f"Rescheduled reminder {reminder_id} for {next_occurrence.isoformat()}.")
                 else:
+                    # If there are no more occurrences, delete the reminder.
                     self.logger.info(f"Recurring reminder {reminder_id} has no more occurrences. Deleting.")
                     await self.db.delete_reminders([reminder_id])
             except Exception as e:
                 self.logger.error(f"Failed to reschedule recurring reminder {reminder_id}: {e}", exc_info=True)
+                # If rescheduling fails, delete the reminder to prevent error loops.
                 await self.db.delete_reminders([reminder_id]) # Delete if rescheduling fails
         else:
-            # If it's not recurring, simply delete it.
+            # If it's not recurring, simply delete it from the database.
             await self.db.delete_reminders([reminder_id])
             self.logger.info(f"Cleaned up non-recurring reminder {reminder_id} from database.")
 
@@ -201,9 +244,8 @@ class Reminders(BaseCog):
         Returns a tuple of (message, time_string, recurrence_rule).
         """
         # --- Stage 1: Initial Sanitization ---
-        # The NLP command registry has already matched one of the trigger words.
-        # This first pass removes the trigger phrase from the beginning of the query.
-        # These patterns are based on the NLP_COMMANDS in config.py
+        # The NLP command registry has already matched one of the trigger words (e.g., "remind", "reminder").
+        # This first pass removes that trigger phrase from the beginning of the query.
         trigger_patterns = [
             r'\bremind\b',
             r'\breminder\b',
@@ -217,7 +259,7 @@ class Reminders(BaseCog):
         
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Further cleanup: if "me" or "to" are at the start, remove them.
+        # Further cleanup: if "me" or "to" are at the start, remove them as they are conversational padding.
         sanitized_query = re.sub(r'^(me|to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
         sanitized_query = re.sub(r'^(to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
 
@@ -225,6 +267,7 @@ class Reminders(BaseCog):
             return None
 
         # --- Stage 2: Detect and Extract Recurrence ---
+        # Look for patterns like "every day", "every 2 weeks", "every monday" to create an RRULE string.
         recurrence_rule = None
         recurrence_match = re.search(
             r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
@@ -256,23 +299,26 @@ class Reminders(BaseCog):
 
             if recurrence_rule:
                 self.logger.info(f"Detected recurrence rule: {recurrence_rule}")
-                # Remove the recurrence part from the query to not confuse dateparser for the first occurrence
+                # Remove the recurrence part from the query to not confuse dateparser for the first occurrence.
                 sanitized_query = sanitized_query.replace(recurrence_match.group(0), '', 1).strip()
 
         # --- Stage 3: Intelligent Split with Keywords ---
+        # Try to split the message and time string based on common keywords like "in", "at", "on".
+        # We use rpartition to split on the *last* occurrence, which is more likely to be the time.
         time_keywords = [' on ', ' at ', ' in ', ' for ', ' next ', ' tomorrow', ' tonight']
         for keyword in time_keywords:
             if keyword in sanitized_query:
                 message_part, sep, time_part = sanitized_query.rpartition(keyword)
                 time_string = sep.strip() + ' ' + time_part.strip()
                 
-                # Validate that the extracted part is a parsable date
+                # Validate that the extracted part is a parsable date to avoid false positives.
+                # This is run in a thread to prevent blocking the event loop.
                 if await asyncio.to_thread(dateparser.parse, time_string, settings={'PREFER_DATES_FROM': 'future'}):
                     self.logger.info(f"Parsed via keyword split. Message: '{message_part}', Time: '{time_string}', Recurrence: {recurrence_rule}")
                     return (message_part.strip(), time_string, recurrence_rule)
 
         # --- Stage 4: Time at the Front ---
-        # Check if the beginning of the query is a time
+        # Check if the beginning of the query is a time string (e.g., "in 5 minutes do the laundry").
         words = sanitized_query.split()
         for i in range(len(words), 0, -1):
             potential_time = ' '.join(words[:i])
@@ -282,7 +328,7 @@ class Reminders(BaseCog):
                 return (message_part.strip() or None, potential_time, recurrence_rule)
 
         # --- Stage 5: Time at the Back ---
-        # Check if the end of the query is a time
+        # Check if the end of the query is a time string (e.g., "do the laundry in 5 minutes").
         for i in range(len(words)):
             potential_time = ' '.join(words[i:])
             if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
@@ -292,7 +338,7 @@ class Reminders(BaseCog):
 
         # --- Stage 6: Fallback ---
         # If no time is found anywhere, assume the whole query is the message.
-        # This will trigger the interactive flow later.
+        # This will trigger the interactive flow later where the bot asks for the time.
         self.logger.warning(f"Could not find a time string in '{sanitized_query}'. Assuming it's all a message.")
         return (sanitized_query, "", recurrence_rule)
 
@@ -454,6 +500,7 @@ class Reminders(BaseCog):
                 return
 
             timestamp = int(dt_object.timestamp())
+            # Prevent setting reminders in the past.
             if timestamp <= int(time.time()):
                 await ctx.send("You can't set a reminder in the past! Please try again.")
                 # We retain context here because the user's intent was clear, just the time was wrong.
@@ -461,6 +508,7 @@ class Reminders(BaseCog):
                 return
 
             # --- Confirmation Step ---
+            # Ask the user to confirm the parsed details before saving.
             def check(m: discord.Message) -> bool:
                 return m.author == ctx.author and m.channel == ctx.channel
 
@@ -547,7 +595,7 @@ class Reminders(BaseCog):
         """NLP handler for deleting reminders."""
         self.logger.info(f"Handling NLP request for deleting reminders from user {ctx.author.id}: '{query}'")
         
-        # Find all numbers in the query string
+        # Find all numbers in the query string to allow for deleting multiple reminders at once.
         numbers_found = re.findall(r'\d+', query)
         
         if not numbers_found:
@@ -560,7 +608,7 @@ class Reminders(BaseCog):
             # 1. Get the user's current reminders to map # to db ID
             user_reminders = await self.db.get_user_reminders(ctx.author.id)
             
-            # Create a mapping from user-facing number to reminder ID
+            # Create a mapping from user-facing number (like #1, #2) to the actual database ID.
             num_to_id_map = {i + 1: r['id'] for i, r in enumerate(user_reminders)}
 
             if not user_reminders:
@@ -585,10 +633,10 @@ class Reminders(BaseCog):
                     if db_id not in ids_to_delete:
                         ids_to_delete.append(db_id)
                         valid_numbers_deleted.append(user_facing_num)
-                        # Also cancel the scheduled task
+                        # Also cancel the scheduled asyncio task to stop it from firing.
                         if db_id in self.scheduled_tasks:
                             self.scheduled_tasks[db_id].cancel()
-                            # Remove from the dict to prevent memory leaks
+                            # Remove from the dict to prevent memory leaks.
                             self.scheduled_tasks.pop(db_id, None)
                             self.logger.info(f"Cancelled and removed scheduled task for deleted reminder {db_id}.")
                 else:

@@ -1,10 +1,16 @@
 """
-Module for setting up centralized logging for the application.
+logging_config.py
+
+This module configures the logging for the entire application.
+It sets up a structured logging format that includes a timestamp, log level,
+logger name, and the message. It also configures file-based logging with
+log rotation to manage file sizes.
 """
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 import sys
 import asyncio
-from logging.handlers import RotatingFileHandler
 from typing import Literal
 
 class AsyncFileHandler(logging.Handler):
@@ -24,28 +30,24 @@ class AsyncFileHandler(logging.Handler):
 
     def emit(self, record):
         """
-        Emit a record.
-        If an asyncio event loop is running, it schedules the log to be written
-        in a separate thread. Otherwise, it writes the log synchronously.
+        Emit a record by scheduling the write operation in a separate thread
+        to avoid blocking the main asyncio event loop.
         """
         try:
-            # Check if an event loop is running
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                # If the loop is running, use the async approach
                 loop.create_task(asyncio.to_thread(self._handler.emit, record))
             else:
-                # If the loop is not running, fall back to synchronous logging
+                # Fallback to synchronous logging if no event loop is running.
                 self._handler.emit(record)
         except RuntimeError:
-            # This exception is raised if there's no running event loop
-            # Fall back to synchronous logging
+            # This occurs if there's no running event loop.
             self._handler.emit(record)
 
-# Custom formatter
 class CustomFormatter(logging.Formatter):
     """
-    A custom log formatter that adds color to log levels.
+    A custom log formatter that adds color codes to log levels for console output,
+    making it easier to distinguish between different levels of severity.
     """
     grey = "\x1b[38;20m"
     yellow = "\x1b[33;20m"
@@ -72,32 +74,42 @@ def setup_logging(
     log_to_file: bool = True
 ):
     """
-    Set up logging for the application.
+    Sets up logging for the entire application.
+
+    This function configures:
+    - A console handler with colored output for immediate feedback.
+    - An asynchronous, rotating file handler to save logs to `sancho.log`
+      without blocking the bot's operations.
+    - Clears any existing handlers to prevent duplicate log entries.
+    - Sets the log levels for noisy libraries like discord.py to a higher
+      threshold to reduce spam.
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
     
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    root_logger.handlers.clear() # Clear existing handlers
+    root_logger.handlers.clear() # Prevent duplicate logs if called multiple times.
 
-    # Console handler
+    # --- Console Handler ---
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(CustomFormatter())
     root_logger.addHandler(console_handler)
 
-    # File handler
+    # --- Asynchronous File Handler ---
     if log_to_file:
-        # Use the async file handler to prevent blocking the event loop.
+        # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(
             'sancho.log', 
-            maxBytes=5*1024*1024, # 5 MB
-            backupCount=2
+            maxBytes=5*1024*1024, # 5 MB per file
+            backupCount=2         # Keep 2 backup files
         )
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s'))
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s'
+        ))
         root_logger.addHandler(file_handler)
 
-    # Set discord.py logger to a higher level to avoid spam
+    # Reduce noise from third-party libraries.
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
 
-    root_logger.info("Logging configured successfully with console and rotating file handlers.")
+    root_logger.info("Logging configured with console and rotating file handlers.")
