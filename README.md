@@ -1,4 +1,4 @@
-# Sancho
+# Sancho (Now offically on V0.1!)
 
 The local Discord bot, ready to roll dice and remember your stuff. (uhhhh, idk I thought it sounded cool :3)
 
