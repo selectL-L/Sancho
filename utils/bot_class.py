@@ -42,6 +42,10 @@ class SanchoBot(commands.Bot):
         else:
             logging.error("Bot user information not available on ready.")
 
+        logging.info("Connected to the following guilds:")
+        for guild in self.guilds:
+            logging.info(f"- {guild.name} (ID: {guild.id})")
+
         if config.STARTUP_CHANNEL_ID:
             try:
                 channel = self.get_channel(config.STARTUP_CHANNEL_ID)
