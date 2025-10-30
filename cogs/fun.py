@@ -8,10 +8,15 @@ import discord
 from discord.ext import commands
 import random
 import os
+from typing import TYPE_CHECKING, cast
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 import config
+
+if TYPE_CHECKING:
+    from cogs.math import Math
+
 
 class Fun(BaseCog):
     """
@@ -55,7 +60,7 @@ class Fun(BaseCog):
             query (str): The user's query, which is not used in this command.
         """
         # Get the Math cog to perform the dice roll.
-        math_cog = self.bot.get_cog('Math')
+        math_cog = cast("Math", self.bot.get_cog('Math'))
         if not math_cog:
             await ctx.reply("I can't find my dice right now. Please try again later.")
             self.logger.error("Math cog not found, cannot perform bod roll.")

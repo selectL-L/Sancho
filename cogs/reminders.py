@@ -207,30 +207,45 @@ class Reminders(BaseCog):
             return ""
 
         try:
-            rule = rrulestr(rule_str)
-            # The rrule._freq attribute is an integer constant.
-            # We can map it back to a human-readable string.
+            from dateutil.rrule import rruleset
+            rule = rrulestr(rule_str, ignoretz=True)
+
+            # rrulestr can return an rrule or rruleset. We'll inspect the first rrule for display.
+            if isinstance(rule, rruleset):
+                # For a ruleset, we get the underlying rule. This is a simplification.
+                rrule_list = getattr(rule, '_rrule', [])
+                if not rrule_list:
+                    return f"Repeats: {rule_str}" # Cannot parse further
+                rule = rrule_list[0]
+
+            # Use getattr to safely access internal attributes that Pylance warns about.
+            freq_val = getattr(rule, '_freq', None)
+            interval_val = getattr(rule, '_interval', 1)
+            byweekday_val = getattr(rule, '_byweekday', None)
+
+            if freq_val is None:
+                 return f"Repeats: {rule_str}"
+
             freq_map = {YEARLY: "year", MONTHLY: "month", WEEKLY: "week", DAILY: "day", HOURLY: "hour", MINUTELY: "minute"}
-            freq = freq_map.get(rule._freq, "time")
+            freq = freq_map.get(freq_val, "time")
             
-            interval = rule._interval
-            
+            period = ""
             # Handle simple cases
-            if interval == 1:
+            if interval_val == 1:
                 period = f"every {freq}"
             else:
-                period = f"every {interval} {freq}s"
+                period = f"every {interval_val} {freq}s"
 
             # Handle specific days of the week
-            if rule._byweekday:
+            if byweekday_val:
                 day_map = {0: 'Monday', 1: 'Tuesday', 2: 'Wednesday', 3: 'Thursday', 4: 'Friday', 5: 'Saturday', 6: 'Sunday'}
-                days = [day_map[d] for d in rule._byweekday]
+                days = [day_map[d] for d in byweekday_val]
                 if sorted(days) == ['Friday', 'Monday', 'Thursday', 'Tuesday', 'Wednesday']:
-                    return "Repeats every weekday"
+                    period = "every weekday"
                 else:
-                    return f"Repeats every {', '.join(days)}"
+                    period = f"every {', '.join(days)}"
 
-            if freq == "day" and interval == 1: return "Repeats every day"
+            if freq == "day" and interval_val == 1: return "Repeats every day"
             
             return f"Repeats {period}"
 
@@ -678,6 +693,7 @@ class Reminders(BaseCog):
 
         tz_to_check = timezone_str.lower()
         final_tz_str = None
+        display_tz_str = ""
 
         if tz_to_check in TIMEZONE_ABBREVIATIONS:
             final_tz_str = TIMEZONE_ABBREVIATIONS[tz_to_check]
@@ -686,13 +702,10 @@ class Reminders(BaseCog):
             match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check)
             if match:
                 sign = match.group(2)
-                offset = int(match.group(3))
-                # For pytz, the sign is inverted for Etc/GMT zones.
-                # GMT-5 is Etc/GMT+5.
-                inverted_sign = '-' if sign == '+' else '+'
-                final_tz_str = f"Etc/GMT{inverted_sign}{offset}"
-                # But we want to show the user the logical name
-                display_tz_str = f"GMT{sign}{offset}"
+                hour = int(match.group(3))
+                # pytz uses Etc/GMT where the sign is inverted
+                final_tz_str = f"Etc/GMT{-hour if sign == '+' else +hour}"
+                display_tz_str = tz_to_check.upper()
 
         if not final_tz_str:
             final_tz_str = timezone_str
@@ -701,8 +714,8 @@ class Reminders(BaseCog):
         try:
             tz = pytz.timezone(final_tz_str)
             
-            # Use the display name for storage and confirmation, but the real one for calculation.
-            zone_to_store = display_tz_str if 'display_tz_str' in locals() else final_tz_str
+            # Use the display name for storage and confirmation.
+            zone_to_store = display_tz_str
             
             await self.db.set_user_timezone(ctx.author.id, zone_to_store)
             

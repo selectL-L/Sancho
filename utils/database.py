@@ -205,7 +205,7 @@ class DatabaseManager:
     async def add_reminder(
         self, user_id: int, channel_id: int, reminder_time: int, message: str,
         created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None
-    ) -> int:
+    ) -> Optional[int]:
         """Adds a reminder to the database and returns the new reminder's ID."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
