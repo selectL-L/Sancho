@@ -20,6 +20,7 @@ import asyncio
 import os
 import re
 import sys
+import time
 from typing import Optional, Any
 from collections.abc import Callable
 
@@ -69,9 +70,28 @@ bot.db_manager = DatabaseManager(bot.db_path)
 # --- 3. Core Bot Events --- (Well, not anymore but, hey you know :) It exists) (To be clear, most of the functionality here is important anyway.)
 @bot.command()
 async def ping(ctx: commands.Context) -> None:
-    """A simple command to check the bot's latency."""
-    latency = bot.latency * 1000
-    await ctx.send(f'Pong! Latency: {latency:.2f}ms')
+    """
+    A command to check the bot's latency, differentiating bot vs. gateway.
+    This Commands main purpose is to check for basic functionality and responsiveness.
+    """
+    # Gateway latency (from Discord's heartbeat)
+    gateway_latency = bot.latency * 1000
+
+    # Measure message round-trip time
+    start_time = time.monotonic()
+    message = await ctx.send("Pinging...")
+    end_time = time.monotonic()
+    
+    # This is the time it took to send the message and get a confirmation.
+    # It includes network latency to Discord, processing time on Discord's end,
+    # and network latency back to the bot.
+    roundtrip_latency = (end_time - start_time) * 1000
+
+    await message.edit(
+        content=f"Pong! 🏓\n"
+                f"Gateway Latency: `{gateway_latency:.2f}ms`\n"
+                f"Roundtrip Latency: `{roundtrip_latency:.2f}ms`"
+    )
     logging.info(f"Ping command used by {ctx.author}.")
 
 @bot.event
