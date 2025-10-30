@@ -67,7 +67,7 @@ bot.db_path = config.DB_PATH
 bot.db_manager = DatabaseManager(bot.db_path)
 
 
-# --- 3. Core Bot Events --- (Well, not anymore but, hey you know :) It exists) (To be clear, most of the functionality here is important anyway.)
+# --- 3. Core Bot Events ---
 @bot.command()
 async def ping(ctx: commands.Context) -> None:
     """
