@@ -45,6 +45,8 @@ ENV_PATH = os.path.join(APP_PATH, 'info.env')
 LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
 DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
+STARTUP_GIF_PATH = os.path.join(ASSETS_PATH, 'startup.gif')
+SHUTDOWN_GIF_PATH = os.path.join(ASSETS_PATH, 'shutdown.gif')
 
 # --- Bot Configuration ---
 
@@ -75,7 +77,11 @@ load_dotenv(dotenv_path=ENV_PATH)
 # --- Environment Variables ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 raw_owner_id = os.getenv('OWNER_ID')
+raw_startup_channel_id = os.getenv('STARTUP_CHANNEL_ID')
+raw_shutdown_channel_id = os.getenv('SHUTDOWN_CHANNEL_ID')
 OWNER_ID = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
+STARTUP_CHANNEL_ID = int(raw_startup_channel_id) if raw_startup_channel_id and raw_startup_channel_id.isdigit() else None
+SHUTDOWN_CHANNEL_ID = int(raw_shutdown_channel_id) if raw_shutdown_channel_id and raw_shutdown_channel_id.isdigit() else None
 BOT_PREFIX = [".sancho ", ".s "]
 
 # --- Cog Loading ---
@@ -151,4 +157,6 @@ NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
     ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
     # BOD
     ((r'\bbod\b',), 'Fun', 'bod'),
+    # Sanitize
+    ((r'\bsanitize\b', r'\bsanitise\b'), 'Fun', 'sanitize'),
 ]

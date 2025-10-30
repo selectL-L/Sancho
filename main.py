@@ -66,19 +66,7 @@ bot.db_path = config.DB_PATH
 bot.db_manager = DatabaseManager(bot.db_path)
 
 
-# --- 3. Core Bot Events ---
-
-@bot.event
-async def on_ready() -> None:
-    """
-    Called when the bot has successfully connected to Discord and is ready to operate.
-    This is typically used to log the bot's user information.
-    """
-    if bot.user:
-        logging.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    else:
-        logging.error("Bot user information not available on ready.")
-
+# --- 3. Core Bot Events --- (Well, not anymore but, hey you know :) It exists) (To be clear, most of the functionality here is important anyway.)
 @bot.command()
 async def ping(ctx: commands.Context) -> None:
     """A simple command to check the bot's latency."""
@@ -216,4 +204,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         # Gracefully handle shutdown signals (e.g., Ctrl+C).
-        logging.info("Sancho is shutting down.")
+        logging.info("Sancho has shutdown.")
