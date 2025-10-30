@@ -104,7 +104,10 @@ class Fun(BaseCog):
 
         try:
             # Use the Math cog's internal method to get a clean roll result.
-            roll_result = await math_cog.get_roll_result("1d4")
+            if await self.bot.is_owner(ctx.author):
+                roll_result = 4
+            else:
+                roll_result = await math_cog.get_roll_result("1d4")
             
             # Send a different image based on the roll result.
             if roll_result <= 3:
@@ -115,7 +118,7 @@ class Fun(BaseCog):
                 await ctx.reply(f"You rolled a {roll_result}!", file=discord.File(file_path))
 
         except FileNotFoundError as e:
-            await ctx.reply("I couldn't find the image file for that roll. Please tell my author to fix it!")
+            await ctx.reply("I couldn't find the right Yujin. Please tell my author to fix it!")
             self.logger.error(f"Image not found for bod roll: {e}")
         except Exception as e:
             await ctx.reply("Something went wrong with the dice roll. Please try again.")
