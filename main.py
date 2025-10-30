@@ -204,4 +204,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         # Gracefully handle shutdown signals (e.g., Ctrl+C).
-        logging.info("Sancho has shutdown.")
+        logging.info("Sancho has shutdown!")
