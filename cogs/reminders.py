@@ -40,7 +40,8 @@ class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.db: DatabaseManager = bot.db_manager # type: ignore
+        self.bot: SanchoBot = bot
+        self.db_manager: DatabaseManager = self.bot.db_manager
         # Stores active reminder tasks, mapping reminder ID to the asyncio.Task instance.
         # This allows us to cancel reminders if they are deleted or the cog is reloaded.
         self.scheduled_tasks: dict[int, asyncio.Task[None]] = {}
@@ -61,7 +62,7 @@ class Reminders(BaseCog):
     async def _schedule_existing_reminders(self) -> None:
         """Queries the database for all pending reminders and schedules them."""
         try:
-            all_reminders = await self.db.get_all_pending_reminders()
+            all_reminders = await self.db_manager.get_all_reminders()
             count = 0
             for reminder in all_reminders:
                 self._schedule_reminder_task(reminder)
@@ -136,7 +137,7 @@ class Reminders(BaseCog):
         except (discord.NotFound, discord.Forbidden) as e:
             self.logger.warning(f"Failed to send reminder {reminder['id']} (user/channel not found or permissions error). Error: {e}")
             # If we can't find the user/channel, the reminder is unserviceable. Delete it.
-            await self.db.delete_reminders([reminder['id']])
+            await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Unexpected error in reminder task {reminder['id']}: {e}", exc_info=True)
         finally:
@@ -152,7 +153,7 @@ class Reminders(BaseCog):
         reminder_id = reminder['id']
         
         # First, check if the reminder still exists. It might have been deleted while the task was running.
-        reminder_data = await self.db.get_reminder_by_id(reminder_id)
+        reminder_data = await self.db_manager.get_reminder_by_id(reminder_id)
         if not reminder_data:
             self.logger.info(f"Reminder {reminder_id} was deleted. Halting recurrence.")
             return
@@ -176,7 +177,7 @@ class Reminders(BaseCog):
                 if next_occurrence:
                     # Update the database with the new time for the next reminder.
                     next_timestamp = int(next_occurrence.timestamp())
-                    await self.db.update_reminder_time(reminder_id, next_timestamp)
+                    await self.db_manager.update_reminder_time(reminder_id, next_timestamp)
                     
                     # Create a new asyncio task for the next occurrence.
                     next_reminder = reminder_data.copy()
@@ -186,19 +187,19 @@ class Reminders(BaseCog):
                 else:
                     # If there are no more occurrences, delete the reminder.
                     self.logger.info(f"Recurring reminder {reminder_id} has no more occurrences. Deleting.")
-                    await self.db.delete_reminders([reminder_id])
+                    await self.db_manager.delete_reminders([reminder_id])
             except Exception as e:
                 self.logger.error(f"Failed to reschedule recurring reminder {reminder_id}: {e}", exc_info=True)
                 # If rescheduling fails, delete the reminder to prevent error loops.
-                await self.db.delete_reminders([reminder_id]) # Delete if rescheduling fails
+                await self.db_manager.delete_reminders([reminder_id]) # Delete if rescheduling fails
         else:
             # If it's not recurring, simply delete it from the database.
-            await self.db.delete_reminders([reminder_id])
+            await self.db_manager.delete_reminders([reminder_id])
             self.logger.info(f"Cleaned up non-recurring reminder {reminder_id} from database.")
 
     async def _get_user_timezone(self, user_id: int) -> str:
         """Fetches a user's timezone, defaulting to UTC."""
-        tz = await self.db.get_user_timezone(user_id)
+        tz = await self.db_manager.get_user_timezone(user_id)
         return tz or "UTC"
 
     def _format_recurrence_rule(self, rule_str: str) -> str:
@@ -357,7 +358,7 @@ class Reminders(BaseCog):
         self.logger.warning(f"Could not find a time string in '{sanitized_query}'. Assuming it's all a message.")
         return (sanitized_query, "", recurrence_rule)
 
-    async def _interactive_reminder_flow(self, ctx: commands.Context, initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
+    async def _interactive_reminder_flow(self, ctx: 'commands.Context', initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
         """Guides the user through creating a reminder interactively."""
         
         def check(m: discord.Message) -> bool:
@@ -457,7 +458,7 @@ class Reminders(BaseCog):
             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
             if msg.content.lower() in ['yes', 'y']:
                 is_recurring = recurrence_rule is not None
-                new_reminder_id = await self.db.add_reminder(
+                new_reminder_id = await self.db_manager.add_reminder(
                     ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
                     is_recurring, recurrence_rule
                 )
@@ -481,7 +482,7 @@ class Reminders(BaseCog):
             self.logger.error(f"Error in interactive reminder flow for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while creating the reminder.")
 
-    async def remind(self, ctx: commands.Context, *, query: str) -> None:
+    async def remind(self, ctx: 'commands.Context', *, query: str) -> None:
         """The NLP handler for all reminder requests."""
         try:
             if not query.strip():
@@ -541,7 +542,7 @@ class Reminders(BaseCog):
             if msg.content.lower() in ['yes', 'y']:
                 if reminder_message:
                     is_recurring = recurrence_rule is not None
-                    new_reminder_id = await self.db.add_reminder(
+                    new_reminder_id = await self.db_manager.add_reminder(
                         ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
                         is_recurring, recurrence_rule
                     )
@@ -574,7 +575,7 @@ class Reminders(BaseCog):
         """NLP handler for checking reminders."""
         self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         try:
-            reminders = await self.db.get_user_reminders(ctx.author.id)
+            reminders = await self.db_manager.get_user_reminders(ctx.author.id)
 
             if not reminders:
                 await ctx.send("You have no pending reminders.")
@@ -621,7 +622,7 @@ class Reminders(BaseCog):
         
         try:
             # 1. Get the user's current reminders to map # to db ID
-            user_reminders = await self.db.get_user_reminders(ctx.author.id)
+            user_reminders = await self.db_manager.get_user_reminders(ctx.author.id)
             
             # Create a mapping from user-facing number (like #1, #2) to the actual database ID.
             num_to_id_map = {i + 1: r['id'] for i, r in enumerate(user_reminders)}
@@ -662,7 +663,7 @@ class Reminders(BaseCog):
                 return
 
             # This is the crucial step: delete from the database so it doesn't recur on restart.
-            await self.db.delete_reminders(ids_to_delete)
+            await self.db_manager.delete_reminders(ids_to_delete)
 
             deleted_count = len(ids_to_delete)
             response_parts = [f"Successfully deleted {deleted_count} reminder(s): `#{', #'.join(map(str, sorted(valid_numbers_deleted)))}`"]
@@ -717,7 +718,7 @@ class Reminders(BaseCog):
             # Use the display name for storage and confirmation.
             zone_to_store = display_tz_str
             
-            await self.db.set_user_timezone(ctx.author.id, zone_to_store)
+            await self.db_manager.set_user_timezone(ctx.author.id, zone_to_store)
             
             now = datetime.now(tz)
             await ctx.send(
