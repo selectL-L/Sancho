@@ -79,7 +79,7 @@ class AdminCog(BaseCog):
         self.bot: SanchoBot = bot
         self.db_manager = self.bot.db_manager
 
-    @commands.command(name="status")
+    @commands.command(name="status", hidden=True)
     @commands.is_owner()
     async def status(self, ctx: commands.Context):
         """
