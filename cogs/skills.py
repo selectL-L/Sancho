@@ -38,7 +38,8 @@ class Skills(BaseCog):
 
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.db: DatabaseManager = bot.db_manager # type: ignore
+        self.bot: SanchoBot = bot
+        self.db_manager: DatabaseManager = self.bot.db_manager
 
     def _sync_evaluate_max_roll(self, dice_roll: str) -> int:
         """
@@ -102,9 +103,9 @@ class Skills(BaseCog):
         6.  Saving the completed skill to the database.
         """
         
-        user_skills = await self.db.get_user_skills(ctx.author.id)
+        user_skills = await self.db_manager.get_user_skills(ctx.author.id)
         current_skills_count = len(user_skills)
-        user_skill_limit = await self.db.get_user_skill_limit(ctx.author.id)
+        user_skill_limit = await self.db_manager.get_user_skill_limit(ctx.author.id)
 
         if current_skills_count >= user_skill_limit:
             await ctx.send(f"You have reached your skill limit of **{user_skill_limit}** skills. Please delete a skill before adding a new one.")
@@ -233,7 +234,7 @@ class Skills(BaseCog):
                 break # Type is valid.
 
             # --- Step 5: Save to Database ---
-            await self.db.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type)
+            await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type)
             
             confirmation_message = f"✅ Skill saved for you! You can now use `.sancho skill {skill_name}`. Please note your skills are tied to your ID!"
             if aliases:
@@ -260,7 +261,7 @@ class Skills(BaseCog):
         5.  Delegates the actual roll and response formatting to the `Math` cog.
         """
         # 1. Fetch all user skills.
-        user_skills = await self.db.get_user_skills(ctx.author.id)
+        user_skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not user_skills:
             await ctx.send("You have no saved skills to use. Use `.sancho save skill` to create one.")
             return
@@ -326,7 +327,7 @@ class Skills(BaseCog):
         It formats the skills into a clean, readable embed, showing the name,
         aliases, roll formula, type, and a unique ID for deletion.
         """
-        skills = await self.db.get_user_skills(ctx.author.id)
+        skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not skills:
             await ctx.send("You have no saved skills. Use `.sancho save skill` to create one!")
             return
@@ -355,7 +356,7 @@ class Skills(BaseCog):
                 description.append(f"{field['name']}\n{field['value']}")
             embed.description = "\n\n".join(description)
 
-        user_skill_limit = await self.db.get_user_skill_limit(ctx.author.id)
+        user_skill_limit = await self.db_manager.get_user_skill_limit(ctx.author.id)
         embed.set_footer(text=f"You are using {len(skills)}/{user_skill_limit} skill slots. Use '.sancho delete skill <id>' to remove one.")
         await ctx.send(embed=embed)
 
@@ -371,7 +372,7 @@ class Skills(BaseCog):
             return
         
         skill_num_to_delete = int(match.group(0))
-        skills = await self.db.get_user_skills(ctx.author.id)
+        skills = await self.db_manager.get_user_skills(ctx.author.id)
 
         # Validate the provided number against the user's actual skill list.
         if not (1 <= skill_num_to_delete <= len(skills)):
@@ -379,7 +380,7 @@ class Skills(BaseCog):
             return
         
         skill_to_delete = skills[skill_num_to_delete - 1]
-        rows_affected = await self.db.delete_skill(ctx.author.id, skill_to_delete['id'])
+        rows_affected = await self.db_manager.delete_skill(ctx.author.id, skill_to_delete['id'])
 
         if rows_affected > 0:
             await ctx.send(f"✅ Successfully deleted your skill: **{skill_to_delete['name'].title()}**.")
@@ -395,7 +396,7 @@ class Skills(BaseCog):
             await ctx.send("Please provide a limit between 1 and 100.")
             return
         
-        await self.db.set_skill_limit(limit)
+        await self.db_manager.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
 
     @commands.command(name="setuserskilllimit", hidden=True)
@@ -406,7 +407,7 @@ class Skills(BaseCog):
             await ctx.send("Please provide a limit between 1 and 100.")
             return
         
-        await self.db.set_user_skill_limit(user.id, limit)
+        await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
 async def setup(bot: SanchoBot) -> None:

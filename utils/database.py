@@ -195,6 +195,14 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def get_all_skills(self) -> List[Dict[str, Any]]:
+        """Retrieves all skills for all users, ordered by user_id."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM skills ORDER BY user_id, name ASC")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
     async def delete_skill(self, user_id: int, skill_id: int) -> int:
         """Deletes a skill by its unique ID for a specific user."""
         async with aiosqlite.connect(self.db_path) as db:
@@ -236,11 +244,11 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_all_pending_reminders(self) -> List[Dict[str, Any]]:
-        """Fetches all reminders currently in the database."""
+    async def get_all_reminders(self) -> List[Dict[str, Any]]:
+        """Retrieves all reminders for all users, ordered by user_id."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM reminders")
+            cursor = await db.execute("SELECT * FROM reminders ORDER BY user_id, reminder_time ASC")
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 

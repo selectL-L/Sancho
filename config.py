@@ -98,7 +98,8 @@ except FileNotFoundError:
         'cogs.reminders',
         'cogs.image',
         'cogs.fun',
-        'cogs.skills'
+        'cogs.skills',
+        'cogs.admin'
     ]
 
 # --- Logging Configuration ---
