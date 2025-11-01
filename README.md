@@ -1,38 +1,29 @@
 # Sancho (Now offically on V0.1!)
 
-The local Discord bot, ready to roll dice and remember your stuff. (uhhhh, idk I thought it sounded cool :3)
+A local discord bot, mostly designed for my own small community, but does have flexibility to be used in your servers, or even forked for your own use!
 
-This is a small, personal bot built to handle commands in a more natural way. Instead of rigid command structures, you can just talk to it. (Though we have rigid commands for those who prefer it!)
+The major design philosophy is to handle commands in a more natural way. Instead of rigid command structures, you can just talk to it. (Though some rigid commands exist for admin stuff!)
 
 ## What's it do?
 
 Sancho is currently equipped with a couple of handy features (more to come!):
 
-*   **A half decent Dice Roller:** You can throw complex dice notations at it, and it'll figure it out. Stuff like `.sancho roll (2d6+5)*3` or `.sancho roll 4d20kh3 with advantage`.
+*   **A Dice Roller:** You can use complex dice notations with it. Stuff like `.sancho roll (2d6+5)*3` or `.sancho roll 4d20kh3 with advantage` should simply just work.
 *   **Natural Language Reminders:** Set reminders just by talking to the bot (still doesn't work super well (yet)). For example: `.sancho remind me in 2 hours to check on my laundry`. It also supports custom timezones so you don't have to do any conversions.
+*   **Image Conversion:** You can convert and resize images just by asking `.sancho convert` or `.sancho resize` and either attaching your image, or replying to an image.
+*   **Skill database:** You can save dice notation as skills that can be called at any time, helps with roleplay and/or repetitive work.
+*   **General fun commands:** You can call the bot for certain more basic fun commands like 8ball or BOD (from hit game library of ruina)!
 
 ## How to Use It
 
-Just start a message with `.sancho` and tell it what you want. (side note, it only responds to .sancho)
+Just start a message with `.sancho` or `.s` (by default, changeable in config.py!) and speak to it.
 
-### Dice Rolling
-
-*   `.sancho roll 2d6 + 5`
-*   `.sancho roll 1d20 with advantage`
-*   `.sancho roll 8d6kh5` (Rolls 8 six-sided dice and keeps the highest 5)
-
-### Reminders
-
-*   `.sancho remind me in 30 minutes to take a break`
-*   `.sancho remind me on Friday at 8pm to watch the new movie`
-*   `.sancho timezone EST` (Sets your personal timezone for all reminders)
-*   `.sancho checkreminders` (See what you've asked it to remember)
-*   `.sancho delrem 1` (Deletes your first reminder from the list)
+(List of commands removed in lieu of figuring out a better way to do so.)
 
 ## How to Get It Running
 
 1.  **Clone the repo.**
-2.  **Create an `info.env` file** in the main directory. It needs to contain one thing:
+2.  **Create an `info.env` file** in the main directory. You only have to fill in the token:
     ```
     DISCORD_TOKEN=YourSuperSecretBotTokenHere
     ```
@@ -40,11 +31,11 @@ Just start a message with `.sancho` and tell it what you want. (side note, it on
     ```
     pip install -r requirements.txt
     ```
-4.  **Run it!**
+4.  **Run it! (or don't, we don't judge)**
     ```
     python main.py
     ```
 
 ## Want to build it yourself?
 
-If you want to bundle this up into a neat little executable, check out the [**Build Guide**](BUILD.md).
+If you want to bundle this up into a neat little executable (THAT MAY OR MAY NOT WORK), check out the [**Build Guide**](BUILD.md).
