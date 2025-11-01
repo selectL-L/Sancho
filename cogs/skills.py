@@ -129,7 +129,7 @@ class Skills(BaseCog):
             skill_name = ""
             while True:
                 await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")
-                name_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
+                name_msg = await self.bot.wait_for('message', check=check, timeout=15.0)
                 
                 if name_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -180,7 +180,7 @@ class Skills(BaseCog):
             dice_roll = ""
             while True:
                 await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `1d20kh1`, `4c + 2`)")
-                roll_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
+                roll_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
                 if roll_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
@@ -221,7 +221,7 @@ class Skills(BaseCog):
             skill_type = ""
             while True:
                 await ctx.send(f"Is this an `attack` or a `defense` skill?")
-                type_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
+                type_msg = await self.bot.wait_for('message', check=check, timeout=10.0)
                 if type_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
@@ -244,7 +244,7 @@ class Skills(BaseCog):
             self.logger.info(f"User {ctx.author.id} saved skill '{skill_name}'.")
 
         except asyncio.TimeoutError:
-            await ctx.send("You took too long to respond. Skill creation cancelled.")
+            await ctx.send("You took too long to respond! Skill creation cancelled...")
         except Exception as e:
             self.logger.error(f"Error creating skill for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while creating the skill.")
