@@ -31,7 +31,7 @@ Just start a message with `.sancho` or `.s` (by default, changeable in config.py
     ```
     pip install -r requirements.txt
     ```
-4.  **Run it! (or don't, we don't judge)**
+4.  **Run it! (or don't, we don't judge):**
     ```
     python main.py
     ```
