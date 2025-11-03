@@ -108,54 +108,68 @@ LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 LOG_BACKUP_COUNT = 5
 
 # --- NLP Command Registry ---
-# This is the central registry for all NLP-based commands. The `on_message`
-# event in `main.py` iterates through this list to find a matching command.
-# The order is important: more specific patterns should come before general ones.
+# This is the central registry for all NLP-based commands. It is structured
+# as a list of "groups" (each group is a list of commands).
 #
-# Format: ( (tuple_of_regex_keywords), 'CogClassName', 'method_to_call' )
-NLP_COMMANDS: list[tuple[tuple[str, ...], str, str]] = [
-
-    # --- Math Commands ---
-    # Limbus Company coin flip
-    ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
-    # Dice rolling (should be checked before basic calculation)
-    ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
-    # Basic calculation
-    ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
-    
-    # --- Skill Commands ---
-    # Specific "delete" command that must come before the general "skill" command.
-    ((r'\b(delete|remove)\s.*skill\b',), 'Skills', 'delete_skill_nlp'),
-    # Specific "list" command.
-    ((r'\b(list|show|check)\s.*skill(s)?\b', r'\bskill\s.*(list|show|check)\b', r'\bskilllist\b'), 'Skills', 'list_skills_nlp'),
-    # Specific "save" command.
-    ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b', r'create.*skill'), 'Skills', 'save_skill_nlp'),
-    # General "use skill" command, should be last in this group.
-    ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
-
-    # --- Reminder Commands ---
-    # Deleting reminders (catches "delete/remove reminder 1", etc.)
-    # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
-    ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
-    # Setting reminders
-    ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s+a\s+reminder', r'set\s.*reminder'), 'Reminders', 'remind'),
-    # Checking reminders (catches "check my reminders", "show reminders", etc.)
-    ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
-    # Setting user timezone
-    ((r'\b(set|change)\s.*timezone\b', r'\b(set|change)\s.*tz\b', r'\btz\b'), 'Reminders', 'set_timezone_nlp'),
-
-    # --- Image Commands ---
-    # Resize image
-    ((r'\bresize\b', r'\bscale\b'), 'Image', 'resize'),
-
-    # Convert image format
-    ((r'\bconvert\b', r'\bchange to\b'), 'Image', 'convert'),
-
-    # --- Fun Commands ---
-    # 8-Ball
-    ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
-    # BOD
-    ((r'\bbod\b',), 'Fun', 'bod'),
-    # Sanitize
-    ((r'\bsanitize\b', r'\bsanitise\b'), 'Fun', 'sanitize'),
+# 1.  **Intra-Group Priority**: Within each group, the commands are checked in
+#     the order they are defined. The first one that matches becomes the "group winner".
+#     This means more specific commands should always be placed before more general ones
+#     (e.g., 'delete skill' before 'skill').
+# 2.  **Inter-Group Priority**: After finding a winner from each group that has a match,
+#     the bot compares the position of the matched keywords in the user's query.
+#     The group winner whose keyword appeared earliest in the query is the final command executed.
+#
+# Format: [
+#   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 1
+#   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 2
+# ]
+NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
+    # --- Math Group ---
+    [
+        # Limbus Company coin flip
+        ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
+        # Dice rolling (should be checked before basic calculation)
+        ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
+        # Basic calculation
+        ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
+    ],
+    # --- Skills Group ---
+    [
+        # Specific "delete" command that must come before the general "skill" command.
+        ((r'\b(delete|remove)\s.*skill\b',), 'Skills', 'delete_skill_nlp'),
+        # Specific "list" command.
+        ((r'\b(list|show|check)\s.*skill(s)?\b', r'\bskill\s.*(list|show|check)\b', r'\bskilllist\b'), 'Skills', 'list_skills_nlp'),
+        # Specific "save" command.
+        ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b', r'create.*skill'), 'Skills', 'save_skill_nlp'),
+        # General "use skill" command, should be last in this group.
+        ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
+    ],
+    # --- Reminders Group ---
+    [
+        # Deleting reminders (catches "delete/remove reminder 1", etc.)
+        # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
+        ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
+        # Setting reminders
+        ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s+a\s+reminder', r'set\s.*reminder'), 'Reminders', 'remind'),
+        # Checking reminders (catches "check my reminders", "show reminders", etc.)
+        ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
+        # Setting user timezone
+        ((r'\b(set|change)\s.*timezone\b', r'\b(set|change)\s.*tz\b', r'\btz\b'), 'Reminders', 'set_timezone_nlp'),
+    ],
+    # --- Image Group ---
+    [
+        # Resize image
+        ((r'\bresize\b', r'\bscale\b'), 'Image', 'resize'),
+        # Convert image format
+        ((r'\bconvert\b', r'\bchange to\b'), 'Image', 'convert'),
+    ],
+    # --- Fun Group ---
+    [
+        # 8-Ball
+        ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
+        # BOD
+        ((r'\bbod\b',), 'Fun', 'bod'),
+        # Sanitize
+        ((r'\bsanitize\b', r'\bsanitise\b'), 'Fun', 'sanitize'),
+    ]
 ]
