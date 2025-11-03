@@ -212,17 +212,40 @@ async def on_message(message: discord.Message) -> None:
 async def console_input_handler(bot: SanchoBot):
     """
     Listens for console input and triggers a graceful shutdown if 'exit' is typed.
-    This is the designated way to shut down the bot gracefully from the console.
+    This implementation uses a platform-specific approach for compatibility.
     """
     loop = asyncio.get_running_loop()
-    while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        if line.strip().lower() == 'exit':
-            logging.info("'exit' command received from console. Initiating shutdown.")
-            # Create a task to run the shutdown handler, simulating a SIGINT signal.
-            # This ensures the shutdown logic is the same as for system signals.
-            loop.create_task(shutdown_handler(signal.SIGINT, bot))
-            break
+    try:
+        if sys.platform == "win32":
+            # On Windows, run_in_executor is a reliable way to read from stdin.
+            # This is a blocking call in a separate thread, so cancellation is
+            # not immediate but will occur after the next input.
+            while True:
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if line.strip().lower() == 'exit':
+                    logging.info("'exit' command received from console. Initiating shutdown.")
+                    loop.create_task(shutdown_handler(signal.SIGINT, bot))
+                    break
+        else:
+            # On Linux/macOS, use a non-blocking StreamReader for stdin.
+            reader = asyncio.StreamReader()
+            protocol = asyncio.StreamReaderProtocol(reader)
+            await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+            while True:
+                line_bytes = await reader.readline()
+                if not line_bytes: # Reached EOF
+                    break
+                line = line_bytes.decode().strip()
+                if line.lower() == 'exit':
+                    logging.info("'exit' command received from console. Initiating shutdown.")
+                    loop.create_task(shutdown_handler(signal.SIGINT, bot))
+                    break
+
+    except asyncio.CancelledError:
+        logging.info("Console input handler cancelled.")
+    except Exception as e:
+        # Log other potential errors, e.g., if stdin is closed unexpectedly.
+        logging.error(f"Error in console input handler: {e}", exc_info=False)
 
 async def main() -> None:
     """
@@ -270,7 +293,7 @@ async def run_bot_with_handlers():
 
     # Start the console listener for the 'exit' command.
     if sys.stdin and sys.stdin.isatty():
-        loop.create_task(console_input_handler(bot))
+        bot.console_task = loop.create_task(console_input_handler(bot))
 
     await main()
 
@@ -280,4 +303,4 @@ if __name__ == '__main__':
     finally:
         # This message logs after the asyncio event loop has closed, ensuring
         # it's the final log entry upon termination.
-        logging.info("Sancho has shutdown!")
+        logging.info("Sancho has shutdown properly!")
