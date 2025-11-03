@@ -22,3 +22,7 @@ pytz
 
 # For image manipulation in the Image cog.
 Pillow
+
+# Testing dependencies (tests are not included with the github repository, so these are not required)
+pytest
+pytest-asyncio
