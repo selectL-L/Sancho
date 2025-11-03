@@ -19,6 +19,7 @@ import logging
 import asyncio
 import os
 import re
+import signal
 import sys
 import time
 from typing import Optional, Any
@@ -30,6 +31,7 @@ import config
 from utils.logging_config import setup_logging
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
+from utils.lifecycle import startup_handler, shutdown_handler
 
 # Set up logging immediately to capture any issues during startup.
 setup_logging()
@@ -52,6 +54,20 @@ if not config.OWNER_ID:
         "The bot will run, but owner-specific commands will not be available."
     )
 
+# Warn if the startup channel ID is missing.
+if not config.STARTUP_CHANNEL_ID:
+    logging.warning(
+        f"STARTUP_CHANNEL_ID not found in '{os.path.basename(config.ENV_PATH)}'. "
+        "The bot will run, but the startup message will not be sent."
+    )
+
+# Warn if the shutdown channel ID is missing.
+if not config.SHUTDOWN_CHANNEL_ID:
+    logging.warning(
+        f"SHUTDOWN_CHANNEL_ID not found in '{os.path.basename(config.ENV_PATH)}'. "
+        "The bot will run, but shutdown/reboot messages will not be sent."
+    )
+
 # --- 2. Bot Initialization ---
 
 # Define the bot's intents. `message_content` is required for reading messages
@@ -62,12 +78,15 @@ intents.message_content = True
 
 # Create the custom bot instance.
 bot = SanchoBot(command_prefix=config.BOT_PREFIX, intents=intents)
-# Attach database path and manager to the bot instance for easy access across cogs.
-bot.db_path = config.DB_PATH
-bot.db_manager = DatabaseManager(bot.db_path)
+# The db_manager will be attached in main() after async initialization.
 
 
 # --- 3. Core Bot Events ---
+@bot.event
+async def on_ready():
+    """Called when the bot is ready; triggers the startup handler."""
+    await startup_handler(bot)
+    
 @bot.command()
 async def ping(ctx: commands.Context) -> None:
     """
@@ -190,18 +209,36 @@ async def on_message(message: discord.Message) -> None:
 
 # --- 4. Main Bot Execution ---
 
+async def console_input_handler(bot: SanchoBot):
+    """
+    Listens for console input and triggers a graceful shutdown if 'exit' is typed.
+    This is the designated way to shut down the bot gracefully from the console.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        if line.strip().lower() == 'exit':
+            logging.info("'exit' command received from console. Initiating shutdown.")
+            # Create a task to run the shutdown handler, simulating a SIGINT signal.
+            # This ensures the shutdown logic is the same as for system signals.
+            loop.create_task(shutdown_handler(signal.SIGINT, bot))
+            break
+
 async def main() -> None:
     """
     The main asynchronous entry point for initializing and running the bot.
     This function orchestrates the entire startup process.
     """
     logging.info("Sancho is starting...")
-    async with bot:
-        # Initialize the database, creating tables if they don't exist.
-        await bot.db_manager.setup_databases()
-        # Load any dynamic configurations from the database.
-        await bot.db_manager.load_skill_limit()
+    
+    # Asynchronously initialize the database manager and attach it to the bot.
+    # This ensures the database is ready before the bot logs in.
+    if config.DB_PATH is None:
+        raise ValueError("DB_PATH cannot be None.")
+    db_manager = await DatabaseManager.create(config.DB_PATH)
+    bot.db_manager = db_manager
 
+    async with bot:
         # Load all cogs (extensions) specified in the configuration file.
         for extension in config.COGS_TO_LOAD:
             try:
@@ -218,10 +255,29 @@ async def main() -> None:
         # Start the bot and connect to Discord.
         await bot.start(config.TOKEN)
 
+async def run_bot_with_handlers():
+    """
+    Wraps the main bot logic with signal and console handlers for graceful shutdown.
+    """
+    loop = asyncio.get_running_loop()
+
+    # Add signal handlers for SIGINT/SIGTERM on Linux for systemd integration.
+    if sys.platform != "win32":
+        for s in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(
+                s, lambda s=s: asyncio.create_task(shutdown_handler(s, bot))
+            )
+
+    # Start the console listener for the 'exit' command.
+    if sys.stdin and sys.stdin.isatty():
+        loop.create_task(console_input_handler(bot))
+
+    await main()
+
 if __name__ == '__main__':
     try:
-        # Run the main asynchronous function.
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        # Gracefully handle shutdown signals (e.g., Ctrl+C).
+        asyncio.run(run_bot_with_handlers())
+    finally:
+        # This message logs after the asyncio event loop has closed, ensuring
+        # it's the final log entry upon termination.
         logging.info("Sancho has shutdown!")

@@ -37,7 +37,26 @@ class DatabaseManager:
         self.db_path = db_path
         self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
 
-    async def setup_databases(self) -> None:
+    @classmethod
+    async def create(cls, db_path: str) -> "DatabaseManager":
+        """
+        Creates and initializes a new DatabaseManager instance.
+
+        This factory method handles the asynchronous setup, including creating
+        tables and loading initial configuration from the database.
+
+        Args:
+            db_path (str): The file path to the SQLite database.
+
+        Returns:
+            DatabaseManager: A fully initialized DatabaseManager instance.
+        """
+        manager = cls(db_path)
+        await manager._setup_databases()
+        await manager._load_skill_limit()
+        return manager
+
+    async def _setup_databases(self) -> None:
         """
         Ensures all necessary tables exist in the database. This is called once
         on bot startup. It creates tables for skills, reminders, user timezones,
@@ -97,7 +116,7 @@ class DatabaseManager:
             await db.commit()
             logger.info("All database tables initialized.")
 
-    async def load_skill_limit(self) -> None:
+    async def _load_skill_limit(self) -> None:
         """Loads the global skill limit from the database into the instance."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")

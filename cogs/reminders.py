@@ -40,8 +40,8 @@ class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.bot: SanchoBot = bot
-        self.db_manager: DatabaseManager = self.bot.db_manager
+        assert bot.db_manager is not None
+        self.db_manager: DatabaseManager = bot.db_manager
         # Stores active reminder tasks, mapping reminder ID to the asyncio.Task instance.
         # This allows us to cancel reminders if they are deleted or the cog is reloaded.
         self.scheduled_tasks: dict[int, asyncio.Task[None]] = {}

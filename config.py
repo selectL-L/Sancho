@@ -45,8 +45,6 @@ ENV_PATH = os.path.join(APP_PATH, 'info.env')
 LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
 DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
-STARTUP_GIF_PATH = os.path.join(ASSETS_PATH, 'startup.gif')
-SHUTDOWN_GIF_PATH = os.path.join(ASSETS_PATH, 'shutdown.gif')
 
 # --- Bot Configuration ---
 
