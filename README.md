@@ -1,4 +1,4 @@
-# Sancho (Now offically on V0.1!)
+# Sancho (Now offically on V0.2!)
 
 A local discord bot, mostly designed for my own small community, but does have flexibility to be used in your servers, or even forked for your own use!
 

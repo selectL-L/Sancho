@@ -412,7 +412,8 @@ class Math(BaseCog):
                         # For dice rolls, the result is a list of numbers to be summed.
                         # For coin flips, it's already a sum.
                         try:
-                            result_display = str(sum(map(int, result_str.split(','))))
+                            # The lambda is more explicit for the type checker and strip() handles potential whitespace.
+                            result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
                         except (ValueError, TypeError):
                              # This handles the coin flip case where the result is already a sum.
                             result_display = result_str.split(' ')[0]
