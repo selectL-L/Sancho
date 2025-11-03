@@ -21,6 +21,7 @@ import asyncio
 from typing import Optional
 import re as _re
 from utils.base_cog import BaseCog
+from utils.bot_class import SanchoBot
 
 # --- Secure Expression Evaluator ---
 
@@ -79,7 +80,7 @@ COIN_FLIP_REGEX = re.compile(r'(\d*)c', re.IGNORECASE)
 
 class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: SanchoBot):
         super().__init__(bot)
 
     async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str):
@@ -466,6 +467,6 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
 
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: SanchoBot) -> None:
     """Standard setup function for the cog."""
     await bot.add_cog(Math(bot))

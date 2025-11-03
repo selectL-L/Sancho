@@ -219,3 +219,6 @@ info.env
 /.github
 /.vscode
 /assets
+
+# Test folder
+/tests/

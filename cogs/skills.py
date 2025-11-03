@@ -38,8 +38,8 @@ class Skills(BaseCog):
 
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.bot: SanchoBot = bot
-        self.db_manager: DatabaseManager = self.bot.db_manager
+        assert bot.db_manager is not None
+        self.db_manager: DatabaseManager = bot.db_manager
 
     def _sync_evaluate_max_roll(self, dice_roll: str) -> int:
         """

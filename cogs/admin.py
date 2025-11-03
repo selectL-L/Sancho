@@ -74,10 +74,12 @@ class AdminCog(BaseCog):
     """
     Administrative and owner-only commands.
     """
+
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        self.bot: SanchoBot = bot
-        self.db_manager = self.bot.db_manager
+        # This assertion helps the type checker understand that db_manager will not be None.
+        assert bot.db_manager is not None
+        self.db_manager = bot.db_manager
 
     @commands.command(name="status", hidden=True)
     @commands.is_owner()

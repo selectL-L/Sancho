@@ -7,11 +7,8 @@ especially within cogs.
 """
 import discord
 from discord.ext import commands
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 import logging
-import os
-
-import config
 
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
@@ -20,74 +17,19 @@ if TYPE_CHECKING:
 
 class SanchoBot(commands.Bot):
     """
-    A custom bot class that extends `discord.ext.commands.Bot`.
-    This class is used to attach custom attributes like the database manager
-    to the bot instance, making it accessible from any cog.
+    A custom bot class that extends `discord.ext.commands.Bot` to include
+    additional attributes for managing the database and skill limits.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # These attributes are initialized after the bot object is created in main.py
-        # They provide easy access to the database path and manager from anywhere
-        # the bot object is available.
-        self.db_path: str = ""
-        if TYPE_CHECKING:
-            self.db_manager: DatabaseManager
-
-    async def on_ready(self) -> None:
-        """
-        Called when the bot is ready. Handles startup logging and sends a startup message.
-        """
-        if self.user:
-            logging.info(f'Logged in as {self.user} (ID: {self.user.id})')
-        else:
-            logging.error("Bot user information not available on ready.")
-
-        logging.info("Connected to the following guilds:")
-        for guild in self.guilds:
-            logging.info(f"- {guild.name} (ID: {guild.id})")
-
-        if config.STARTUP_CHANNEL_ID:
-            try:
-                channel = self.get_channel(config.STARTUP_CHANNEL_ID)
-                if isinstance(channel, discord.TextChannel):
-                    embed = discord.Embed(title="Good morning, sancho is awake!")
-                    
-                    if os.path.exists(config.STARTUP_GIF_PATH):
-                        file = discord.File(config.STARTUP_GIF_PATH, filename="startup.gif")
-                        embed.set_image(url="attachment://startup.gif")
-                        await channel.send(embed=embed, file=file)
-                    else:
-                        await channel.send(embed=embed)
-                else:
-                    logging.warning(
-                        f"Startup channel ID {config.STARTUP_CHANNEL_ID} is not a valid text channel or could not be found."
-                    )
-            except discord.HTTPException as e:
-                logging.error(f"Failed to send startup message: {e}")
+        self.db_manager: Optional["DatabaseManager"] = None
 
     async def close(self) -> None:
         """
-        Handles bot shutdown, preferably gracefully.
-        This sends a final message to a designated channel before closing the connection.
+        Overrides the default close method to ensure a clean shutdown.
+        The actual shutdown message is now handled by the signal handler
+        in `shutdown_logic.py`.
         """
-        logging.info("Attempting shutdown...")
-        if config.SHUTDOWN_CHANNEL_ID:
-            try:
-                channel = self.get_channel(config.SHUTDOWN_CHANNEL_ID)
-                if isinstance(channel, discord.TextChannel):
-                    embed = discord.Embed(title="Sancho is heading to bed, goodnight!")
-
-                    if os.path.exists(config.SHUTDOWN_GIF_PATH):
-                        file = discord.File(config.SHUTDOWN_GIF_PATH, filename="shutdown.gif")
-                        embed.set_image(url="attachment://shutdown.gif")
-                        await channel.send(embed=embed, file=file)
-                    else:
-                        await channel.send(embed=embed)
-                else:
-                    logging.warning(
-                        f"Shutdown channel ID {config.SHUTDOWN_CHANNEL_ID} is not a valid text channel or could not be found."
-                    )
-            except discord.HTTPException as e:
-                logging.error(f"Failed to send shutdown message: {e}")
-        
+        logging.info("Closing bot connection...")
         await super().close()
+        logging.info("Connection closed.")
