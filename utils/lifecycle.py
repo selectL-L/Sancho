@@ -112,4 +112,4 @@ async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot"):
     # Perform the graceful shutdown of the bot.
     logging.info("Closing connections...")
     await bot.close()
-    logging.info("Bot has been shut down gracefully.")
+    logging.info("Discord connection has been shut down gracefully.")
