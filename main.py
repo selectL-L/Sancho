@@ -180,32 +180,54 @@ async def on_message(message: discord.Message) -> None:
     query_lower = query.lower()
     logging.info(f"NLP query from '{message.author}': '{query}'")
 
-    # Iterate through the NLP command mappings defined in `config.py`.
-    for keywords, cog_name, method_name in config.NLP_COMMANDS:
-        # Check if any of the keywords for a command are present in the query.
-        if any(re.search(keyword, query_lower) for keyword in keywords):
-            cog = bot.get_cog(cog_name)
-            if not cog:
-                logging.error(f"NLP dispatcher: Cog '{cog_name}' is registered but not loaded.")
+    # --- NLP Command Matching Logic ---
+    group_winners = []
+    # Step 1: Find a "winner" from each command group based on definition order.
+    for group in config.NLP_COMMANDS:
+        for keywords, cog_name, method_name in group:
+            for keyword in keywords:
+                match = re.search(keyword, query_lower)
+                if match:
+                    # Found a match. This is the winner for its group.
+                    # Store it with its match position and break to the next group.
+                    group_winners.append((match.start(), cog_name, method_name))
+                    break  # Move to the next group
+            else:
+                # This 'else' belongs to the inner 'for' loop.
+                # If the inner loop completes without a 'break', continue to the next command.
                 continue
+            # This 'break' belongs to the outer 'for' loop.
+            # It executes if the inner loop was broken (i.e., a match was found).
+            break
 
-            # Get the method from the cog and ensure it's a callable coroutine.
-            method: Optional[Callable[..., Any]] = getattr(cog, method_name, None)
-            if not (method and asyncio.iscoroutinefunction(method)):
-                logging.error(f"NLP dispatcher: Method '{method_name}' in '{cog_name}' is not an awaitable coroutine.")
-                continue
+    # If no commands matched at all, do nothing.
+    if not group_winners:
+        return
 
-            try:
-                # Call the NLP handler method in the cog. All NLP handlers are
-                # expected to have the signature `(self, ctx, *, query)`.
-                await method(ctx, query=query)
-            except Exception as e:
-                # This is a fallback for unhandled errors within the NLP command itself.
-                logging.error(f"Error in NLP command '{cog_name}.{method_name}': {e}", exc_info=True)
-                await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
-            
-            # Stop after the first match to prevent multiple commands from firing.
-            return
+    # Step 2: Sort the group winners by their keyword's position in the query.
+    # The command that appeared earliest in the string wins overall.
+    group_winners.sort(key=lambda x: x[0])
+    
+    # Get the final winning command.
+    _, cog_name, method_name = group_winners[0]
+
+    cog = bot.get_cog(cog_name)
+    if not cog:
+        logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
+        return
+
+    method: Optional[Callable[..., Any]] = getattr(cog, method_name, None)
+    if not (method and asyncio.iscoroutinefunction(method)):
+        logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' is not an awaitable coroutine.")
+        return
+
+    try:
+        # Call the winning NLP handler.
+        await method(ctx, query=query)
+    except Exception as e:
+        logging.error(f"Error in NLP command '{cog_name}.{method_name}': {e}", exc_info=True)
+        await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
+
 
 # --- 4. Main Bot Execution ---
 
