@@ -27,42 +27,60 @@ class Fun(BaseCog):
         super().__init__(bot)
         # Load the 8-ball responses from the assets file upon initialization.
         self.responses = self._load_8ball_responses()
-        self.image_commands = {
+        self.fun_commands = {
             'sanitize': {
+                'type': 'image',
                 'file': 'sanitize.webp',
                 'error_message': "I couldn't find my sanitizer!"
+            },
+            'issues': {
+                'type': 'text',
+                'content': 'My issues page is [here](https://github.com/selectL-L/Sancho/issues) please write your suggestions and issues over there!'
             }
         }
 
-    async def image_command_handler(self, ctx: commands.Context, command: str):
+    async def fun_command_handler(self, ctx: commands.Context, command: str):
         """
-        A generic handler for commands that post an image.
+        A generic handler for "fun" commands that post content like images, text, or links.
 
         Args:
             ctx (commands.Context): The context of the command.
             command (str): The command that was triggered.
         """
-        command_details = self.image_commands.get(command)
+        command_details = self.fun_commands.get(command)
         if not command_details:
-            self.logger.error(f"Image command '{command}' has no image file mapping.")
+            self.logger.error(f"Fun command '{command}' has no configuration.")
             return
 
-        image_file = command_details.get('file')
-        if not image_file:
-            self.logger.error(f"Image command '{command}' is missing 'file' in its configuration.")
-            return
+        command_type = command_details.get('type')
 
         try:
-            file_path = os.path.join(config.ASSETS_PATH, image_file)
-            await ctx.reply(file=discord.File(file_path))
-            self.logger.info(f"Image command '{command}' used by {ctx.author}.")
+            if command_type == 'image':
+                image_file = command_details.get('file')
+                if not image_file:
+                    self.logger.error(f"Image command '{command}' is missing 'file' in its configuration.")
+                    return
+                
+                file_path = os.path.join(config.ASSETS_PATH, image_file)
+                await ctx.reply(file=discord.File(file_path))
+                self.logger.info(f"Image command '{command}' used by {ctx.author}.")
+
+            elif command_type == 'text':
+                content = command_details.get('content')
+                if not content:
+                    self.logger.error(f"Text command '{command}' is missing 'content' in its configuration.")
+                    return
+                
+                await ctx.reply(content)
+                self.logger.info(f"Text command '{command}' used by {ctx.author}.")
+
         except FileNotFoundError:
-            error_message = command_details.get('error_message', f"Image is missing for '{command}'. Please contact my author to fix it!")
+            error_message = command_details.get('error_message', f"Asset is missing for '{command}'. Please contact my author to fix it!")
             await ctx.reply(error_message)
-            self.logger.error(f"{image_file} not found for '{command}' command.")
+            self.logger.error(f"Asset not found for '{command}' command.")
         except Exception as e:
             await ctx.reply("Something went wrong. Please try again.")
-            self.logger.error(f"Error in image_command_handler for '{command}': {e}", exc_info=True)
+            self.logger.error(f"Error in fun_command_handler for '{command}': {e}", exc_info=True)
 
     def _load_8ball_responses(self) -> list[str]:
         """
@@ -140,7 +158,11 @@ class Fun(BaseCog):
 
     async def sanitize(self, ctx: commands.Context, *, query: str):
         """NLP handler for the sanitize command."""
-        await self.image_command_handler(ctx, 'sanitize')
+        await self.fun_command_handler(ctx, 'sanitize')
+
+    async def issues(self, ctx: commands.Context, *, query: str):
+        """NLP handler for the issues command."""
+        await self.fun_command_handler(ctx, 'issues')
 
 
 async def setup(bot: SanchoBot) -> None:
