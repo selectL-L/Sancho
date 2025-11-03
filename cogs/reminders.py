@@ -275,9 +275,14 @@ class Reminders(BaseCog):
         
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Further cleanup: if "me" or "to" are at the start, remove them as they are conversational padding.
-        sanitized_query = re.sub(r'^(me|to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
-        sanitized_query = re.sub(r'^(to)\s*', '', sanitized_query, flags=re.IGNORECASE).strip()
+        # Further cleanup: if "me to", "me", or "to" are at the start, remove them as they are conversational padding.
+        # We try to strip "me to" first, then fall back to stripping "me" or "to".
+        if sanitized_query.lower().startswith('me to '):
+            sanitized_query = sanitized_query[6:].lstrip()
+        elif sanitized_query.lower().startswith('me '):
+            sanitized_query = sanitized_query[3:].lstrip()
+        elif sanitized_query.lower().startswith('to '):
+            sanitized_query = sanitized_query[3:].lstrip()
 
         if not sanitized_query:
             return None
