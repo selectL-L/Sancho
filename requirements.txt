@@ -7,6 +7,9 @@ python-dotenv
 # Asynchronous driver for SQLite, used by the Reminders cog.
 aiosqlite
 
+# Asynchronous HTTP client, used by the Starboard cog.
+aiohttp
+
 # For parsing natural language dates and times in the Reminders cog.
 dateparser
 
