@@ -148,7 +148,7 @@ class Skills(BaseCog):
             aliases = []
             while True:
                 await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")
-                aliases_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
+                aliases_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
 
                 if aliases_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -175,7 +175,7 @@ class Skills(BaseCog):
             dice_roll = ""
             while True:
                 await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `1d20kh1`, `4c + 2`)")
-                roll_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                roll_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
                 if roll_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
