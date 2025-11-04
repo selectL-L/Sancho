@@ -136,11 +136,6 @@ class Skills(BaseCog):
                     return
                 
                 skill_name = name_msg.content.strip()
-
-                # Prevent using reserved keywords.
-                if skill_name.lower() == 'list':
-                    await ctx.send("`list` is a reserved keyword and cannot be used as a skill name. Please try again.")
-                    continue
                 
                 # Check for uniqueness.
                 if skill_name.lower() in existing_names_and_aliases:
@@ -249,7 +244,7 @@ class Skills(BaseCog):
             self.logger.error(f"Error creating skill for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while creating the skill.")
 
-    async def use_skill_nlp(self, ctx: commands.Context, *, query: str):
+    async def use_skill_nlp(self, ctx: commands.Context, query: str):
         """
         Handles the NLP intent for using a saved skill. This function:
         1.  Fetches all of the user's skills from the database.
@@ -279,28 +274,44 @@ class Skills(BaseCog):
         found_skill = None
         rest_of_query = ""
 
-        # The query from the NLP dispatcher includes "skill", which we can remove for cleaner parsing.
-        cleaned_query = query.replace("skill", "", 1).strip()
+        # The query from the NLP dispatcher includes the command. We need to find which
+        # trigger word was used and separate it from the rest of the query.
+        trigger_words = ["cast", "skill", "use"]
+        
+        # Find which trigger word the query starts with and remove it.
+        # This leaves us with the skill name and any modifiers.
+        temp_query = query.strip().lower()
+        cleaned_query = ""
+        for word in trigger_words:
+            # Check if the query starts with the trigger word, followed by a space or nothing.
+            if temp_query.startswith(word):
+                # Check for an exact match (e.g., "cast") or a match followed by a space.
+                if len(temp_query) == len(word) or temp_query[len(word)].isspace():
+                    cleaned_query = query.strip()[len(word):].lstrip()
+                    break
 
-        # 3. Find the skill in the query.
+        if not cleaned_query:
+            await ctx.send("You didn't specify a skill. Try `.s cast <skill_name>`.")
+            return
+
+        # 3. Find which of the user's skills the query starts with.
         for name in all_skill_names:
-            # Use word boundaries to prevent partial matches (e.g., matching 'fire' in 'fireball').
-            pattern = r'\b' + re.escape(name) + r'\b'
-            match = re.search(pattern, cleaned_query, re.IGNORECASE)
-            if match:
+            # Check if the cleaned query starts with the skill name, using word boundaries
+            # to ensure "slash" doesn't match "slashing".
+            if re.match(r'^' + re.escape(name) + r'\b', cleaned_query, re.IGNORECASE):
                 # Find the full skill dictionary object corresponding to the matched name/alias.
                 for s in user_skills:
-                    aliases = [alias.strip() for alias in s['aliases'].split('|')] if s['aliases'] else []
+                    aliases = [alias.strip().lower() for alias in s['aliases'].split('|')] if s['aliases'] else []
                     if s['name'].lower() == name.lower() or name.lower() in aliases:
                         found_skill = s
                         break
                 
                 # The rest of the query contains any modifiers (e.g., "+ 5").
-                rest_of_query = cleaned_query[match.end():].strip()
+                rest_of_query = cleaned_query[len(name):].strip()
                 break
         
         if not found_skill:
-            await ctx.send(f"I couldn't find a skill in your query: `{cleaned_query}`. Use `.sancho skill list` to see your skills.")
+            await ctx.send(f"I couldn't find the skill: `{cleaned_query}`. Use `.s list skills` to see your available skills.")
             return
 
         # 4. Get the Math cog to perform the roll.

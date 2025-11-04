@@ -32,6 +32,7 @@ from utils.logging_config import setup_logging
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.lifecycle import startup_handler, shutdown_handler
+from utils.extensions import discover_cogs
 
 # Set up logging immediately to capture any issues during startup.
 setup_logging()
@@ -248,6 +249,10 @@ async def console_input_handler(bot: SanchoBot):
                     logging.info("'exit' command received from console. Initiating shutdown.")
                     loop.create_task(shutdown_handler(signal.SIGINT, bot))
                     break
+                elif line.strip().lower() == 'reload':
+                    logging.info("'reload' command received from console. Reloading cogs...")
+                    # Create a task to run the reload concurrently.
+                    loop.create_task(reload_all_cogs(bot))
         else:
             # On Linux/macOS, use a non-blocking StreamReader for stdin.
             reader = asyncio.StreamReader()
@@ -262,12 +267,67 @@ async def console_input_handler(bot: SanchoBot):
                     logging.info("'exit' command received from console. Initiating shutdown.")
                     loop.create_task(shutdown_handler(signal.SIGINT, bot))
                     break
+                elif line.lower() == 'reload':
+                    logging.info("'reload' command received from console. Reloading cogs...")
+                    # Create a task to run the reload concurrently.
+                    loop.create_task(reload_all_cogs(bot))
 
     except asyncio.CancelledError:
         logging.info("Console input handler cancelled.")
     except Exception as e:
         # Log other potential errors, e.g., if stdin is closed unexpectedly.
         logging.error(f"Error in console input handler: {e}", exc_info=False)
+
+async def reload_all_cogs(bot: SanchoBot):
+    """
+    Asynchronously discovers and reloads all cogs, handling new, removed,
+    and updated extensions.
+    """
+    logging.info("Starting cog reload process...")
+
+    # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.math'})
+    loaded_cogs = set(bot.extensions.keys())
+    logging.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
+
+    # Discover the cogs currently present in the filesystem.
+    try:
+        discovered_cogs = set(discover_cogs(config.COGS_PATH))
+        logging.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
+    except Exception as e:
+        logging.error(f"Failed to discover cogs: {e}", exc_info=True)
+        return
+
+    # --- Determine which cogs to load, unload, and reload ---
+    cogs_to_load = discovered_cogs - loaded_cogs
+    cogs_to_unload = loaded_cogs - discovered_cogs
+    cogs_to_reload = loaded_cogs.intersection(discovered_cogs)
+
+    # --- Perform actions ---
+    # 1. Unload cogs that have been removed.
+    for extension in cogs_to_unload:
+        try:
+            await bot.unload_extension(extension)
+            logging.info(f"Successfully unloaded removed extension: {extension}")
+        except Exception:
+            logging.error(f'Failed to unload extension {extension}.', exc_info=True)
+
+    # 2. Load new cogs that have been added.
+    for extension in cogs_to_load:
+        try:
+            await bot.load_extension(extension)
+            logging.info(f"Successfully loaded new extension: {extension}")
+        except Exception:
+            logging.error(f'Failed to load new extension {extension}.', exc_info=True)
+
+    # 3. Reload existing cogs to apply any changes.
+    for extension in cogs_to_reload:
+        try:
+            await bot.reload_extension(extension)
+            logging.info(f"Successfully reloaded extension: {extension}")
+        except Exception:
+            logging.error(f'Failed to reload extension {extension}.', exc_info=True)
+
+    logging.info("Finished reloading cogs.")
 
 async def main() -> None:
     """
@@ -285,7 +345,9 @@ async def main() -> None:
 
     async with bot:
         # Load all cogs (extensions) specified in the configuration file.
-        for extension in config.COGS_TO_LOAD:
+        cogs_to_load = discover_cogs(config.COGS_PATH)
+        logging.info(f"Found {len(cogs_to_load)} cogs to load.")
+        for extension in cogs_to_load:
             try:
                 await bot.load_extension(extension)
                 logging.info(f"Successfully loaded extension: {extension}")

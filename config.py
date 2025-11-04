@@ -9,6 +9,7 @@ import os
 import sys
 import logging
 from dotenv import load_dotenv
+from utils.extensions import discover_cogs
 
 # --- Pathing ---
 
@@ -23,19 +24,6 @@ def get_application_path() -> str:
         return os.path.dirname(sys.executable)
     # Running as a script from source
     return os.path.dirname(os.path.abspath(__file__))
-
-def discover_cogs(cogs_path: str) -> list[str]:
-    """
-    Scans the `cogs` directory and returns a list of all valid cog modules
-    (e.g., 'cogs.math', 'cogs.reminders'). This allows for dynamic loading
-    of cogs without having to manually list them.
-    """
-    cogs = []
-    for filename in os.listdir(cogs_path):
-        # Ensure the file is a Python file and not a special file like __init__.py
-        if filename.endswith('.py') and not filename.startswith('__'):
-            cogs.append(f'cogs.{filename[:-3]}')
-    return cogs
 
 # --- Core Paths ---
 # Define all essential paths based on the application's root directory.
@@ -82,24 +70,6 @@ STARTUP_CHANNEL_ID = int(raw_startup_channel_id) if raw_startup_channel_id and r
 SHUTDOWN_CHANNEL_ID = int(raw_shutdown_channel_id) if raw_shutdown_channel_id and raw_shutdown_channel_id.isdigit() else None
 BOT_PREFIX = [".sancho ", ".s "]
 
-# --- Cog Loading ---
-# Dynamically discover all cogs to be loaded at runtime.
-# This list is also used by the build script to ensure all cogs are included.
-try:
-    COGS_TO_LOAD = discover_cogs(COGS_PATH)
-except FileNotFoundError:
-    # This fallback is for when the script is run in a context where the `cogs`
-    # directory isn't present (like in a bundled executable). The build script
-    # freezes the necessary modules, so this list acts as a placeholder.
-    COGS_TO_LOAD = [
-        'cogs.math',
-        'cogs.reminders',
-        'cogs.image',
-        'cogs.fun',
-        'cogs.skills',
-        'cogs.admin'
-    ]
-
 # --- Logging Configuration ---
 # These are default values that can be used by the logging setup function.
 LOG_LEVEL = logging.INFO
@@ -135,14 +105,13 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
     ],
     # --- Skills Group ---
     [
-        # Specific "delete" command that must come before the general "skill" command.
-        ((r'\b(delete|remove)\s.*skill\b',), 'Skills', 'delete_skill_nlp'),
-        # Specific "list" command.
-        ((r'\b(list|show|check)\s.*skill(s)?\b', r'\bskill\s.*(list|show|check)\b', r'\bskilllist\b'), 'Skills', 'list_skills_nlp'),
-        # Specific "save" command.
-        ((r'\bsave\s.*skill\b', r'\bskill\s.*save\b', r'create.*skill'), 'Skills', 'save_skill_nlp'),
-        # General "use skill" command, should be last in this group.
-        ((r'\bskill\b',), 'Skills', 'use_skill_nlp'),
+        # Management commands are checked first for specific verb-noun phrases.
+        ((r'\b(delete|remove)\s.*skill(s)?\b',), 'Skills', 'delete_skill_nlp'),
+        ((r'\b(list|check|show)\s.*skill(s)?\b',), 'Skills', 'list_skills_nlp'),
+        ((r'\b(save|create)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
+        
+        # Commands for casting or using skills.
+        ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
     ],
     # --- Reminders Group ---
     [
