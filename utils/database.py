@@ -107,6 +107,34 @@ class DatabaseManager:
                     key TEXT PRIMARY KEY,
                     value INTEGER NOT NULL
                 )''')
+
+            # Stores guild-specific configurations for features like the starboard.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS guild_config (
+                    guild_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    PRIMARY KEY(guild_id, key)
+                )''')
+
+            # Stores messages that have been posted to the starboard.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS starboard (
+                    original_message_id INTEGER PRIMARY KEY,
+                    starboard_message_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    starboard_reply_id INTEGER
+                )
+            ''')
+            
+            # --- Schema Migrations ---
+            # Add starboard_reply_id column if it doesn't exist (for older DBs)
+            try:
+                await db.execute("ALTER TABLE starboard ADD COLUMN starboard_reply_id INTEGER")
+                logger.info("Migrated starboard table: Added 'starboard_reply_id' column.")
+            except aiosqlite.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise # Re-raise if it's not the expected error
             
             # Set a default global skill limit if one isn't already in the database.
             cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")
@@ -132,6 +160,49 @@ class DatabaseManager:
             await db.commit()
         self.skill_limit = limit
         logger.info(f"Global skill limit set to {limit}.")
+
+    async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
+        """Sets a configuration value for a specific guild."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)",
+                (guild_id, key, value)
+            )
+            await db.commit()
+        logger.info(f"Guild config for {guild_id} set: {key} = {value}")
+
+    async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
+        """Gets a configuration value for a specific guild."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
+                (guild_id, key)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, starboard_reply_id: Optional[int] = None) -> None:
+        """Saves a new starboard entry to the database."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, starboard_reply_id) VALUES (?, ?, ?, ?)",
+                (original_message_id, starboard_message_id, guild_id, starboard_reply_id)
+            )
+            await db.commit()
+
+    async def get_starboard_entry(self, original_message_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieves a starboard entry by the original message's ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def remove_starboard_entry(self, original_message_id: int) -> None:
+        """Removes a starboard entry from the database."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            await db.commit()
 
     async def set_user_skill_limit(self, user_id: int, limit: int) -> None:
         """Sets a skill limit override for a specific user."""

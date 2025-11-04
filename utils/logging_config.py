@@ -21,7 +21,7 @@ class AsyncFileHandler(logging.Handler):
     def __init__(self, filename, mode='a', maxBytes=0, backupCount=0, encoding=None, delay=False):
         super().__init__()
         # The underlying handler is the synchronous one that does the actual file I/O.
-        self._handler = RotatingFileHandler(filename, mode, maxBytes, backupCount, encoding, delay)
+        self._handler = RotatingFileHandler(filename, mode, maxBytes, backupCount, encoding='utf-8', delay=delay)
 
     def setFormatter(self, fmt):
         """Set the formatter for this handler."""
