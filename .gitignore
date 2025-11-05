@@ -207,6 +207,7 @@ __marimo__/
 
 # Local files created/required by various tools
 info.env
+migrate_db.py
 
 # SQLite database files
 *.sqlite
