@@ -47,12 +47,13 @@ def check_and_create_env_file():
         with open(ENV_PATH, 'w') as f:
             f.write("DISCORD_TOKEN=\n")
             f.write("OWNER_ID=\n")
+            f.write("BOT_PREFIX=\n")
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
-        print("\nPlease open this file and add your bot's DISCORD_TOKEN.")
+        print("\nPlease open this file and add your bot's DISCORD_TOKEN and BOT_PREFIX.")
         print("The OWNER_ID is optional but recommended.")
-        sys.exit("Exiting: Bot token not configured.")
+        sys.exit("Exiting: Bot token and prefix not configured.")
 
 # Check for and/or create the .env file before trying to load from it.
 check_and_create_env_file()
@@ -62,13 +63,20 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 # --- Environment Variables ---
 TOKEN = os.getenv('DISCORD_TOKEN')
+BOT_PREFIX_RAW = os.getenv('BOT_PREFIX')
+
+if not TOKEN or not BOT_PREFIX_RAW:
+    print("DISCORD_TOKEN and BOT_PREFIX must be set in info.env.")
+    sys.exit("Exiting: Missing required configuration.")
+
+BOT_PREFIX = [p.strip() for p in BOT_PREFIX_RAW.split(',')]
+
 raw_owner_id = os.getenv('OWNER_ID')
 raw_startup_channel_id = os.getenv('STARTUP_CHANNEL_ID')
 raw_shutdown_channel_id = os.getenv('SHUTDOWN_CHANNEL_ID')
 OWNER_ID = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
 STARTUP_CHANNEL_ID = int(raw_startup_channel_id) if raw_startup_channel_id and raw_startup_channel_id.isdigit() else None
 SHUTDOWN_CHANNEL_ID = int(raw_shutdown_channel_id) if raw_shutdown_channel_id and raw_shutdown_channel_id.isdigit() else None
-BOT_PREFIX = [".sancho ", ".s "]
 
 # --- Logging Configuration ---
 # These are default values that can be used by the logging setup function.
