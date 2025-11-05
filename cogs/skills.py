@@ -361,7 +361,7 @@ class Skills(BaseCog):
 
         try:
             await ctx.send(
-                f"What would you like to edit for **{skill_to_edit['name'].title()}**?\n"
+                f"What would you like to edit for **{skill_to_edit['name']}**?\n"
                 "1. Name\n"
                 "2. Aliases\n"
                 "3. Dice Roll\n"
@@ -469,7 +469,7 @@ class Skills(BaseCog):
             if updates:
                 rows_affected = await self.db_manager.update_skill(skill_to_edit['id'], ctx.author.id, updates)
                 if rows_affected > 0:
-                    await ctx.send(f"✅ Successfully updated your skill: **{skill_to_edit['name'].title()}**.")
+                    await ctx.send(f"✅ Successfully updated your skill: **{skill_to_edit['name']}**.")
                     self.logger.info(f"User {ctx.author.id} updated skill '{skill_to_edit['name']}'.")
                 else:
                     await ctx.send("Something went wrong. I couldn't update that skill.")
@@ -544,7 +544,7 @@ class Skills(BaseCog):
         rows_affected = await self.db_manager.delete_skill(ctx.author.id, skill_to_delete['id'])
 
         if rows_affected > 0:
-            await ctx.send(f"✅ Successfully deleted your skill: **{skill_to_delete['name'].title()}**.")
+            await ctx.send(f"✅ Successfully deleted your skill: **{skill_to_delete['name']}**.")
             self.logger.info(f"User {ctx.author.id} deleted skill '{skill_to_delete['name']}'.")
         else:
             await ctx.send("Something went wrong. I couldn't delete that skill.")
