@@ -751,6 +751,7 @@ class Reminders(BaseCog):
 
         if tz_to_check in TIMEZONE_ABBREVIATIONS:
             final_tz_str = TIMEZONE_ABBREVIATIONS[tz_to_check]
+            display_tz_str = final_tz_str # Use the full name for display
         
         if not final_tz_str:
             match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check)
@@ -759,7 +760,7 @@ class Reminders(BaseCog):
                 hour = int(match.group(3))
                 # pytz uses Etc/GMT where the sign is inverted
                 final_tz_str = f"Etc/GMT{-hour if sign == '+' else +hour}"
-                display_tz_str = tz_to_check.upper()
+                display_tz_str = final_tz_str # Use the full name for display
 
         if not final_tz_str:
             final_tz_str = timezone_str
@@ -768,9 +769,14 @@ class Reminders(BaseCog):
         try:
             tz = pytz.timezone(final_tz_str)
             
-            # Use the display name for storage and confirmation.
-            zone_to_store = display_tz_str
+            # Use the resolved, full timezone name for storage.
+            zone_to_store = tz.zone
             
+            if not zone_to_store:
+                self.logger.error(f"Could not resolve a storable timezone name from '{final_tz_str}'.")
+                await ctx.send("I couldn't resolve that to a valid timezone name. Please try a different format.")
+                return
+
             await self.db_manager.set_user_timezone(ctx.author.id, zone_to_store)
             
             now = datetime.now(tz)
