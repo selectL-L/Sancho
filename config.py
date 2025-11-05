@@ -45,14 +45,22 @@ def check_and_create_env_file():
     if not os.path.exists(ENV_PATH):
         logging.warning(f"'{os.path.basename(ENV_PATH)}' not found. Creating a new one.")
         with open(ENV_PATH, 'w') as f:
-            f.write("DISCORD_TOKEN=\n")
-            f.write("OWNER_ID=\n")
+            f.write("# Discord Token for bot start up.\n")
+            f.write("DISCORD_TOKEN=\n\n")
+            f.write("# Bot Prefixes, ensure they're seperated with commas.\n")
+            f.write("BOT_PREFIX=\n\n")
+            f.write("# (Optional) Owner ID for owner specific commands.\n")
+            f.write("OWNER_ID=\n\n")
+            f.write("# (Optional) Channel ID for system messages.\n")
+            f.write("SYSTEM_CHANNEL_ID=\n\n")
+            f.write("# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.\n")
+            f.write("DEV_MODE=False\n")
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
-        print("\nPlease open this file and add your bot's DISCORD_TOKEN.")
+        print("\nPlease open this file and add your bot's DISCORD_TOKEN and BOT_PREFIX.")
         print("The OWNER_ID is optional but recommended.")
-        sys.exit("Exiting: Bot token not configured.")
+        sys.exit("Exiting: Bot token and prefix not configured.")
 
 # Check for and/or create the .env file before trying to load from it.
 check_and_create_env_file()
@@ -62,13 +70,23 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 # --- Environment Variables ---
 TOKEN = os.getenv('DISCORD_TOKEN')
+BOT_PREFIX_RAW = os.getenv('BOT_PREFIX')
+
+if not TOKEN or not BOT_PREFIX_RAW:
+    print("DISCORD_TOKEN and BOT_PREFIX must be set in info.env.")
+    sys.exit("Exiting: Missing required configuration.")
+
+# Sort prefixes by length descending to ensure longer prefixes are matched first
+# (e.g., '.mayors' before '.m') and add a trailing space to act as a delimiter.
+BOT_PREFIX = sorted([p.strip() + ' ' for p in BOT_PREFIX_RAW.split(',')], key=len, reverse=True)
+
 raw_owner_id = os.getenv('OWNER_ID')
-raw_startup_channel_id = os.getenv('STARTUP_CHANNEL_ID')
-raw_shutdown_channel_id = os.getenv('SHUTDOWN_CHANNEL_ID')
+raw_system_channel_id = os.getenv('SYSTEM_CHANNEL_ID')
 OWNER_ID = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
-STARTUP_CHANNEL_ID = int(raw_startup_channel_id) if raw_startup_channel_id and raw_startup_channel_id.isdigit() else None
-SHUTDOWN_CHANNEL_ID = int(raw_shutdown_channel_id) if raw_shutdown_channel_id and raw_shutdown_channel_id.isdigit() else None
-BOT_PREFIX = [".sancho ", ".s "]
+SYSTEM_CHANNEL_ID = int(raw_system_channel_id) if raw_system_channel_id and raw_system_channel_id.isdigit() else None
+
+raw_dev_mode = os.getenv('DEV_MODE', 'False')
+DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
 
 # --- Logging Configuration ---
 # These are default values that can be used by the logging setup function.
