@@ -55,18 +55,11 @@ if not config.OWNER_ID:
         "The bot will run, but owner-specific commands will not be available."
     )
 
-# Warn if the startup channel ID is missing.
-if not config.STARTUP_CHANNEL_ID:
+# Warn if the system channel ID is missing.
+if not config.SYSTEM_CHANNEL_ID:
     logging.warning(
-        f"STARTUP_CHANNEL_ID not found in '{os.path.basename(config.ENV_PATH)}'. "
-        "The bot will run, but the startup message will not be sent."
-    )
-
-# Warn if the shutdown channel ID is missing.
-if not config.SHUTDOWN_CHANNEL_ID:
-    logging.warning(
-        f"SHUTDOWN_CHANNEL_ID not found in '{os.path.basename(config.ENV_PATH)}'. "
-        "The bot will run, but shutdown/reboot messages will not be sent."
+        f"SYSTEM_CHANNEL_ID not found in '{os.path.basename(config.ENV_PATH)}'. "
+        "The bot will run, but startup/shutdown messages will not be sent."
     )
 
 # --- 2. Bot Initialization ---
@@ -79,6 +72,8 @@ intents.message_content = True
 
 # Create the custom bot instance.
 bot = SanchoBot(command_prefix=config.BOT_PREFIX, intents=intents)
+logging.info(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
+print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 # The db_manager will be attached in main() after async initialization.
 
 
@@ -149,6 +144,10 @@ async def on_message(message: discord.Message) -> None:
     """
     # Ignore messages from the bot itself to prevent loops.
     if message.author.bot:
+        return
+
+    # If in developer mode, only respond to the owner.
+    if config.DEV_MODE and message.author.id != config.OWNER_ID:
         return
 
     # First, allow `discord.py` to process the message to see if it's a

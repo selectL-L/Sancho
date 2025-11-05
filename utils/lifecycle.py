@@ -47,9 +47,9 @@ async def startup_handler(bot: "SanchoBot"):
     for guild in bot.guilds:
         logging.info(f"- {guild.name} (ID: {guild.id})")
 
-    if config.STARTUP_CHANNEL_ID:
+    if config.SYSTEM_CHANNEL_ID:
         try:
-            channel = bot.get_channel(config.STARTUP_CHANNEL_ID)
+            channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
                 embed = discord.Embed(title="Good morning, sancho is awake!")
                 
@@ -60,10 +60,10 @@ async def startup_handler(bot: "SanchoBot"):
                     await channel.send(embed=embed, file=file)
                 else:
                     await channel.send(embed=embed)
-                logging.info(f"Startup message sent to channel ID: {config.STARTUP_CHANNEL_ID}")
+                logging.info(f"Startup message sent to channel ID: {config.SYSTEM_CHANNEL_ID}")
             else:
                 logging.warning(
-                    f"Startup channel ID {config.STARTUP_CHANNEL_ID} is not a valid text channel or could not be found."
+                    f"System channel ID {config.SYSTEM_CHANNEL_ID} is not a valid text channel or could not be found."
                 )
         except discord.HTTPException as e:
             logging.error(f"Failed to send startup message: {e}")
@@ -93,8 +93,8 @@ async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot"):
         attachment_name = "shutdown.gif"
 
     # Send the shutdown message to the configured channel.
-    if config.SHUTDOWN_CHANNEL_ID:
-        channel = bot.get_channel(config.SHUTDOWN_CHANNEL_ID)
+    if config.SYSTEM_CHANNEL_ID:
+        channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
         if channel and isinstance(channel, discord.TextChannel):
             try:
                 if os.path.exists(gif_path):
@@ -103,11 +103,11 @@ async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot"):
                     await channel.send(embed=embed, file=file)
                 else:
                     await channel.send(embed=embed)
-                logging.info(f"Shutdown message sent to channel ID: {config.SHUTDOWN_CHANNEL_ID}")
+                logging.info(f"Shutdown message sent to channel ID: {config.SYSTEM_CHANNEL_ID}")
             except discord.HTTPException as e:
-                logging.error(f"Failed to send shutdown message to channel {config.SHUTDOWN_CHANNEL_ID}: {e}")
+                logging.error(f"Failed to send shutdown message to channel {config.SYSTEM_CHANNEL_ID}: {e}")
         else:
-            logging.warning(f"Shutdown channel ID {config.SHUTDOWN_CHANNEL_ID} configured but not found or not a text channel.")
+            logging.warning(f"System channel ID {config.SYSTEM_CHANNEL_ID} configured but not found or not a text channel.")
 
     # Perform the graceful shutdown of the bot.
     logging.info("Closing connections...")
