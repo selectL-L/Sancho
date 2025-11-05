@@ -35,7 +35,7 @@ class Starboard(BaseCog):
         
         return channel_id, emoji, threshold
 
-    @commands.group(name="starboard", invoke_without_command=True)
+    @commands.group(name="starboard", invoke_without_command=True, hidden=True)
     @commands.has_permissions(manage_guild=True)
     async def starboard_group(self, ctx: commands.Context):
         """Manages starboard settings."""
