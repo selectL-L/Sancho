@@ -63,16 +63,26 @@ class DatabaseManager:
         and configurations if they don't already exist.
         """
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON;")
             # Stores user-created skills with their dice rolls and aliases.
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS skills (
                     id INTEGER PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
-                    aliases TEXT,
                     dice_roll TEXT NOT NULL,
                     skill_type TEXT NOT NULL,
                     UNIQUE(user_id, name COLLATE NOCASE)
+                )
+            ''')
+            # Stores aliases for skills, linked by skill_id.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS skill_aliases (
+                    id INTEGER PRIMARY KEY,
+                    skill_id INTEGER NOT NULL,
+                    alias TEXT NOT NULL,
+                    FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                    UNIQUE(skill_id, alias COLLATE NOCASE)
                 )
             ''')
             # Stores reminders for users, including recurring ones.
@@ -87,6 +97,10 @@ class DatabaseManager:
                     is_recurring INTEGER NOT NULL DEFAULT 0,
                     recurrence_rule TEXT
                 )''')
+            # Add indexes for performance on the reminders table.
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders (reminder_time);')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);')
+
             # Stores the preferred timezone for each user.
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS user_timezones (
@@ -238,64 +252,94 @@ class DatabaseManager:
 
     async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str) -> None:
         """
-        Saves a new skill or updates an existing one for a user (upsert).
-        Uses `ON CONFLICT` to handle uniqueness for (user_id, name).
+        Saves a new skill and its aliases to the database.
+        This is a transactional operation to ensure data integrity.
         """
-        aliases_str = "|".join(aliases)
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO skills (user_id, name, aliases, dice_roll, skill_type)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, name) DO UPDATE SET
-                aliases=excluded.aliases,
-                dice_roll=excluded.dice_roll,
-                skill_type=excluded.skill_type
-                """,
-                (user_id, name, aliases_str, dice_roll, skill_type.lower())
-            )
+            await db.execute("PRAGMA foreign_keys = ON;")
+            async with db.execute("BEGIN") as cursor:
+                try:
+                    # Insert the main skill
+                    await cursor.execute(
+                        "INSERT INTO skills (user_id, name, dice_roll, skill_type) VALUES (?, ?, ?, ?)",
+                        (user_id, name, dice_roll, skill_type.lower())
+                    )
+                    skill_id = cursor.lastrowid
+
+                    # Insert all aliases
+                    if aliases and skill_id:
+                        await cursor.executemany(
+                            "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
+                            [(skill_id, alias) for alias in aliases]
+                        )
+                except aiosqlite.Error as e:
+                    await db.rollback()
+                    logger.error(f"Failed to save skill '{name}': {e}")
+                    raise
             await db.commit()
 
     async def get_skill(self, user_id: int, skill_name: str) -> Optional[Dict[str, Any]]:
         """
         Retrieves a skill by its name or one of its aliases for a specific user.
-        The search is case-insensitive and matches against the name column or within
-        the pipe-separated aliases string.
+        It joins the skills and skill_aliases tables to perform the search.
+        """
+        query = """
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+                   GROUP_CONCAT(sa.alias, '|') as aliases
+            FROM skills s
+            LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
+            WHERE s.user_id = ?
+              AND (s.name = ? COLLATE NOCASE OR s.id IN (
+                SELECT skill_id FROM skill_aliases WHERE alias = ? COLLATE NOCASE
+              ))
+            GROUP BY s.id
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            skill_name_lower = skill_name.lower()
-            # This query checks the name and also if the skill_name is present within the pipe-separated aliases string.
-            # `INSTR` checks for a substring, and pipes are added to ensure whole-word matching.
-            cursor = await db.execute(
-                """
-                SELECT * FROM skills
-                WHERE user_id = ? AND (name = ? COLLATE NOCASE OR INSTR('|' || aliases || '|', '|' || ? || '|'))
-                """,
-                (user_id, skill_name, skill_name_lower)
-            )
+            cursor = await db.execute(query, (user_id, skill_name, skill_name))
             row = await cursor.fetchone()
             return dict(row) if row else None
 
     async def get_user_skills(self, user_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all skills for a specific user, ordered by name."""
+        """Retrieves all skills for a specific user, including their aliases."""
+        query = """
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+                   GROUP_CONCAT(sa.alias, '|') as aliases
+            FROM skills s
+            LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
+            WHERE s.user_id = ?
+            GROUP BY s.id
+            ORDER BY s.name ASC
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM skills WHERE user_id = ? ORDER BY name ASC", (user_id,))
+            cursor = await db.execute(query, (user_id,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
     async def get_all_skills(self) -> List[Dict[str, Any]]:
-        """Retrieves all skills for all users, ordered by user_id."""
+        """Retrieves all skills for all users, including their aliases."""
+        query = """
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+                   GROUP_CONCAT(sa.alias, '|') as aliases
+            FROM skills s
+            LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
+            GROUP BY s.id
+            ORDER BY s.user_id, s.name ASC
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM skills ORDER BY user_id, name ASC")
+            cursor = await db.execute(query)
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
     async def delete_skill(self, user_id: int, skill_id: int) -> int:
-        """Deletes a skill by its unique ID for a specific user."""
+        """
+        Deletes a skill by its unique ID for a specific user.
+        The `ON DELETE CASCADE` constraint will automatically delete its aliases.
+        """
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON;")
             cursor = await db.execute("DELETE FROM skills WHERE id = ? AND user_id = ?", (skill_id, user_id))
             await db.commit()
             return cursor.rowcount
@@ -303,28 +347,45 @@ class DatabaseManager:
     async def update_skill(self, skill_id: int, user_id: int, updates: Dict[str, Any]) -> int:
         """
         Updates specific fields of a skill for a user.
-
-        Args:
-            skill_id (int): The ID of the skill to update.
-            user_id (int): The ID of the user who owns the skill.
-            updates (Dict[str, Any]): A dictionary of columns to update and their new values.
-
-        Returns:
-            int: The number of rows affected.
+        If aliases are updated, it replaces all existing aliases for the skill.
         """
         if not updates:
             return 0
 
-        set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
-        params = list(updates.values())
-        params.extend([skill_id, user_id])
-
-        query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
-
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(query, params)
+            await db.execute("PRAGMA foreign_keys = ON;")
+            rows_affected = 0
+            async with db.execute("BEGIN") as cursor:
+                try:
+                    # Handle alias updates separately
+                    if 'aliases' in updates:
+                        new_aliases = updates.pop('aliases')
+                        # Delete old aliases
+                        await cursor.execute("DELETE FROM skill_aliases WHERE skill_id = ?", (skill_id,))
+                        # Insert new ones
+                        if new_aliases:
+                            await cursor.executemany(
+                                "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
+                                [(skill_id, alias) for alias in new_aliases]
+                            )
+
+                    # Handle other field updates
+                    if updates:
+                        set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
+                        params = list(updates.values())
+                        params.extend([skill_id, user_id])
+                        query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
+                        await cursor.execute(query, params)
+                    
+                    rows_affected = cursor.rowcount
+
+                except aiosqlite.Error as e:
+                    await db.rollback()
+                    logger.error(f"Failed to update skill {skill_id}: {e}")
+                    raise
             await db.commit()
-            return cursor.rowcount
+            return rows_affected
+
 
     async def add_reminder(
         self, user_id: int, channel_id: int, reminder_time: int, message: str,
