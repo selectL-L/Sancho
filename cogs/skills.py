@@ -415,14 +415,14 @@ class Skills(BaseCog):
                         is_valid = True
                         seen_aliases = set()
                         for alias in new_aliases:
-                            if alias in existing_names_and_aliases or alias in seen_aliases:
+                            if alias.lower() in existing_names_and_aliases or alias.lower() in seen_aliases:
                                 await ctx.send(f"The alias `{alias}` is already in use or is duplicated. Please try again.")
                                 is_valid = False
                                 break
-                            seen_aliases.add(alias)
+                            seen_aliases.add(alias.lower())
                         
                         if is_valid:
-                            updates['aliases'] = "|".join(new_aliases)
+                            updates['aliases'] = new_aliases
                             break
 
                 case '3':  # Edit Dice Roll
