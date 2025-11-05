@@ -154,19 +154,19 @@ class Skills(BaseCog):
                     await ctx.send("Skill creation cancelled.")
                     return
                 
-                aliases_raw = aliases_msg.content.strip().lower()
+                aliases_raw = aliases_msg.content.strip()
                 is_valid = True
-                if aliases_raw != 'none':
+                if aliases_raw.lower() != 'none':
                     aliases = [alias.strip() for alias in aliases_raw.split('|') if alias.strip()]
                     
                     # Check for duplicates within the input and against existing names.
                     newly_added_names = {skill_name.lower()}
                     for alias in aliases:
-                        if alias in existing_names_and_aliases or alias in newly_added_names:
+                        if alias.lower() in existing_names_and_aliases or alias.lower() in newly_added_names:
                             await ctx.send(f"The name or alias `{alias}` is already in use or is duplicated in your input. Please try again.")
                             is_valid = False
                             break
-                        newly_added_names.add(alias)
+                        newly_added_names.add(alias.lower())
                 
                 if is_valid:
                     break # Aliases are valid.
@@ -332,6 +332,156 @@ class Skills(BaseCog):
         # We pass `skill_info` so the response can be customized with the skill's name.
         await math_cog.roll(ctx, query=final_roll_query, skill_info=found_skill)
 
+    async def edit_skill_nlp(self, ctx: commands.Context, *, query: str):
+        """
+        Initiates an interactive conversation to edit an existing skill.
+        The user can choose to edit the skill's name, aliases, dice roll, or type.
+        """
+        match = re.search(r'\d+', query)
+        if not match:
+            await ctx.send("Please specify the number of the skill you want to edit. Use `.sancho list skills` to see the numbers.")
+            return
+
+        try:
+            skill_num_to_edit = int(match.group(0))
+        except (ValueError, IndexError):
+            await ctx.send("Invalid skill number provided.")
+            return
+
+        user_skills = await self.db_manager.get_user_skills(ctx.author.id)
+
+        if not (1 <= skill_num_to_edit <= len(user_skills)):
+            await ctx.send(f"Invalid number. You only have {len(user_skills)} skills.")
+            return
+
+        skill_to_edit = user_skills[skill_num_to_edit - 1]
+
+        def check(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            await ctx.send(
+                f"What would you like to edit for **{skill_to_edit['name'].title()}**?\n"
+                "1. Name\n"
+                "2. Aliases\n"
+                "3. Dice Roll\n"
+                "4. Type\n"
+                "Please respond with the number of your choice, or say `exit` to cancel."
+            )
+            choice_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+            choice = choice_msg.content.strip()
+
+            if choice.lower() in ['exit', 'cancel']:
+                await ctx.send("Edit cancelled.")
+                return
+
+            updates: dict[str, str | list[str]] = {}
+            
+            existing_names_and_aliases = set()
+            for skill in user_skills:
+                if skill['id'] == skill_to_edit['id']:
+                    continue
+                existing_names_and_aliases.add(skill['name'].lower())
+                if skill['aliases']:
+                    for alias in skill['aliases'].split('|'):
+                        if alias.strip():
+                            existing_names_and_aliases.add(alias.strip().lower())
+
+            match choice:
+                case '1':  # Edit Name
+                    while True:
+                        await ctx.send("What should the new name be?")
+                        name_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                        new_name = name_msg.content.strip()
+                        if new_name.lower() in ['exit', 'cancel']:
+                            await ctx.send("Edit cancelled.")
+                            return
+                        if new_name.lower() in existing_names_and_aliases:
+                            await ctx.send(f"The name `{new_name}` is already in use. Please choose another.")
+                            continue
+                        updates['name'] = new_name
+                        break
+
+                case '2':  # Edit Aliases
+                    while True:
+                        await ctx.send("What should the new aliases be? Separate with `|` or say `none`.")
+                        aliases_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
+                        raw_aliases = aliases_msg.content.strip()
+                        if raw_aliases.lower() in ['exit', 'cancel']:
+                            await ctx.send("Edit cancelled.")
+                            return
+                        
+                        new_aliases = [a.strip() for a in raw_aliases.split('|') if a.strip()] if raw_aliases.lower() != 'none' else []
+                        is_valid = True
+                        seen_aliases = set()
+                        for alias in new_aliases:
+                            if alias in existing_names_and_aliases or alias in seen_aliases:
+                                await ctx.send(f"The alias `{alias}` is already in use or is duplicated. Please try again.")
+                                is_valid = False
+                                break
+                            seen_aliases.add(alias)
+                        
+                        if is_valid:
+                            updates['aliases'] = "|".join(new_aliases)
+                            break
+
+                case '3':  # Edit Dice Roll
+                    while True:
+                        await ctx.send(f"What is the new dice roll equation for `{skill_to_edit['name']}`?")
+                        roll_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
+                        new_roll = roll_msg.content.strip()
+                        if new_roll.lower() in ['exit', 'cancel']:
+                            await ctx.send("Edit cancelled.")
+                            return
+
+                        dice_match = DICE_NOTATION_REGEX.search(new_roll)
+                        coin_match = COIN_FLIP_REGEX.search(new_roll)
+                        if not dice_match and not coin_match:
+                            await ctx.send("That doesn't look like a valid dice or coin roll. Please include notation like `d20` or `4c`.")
+                            continue
+                        
+                        max_roll = await self._evaluate_max_roll(new_roll)
+                        if max_roll > 2000:
+                            await ctx.send(f"The maximum possible result of that roll is **{max_roll}**, which exceeds the limit of **2000**.")
+                            continue
+                        
+                        updates['dice_roll'] = new_roll
+                        break
+
+                case '4':  # Edit Type
+                    while True:
+                        await ctx.send("Should this be an `attack` or `defense` skill?")
+                        type_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
+                        new_type = type_msg.content.strip().lower()
+                        if new_type in ['exit', 'cancel']:
+                            await ctx.send("Edit cancelled.")
+                            return
+                        if new_type not in ['attack', 'defense']:
+                            await ctx.send("Invalid type. Please choose `attack` or `defense`.")
+                            continue
+                        updates['skill_type'] = new_type
+                        break
+                
+                case _:
+                    await ctx.send("Invalid choice. Edit cancelled.")
+                    return
+
+            if updates:
+                rows_affected = await self.db_manager.update_skill(skill_to_edit['id'], ctx.author.id, updates)
+                if rows_affected > 0:
+                    await ctx.send(f"✅ Successfully updated your skill: **{skill_to_edit['name'].title()}**.")
+                    self.logger.info(f"User {ctx.author.id} updated skill '{skill_to_edit['name']}'.")
+                else:
+                    await ctx.send("Something went wrong. I couldn't update that skill.")
+            else:
+                await ctx.send("No changes were made.")
+
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Edit cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error editing skill for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred while editing the skill.")
+
     async def list_skills_nlp(self, ctx: commands.Context, *, query: str):
         """
         Handles the NLP intent for listing all of a user's saved skills.
@@ -350,7 +500,7 @@ class Skills(BaseCog):
         
         skill_fields = []
         for i, skill in enumerate(skills, 1):
-            name = f"**{i}. {skill['name'].title()}**"
+            name = f"**{i}. {skill['name']}**"
             value = []
             if skill['aliases']:
                 value.append(f"(aliases: {skill['aliases']})")

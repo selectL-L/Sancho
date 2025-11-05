@@ -72,7 +72,7 @@ class DatabaseManager:
                     aliases TEXT,
                     dice_roll TEXT NOT NULL,
                     skill_type TEXT NOT NULL,
-                    UNIQUE(user_id, name)
+                    UNIQUE(user_id, name COLLATE NOCASE)
                 )
             ''')
             # Stores reminders for users, including recurring ones.
@@ -241,7 +241,7 @@ class DatabaseManager:
         Saves a new skill or updates an existing one for a user (upsert).
         Uses `ON CONFLICT` to handle uniqueness for (user_id, name).
         """
-        aliases_str = "|".join(aliases).lower()
+        aliases_str = "|".join(aliases)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
@@ -252,7 +252,7 @@ class DatabaseManager:
                 dice_roll=excluded.dice_roll,
                 skill_type=excluded.skill_type
                 """,
-                (user_id, name.lower(), aliases_str, dice_roll, skill_type.lower())
+                (user_id, name, aliases_str, dice_roll, skill_type.lower())
             )
             await db.commit()
 
@@ -270,9 +270,9 @@ class DatabaseManager:
             cursor = await db.execute(
                 """
                 SELECT * FROM skills
-                WHERE user_id = ? AND (name = ? OR INSTR('|' || aliases || '|', '|' || ? || '|'))
+                WHERE user_id = ? AND (name = ? COLLATE NOCASE OR INSTR('|' || aliases || '|', '|' || ? || '|'))
                 """,
-                (user_id, skill_name_lower, skill_name_lower)
+                (user_id, skill_name, skill_name_lower)
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
@@ -297,6 +297,32 @@ class DatabaseManager:
         """Deletes a skill by its unique ID for a specific user."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("DELETE FROM skills WHERE id = ? AND user_id = ?", (skill_id, user_id))
+            await db.commit()
+            return cursor.rowcount
+
+    async def update_skill(self, skill_id: int, user_id: int, updates: Dict[str, Any]) -> int:
+        """
+        Updates specific fields of a skill for a user.
+
+        Args:
+            skill_id (int): The ID of the skill to update.
+            user_id (int): The ID of the user who owns the skill.
+            updates (Dict[str, Any]): A dictionary of columns to update and their new values.
+
+        Returns:
+            int: The number of rows affected.
+        """
+        if not updates:
+            return 0
+
+        set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
+        params = list(updates.values())
+        params.extend([skill_id, user_id])
+
+        query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(query, params)
             await db.commit()
             return cursor.rowcount
 

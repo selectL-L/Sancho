@@ -125,6 +125,7 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
     [
         # Management commands are checked first for specific verb-noun phrases.
         ((r'\b(delete|remove)\s.*skill(s)?\b',), 'Skills', 'delete_skill_nlp'),
+        ((r'\b(edit|change|update)\s.*skill(s)?\b',), 'Skills', 'edit_skill_nlp'),
         ((r'\b(list|check|show)\s.*skill(s)?\b',), 'Skills', 'list_skills_nlp'),
         ((r'\b(save|create)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
         
