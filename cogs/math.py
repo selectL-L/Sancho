@@ -443,15 +443,15 @@ class Math(BaseCog):
                     target_user = ctx.message.reference.resolved.author
                     if target_user != ctx.author and not target_user.bot:
                         if skill_info['skill_type'] == 'attack':
-                            header = f"{ctx.author.mention} attacked {target_user.mention} with **{skill_info['name'].title()}**"
+                            header = f"{ctx.author.mention} attacked {target_user.mention} with **{skill_info['name']}**"
                         else: # defense
-                            header = f"{ctx.author.mention} defended against {target_user.mention} with **{skill_info['name'].title()}**"
+                            header = f"{ctx.author.mention} defended against {target_user.mention} with **{skill_info['name']}**"
                         response_parts.append(header)
                         response_parts.append(f"`{display_formula}`")
                 
                 # Case 2: Skill used without a target.
                 else:
-                    response_parts.append(f"**{skill_info['name'].title()}**")
+                    response_parts.append(f"**{skill_info['name']}**")
                     response_parts.append(f"`{display_formula}`")
 
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
