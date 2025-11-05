@@ -21,7 +21,7 @@ from typing import Optional
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 
-class Image(BaseCog):
+class ImageCog(BaseCog):
     """A cog for handling image manipulation commands."""
 
     def __init__(self, bot: SanchoBot):
@@ -147,4 +147,4 @@ class Image(BaseCog):
 
 async def setup(bot: SanchoBot):
     """Sets up the Image cog."""
-    await bot.add_cog(Image(bot))
+    await bot.add_cog(ImageCog(bot))

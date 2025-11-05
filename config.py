@@ -126,8 +126,8 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Management commands are checked first for specific verb-noun phrases.
         ((r'\b(delete|remove)\s.*skill(s)?\b',), 'Skills', 'delete_skill_nlp'),
         ((r'\b(edit|change|update)\s.*skill(s)?\b',), 'Skills', 'edit_skill_nlp'),
-        ((r'\b(list|check|show)\s.*skill(s)?\b',), 'Skills', 'list_skills_nlp'),
-        ((r'\b(save|create)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
+        ((r'\b(list|check|show)\s.*skill(s)?\b', r'^\s*skills?\s*$'), 'Skills', 'list_skills_nlp'),
+        ((r'\b(save|create|make)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
         
         # Commands for casting or using skills.
         ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
@@ -147,9 +147,9 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
     # --- Image Group ---
     [
         # Resize image
-        ((r'\bresize\b', r'\bscale\b'), 'Image', 'resize'),
+        ((r'\bresize\b', r'\bscale\b'), 'ImageCog', 'resize'),
         # Convert image format
-        ((r'\bconvert\b', r'\bchange to\b'), 'Image', 'convert'),
+        ((r'\bconvert\b', r'\bchange to\b'), 'ImageCog', 'convert'),
     ],
     # --- Fun Group ---
     [

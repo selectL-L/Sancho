@@ -63,8 +63,8 @@ class Help(BaseCog):
         embed = discord.Embed(
             title="Hello, I'm Sancho!",
             description=(
-                "I can respond to two kinds of instructions: **standard commands** and **natural language** hopefully the majority will be natural!\n\n"
-                f"My standard command prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`."
+                "I can respond to two kinds of instructions: **standard commands** and **natural language** though the majority will be natural! (hopefully)\n\n"
+                f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),
             color=discord.Color.gold()
         )
@@ -79,39 +79,92 @@ class Help(BaseCog):
         for cog in cogs_with_commands:
             command_list = [f"`{command.name}`" for command in cog.get_commands() if not command.hidden]
             if command_list:
-                embed.add_field(
-                    name=f"**{cog.qualified_name} Commands!**",
-                    value=' '.join(command_list),
-                    inline=False
-                )
+                # Join commands and check length. Split into multiple fields if necessary.
+                value_str = ' '.join(command_list)
+                if len(value_str) > 1024:
+                    # Split the command list into chunks that fit within the limit
+                    chunks = []
+                    current_chunk = ""
+                    for command in command_list:
+                        if len(current_chunk) + len(command) + 1 > 1024:
+                            chunks.append(current_chunk)
+                            current_chunk = command
+                        else:
+                            if current_chunk:
+                                current_chunk += " "
+                            current_chunk += command
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    
+                    for i, chunk in enumerate(chunks):
+                        embed.add_field(
+                            name=f"**{cog.qualified_name} Commands! (Part {i+1})**",
+                            value=chunk,
+                            inline=False
+                        )
+                else:
+                    embed.add_field(
+                        name=f"**{cog.qualified_name} Commands!**",
+                        value=value_str,
+                        inline=False
+                    )
         
-        # This section is crucial for explaining the bot's primary functionality. (Giving examples helps a lot)
+        # This section is crucial for explaining the bot's primary functionality.
+        # Split into multiple fields to avoid exceeding character limits.
         embed.add_field(
-            name="**Natural Language Commands!**",
+            name="**Natural Language Commands: Reminders**",
             value=(
-                "You don't always need a strict command! I can understand requests like these:\n\n"
-                "**Reminders**\n"
                 "• `Sancho remind me` (starts interactive setup)\n"
                 "• `Sancho remind me to check the oven in 15 minutes`\n"
                 "• `Sancho set a reminder to walk the dog every day at 8am`\n"
-                "• `Sancho show my reminders` or `delete reminder 2`\n\n"
-                "**Dice & Math**\n"
+                "• `Sancho show my reminders` or `delete reminder 2`\n"
+                "• `Sancho timezone PST|GMT|EST et cetera`\n\n"
+                "DISCLAIMER: Reminders are a work in progress and may not work perfectly yet."
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="**Natural Language Commands: Dice & Math**",
+            value=(
                 "• `Sancho roll 2d20+5 with advantage`\n"
-                "• `Sancho calculate (5 * 10) / 2`\n\n"
-                "**Skills**\n"
-                "• `Sancho save a new skill` (starts interactive setup)\n"
-                "• `Sancho use my fireball skill + 3`\n"
-                "• `Sancho list my skills`\n\n"
+                "• `Sancho calculate (5 * 10) / 2`"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="**Natural Language Commands: Skills**",
+            value=(
+                "• `Sancho delete|remove skill (index number)`\n"
+                "• `Sancho edit|change|update skill (index number)`\n"
+                "• `Sancho list|check|show my skills (you can also just say Sancho skills)`\n"
+                "• `Sancho save|create|make skill` (starts interactive setup)\n"
+                "• `Sancho cast|use fireball + 3`"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="**Natural Language Commands: Images & Fun**",
+            value=(
                 "**Images** (You can reply to or attach an image!)\n"
                 "• `Sancho resize this image to 50%`\n"
                 "• `Sancho convert this image to webp`\n\n"
                 "**Fun**\n"
                 "• `Sancho 8ball should I have another coffee?`\n"
                 "• `Sancho bod` (for the LOR experience)\n"
+                "• `Sancho sanitize`\n"
+                "• `Sancho issues (to helpfully direct people to sancho's issues page)`"
             ),
             inline=False
         )
-        embed.set_footer(text=f"Use `{example_prefix.strip()} help [command]` for more info on a specific standard command.")
+        embed.set_footer(
+            text=(
+                f"Use `{example_prefix.strip()} help [command]` for more info on a specific standard (Non-NLP!!!) command.\n"
+                "Please be patient with both me and my creator as things change and improve!"
+            )
+        )
         await ctx.send(embed=embed)
 
     async def send_command_help(self, ctx: commands.Context, command: commands.Command):
