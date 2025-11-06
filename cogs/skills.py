@@ -296,9 +296,12 @@ class Skills(BaseCog):
 
         # 3. Find which of the user's skills the query starts with.
         for name in all_skill_names:
-            # Check if the cleaned query starts with the skill name, using word boundaries
-            # to ensure "slash" doesn't match "slashing".
-            if re.match(r'^' + re.escape(name) + r'\b', cleaned_query, re.IGNORECASE):
+            # Check if the cleaned query starts with the skill name.
+            # We use a regex that checks for the name followed by either a word boundary
+            # (like a space, or the end of the string) or a non-word character that is
+            # part of the name itself. This handles names with punctuation like "attack!".
+            match = re.match(r'^' + re.escape(name) + r'(?=\b|\s|$)', cleaned_query, re.IGNORECASE)
+            if match:
                 # Find the full skill dictionary object corresponding to the matched name/alias.
                 for s in user_skills:
                     aliases = [alias.strip().lower() for alias in s['aliases'].split('|')] if s['aliases'] else []
