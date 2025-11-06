@@ -294,35 +294,32 @@ class Reminders(BaseCog):
         Returns a tuple of (message, time_string, recurrence_rule).
         """
         # --- Stage 1: Initial Sanitization ---
-        # The NLP command registry has already matched one of the trigger words (e.g., "remind", "reminder").
-        # This first pass removes that trigger phrase from the beginning of the query.
         trigger_patterns = [
-            r'\bremind\b',
-            r'\breminder\b',
-            r'\bremember\b',
-            r'set\s+a\s+reminder',
-            r'set\s.*reminder'
+            r'\bremind\b', r'\breminder\b', r'\bremember\b',
+            r'set\s+a\s+reminder', r'set\s.*reminder'
         ]
-        # Combine patterns into a single regex to find the first match at the start of the string.
-        # This ensures we only strip the part that triggered the command.
         combined_pattern = r'^\s*(' + '|'.join(f'({p})' for p in trigger_patterns) + r')\s*'
-        
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Further cleanup: if "me to", "me", or "to" are at the start, remove them as they are conversational padding.
-        # We try to strip "me to" first, then fall back to stripping "me" or "to".
-        if sanitized_query.lower().startswith('me to '):
-            sanitized_query = sanitized_query[6:].lstrip()
-        elif sanitized_query.lower().startswith('me '):
-            sanitized_query = sanitized_query[3:].lstrip()
-        elif sanitized_query.lower().startswith('to '):
-            sanitized_query = sanitized_query[3:].lstrip()
+        # Further cleanup of conversational padding using a match-case like structure
+        # to prevent fall-through errors.
+        words = sanitized_query.lower().split()
+        if len(words) > 1:
+            match words[0]:
+                case "me":
+                    if words[1] == "to":
+                        sanitized_query = sanitized_query[6:].lstrip() # "me to"
+                    else:
+                        sanitized_query = sanitized_query[3:].lstrip() # "me"
+                case "to":
+                    sanitized_query = sanitized_query[3:].lstrip()
+                case "for":
+                    sanitized_query = sanitized_query[4:].lstrip()
 
         if not sanitized_query:
             return None
 
-        # --- Stage 2: Detect and Extract Recurrence ---
-        # Look for patterns like "every day", "every 2 weeks", "every monday" to create an RRULE string.
+        # --- Stage 2: Detect and Extract Recurrence (High Priority) ---
         recurrence_rule = None
         recurrence_match = re.search(
             r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
@@ -354,58 +351,96 @@ class Reminders(BaseCog):
 
             if recurrence_rule:
                 self.logger.info(f"Detected recurrence rule: {recurrence_rule}")
-                # Remove the recurrence part from the query to not confuse dateparser for the first occurrence.
-                sanitized_query = sanitized_query.replace(recurrence_match.group(0), '', 1).strip()
-                # If a recurrence rule is found, the remaining text is the message, and the time is 'now'.
-                if sanitized_query:
-                    self.logger.info(f"Parsed with recurrence. Message: '{sanitized_query}', Time: 'now', Recurrence: {recurrence_rule}")
-                    return (sanitized_query, "now", recurrence_rule)
+                message = sanitized_query.replace(recurrence_match.group(0), '', 1).strip()
+                # For recurring reminders, the first occurrence starts relative to 'now'.
+                return (message, "now", recurrence_rule)
 
-        # --- Stage 3: Intelligent Split with Keywords ---
-        # Try to split the message and time string based on common keywords like "in", "at", "on".
-        # We use rpartition to split on the *last* occurrence, which is more likely to be the time.
-        time_keywords = [' on ', ' at ', ' in ', ' for ', ' next ', ' tomorrow', ' tonight']
-        for keyword in time_keywords:
-            if keyword in sanitized_query:
-                message_part, sep, time_part = sanitized_query.rpartition(keyword)
-                time_string = sep.strip() + ' ' + time_part.strip()
-                
-                # Validate that the extracted part is a parsable date to avoid false positives.
-                # This is run in a thread to prevent blocking the event loop.
-                if await asyncio.to_thread(dateparser.parse, time_string, settings={'PREFER_DATES_FROM': 'future'}):
-                    self.logger.info(f"Parsed via keyword split. Message: '{message_part}', Time: '{time_string}', Recurrence: {recurrence_rule}")
-                    return (message_part.strip(), time_string, recurrence_rule)
+        # --- Stage 3: Detect and Extract High-Priority Time Modifiers ---
+        time_modifier = ""
+        modifier_patterns = [
+            r'\btomorrow\b',
+            r'\btonight\b',
+            r'\bnext\s+(week|month|year)\b',
+            r'\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b'
+        ]
+        modifier_regex = re.compile('|'.join(modifier_patterns), re.IGNORECASE)
+        
+        def find_and_remove_modifier(q: str) -> tuple[str, str]:
+            match = modifier_regex.search(q)
+            if match:
+                modifier = match.group(0)
+                self.logger.info(f"Found time modifier: '{modifier}'")
+                # Remove the modifier from the query to prevent it from being parsed again.
+                # Use word boundaries to avoid partial matches in words.
+                q = re.sub(r'\b' + re.escape(modifier) + r'\b', '', q, count=1, flags=re.IGNORECASE).strip()
+                return q, modifier
+            return q, ""
 
-        # --- Stage 4: Time at the Front ---
-        # Check if the beginning of the query is a time string (e.g., "in 5 minutes do the laundry").
+        sanitized_query, time_modifier = find_and_remove_modifier(sanitized_query)
+
+        # --- Stage 4: Sliding Window Search for Specific Time ---
         words = sanitized_query.split()
-        for i in range(len(words), 0, -1):
-            potential_time = ' '.join(words[:i])
-            # Add a guard against short, non-numeric strings being parsed as time.
-            if len(potential_time) <= 2 and not any(char.isdigit() for char in potential_time):
-                continue
-            if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
-                message_part = ' '.join(words[i:])
-                self.logger.info(f"Parsed with time at front. Message: '{message_part}', Time: '{potential_time}', Recurrence: {recurrence_rule}")
-                return (message_part.strip() or None, potential_time, recurrence_rule)
+        parsed_time = ""
+        message_part = sanitized_query  # Default message is the whole query
 
-        # --- Stage 5: Time at the Back ---
-        # Check if the end of the query is a time string (e.g., "do the laundry in 5 minutes").
+        # Check from the end of the string first
         for i in range(len(words)):
+            # Create a phrase from the end of the sentence.
             potential_time = ' '.join(words[i:])
-            # Add a guard against short, non-numeric strings being parsed as time.
-            if len(potential_time) <= 2 and not any(char.isdigit() for char in potential_time):
+            
+            # Guard against parsing single, non-numeric words as a time (e.g., "laundry").
+            if len(potential_time.split()) == 1 and not any(char.isdigit() for char in potential_time):
+                 continue
+
+            # Prevent dateparser from greedily consuming "to" or "for"
+            if potential_time.lower().endswith(("to", "for")):
                 continue
+
+            # Asynchronously check if the phrase is a valid time.
             if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
                 message_part = ' '.join(words[:i])
-                self.logger.info(f"Parsed with time at back. Message: '{message_part}', Time: '{potential_time}', Recurrence: {recurrence_rule}")
-                return (message_part.strip() or None, potential_time, recurrence_rule)
+                parsed_time = potential_time
+                self.logger.info(f"Parsed specific time at back: '{parsed_time}'")
+                break
+        
+        # If no time found at the back, check from the front
+        if not parsed_time:
+            for i in range(len(words), 0, -1):
+                potential_time = ' '.join(words[:i])
+                if len(potential_time.split()) == 1 and not any(char.isdigit() for char in potential_time):
+                    continue
+                if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
+                    message_part = ' '.join(words[i:])
+                    parsed_time = potential_time
+                    self.logger.info(f"Parsed specific time at front: '{parsed_time}'")
+                    break
 
-        # --- Stage 6: Fallback ---
+        # --- Stage 5: Combine Modifier and Parsed Time ---
+        final_time_str = f"{time_modifier} {parsed_time}".strip()
+        final_message = message_part.strip()
+
+        # --- Stage 6: Final Message Sanitization ---
+        # After parsing, clean up any leftover conjunctions or filler words.
+        junk_words = ['to', 'that', 'for', 'and', 'then', 'now', 'a', "from"]
+        words = final_message.split()
+        
+        # Remove leading junk words
+        while words and words[0].lower() in junk_words:
+            words.pop(0)
+        
+        # Remove trailing junk words
+        while words and words[-1].lower() in junk_words:
+            words.pop()
+            
+        final_message = ' '.join(words)
+
+        # --- Stage 7: Fallback ---
         # If no time is found anywhere, assume the whole query is the message.
-        # This will trigger the interactive flow later where the bot asks for the time.
-        self.logger.warning(f"Could not find a time string in '{sanitized_query}'. Assuming it's all a message.")
-        return (sanitized_query, "", recurrence_rule)
+        if not final_time_str:
+            self.logger.warning(f"Could not find a time string in '{query}'. Assuming it's all a message.")
+            return (query, "", None)
+
+        return (final_message or None, final_time_str, None)
 
     async def _interactive_reminder_flow(self, ctx: 'commands.Context', initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
         """Guides the user through creating a reminder interactively."""

@@ -132,17 +132,17 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Commands for casting or using skills.
         ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
     ],
-    # --- Reminders Group ---
+    # --- Reminders Group --- (note: unlike other groups, this one ENFORCES matching at the front to prevent polluting the query)
     [
         # Deleting reminders (catches "delete/remove reminder 1", etc.)
         # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
-        ((r'\b(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
+        ((r'^\s*(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
         # Setting reminders
-        ((r'\bremind\b', r'\breminder\b', r'\bremember\b', r'set\s+a\s+reminder', r'set\s.*reminder'), 'Reminders', 'remind'),
+        ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
         # Checking reminders (catches "check my reminders", "show reminders", etc.)
-        ((r'\b(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
+        ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
         # Setting user timezone
-        ((r'\b(set|change)\s.*timezone\b', r'\b(set|change)\s.*tz\b', r'\btz\b'), 'Reminders', 'set_timezone_nlp'),
+        ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
     ],
     # --- Image Group ---
     [
