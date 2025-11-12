@@ -212,10 +212,19 @@ class Math(BaseCog):
     async def calculate(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all basic math calculation requests."""
         try:
-            # Clean the query for evaluation: standardize spacing, replace 'x' with '*', and '^' with '**'.
-            processed_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
-            # Remove conversational keywords to isolate the mathematical expression.
-            processed_query = re.sub(r'\b(calculate|calc|compute|evaluate)\b', '', processed_query).strip()
+            # Standardize the query: lowercase, collapse whitespace, and handle common operator aliases.
+            original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+
+            # --- Extract Relevant Parts of the Expression ---
+            # We extract only numbers and valid mathematical operators, ignoring all other text.
+            number_pattern = r'\d+(\.\d+)?'
+            operator_pattern = r'\*\*|[+\-*\/()]'
+            
+            full_pattern = re.compile(f'({number_pattern}|{operator_pattern})')
+            
+            tokens = full_pattern.findall(original_query)
+            # The findall with multiple groups returns tuples, so we get the first element.
+            processed_query = "".join([match[0] for match in tokens])
 
             if not processed_query:
                 await ctx.send("Please provide a mathematical expression to calculate.")
@@ -356,32 +365,49 @@ class Math(BaseCog):
         try:
             # --- 1. Sanitize and Detect Keywords ---
             # Standardize the query for easier parsing.
-            processed_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+            original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
             
-            # Check for advantage/disadvantage keywords.
-            adv = bool(re.search(r'\b(advantage|adv)\b', processed_query))
-            dis = bool(re.search(r'\b(disadvantage|dis)\b', processed_query))
+            # Check for advantage/disadvantage keywords. These are handled separately
+            # from the main expression.
+            adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
+            dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
             
             # Extract SP value for coin flips, defaulting to 50 if not specified.
             sp = 50 # Default to 50%
-            sp_match = re.search(r'\b(at)\s+(\d+)\b', processed_query)
+            sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
             if sp_match:
                 sp = int(sp_match.group(2))
                 if not (0 <= sp <= 100):
                     raise ValueError("SP must be between 0 and 100.")
-                processed_query = processed_query.replace(sp_match.group(0), '', 1)
+                original_query = original_query.replace(sp_match.group(0), '', 1)
 
-            # Remove conversational and keyword padding.
-            processed_query = re.sub(r'\broll\b|\ba\b|\b(with\s+)?(advantage|adv|disadvantage|dis)\b', '', processed_query).strip()
+            # --- 2. Extract Relevant Parts of the Expression ---
+            # Instead of removing keywords, we now extract only the parts we need:
+            # - Dice notation (e.g., 2d20, d6, 1d10kh1)
+            # - Coin notation (e.g., 3c, c)
+            # - Numbers (including floating point)
+            # - Basic math operators (+, -, *, /, parentheses)
+            # The power operator `**` must be checked for before `*`.
+            dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
+            coin_pattern = r'(\d*)c'
+            number_pattern = r'\d+(\.\d+)?'
+            operator_pattern = r'\*\*|[+\-*\/()]'
+            
+            # Combine all patterns into one to find all relevant tokens.
+            full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
+            
+            tokens = full_pattern.findall(original_query)
+            # The findall with multiple groups returns tuples, so we need to get the first element of each.
+            processed_query = "".join([match[0] for match in tokens])
 
             if adv and dis:
                 await ctx.send("Cannot roll with both advantage and disadvantage.")
                 return
 
-            # --- 2. Pre-process Parentheses ---
+            # --- 3. Pre-process Parentheses ---
             processed_query = await self._preprocess_parentheses(processed_query)
 
-            # --- 3. Resolve All Rolls (Coins then Dice) ---
+            # --- 4. Resolve All Rolls (Coins then Dice) ---
             # The query is processed in stages. First, all coin notations are found,
             # rolled, and replaced with their numeric result. Then, the same is done for dice.
             roll_descriptions = []
@@ -399,7 +425,7 @@ class Math(BaseCog):
                 roll_descriptions.append(description)
                 final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
-            # --- 4. Final Calculation ---
+            # --- 5. Final Calculation ---
             # If the query is empty after parsing rolls (e.g., user just said "roll 1d20"),
             # we display the result directly without using the safe evaluator.
             if not final_query.strip():
@@ -432,7 +458,7 @@ class Math(BaseCog):
             result = safe_eval_math(final_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
 
-            # --- 5. Format Response ---
+            # --- 6. Format Response ---
             response_parts = []
             # If the roll was triggered by a skill, add special formatting to the message.
             if skill_info:

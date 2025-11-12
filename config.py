@@ -117,7 +117,7 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Limbus Company coin flip
         ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
         # Dice rolling (should be checked before basic calculation)
-        ((r'\broll\b', r'\bdice\b', r'd\d'), 'Math', 'roll'),
+        ((r'\broll\b', r'\bdice\b'), 'Math', 'roll'),
         # Basic calculation
         ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     ],
@@ -142,7 +142,7 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Checking reminders (catches "check my reminders", "show reminders", etc.)
         ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
         # Setting user timezone
-        ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
+        ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*timezone\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
     ],
     # --- Image Group ---
     [
