@@ -10,6 +10,7 @@ import random
 import os
 import time
 import asyncio
+import re
 from typing import TYPE_CHECKING, cast, Dict
 
 from utils.base_cog import BaseCog
@@ -292,9 +293,19 @@ class Fun(BaseCog):
             ctx (commands.Context): The context of the command.
             query (str): The user's question for the 8-ball.
         """
+        # The NLP dispatcher passes the whole message. We need to strip the trigger phrase.
+        # This pattern is the same as the one in config.py
+        trigger_pattern = r'8\s?-?ball'
+        cleaned_query = re.sub(rf'^\s*{trigger_pattern}\s*', '', query, flags=re.IGNORECASE).strip()
+
+        if not cleaned_query:
+            await ctx.reply("I cannot intuit from nothing!")
+            self.logger.info(f"8ball command used by {ctx.author} with no actual query.")
+            return
+
         response = random.choice(self.responses)
         await ctx.reply(response)
-        self.logger.info(f"8ball command used by {ctx.author} with query '{query}'. Response: '{response}'")
+        self.logger.info(f"8ball command used by {ctx.author} with query '{cleaned_query}'. Response: '{response}'")
 
     async def sanitize(self, ctx: commands.Context, *, query: str):
         """NLP handler for the sanitize command."""
