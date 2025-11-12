@@ -70,36 +70,9 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 
-def get_case_insensitive_prefix(bot: SanchoBot, message: discord.Message) -> list[str]:
-    """
-    A callable that returns a list of prefixes for the bot to respond to,
-    making them case-insensitive.
-    """
-    # This function is called for every message, so we generate the prefixes on the fly.
-    # We match the message content's lowercase version against the bot's configured prefixes.
-    content_lower = message.content.lower()
-    
-    # Find all prefixes that match the start of the message.
-    # This ensures that if a user types `.Mayors`, it matches `.mayors `.
-    matching_prefixes = [p for p in config.BOT_PREFIX if content_lower.startswith(p.lower())]
-    
-    # If there are matches, we need to return the *original cased* prefix
-    # from the message content so that discord.py can correctly parse the command.
-    # For example, if message is ".M ping" and a prefix is ".m ", we should return ".M ".
-    if matching_prefixes:
-        # The prefixes are sorted by length, so the first match is the longest one.
-        # This correctly handles cases like '.mayors' before '.m'.
-        longest_match = matching_prefixes[0]
-        # Return the slice of the original message that corresponds to the prefix length.
-        return [message.content[:len(longest_match)]]
-
-    # `when_mentioned_or` will handle mentions if no other prefix matches.
-    return commands.when_mentioned(bot, message)
-
 # Create the custom bot instance.
-# We use a callable for the command_prefix to make it case-insensitive.
+# The prefix logic is now handled inside the SanchoBot class.
 bot = SanchoBot(
-    command_prefix=get_case_insensitive_prefix,
     intents=intents,
     case_insensitive=True  # This makes the command name (e.g., 'ping') case-insensitive
 )
