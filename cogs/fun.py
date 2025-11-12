@@ -212,16 +212,15 @@ class Fun(BaseCog):
 
         # Main cooldown (12 hours), only applies if the user is not in an active chain.
         # An active chain means they are within their 20-minute session.
-        if current_chain == 0 and time_since_last_use < 12 * 60 * 60 and not await self.bot.is_owner(ctx.author):
+        if current_chain == 0 and time_since_last_use < 12 * 60 * 60 and not (config.DEV_MODE and await self.bot.is_owner(ctx.author)):
             remaining_time = (12 * 60 * 60) - time_since_last_use
             hours, remainder = divmod(remaining_time, 3600)
             minutes, _ = divmod(remainder, 60)
-            await ctx.reply(f"BOD is on cooldown. You can use it again in {int(hours)}h {int(minutes)}m.")
+            await ctx.reply(f"Yujin is tired. You can use BOD again in {int(hours)}h {int(minutes)}m.")
             return
 
         # --- Start a new session if applicable ---
         if user_id not in self.bod_timeout_tasks and current_chain == 0:
-            await ctx.reply("Your 20-minute `bod` session has begun. Roll now!")
             task = asyncio.create_task(self._handle_bod_session_timeout(user_id, ctx.channel.id))
             self.bod_timeout_tasks[user_id] = task
             self.logger.info(f"BOD session started for user {user_id}. Creating timeout task.")
@@ -234,8 +233,8 @@ class Fun(BaseCog):
             return
 
         try:
-            # Owner gets guaranteed success until chain 21 for testing purposes.
-            if await self.bot.is_owner(ctx.author) and current_chain < 21:
+            # Owner gets guaranteed success until chain 21 for testing purposes, only in DEV_MODE.
+            if config.DEV_MODE and await self.bot.is_owner(ctx.author) and current_chain < 21:
                 roll_result = 4
             else:
                 roll_result = await math_cog.get_roll_result("1d4")
@@ -261,16 +260,20 @@ class Fun(BaseCog):
                     # The task is removed from the dict in the finally block of the task handler
 
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_fail.jpg')
-                reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
-                self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
-
+                
                 if current_chain > 0:
+                    reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
+                    self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
+
                     user_best = await db_manager.get_user_bod_best(user_id)
                     if current_chain > user_best:
                         await db_manager.update_bod_leaderboard(user_id, ctx.author.display_name, current_chain)
-                        reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}!**"
+                        reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}! Yujin would be proud!**"
                     else:
-                        reply_message += f" Your personal best is {user_best}."
+                        reply_message += f"\nYour personal best is {user_best}. Yujin is now heading to sleep!"
+                else:
+                    reply_message = f"You rolled a {roll_result}. Yujin has collapsed!"
+                    self.logger.info(f"BOD chain for user {user_id} failed at chain 0 with a roll of {roll_result}.")
                 
                 # Reset chain and start the 12-hour cooldown from now.
                 await db_manager.update_bod_usage(user_id, int(current_time), 0, ctx.channel.id) 
@@ -389,6 +392,65 @@ class Fun(BaseCog):
 
         self.has_cleaned_up_chains = True
         self.logger.info("Finished cleaning up all active BOD chains.")
+
+    async def bod_leaderboard(self, ctx: commands.Context, query: str):
+        """
+        Displays the top 10 BOD chain scores from the leaderboard.
+        """
+        db_manager = self.bot.db_manager
+        if not db_manager:
+            await ctx.reply("The database is not available at the moment. Please try again later.")
+            self.logger.error("DatabaseManager not found in bot instance.")
+            return
+
+        leaderboard_data = await db_manager.get_bod_leaderboard()
+
+        if not leaderboard_data:
+            await ctx.reply("The BOD leaderboard is currently empty. Be the first to set a score!")
+            return
+
+        embed = discord.Embed(
+            title="BOD Chain Leaderboard",
+            description="The highest chain achieved by the most dedicated Yujin fans.",
+            color=discord.Color.gold()
+        )
+
+        # Format the leaderboard string
+        board_string = ""
+        for i, entry in enumerate(leaderboard_data[:10]):
+            rank = i + 1
+            user_name = entry['user_name']
+            chain = entry['best_chain']
+            
+            if rank == 1:
+                board_string += f"🥇 **{user_name}** - Chain of **{chain}**\n"
+            elif rank == 2:
+                board_string += f"🥈 **{user_name}** - Chain of **{chain}**\n"
+            elif rank == 3:
+                board_string += f"🥉 **{user_name}** - Chain of **{chain}**\n"
+            else:
+                board_string += f"**{rank}.** {user_name} - Chain of {chain}\n"
+        
+        embed.add_field(name="Top 10", value=board_string, inline=False)
+        
+        # Add user's rank if they are not in the top 10
+        user_id = ctx.author.id
+        user_in_top_10 = any(entry['user_name'] == ctx.author.display_name for entry in leaderboard_data[:10])
+
+        if not user_in_top_10:
+            for i, entry in enumerate(leaderboard_data):
+                if entry['user_name'] == ctx.author.display_name:
+                    rank = i + 1
+                    chain = entry['best_chain']
+                    embed.add_field(
+                        name="Your Rank",
+                        value=f"You are rank **#{rank}** with a chain of **{chain}**.",
+                        inline=False
+                    )
+                    break
+
+        await ctx.reply(embed=embed)
+        self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
 
 
 async def setup(bot: SanchoBot) -> None:
