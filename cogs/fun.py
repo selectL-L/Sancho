@@ -8,7 +8,9 @@ import discord
 from discord.ext import commands
 import random
 import os
-from typing import TYPE_CHECKING, cast
+import time
+import asyncio
+from typing import TYPE_CHECKING, cast, Dict
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -38,6 +40,8 @@ class Fun(BaseCog):
                 'content': 'My issues page is [here](https://github.com/selectL-L/Sancho/issues) please write your suggestions and issues over there!'
             }
         }
+        self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
+        self.has_cleaned_up_chains = False
 
     async def fun_command_handler(self, ctx: commands.Context, command: str):
         """
@@ -103,17 +107,125 @@ class Fun(BaseCog):
             self.logger.error("8ball.txt not found. 8ball command will not work.")
             return ["I seem to have lost my magic 8-ball..."]
 
+    async def cog_unload(self):
+        """Clean up tasks when the cog is unloaded."""
+        self.logger.info(f"Unloading Fun cog. Cancelling {len(self.bod_timeout_tasks)} BOD timeout tasks.")
+        
+        # Create a list of tasks to cancel
+        tasks_to_cancel = list(self.bod_timeout_tasks.values())
+        if not tasks_to_cancel:
+            return
+
+        # Cancel all tasks
+        for task in tasks_to_cancel:
+            task.cancel()
+
+        # Wait for all tasks to acknowledge cancellation
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        
+        self.logger.info("All BOD timeout tasks have been successfully cancelled and cleaned up.")
+
+    async def _handle_bod_session_timeout(self, user_id: int, channel_id: int):
+        """
+        A background task that waits 20 minutes, ending a user's BOD session 
+        if they are still in an active chain.
+        """
+        try:
+            await asyncio.sleep(20 * 60)
+            
+            db_manager = self.bot.db_manager
+            if not db_manager:
+                self.logger.error(f"BOD session timeout: DatabaseManager not found for user {user_id}.")
+                return
+
+            usage_data = await db_manager.get_bod_usage(user_id)
+            current_chain = usage_data.get('current_chain', 0)
+
+            # If the user is no longer in a chain, their session ended naturally (by failing a roll).
+            if current_chain == 0:
+                self.logger.info(f"BOD session for user {user_id} ended naturally. Timeout task complete.")
+                return
+
+            # If they are still in a chain, the session has timed out.
+            channel = self.bot.get_channel(channel_id)
+            user = self.bot.get_user(user_id)
+            user_name = user.display_name if user else "A user"
+
+            reply_message = f"Your 20-minute `bod` session has ended. Your final chain was {current_chain}."
+            user_best = await db_manager.get_user_bod_best(user_id)
+            if current_chain > user_best:
+                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
+                reply_message += f"\n**Congratulations! You set a new personal best!**"
+            else:
+                reply_message += f" Your personal best remains {user_best}."
+            
+            # Reset chain, start the 12-hour cooldown from now.
+            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id) 
+            
+            if channel and isinstance(channel, discord.TextChannel):
+                await channel.send(f"<@{user_id}>, {reply_message}")
+            else:
+                self.logger.error(f"BOD session timeout: Could not find channel {channel_id} to notify user {user_id}.")
+
+            self.logger.info(f"BOD session for user {user_id} timed out with a chain of {current_chain}.")
+
+        except asyncio.CancelledError:
+            # This is expected when the cog is reloaded or the user fails a roll.
+            self.logger.info(f"BOD session task for user {user_id} was cancelled.")
+            # No need to re-raise, as we are handling cleanup explicitly.
+
+        finally:
+            # Always remove the task from the tracking dictionary upon completion or cancellation.
+            if user_id in self.bod_timeout_tasks:
+                self.bod_timeout_tasks.pop(user_id, None)
+                self.logger.info(f"Removed BOD task for user {user_id} from tracking.")
+
     async def bod(self, ctx: commands.Context, query: str):
         """
         A special command that rolls a 1d4. On a result of 1-3, it sends a
         common "fail" image. On a 4, it sends a rare "complete" image.
-        This command depends on the `Math` cog to perform the dice roll.
-
-        Args:
-            ctx (commands.Context): The context of the command.
-            query (str): The user's query, which is not used in this command.
+        This command has a 12-hour cooldown. Once off cooldown, the user has a
+        20-minute session to build their chain.
         """
-        # Get the Math cog to perform the dice roll.
+        BOD_CHAIN_DIALOGUE = [
+            "First…", "Second…", "Third…", "Fourth…", "Fifth…",
+            "Sixth…", "Seventh…", "Eighth…", "Ninth…", "Tenth…",
+            "Eleventh…", "Twelfth…", "Thirteenth…", "Fourteenth…", "Fifteenth…",
+            "Sixteenth…", "Seventeenth…", "Eighteenth…", "Nineteenth…",
+            "Twentieth, and final… Be not afraid."
+        ]
+
+        user_id = ctx.author.id
+        db_manager = self.bot.db_manager
+        if not db_manager:
+            await ctx.reply("The database is not available at the moment. Please try again later.")
+            self.logger.error("DatabaseManager not found in bot instance.")
+            return
+
+        # --- Check Cooldowns ---
+        usage_data = await db_manager.get_bod_usage(user_id)
+        last_used = usage_data.get('last_used_timestamp', 0)
+        current_chain = usage_data.get('current_chain', 0)
+        current_time = time.time()
+        time_since_last_use = current_time - last_used
+
+        # Main cooldown (12 hours), only applies if the user is not in an active chain.
+        # An active chain means they are within their 20-minute session.
+        if current_chain == 0 and time_since_last_use < 12 * 60 * 60 and not await self.bot.is_owner(ctx.author):
+            remaining_time = (12 * 60 * 60) - time_since_last_use
+            hours, remainder = divmod(remaining_time, 3600)
+            minutes, _ = divmod(remainder, 60)
+            await ctx.reply(f"BOD is on cooldown. You can use it again in {int(hours)}h {int(minutes)}m.")
+            return
+
+        # --- Start a new session if applicable ---
+        if user_id not in self.bod_timeout_tasks and current_chain == 0:
+            await ctx.reply("Your 20-minute `bod` session has begun. Roll now!")
+            task = asyncio.create_task(self._handle_bod_session_timeout(user_id, ctx.channel.id))
+            self.bod_timeout_tasks[user_id] = task
+            self.logger.info(f"BOD session started for user {user_id}. Creating timeout task.")
+
+        # --- Perform Dice Roll ---
         math_cog = cast("Math", self.bot.get_cog('Math'))
         if not math_cog:
             await ctx.reply("I can't find my dice right now. Please try again later.")
@@ -121,26 +233,54 @@ class Fun(BaseCog):
             return
 
         try:
-            # Use the Math cog's internal method to get a clean roll result.
-            if await self.bot.is_owner(ctx.author):
+            # Owner gets guaranteed success until chain 21 for testing purposes.
+            if await self.bot.is_owner(ctx.author) and current_chain < 21:
                 roll_result = 4
             else:
                 roll_result = await math_cog.get_roll_result("1d4")
             
-            # Send a different image based on the roll result.
-            if roll_result <= 3:
-                file_path = os.path.join(config.ASSETS_PATH, 'bod_fail.jpg')
-                await ctx.reply(f"You rolled a {roll_result}", file=discord.File(file_path))
-            else:
+            if roll_result == 4:
+                # Successful roll, continue the chain
+                new_chain = current_chain + 1
+                # Update timestamp, chain, and the last channel used.
+                await db_manager.update_bod_usage(user_id, int(current_time), new_chain, ctx.channel.id)
+
+                dialogue = (BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(BOD_CHAIN_DIALOGUE)
+                            else f"You've reached an unheard of chain of {new_chain}! The angels sing your name.")
+
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_complete.jpg')
-                await ctx.reply(f"You rolled a {roll_result}!", file=discord.File(file_path))
+                await ctx.reply(
+                    f"You rolled a 4! **{dialogue}** Your chain is now {new_chain}. Roll again!",
+                    file=discord.File(file_path)
+                )
+            else:
+                # Failed roll, break the chain and end the session
+                if user_id in self.bod_timeout_tasks:
+                    self.bod_timeout_tasks[user_id].cancel()
+                    # The task is removed from the dict in the finally block of the task handler
+
+                file_path = os.path.join(config.ASSETS_PATH, 'bod_fail.jpg')
+                reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
+                self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
+
+                if current_chain > 0:
+                    user_best = await db_manager.get_user_bod_best(user_id)
+                    if current_chain > user_best:
+                        await db_manager.update_bod_leaderboard(user_id, ctx.author.display_name, current_chain)
+                        reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}!**"
+                    else:
+                        reply_message += f" Your personal best is {user_best}."
+                
+                # Reset chain and start the 12-hour cooldown from now.
+                await db_manager.update_bod_usage(user_id, int(current_time), 0, ctx.channel.id) 
+                await ctx.reply(reply_message, file=discord.File(file_path))
 
         except FileNotFoundError as e:
             await ctx.reply("I couldn't find the right Yujin. Please tell my author to fix it!")
             self.logger.error(f"Image not found for bod roll: {e}")
         except Exception as e:
             await ctx.reply("Something went wrong with the dice roll. Please try again.")
-            self.logger.error(f"Error calling Math cog from Fun.bod: {e}", exc_info=True)
+            self.logger.error(f"Error in Fun.bod: {e}", exc_info=True)
 
 
     async def eight_ball(self, ctx: commands.Context, *, query: str) -> None:
@@ -163,6 +303,66 @@ class Fun(BaseCog):
     async def issues(self, ctx: commands.Context, *, query: str):
         """NLP handler for the issues command."""
         await self.fun_command_handler(ctx, 'issues')
+
+    @commands.Cog.listener('on_ready')
+    async def cleanup_active_chains_on_startup(self):
+        """
+        On bot startup, check for any chains that were active before the restart,
+        notify the users, and reset their state. This runs only once.
+        """
+        if self.has_cleaned_up_chains:
+            return
+
+        self.logger.info("Performing one-time check for active BOD chains after restart.")
+        db_manager = self.bot.db_manager
+        if not db_manager:
+            self.logger.error("Cannot perform BOD chain cleanup: DatabaseManager not found.")
+            return
+
+        active_chains = await db_manager.get_all_active_bod_chains()
+
+        if not active_chains:
+            self.logger.info("No active BOD chains found to clean up.")
+            self.has_cleaned_up_chains = True
+            return
+
+        self.logger.warning(f"Found {len(active_chains)} active BOD chains after a restart. Notifying users and resetting.")
+
+        for chain_data in active_chains:
+            user_id = chain_data['user_id']
+            channel_id = chain_data['last_channel_id']
+            current_chain = chain_data['current_chain']
+
+            # Reset the user's chain in the database first.
+            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id)
+
+            channel = self.bot.get_channel(channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                self.logger.error(f"Could not find channel {channel_id} to notify user {user_id} about their broken chain.")
+                continue
+
+            user = self.bot.get_user(user_id)
+            user_name = user.display_name if user else "User"
+            
+            reply_message = f"It looks like I had to restart, which has unfortunately broken your chain of {current_chain}."
+            
+            user_best = await db_manager.get_user_bod_best(user_id)
+            if current_chain > user_best:
+                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
+                reply_message += f"\n**However, you set a new personal best! Congratulations!**"
+            else:
+                reply_message += f" Your personal best remains {user_best}."
+
+            try:
+                await channel.send(f"<@{user_id}>, {reply_message}")
+                self.logger.info(f"Notified user {user_id} in channel {channel_id} about their broken chain of {current_chain}.")
+            except discord.Forbidden:
+                self.logger.error(f"Missing permissions to send message in channel {channel_id}.")
+            except Exception as e:
+                self.logger.error(f"Failed to notify user {user_id} about broken chain: {e}")
+
+        self.has_cleaned_up_chains = True
+        self.logger.info("Finished cleaning up all active BOD chains.")
 
 
 async def setup(bot: SanchoBot) -> None:
