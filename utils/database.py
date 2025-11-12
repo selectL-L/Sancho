@@ -140,6 +140,25 @@ class DatabaseManager:
                     starboard_reply_id INTEGER
                 )
             ''')
+
+            # Stores usage and chain data for the 'bod' command.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bod_usage (
+                    user_id INTEGER PRIMARY KEY,
+                    last_used_timestamp INTEGER NOT NULL DEFAULT 0,
+                    current_chain INTEGER NOT NULL DEFAULT 0,
+                    last_channel_id INTEGER NOT NULL DEFAULT 0
+                )
+            ''')
+
+            # Stores the global leaderboard for the 'bod' command.
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bod_leaderboard (
+                    user_id INTEGER PRIMARY KEY,
+                    user_name TEXT NOT NULL,
+                    best_chain INTEGER NOT NULL DEFAULT 0
+                )
+            ''')
             
             # --- Schema Migrations ---
             # Add starboard_reply_id column if it doesn't exist (for older DBs)
@@ -149,6 +168,14 @@ class DatabaseManager:
             except aiosqlite.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise # Re-raise if it's not the expected error
+
+            # Add last_channel_id to bod_usage if it doesn't exist
+            try:
+                await db.execute("ALTER TABLE bod_usage ADD COLUMN last_channel_id INTEGER NOT NULL DEFAULT 0")
+                logger.info("Migrated bod_usage table: Added 'last_channel_id' column.")
+            except aiosqlite.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
             
             # Set a default global skill limit if one isn't already in the database.
             cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")
@@ -174,6 +201,72 @@ class DatabaseManager:
             await db.commit()
         self.skill_limit = limit
         logger.info(f"Global skill limit set to {limit}.")
+
+    async def get_bod_usage(self, user_id: int) -> Dict[str, Any]:
+        """
+        Retrieves the last usage time, current chain, and last channel for a user's 'bod' command.
+        If the user is not in the table, it returns default values.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT last_used_timestamp, current_chain, last_channel_id FROM bod_usage WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return {'last_used_timestamp': 0, 'current_chain': 0, 'last_channel_id': 0}
+
+    async def update_bod_usage(self, user_id: int, last_used_timestamp: int, current_chain: int, channel_id: Optional[int] = None) -> None:
+        """
+        Updates or inserts a user's 'bod' command usage data.
+        If channel_id is not provided, it remains unchanged.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if channel_id is not None:
+                await db.execute(
+                    "INSERT OR REPLACE INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) VALUES (?, ?, ?, ?)",
+                    (user_id, last_used_timestamp, current_chain, channel_id)
+                )
+            else:
+                # This logic ensures we don't overwrite last_channel_id with 0 if it's not passed.
+                await db.execute(
+                    "INSERT INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_usage WHERE user_id = ?))"
+                    "ON CONFLICT(user_id) DO UPDATE SET last_used_timestamp = excluded.last_used_timestamp, current_chain = excluded.current_chain",
+                    (user_id, last_used_timestamp, current_chain, user_id)
+                )
+            await db.commit()
+
+    async def get_all_active_bod_chains(self) -> List[Dict[str, Any]]:
+        """Retrieves all users who are currently in an active 'bod' chain."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT user_id, last_channel_id, current_chain FROM bod_usage WHERE current_chain > 0")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_bod_leaderboard(self) -> List[Dict[str, Any]]:
+        """Retrieves the entire 'bod' leaderboard, ordered by best chain."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT user_name, best_chain FROM bod_leaderboard ORDER BY best_chain DESC")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_user_bod_best(self, user_id: int) -> int:
+        """Retrieves a single user's best chain from the leaderboard."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT best_chain FROM bod_leaderboard WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int) -> None:
+        """Updates the 'bod' leaderboard with a user's new best score."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO bod_leaderboard (user_id, user_name, best_chain) VALUES (?, ?, ?)",
+                (user_id, user_name, chain_length)
+            )
+            await db.commit()
+            logger.info(f"New BOD leaderboard score for {user_name}: {chain_length}.")
 
     async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
         """Sets a configuration value for a specific guild."""
