@@ -63,7 +63,7 @@ class Help(BaseCog):
         embed = discord.Embed(
             title="Hello, I'm Sancho!",
             description=(
-                "I can respond to two kinds of instructions: **standard commands** and **natural language** though the majority will be natural! (hopefully)\n\n"
+                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),
             color=discord.Color.gold()
@@ -117,8 +117,9 @@ class Help(BaseCog):
                 "• `Sancho remind me` (starts interactive setup)\n"
                 "• `Sancho remind me to check the oven in 15 minutes`\n"
                 "• `Sancho set a reminder to walk the dog every day at 8am`\n"
-                "• `Sancho show my reminders` or `delete reminder 2`\n"
-                "• `Sancho timezone PST|GMT|EST et cetera`\n\n"
+                "• `Sancho show my reminders`\n"
+                "• `Sancho delete reminder 2`\n"
+                "• `Sancho timezone America/New_York or GMT-5 (prefers IANA timezones)`\n\n"
                 "DISCLAIMER: Reminders are a work in progress and may not work perfectly yet."
             ),
             inline=False
