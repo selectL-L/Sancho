@@ -161,7 +161,8 @@ class Help(BaseCog):
             name="**Natural Language Commands: Fun**",
             value=(
                 "• `Sancho 8ball should I have another coffee?`\n"
-                "• `Sancho bod` (for the LOR experience)\n"
+                "• `Sancho bod` (you get 20 minutes to hit the LOR experience)\n"
+                "• `Sancho bod leaderboard` (shows the top 10 bod scores)\n"
                 "• `Sancho sanitize`\n"
                 "• `Sancho issues` (to helpfully direct people to sancho's issues page)"
             ),

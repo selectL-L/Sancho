@@ -155,6 +155,8 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
     [
         # 8-Ball
         ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
+        # BOD Leaderboard (must be checked before the general 'bod' command)
+        ((r'\bbod\s.*(leaderboard|lb|scores|ranks)\b',), 'Fun', 'bod_leaderboard'),
         # BOD
         ((r'\bbod\b',), 'Fun', 'bod'),
         # Sanitize
