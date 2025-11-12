@@ -97,15 +97,25 @@ class ImageCog(BaseCog):
     async def convert(self, ctx: commands.Context, *, query: str) -> None:
         """
         NLP handler for converting an image's format. It parses the target format
-        (e.g., "to png") from the query and converts the image.
+        (e.g., "png") from the query and converts the image.
         """
-        supported_formats = {"png", "jpeg", "webp", "gif", "bmp"}
-        match = re.search(r'\bto\s+(' + '|'.join(supported_formats) + r')\b', query, re.IGNORECASE)
-        if not match:
+        # Alias 'jpg' to 'jpeg' to handle common user input.
+        query = re.sub(r'\bjpg\b', 'jpeg', query, flags=re.IGNORECASE)
+
+        supported_formats = {"png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "pdf"}
+        
+        # Find all unique format mentions in the query.
+        found_formats = set(re.findall(r'\b(' + '|'.join(supported_formats) + r')\b', query, re.IGNORECASE))
+
+        if len(found_formats) > 1:
+            await ctx.send("I found multiple formats in your request. I can't convert one file into multiple formats!.")
+            return
+        elif not found_formats:
             await ctx.send(f"I couldn't figure out what format to convert to. Supported formats are: `{', '.join(supported_formats)}`.")
             return
         
-        target_format = match.group(1).upper()
+        # Get the single target format and make it uppercase.
+        target_format = found_formats.pop().upper()
         
         attachment = await self._find_image_attachment(ctx.message)
         if not attachment:
@@ -118,8 +128,8 @@ class ImageCog(BaseCog):
             is intended to be run in a separate thread.
             """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
-                # Handle transparency for formats that don't support it (like JPEG).
-                if format_str == 'JPEG' and img.mode in ('RGBA', 'P'):
+                # Handle transparency for formats that don't support it (like JPEG and PDF).
+                if format_str in ('JPEG', 'PDF') and img.mode in ('RGBA', 'P'):
                     img = img.convert('RGB')
 
                 buffer = io.BytesIO()

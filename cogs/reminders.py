@@ -232,9 +232,22 @@ class Reminders(BaseCog):
             self.logger.info(f"Cleaned up non-recurring reminder {reminder_id} from database.")
 
     async def _get_user_timezone(self, user_id: int) -> str:
-        """Fetches a user's timezone, defaulting to UTC."""
-        tz = await self.db_manager.get_user_timezone(user_id)
-        return tz or "UTC"
+        """
+        Fetches a user's timezone string and converts it to a pytz-compatible format 
+        if it's a GMT/UTC offset. Defaults to UTC.
+        """
+        tz_str = await self.db_manager.get_user_timezone(user_id) or "UTC"
+
+        # Check if it's a GMT/UTC offset that needs conversion for pytz
+        match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_str.lower())
+        if match:
+            sign = match.group(2)
+            hour = int(match.group(3))
+            # Invert the sign for the Etc/GMT format required by pytz
+            return f"Etc/GMT{-hour if sign == '+' else +hour}"
+
+        # For standard IANA names (e.g., 'US/Eastern') or 'UTC', return as is.
+        return tz_str
 
     def _format_recurrence_rule(self, rule_str: str) -> str:
         """Formats an rrule string into a human-readable format."""
@@ -776,8 +789,42 @@ class Reminders(BaseCog):
             return
 
         TIMEZONE_ABBREVIATIONS = {
-            "bst": "Europe/London", "ist": "Asia/Kolkata", "cst": "America/Chicago",
-            "mst": "America/Denver", "pst": "America/Los_Angeles", "est": "America/New_York",
+            # North America
+            "est": "America/New_York",    # Eastern Standard Time
+            "edt": "America/New_York",    # Eastern Daylight Time
+            "cst": "America/Chicago",     # Central Standard Time
+            "cdt": "America/Chicago",     # Central Daylight Time
+            "mst": "America/Denver",      # Mountain Standard Time
+            "mdt": "America/Denver",      # Mountain Daylight Time
+            "pst": "America/Los_Angeles", # Pacific Standard Time
+            "pdt": "America/Los_Angeles", # Pacific Daylight Time
+            "akst": "America/Anchorage",  # Alaska Standard Time
+            "akdt": "America/Anchorage",  # Alaska Daylight Time
+            "hst": "Pacific/Honolulu",    # Hawaii Standard Time
+
+            # Europe
+            "gmt": "Europe/London",       # Greenwich Mean Time
+            "bst": "Europe/London",       # British Summer Time
+            "wet": "WET",                 # Western European Time
+            "west": "WET",                # Western European Summer Time
+            "cet": "CET",                 # Central European Time
+            "cest": "CET",                # Central European Summer Time
+            "eet": "EET",                 # Eastern European Time
+            "eest": "EET",                # Eastern European Summer Time
+            "msk": "Europe/Moscow",       # Moscow Standard Time
+
+            # Asia
+            "ist": "Asia/Kolkata",        # Indian Standard Time
+            "jst": "Asia/Tokyo",          # Japan Standard Time
+            "kst": "Asia/Seoul",          # Korea Standard Time
+            "sgt": "Asia/Singapore",      # Singapore Time
+
+            # Australia
+            "aest": "Australia/Sydney",   # Australian Eastern Standard Time
+            "aedt": "Australia/Sydney",   # Australian Eastern Daylight Time
+            "acst": "Australia/Darwin",   # Australian Central Standard Time
+            "acdt": "Australia/Adelaide", # Australian Central Daylight Time
+            "awst": "Australia/Perth",    # Australian Western Standard Time
         }
 
         tz_to_check = timezone_str.lower()
@@ -793,19 +840,21 @@ class Reminders(BaseCog):
             if match:
                 sign = match.group(2)
                 hour = int(match.group(3))
-                # pytz uses Etc/GMT where the sign is inverted
+                # pytz uses Etc/GMT where the sign is inverted for calculations
                 final_tz_str = f"Etc/GMT{-hour if sign == '+' else +hour}"
-                display_tz_str = final_tz_str # Use the full name for display
+                # But we want to store and display the user-friendly version
+                display_tz_str = f"GMT{sign}{hour}"
 
         if not final_tz_str:
             final_tz_str = timezone_str
             display_tz_str = timezone_str
 
         try:
+            # Use the calculation-friendly string for validation
             tz = pytz.timezone(final_tz_str)
             
-            # Use the resolved, full timezone name for storage.
-            zone_to_store = tz.zone
+            # Use the display-friendly string for storage
+            zone_to_store = display_tz_str or tz.zone
             
             if not zone_to_store:
                 self.logger.error(f"Could not resolve a storable timezone name from '{final_tz_str}'.")
@@ -815,10 +864,25 @@ class Reminders(BaseCog):
             await self.db_manager.set_user_timezone(ctx.author.id, zone_to_store)
             
             now = datetime.now(tz)
-            await ctx.send(
+            
+            # Prepare the main confirmation message
+            confirmation_message = (
                 f"Your timezone has been set to `{zone_to_store}`.\n"
                 f"The current time in your timezone is `{now.strftime('%Y-%m-%d %H:%M:%S')}`."
             )
+
+            # If the user set a GMT/UTC offset, add an informational message about IANA timezones
+            if re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check):
+                iana_recommendation = (
+                    "\n\n**Note:** You've set a fixed GMT/UTC offset. For automatic Daylight Saving Time adjustments, "
+                    "we recommend using an IANA timezone name instead. Examples include:\n"
+                    "- `America/New_York` (for US Eastern Time (P.S yes the underscore is neccessary))\n"
+                    "- `Europe/London` (for UK time)\n"
+                    "- `Asia/Tokyo` (for Japan Standard Time)"
+                )
+                confirmation_message += iana_recommendation
+
+            await ctx.send(confirmation_message)
             self.logger.info(f"Timezone for user {ctx.author.id} set from '{timezone_str}' to '{zone_to_store}'.")
 
         except pytz.UnknownTimeZoneError:

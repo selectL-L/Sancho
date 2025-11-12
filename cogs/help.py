@@ -138,7 +138,7 @@ class Help(BaseCog):
             value=(
                 "• `Sancho delete|remove skill (index number)`\n"
                 "• `Sancho edit|change|update skill (index number)`\n"
-                "• `Sancho list|check|show my skills (you can also just say Sancho skills)`\n"
+                "• `Sancho list|check|show my skills (you can also just use .Sancho skills)`\n"
                 "• `Sancho save|create|make skill` (starts interactive setup)\n"
                 "• `Sancho cast|use fireball + 3`"
             ),
@@ -146,16 +146,22 @@ class Help(BaseCog):
         )
 
         embed.add_field(
-            name="**Natural Language Commands: Images & Fun**",
+            name="**Natural Language Commands: Images**",
             value=(
-                "**Images** (You can reply to or attach an image!)\n"
+                "You can reply to or attach an image!\n"
                 "• `Sancho resize this image to 50%`\n"
-                "• `Sancho convert this image to webp`\n\n"
-                "**Fun**\n"
+                "• `Sancho convert this image to webp`"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="**Natural Language Commands: Fun**",
+            value=(
                 "• `Sancho 8ball should I have another coffee?`\n"
                 "• `Sancho bod` (for the LOR experience)\n"
                 "• `Sancho sanitize`\n"
-                "• `Sancho issues (to helpfully direct people to sancho's issues page)`"
+                "• `Sancho issues` (to helpfully direct people to sancho's issues page)"
             ),
             inline=False
         )
