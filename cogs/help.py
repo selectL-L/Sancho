@@ -20,6 +20,7 @@ import discord
 from discord.ext import commands
 import logging
 
+import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 
@@ -53,7 +54,7 @@ class Help(BaseCog):
         """Sends a general help embed listing all commands and NLP capabilities."""
         # The command_prefix can be a list or a callable. We need to get the
         # specific prefixes for the current context (server/message).
-        prefixes = await self.bot.get_prefix(ctx.message)
+        prefixes = self.bot.command_prefix if isinstance(self.bot.command_prefix, list) else config.BOT_PREFIX
         
         # Format prefixes for display, e.g., "`.s`", "`.sancho`"
         formatted_prefixes = ", ".join(f"`{p.strip()}`" for p in prefixes)
