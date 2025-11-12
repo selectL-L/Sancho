@@ -304,16 +304,31 @@ class Fun(BaseCog):
         """NLP handler for the issues command."""
         await self.fun_command_handler(ctx, 'issues')
 
-    @commands.Cog.listener('on_ready')
-    async def cleanup_active_chains_on_startup(self):
+    async def cog_load(self):
         """
-        On bot startup, check for any chains that were active before the restart,
-        notify the users, and reset their state. This runs only once.
+        Schedules a one-time task to clean up active BOD chains after a restart/reload.
+        This is non-blocking to avoid deadlocking the bot's startup process.
         """
+        asyncio.create_task(self._cleanup_chains_task())
+
+    async def _cleanup_chains_task(self):
+        """
+        Waits for the bot to be ready, then checks for any chains that were active
+        before a restart/reload, notifies the users, and resets their state.
+        This runs only once per startup.
+        """
+        # Wait for the bot to be fully ready before proceeding,
+        # ensuring that the cache is populated.
+        await self.bot.wait_until_ready()
+
         if self.has_cleaned_up_chains:
             return
+        
+        # On a reload, give the unload of the old cog a moment to finish its cleanup.
+        # On a cold start, this just adds a small safety buffer.
+        await asyncio.sleep(2)
 
-        self.logger.info("Performing one-time check for active BOD chains after restart.")
+        self.logger.info("Performing one-time check for active BOD chains after restart/reload.")
         db_manager = self.bot.db_manager
         if not db_manager:
             self.logger.error("Cannot perform BOD chain cleanup: DatabaseManager not found.")
@@ -326,7 +341,7 @@ class Fun(BaseCog):
             self.has_cleaned_up_chains = True
             return
 
-        self.logger.warning(f"Found {len(active_chains)} active BOD chains after a restart. Notifying users and resetting.")
+        self.logger.warning(f"Found {len(active_chains)} active BOD chains after a restart/reload. Notifying users and resetting.")
 
         for chain_data in active_chains:
             user_id = chain_data['user_id']
@@ -344,7 +359,7 @@ class Fun(BaseCog):
             user = self.bot.get_user(user_id)
             user_name = user.display_name if user else "User"
             
-            reply_message = f"It looks like I had to restart, which has unfortunately broken your chain of {current_chain}."
+            reply_message = f"It looks like I had to restart or reload, which has unfortunately broken your chain of {current_chain}."
             
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
