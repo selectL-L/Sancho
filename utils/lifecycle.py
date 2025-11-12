@@ -51,7 +51,7 @@ async def startup_handler(bot: "SanchoBot"):
         try:
             channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
-                embed = discord.Embed(title="Good morning, sancho is awake!")
+                embed = discord.Embed(title="Good morning, Sancho is awake!")
                 
                 startup_gif_path = os.path.join(config.ASSETS_PATH, "startup.gif")
                 if os.path.exists(startup_gif_path):
