@@ -129,7 +129,7 @@ class Skills(BaseCog):
             skill_name = ""
             while True:
                 await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")
-                name_msg = await self.bot.wait_for('message', check=check, timeout=15.0)
+                name_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
                 
                 if name_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -148,7 +148,7 @@ class Skills(BaseCog):
             aliases = []
             while True:
                 await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")
-                aliases_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
+                aliases_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
 
                 if aliases_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -175,7 +175,7 @@ class Skills(BaseCog):
             dice_roll = ""
             while True:
                 await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `1d20kh1`, `4c + 2`)")
-                roll_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
+                roll_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
                 if roll_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
@@ -193,15 +193,15 @@ class Skills(BaseCog):
                 if dice_match:
                     num_dice = int(dice_match.group(1) or 1)
                     num_sides = int(dice_match.group(2))
-                    if num_dice > 10 or num_sides > 40:
-                        await ctx.send("Skill rolls are limited to a maximum of **10 dice** and **40 sides**. Please enter a different roll.")
+                    if num_dice > 40 or num_sides > 100:
+                        await ctx.send("Skill rolls are limited to a maximum of **40 dice** and **100 sides**. Please enter a different roll.")
                         continue
                 
                 if coin_match:
                     num_coins_str = coin_match.group(1)
                     num_coins = int(num_coins_str) if num_coins_str else 1
-                    if num_coins > 40:
-                        await ctx.send("Skill rolls are limited to a maximum of **40 coins**. Please enter a different roll.")
+                    if num_coins > 80:
+                        await ctx.send("Skill rolls are limited to a maximum of **80 coins**. Please enter a different roll.")
                         continue
 
                 # Validate the maximum possible outcome to prevent excessively large numbers.
@@ -216,7 +216,7 @@ class Skills(BaseCog):
             skill_type = ""
             while True:
                 await ctx.send(f"Is this an `attack` or a `defense` skill?")
-                type_msg = await self.bot.wait_for('message', check=check, timeout=10.0)
+                type_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
                 if type_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
