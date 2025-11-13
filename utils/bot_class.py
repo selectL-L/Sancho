@@ -12,6 +12,7 @@ from typing import Optional, TYPE_CHECKING
 import asyncio
 import logging
 import config
+import time
 
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
@@ -30,6 +31,7 @@ class SanchoBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self.db_manager: Optional[DatabaseManager] = None
         self.console_task: Optional[asyncio.Task] = None
+        self.start_time: float = time.time()
 
     def _get_case_insensitive_prefix(self, bot: "SanchoBot", message: discord.Message) -> list[str]:
         """

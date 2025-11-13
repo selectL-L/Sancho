@@ -37,6 +37,19 @@ class DatabaseManager:
         self.db_path = db_path
         self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
 
+    async def ping(self) -> float:
+        """
+        Performs a quick, simple query to the database to measure latency.
+
+        Returns:
+            float: The latency in milliseconds.
+        """
+        start_time = time.monotonic()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("SELECT 1")
+        end_time = time.monotonic()
+        return (end_time - start_time) * 1000
+
     @classmethod
     async def create(cls, db_path: str) -> "DatabaseManager":
         """
