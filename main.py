@@ -1,29 +1,25 @@
 """
 main.py
 
-This is the primary entry point for the Sancho-Bot, which is responsible for:
+This is the primary entry point for the Sancho-Bot. Its responsibilities are:
 
-1.  Setting up logging and validating critical configurations from the .env file.
-2.  Initializing the Discord bot instance (`SanchoBot`) with necessary intents and
-    the database manager.
-3.  Defining core bot event handlers, including `on_ready`, `on_command_error`,
-    and the crucial `on_message` for NLP-based command dispatching.
-4.  A `main` asynchronous function that orchestrates the bot's startup sequence:
-    initializing the database, loading all cogs (extensions), and connecting to Discord.
+1.  Performing initial setup: logging, configuration validation from `info.env`.
+2.  Instantiating the custom `SanchoBot` class from `utils.bot_class`.
+3.  Defining console and signal handlers for graceful startup and shutdown.
+4.  Orchestrating the bot's asynchronous startup sequence via the `main()` function,
+    which initializes the database, loads cogs, and connects to Discord.
 
-(Note to self, adding descriptions to other files might be a smart idea.)
+This script acts as the "launcher" for the bot; the core logic, event handlers,
+and command processing are defined within the `SanchoBot` class itself.
 """
 import discord
 from discord.ext import commands
 import logging
 import asyncio
 import os
-import re
 import signal
 import sys
 import time
-from typing import Optional, Any
-from collections.abc import Callable
 import psutil
 from datetime import timedelta
 
@@ -33,7 +29,7 @@ import config
 from utils.logging_config import setup_logging
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
-from utils.lifecycle import startup_handler, shutdown_handler
+from utils.lifecycle import shutdown_handler
 from utils.extensions import discover_cogs
 
 # Set up logging immediately to capture any issues during startup.
@@ -81,11 +77,7 @@ print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 # The db_manager will be attached in main() after async initialization.
 
 
-# --- 3. Core Bot Events ---
-@bot.event
-async def on_ready():
-    """Called when the bot is ready; triggers the startup handler."""
-    await startup_handler(bot)
+# --- 3. Core Bot Commands ---
     
 @bot.command(name="ping", help="Provides a comprehensive health and status check for the bot.", hidden=True)
 @commands.is_owner()
@@ -172,139 +164,6 @@ async def ping(ctx: commands.Context) -> None:
     await message.edit(content=None, embed=embed)
     logging.info(f"Ping command used by {ctx.author}.")
 
-@bot.event
-async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
-    """
-    Global error handler for all standard `discord.ext.commands`.
-    This catches errors from commands defined with `@bot.command()`.
-    """
-    # Ignore `CommandNotFound` errors, as the `on_message` handler will treat
-    # these as potential NLP commands. This prevents duplicate error messages.
-    if isinstance(error, commands.CommandNotFound):
-        return
-
-    # For user input errors (e.g., missing arguments), show the command's help message
-    # to guide the user on correct usage.
-    if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
-        await ctx.send_help(ctx.command)
-        return
-
-    # Handle permission errors gracefully. `NotOwner` is a subclass of `CheckFailure`.
-    if isinstance(error, commands.CheckFailure):
-        logging.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
-        # Send a silent or ephemeral message if possible, or just a simple public one.
-        try:
-            await ctx.send("Sorry, you don't have permission to use this command.", delete_after=8)
-        except discord.HTTPException:
-            pass # Ignore if we can't send the message
-        return
-
-    # For all other errors, log the full traceback for debugging purposes.
-    logging.error(f"Unhandled error in command '{ctx.command}'", exc_info=error)
-
-    # Notify the user that a generic, unexpected error occurred.
-    try:
-        await ctx.send("Sorry, an unexpected error occurred. The issue has been logged.")
-    except discord.HTTPException:
-        logging.error(f"Failed to send error message to channel {ctx.channel.id}")
-
-
-@bot.event
-async def on_message(message: discord.Message) -> None:
-    """
-    The main event handler for processing all incoming messages.
-    This function serves as the core dispatcher for NLP-based commands.
-    """
-    # Ignore messages from the bot itself to prevent loops.
-    if message.author.bot:
-        return
-
-    # If in developer mode, only respond to the owner.
-    if config.DEV_MODE and message.author.id != config.OWNER_ID:
-        return
-
-    # First, allow `discord.py` to process the message to see if it's a
-    # standard, decorator-based command (like `.ping`).
-    await bot.process_commands(message)
-
-    # If the message was a standard command, we don't need to process it for NLP.
-    # `ctx.valid` will be True if a valid command was found and invoked.
-    ctx = await bot.get_context(message)
-    if ctx.valid:
-        return
-
-    # --- NLP Processing Logic ---
-    # Check if the message starts with one of the recognized bot prefixes (case-insensitive).
-    prefix_used = None
-    content_lower = message.content.lower()
-    for p in config.BOT_PREFIX:
-        if content_lower.startswith(p.lower()):
-            # Find the actual prefix used from the original message content
-            # to correctly slice it off later.
-            prefix_used = message.content[:len(p)]
-            break
-
-    # If no valid prefix was found, it's not an NLP command, so we ignore it.
-    if not prefix_used:
-        return
-
-    # Extract the user's query by removing the prefix and any leading/trailing whitespace.
-    query = message.content[len(prefix_used):].strip()
-    if not query:
-        return  # Ignore messages that are just the prefix.
-
-    query_lower = query.lower()
-    logging.info(f"NLP query from '{message.author}': '{query}'")
-
-    # --- NLP Command Matching Logic ---
-    group_winners = []
-    # Step 1: Find a "winner" from each command group based on definition order.
-    for group in config.NLP_COMMANDS:
-        for keywords, cog_name, method_name in group:
-            for keyword in keywords:
-                match = re.search(keyword, query_lower)
-                if match:
-                    # Found a match. This is the winner for its group.
-                    # Store it with its match position and break to the next group.
-                    group_winners.append((match.start(), cog_name, method_name))
-                    break  # Move to the next group
-            else:
-                # This 'else' belongs to the inner 'for' loop.
-                # If the inner loop completes without a 'break', continue to the next command.
-                continue
-            # This 'break' belongs to the outer 'for' loop.
-            # It executes if the inner loop was broken (i.e., a match was found).
-            break
-
-    # If no commands matched at all, do nothing.
-    if not group_winners:
-        return
-
-    # Step 2: Sort the group winners by their keyword's position in the query.
-    # The command that appeared earliest in the string wins overall.
-    group_winners.sort(key=lambda x: x[0])
-    
-    # Get the final winning command.
-    _, cog_name, method_name = group_winners[0]
-
-    cog = bot.get_cog(cog_name)
-    if not cog:
-        logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
-        return
-
-    method: Optional[Callable[..., Any]] = getattr(cog, method_name, None)
-    if not (method and asyncio.iscoroutinefunction(method)):
-        logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' is not an awaitable coroutine.")
-        return
-
-    try:
-        # Call the winning NLP handler.
-        await method(ctx, query=query)
-    except Exception as e:
-        logging.error(f"Error in NLP command '{cog_name}.{method_name}': {e}", exc_info=True)
-        await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
-
-
 # --- 4. Main Bot Execution ---
 
 async def console_input_handler(bot: SanchoBot):
@@ -327,7 +186,7 @@ async def console_input_handler(bot: SanchoBot):
                 elif line.strip().lower() == 'reload':
                     logging.info("'reload' command received from console. Reloading cogs...")
                     # Create a task to run the reload concurrently.
-                    loop.create_task(reload_all_cogs(bot))
+                    loop.create_task(bot.reload_all_cogs())
         else:
             # On Linux/macOS, use a non-blocking StreamReader for stdin.
             reader = asyncio.StreamReader()
@@ -345,64 +204,13 @@ async def console_input_handler(bot: SanchoBot):
                 elif line.lower() == 'reload':
                     logging.info("'reload' command received from console. Reloading cogs...")
                     # Create a task to run the reload concurrently.
-                    loop.create_task(reload_all_cogs(bot))
+                    loop.create_task(bot.reload_all_cogs())
 
     except asyncio.CancelledError:
         logging.info("Console input handler cancelled.")
     except Exception as e:
         # Log other potential errors, e.g., if stdin is closed unexpectedly.
         logging.error(f"Error in console input handler: {e}", exc_info=False)
-
-async def reload_all_cogs(bot: SanchoBot):
-    """
-    Asynchronously discovers and reloads all cogs, handling new, removed,
-    and updated extensions.
-    """
-    logging.info("Starting cog reload process...")
-
-    # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.math'})
-    loaded_cogs = set(bot.extensions.keys())
-    logging.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
-
-    # Discover the cogs currently present in the filesystem.
-    try:
-        discovered_cogs = set(discover_cogs(config.COGS_PATH))
-        logging.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
-    except Exception as e:
-        logging.error(f"Failed to discover cogs: {e}", exc_info=True)
-        return
-
-    # --- Determine which cogs to load, unload, and reload ---
-    cogs_to_load = discovered_cogs - loaded_cogs
-    cogs_to_unload = loaded_cogs - discovered_cogs
-    cogs_to_reload = loaded_cogs.intersection(discovered_cogs)
-
-    # --- Perform actions ---
-    # 1. Unload cogs that have been removed.
-    for extension in cogs_to_unload:
-        try:
-            await bot.unload_extension(extension)
-            logging.info(f"Successfully unloaded removed extension: {extension}")
-        except Exception:
-            logging.error(f'Failed to unload extension {extension}.', exc_info=True)
-
-    # 2. Load new cogs that have been added.
-    for extension in cogs_to_load:
-        try:
-            await bot.load_extension(extension)
-            logging.info(f"Successfully loaded new extension: {extension}")
-        except Exception:
-            logging.error(f'Failed to load new extension {extension}.', exc_info=True)
-
-    # 3. Reload existing cogs to apply any changes.
-    for extension in cogs_to_reload:
-        try:
-            await bot.reload_extension(extension)
-            logging.info(f"Successfully reloaded extension: {extension}")
-        except Exception:
-            logging.error(f'Failed to reload extension {extension}.', exc_info=True)
-
-    logging.info("Finished reloading cogs.")
 
 async def main() -> None:
     """
