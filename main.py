@@ -24,6 +24,8 @@ import sys
 import time
 from typing import Optional, Any
 from collections.abc import Callable
+import psutil
+from datetime import timedelta
 
 # --- 1. Setup and Configuration ---
 # Import necessary configurations and utility functions.
@@ -87,30 +89,89 @@ async def on_ready():
     """Called when the bot is ready; triggers the startup handler."""
     await startup_handler(bot)
     
-@bot.command()
+@bot.command(name="ping", help="Provides a comprehensive health and status check for the bot.", hidden=True)
+@commands.is_owner()
 async def ping(ctx: commands.Context) -> None:
     """
-    A command to check the bot's latency, differentiating bot vs. gateway.
-    This Commands main purpose is to check for basic functionality and responsiveness.
+    Provides a comprehensive health and status check for the bot, including
+    latency, uptime, cog status, database health, and resource usage.
     """
-    # Gateway latency (from Discord's heartbeat)
-    gateway_latency = bot.latency * 1000
-
-    # Measure message round-trip time
+    # 1. Initial "Pinging..." message
     start_time = time.monotonic()
-    message = await ctx.send("Pinging...")
+    message = await ctx.send("Pinging for status...")
     end_time = time.monotonic()
-    
-    # This is the time it took to send the message and get a confirmation.
-    # It includes network latency to Discord, processing time on Discord's end,
-    # and network latency back to the bot.
-    roundtrip_latency = (end_time - start_time) * 1000
 
-    await message.edit(
-        content=f"Pong! 🏓\n"
-                f"Gateway Latency: `{gateway_latency:.2f}ms`\n"
-                f"Roundtrip Latency: `{roundtrip_latency:.2f}ms`"
+    # 2. Gather all metrics
+    # Latencies
+    roundtrip_latency = (end_time - start_time) * 1000
+    gateway_latency = bot.latency * 1000
+    db_latency = await bot.db_manager.ping() if bot.db_manager else -1
+
+    # Uptime & Start Time
+    start_timestamp = int(bot.start_time)
+    uptime_delta = timedelta(seconds=time.time() - bot.start_time)
+    days, remainder = divmod(uptime_delta.total_seconds(), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m"
+
+    # Cogs
+    loaded_cogs = bot.extensions.keys()
+    total_cogs = len(discover_cogs(config.COGS_PATH))
+    cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
+    
+    # Resource Usage
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    cpu_usage = psutil.cpu_percent(interval=None) # Use interval=None for non-blocking call
+    ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
+
+    # 3. Create Embed
+    embed = discord.Embed(
+        title="Sancho Status Report",
+        color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
     )
+    if bot.user and bot.user.display_avatar:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+
+    embed.add_field(
+        name="Timings",
+        value=f"**Gateway:** `{gateway_latency:.2f}ms`\n"
+              f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
+              f"**Database:** `{db_latency:.2f}ms`",
+        inline=True
+    )
+
+    embed.add_field(
+        name="Status",
+        value=f"**Uptime:** `{uptime_str}`\n"
+              f"**Started:** <t:{start_timestamp}:f>\n"
+              f"**Cogs Loaded:** `{cogs_status}`",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="Resource Usage",
+        value=f"**CPU:** `{cpu_usage:.1f}%`\n"
+              f"**RAM:** `{ram_usage:.2f} MB`",
+        inline=True
+    )
+
+    # Add a field for loaded cogs, formatted nicely
+    if loaded_cogs:
+        # Format cog names by removing 'cogs.' prefix and joining them
+        cog_list_str = ", ".join([cog.replace('cogs.', '') for cog in sorted(loaded_cogs)])
+        embed.add_field(
+            name="Loaded Cogs",
+            value=f"```{cog_list_str}```",
+            inline=False
+        )
+
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+    embed.timestamp = discord.utils.utcnow()
+
+    # 4. Edit the original message with the embed
+    await message.edit(content=None, embed=embed)
     logging.info(f"Ping command used by {ctx.author}.")
 
 @bot.event

@@ -26,6 +26,9 @@ pytz
 # For image manipulation in the Image cog.
 Pillow
 
+# For monitoring system resource usage (CPU, RAM) in the ping command.
+psutil
+
 # Testing dependencies (tests are not included with the github repository, so these are not required)
 pytest
 pytest-asyncio
