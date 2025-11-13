@@ -74,10 +74,8 @@ intents.message_content = True
 
 # Create the custom bot instance.
 # The prefix logic is now handled inside the SanchoBot class.
-bot = SanchoBot(
-    intents=intents,
-    case_insensitive=True  # This makes the command name (e.g., 'ping') case-insensitive
-)
+bot = SanchoBot()
+
 logging.info(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 # The db_manager will be attached in main() after async initialization.
@@ -189,6 +187,16 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
     # to guide the user on correct usage.
     if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
         await ctx.send_help(ctx.command)
+        return
+
+    # Handle permission errors gracefully. `NotOwner` is a subclass of `CheckFailure`.
+    if isinstance(error, commands.CheckFailure):
+        logging.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
+        # Send a silent or ephemeral message if possible, or just a simple public one.
+        try:
+            await ctx.send("Sorry, you don't have permission to use this command.", delete_after=8)
+        except discord.HTTPException:
+            pass # Ignore if we can't send the message
         return
 
     # For all other errors, log the full traceback for debugging purposes.

@@ -22,13 +22,25 @@ if TYPE_CHECKING:
 class SanchoBot(commands.Bot):
     """
     A custom bot class that extends `discord.ext.commands.Bot` to include
-    additional attributes for managing the database and skill limits.
+    additional attributes and to centralize initialization.
     """
-    def __init__(self, *args, **kwargs):
-        # The case_insensitive_prefix callable is now part of the bot.
-        # We set it before calling super().__init__ so it's available.
-        kwargs['command_prefix'] = self._get_case_insensitive_prefix
-        super().__init__(*args, **kwargs)
+    def __init__(self, **kwargs):
+        # Define intents directly within the class for encapsulation.
+        intents = discord.Intents.default()
+        intents.messages = True
+        intents.message_content = True
+
+        # Call super().__init__ with all configuration handled internally.
+        # We pass `config.OWNER_ID or 0` to allow for proper testing of
+        # owner-only commands when the OWNER_ID is not set in the .env file.
+        super().__init__(
+            command_prefix=self._get_case_insensitive_prefix,
+            intents=intents,
+            case_insensitive=True,
+            owner_id=config.OWNER_ID,
+            **kwargs
+        )
+        
         self.db_manager: Optional[DatabaseManager] = None
         self.console_task: Optional[asyncio.Task] = None
         self.start_time: float = time.time()
