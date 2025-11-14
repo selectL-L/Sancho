@@ -71,13 +71,13 @@ class Skills(BaseCog):
             processed_roll = dice_roll.lower().replace('x', '*')
 
             # Replace coin and dice notations with their maximum values.
-            expr = COIN_FLIP_REGEX.sub(max_coin_value, processed_roll)
-            expr = DICE_NOTATION_REGEX.sub(max_dice_value, expr)
+            expr_str = COIN_FLIP_REGEX.sub(max_coin_value, processed_roll)
+            expr_str = DICE_NOTATION_REGEX.sub(max_dice_value, expr_str)
             # Remove keep/drop modifiers as they don't affect the max of the base dice.
-            expr = re.sub(r'kh\d+|kl\d+', '', expr)
+            expr_str = re.sub(r'kh\d+|kl\d+', '', expr_str)
             
             # Use the safe evaluation function from the Math cog.
-            return int(safe_eval_math(expr))
+            return int(safe_eval_math(expr_str))
         except Exception as e:
             self.logger.error(f"Could not evaluate max roll for '{dice_roll}': {e}")
             # Return a high number as a safe fallback if evaluation fails.
@@ -90,6 +90,64 @@ class Skills(BaseCog):
         potentially complex calculations from blocking the bot's event loop.
         """
         return await asyncio.to_thread(self._sync_evaluate_max_roll, dice_roll)
+
+    async def _validate_roll_logic(self, dice_roll: str) -> tuple[bool, str]:
+        """
+        Validates a dice roll string against several criteria: complexity and max value.
+        It checks all dice and coin notations in the string and provides a comprehensive
+        error message if any limits are exceeded.
+
+        Args:
+            dice_roll (str): The dice roll string to validate.
+
+        Returns:
+            A tuple containing:
+            - bool: True if the roll is valid, False otherwise.
+            - str: A detailed error message if invalid, or an empty string if valid.
+        """
+        dice_matches = list(DICE_NOTATION_REGEX.finditer(dice_roll))
+        coin_matches = list(COIN_FLIP_REGEX.finditer(dice_roll))
+
+        if not dice_matches and not coin_matches:
+            return False, "That doesn't look like a valid dice or coin roll. Please include a notation like `d20`, `2d6`, or `4c`."
+
+        # Define limits
+        max_dice_limit = 40
+        max_sides_limit = 100
+        max_coins_limit = 80
+        max_total_roll_limit = 5000
+        
+        error_messages = []
+
+        for match in dice_matches:
+            num_dice = int(match.group(1) or 1)
+            num_sides = int(match.group(2))
+            if num_dice > max_dice_limit:
+                error_messages.append(f"exceeds the **{max_dice_limit}** dice limit")
+            if num_sides > max_sides_limit:
+                error_messages.append(f"exceeds the **{max_sides_limit}** sides limit")
+
+        for match in coin_matches:
+            num_coins_str = match.group(1)
+            num_coins = int(num_coins_str) if num_coins_str else 1
+            if num_coins > max_coins_limit:
+                error_messages.append(f"exceeds the **{max_coins_limit}** coins limit")
+        
+        if error_messages:
+            # Join unique error messages
+            unique_errors = sorted(list(set(error_messages)))
+            error_summary = ", ".join(unique_errors)
+            return False, (
+                f"Your roll {error_summary}. "
+                f"The limits are: **{max_dice_limit}** dice, **{max_sides_limit}** sides, **{max_coins_limit}** coins, "
+                f"and a max total roll value of **{max_total_roll_limit}**."
+            )
+
+        max_roll = await self._evaluate_max_roll(dice_roll)
+        if max_roll > max_total_roll_limit:
+            return False, f"The maximum possible result of that roll is **{max_roll}**, which exceeds the limit of **{max_total_roll_limit}**."
+
+        return True, ""
 
     async def save_skill_nlp(self, ctx: commands.Context, *, query: str):
         """
@@ -181,33 +239,9 @@ class Skills(BaseCog):
                     return
                 dice_roll = roll_msg.content.strip()
 
-                # Basic validation to ensure it contains dice or coin notation.
-                dice_match = DICE_NOTATION_REGEX.search(dice_roll)
-                coin_match = COIN_FLIP_REGEX.search(dice_roll)
-
-                if not dice_match and not coin_match:
-                    await ctx.send("That doesn't look like a valid dice or coin roll. Please include a notation like `d20`, `2d6`, or `4c`.")
-                    continue
-
-                # Validate against complexity limits to prevent abuse.
-                if dice_match:
-                    num_dice = int(dice_match.group(1) or 1)
-                    num_sides = int(dice_match.group(2))
-                    if num_dice > 40 or num_sides > 100:
-                        await ctx.send("Skill rolls are limited to a maximum of **40 dice** and **100 sides**. Please enter a different roll.")
-                        continue
-                
-                if coin_match:
-                    num_coins_str = coin_match.group(1)
-                    num_coins = int(num_coins_str) if num_coins_str else 1
-                    if num_coins > 80:
-                        await ctx.send("Skill rolls are limited to a maximum of **80 coins**. Please enter a different roll.")
-                        continue
-
-                # Validate the maximum possible outcome to prevent excessively large numbers.
-                max_roll = await self._evaluate_max_roll(dice_roll)
-                if max_roll > 2000:
-                    await ctx.send(f"The maximum possible result of that roll is **{max_roll}**, which exceeds the limit of **2000**. Please enter a different roll.")
+                is_valid, error_message = await self._validate_roll_logic(dice_roll)
+                if not is_valid:
+                    await ctx.send(error_message)
                     continue
                 
                 break # Roll is valid.
@@ -437,15 +471,9 @@ class Skills(BaseCog):
                             await ctx.send("Edit cancelled.")
                             return
 
-                        dice_match = DICE_NOTATION_REGEX.search(new_roll)
-                        coin_match = COIN_FLIP_REGEX.search(new_roll)
-                        if not dice_match and not coin_match:
-                            await ctx.send("That doesn't look like a valid dice or coin roll. Please include notation like `d20` or `4c`.")
-                            continue
-                        
-                        max_roll = await self._evaluate_max_roll(new_roll)
-                        if max_roll > 2000:
-                            await ctx.send(f"The maximum possible result of that roll is **{max_roll}**, which exceeds the limit of **2000**.")
+                        is_valid, error_message = await self._validate_roll_logic(new_roll)
+                        if not is_valid:
+                            await ctx.send(error_message)
                             continue
                         
                         updates['dice_roll'] = new_roll

@@ -20,6 +20,7 @@ import operator as op
 import asyncio
 from typing import Optional
 import re as _re
+import math
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 
@@ -29,7 +30,24 @@ from utils.bot_class import SanchoBot
 # This prevents the execution of any functions, attribute access, or other dangerous operations.
 ALLOWED_OPERATORS = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
-    ast.Div: op.truediv, ast.USub: op.neg, ast.Pow: op.pow
+    ast.Div: op.truediv, ast.USub: op.neg, ast.Pow: op.pow,
+    ast.Mod: op.mod
+}
+
+ALLOWED_FUNCTIONS = {
+    'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
+    'asin': math.asin, 'acos': math.acos, 'atan': math.atan,
+    'sqrt': math.sqrt, 'log': math.log, 'log10': math.log10,
+    'exp': math.exp, 'pow': math.pow, 'abs': abs,
+    'ceil': math.ceil, 'floor': math.floor, 'round': round,
+    'radians': math.radians, 'degrees': math.degrees
+}
+
+ALLOWED_NAMES = {
+    'pi': math.pi,
+    'e': math.e,
+    'c': 299792458,  # Speed of light in m/s
+    'avogadro': 6.02214076e23  # Avogadro's number
 }
 
 def safe_eval_math(expr: str) -> float:
@@ -66,6 +84,19 @@ def safe_eval_math(expr: str) -> float:
             else: # UnaryOp (e.g., -5)
                 operand = _eval_node(node.operand)
                 return ALLOWED_OPERATORS[op_type](operand)
+        # Handles function calls (e.g., sin(pi)).
+        elif isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in ALLOWED_FUNCTIONS:
+                func_name = node.func.id if isinstance(node.func, ast.Name) else 'unknown'
+                raise ValueError(f"Function not allowed: {func_name}")
+            
+            args = [_eval_node(arg) for arg in node.args]
+            return ALLOWED_FUNCTIONS[node.func.id](*args)
+        # Handles named constants (e.g., pi, e).
+        elif isinstance(node, ast.Name):
+            if node.id not in ALLOWED_NAMES:
+                raise ValueError(f"Name not allowed: {node.id}")
+            return ALLOWED_NAMES[node.id]
         # If the node is not a number or an allowed operation, raise an error.
         raise TypeError(f"Unsupported node type: {type(node).__name__}")
     
@@ -209,22 +240,103 @@ class Math(BaseCog):
             await ctx.send(f"An unexpected error occurred: {e}")
             self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
 
+    async def send_calc_help(self, ctx: commands.Context):
+        """Sends a detailed help message for the calculator command."""
+        embed = discord.Embed(
+            title="Calculator Help",
+            description="The calculator supports a wide range of mathematical functions and constants. Here's how to use it:",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="Basic Operations",
+            value="`+` (add), `-` (subtract), `x or *` (multiply), `/` (divide), `^ or **` (power), `%` (modulo)",
+            inline=False
+        )
+
+        functions_list = ", ".join(f"`{f}`" for f in sorted(ALLOWED_FUNCTIONS.keys()))
+        embed.add_field(
+            name="Available Functions",
+            value=functions_list,
+            inline=False
+        )
+
+        constants_list = ", ".join(f"`{c}`" for c in sorted(ALLOWED_NAMES.keys()))
+        embed.add_field(
+            name="Available Constants",
+            value=constants_list,
+            inline=False
+        )
+
+        embed.add_field(
+            name="Usage Examples",
+            value=(
+                "**Basic Arithmetic:**\n"
+                "`5 * (3 + 2)`\n\n"
+                "**Functions:**\n"
+                "`sqrt(64)` - Square Root\n"
+                "`pow(3, 4)` - Power (X^Y)\n"
+                "`abs(-15.5)` - Absolute Value\n"
+                "`round(pi, 4)` - Rounding (Value, Precision)\n"
+                "`ceil(4.2)` - Ceiling (round up)\n"
+                "`floor(4.8)` - Floor (round down)\n\n"
+                "**Trigonometry (angles in radians):**\n"
+                "`sin(pi / 2)`\n"
+                "`cos(0)`\n"
+                "`tan(pi / 4)`\n\n"
+                "**Inverse Trigonometry:**\n"
+                "`asin(1)`\n"
+                "`acos(-1)`\n"
+                "`atan(0)`\n\n"
+                "**Logarithms & Exponents:**\n"
+                "`log(e)` - Natural Log\n"
+                "`log10(1000)` - Base-10 Log\n"
+                "`exp(2)` - e raised to the power of 2\n\n"
+                "**Conversions:**\n"
+                "`degrees(pi)` - Radians to Degrees\n"
+                "`radians(180)` - Degrees to Radians\n\n"
+                "**Constants:**\n"
+                "`1/2 * 10 * c^2` - E=mc^2 example\n"
+                "`avogadro * 2` - Using Avogadro's number\n\n"
+                "**Combining Functions:**\n"
+                "`sin(radians(90)) + cos(radians(180))`"
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text="Expressions are parsed for safety. Only the functions and constants listed are available.")
+
+        await ctx.send(embed=embed)
+
     async def calculate(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all basic math calculation requests."""
         try:
             # Standardize the query: lowercase, collapse whitespace, and handle common operator aliases.
             original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
 
+            if 'help' in original_query:
+                await self.send_calc_help(ctx)
+                return
+
             # --- Extract Relevant Parts of the Expression ---
             # We extract only numbers and valid mathematical operators, ignoring all other text.
-            number_pattern = r'\d+(\.\d+)?'
-            operator_pattern = r'\*\*|[+\-*\/()]'
+            # This regex is designed to capture function names, numbers, and operators.
+            token_pattern = re.compile(
+                r'([a-zA-Z_][a-zA-Z0-9_]*|\d+(?:\.\d+)?|\*\*|[+\-*/%()]|\S)'
+            )
             
-            full_pattern = re.compile(f'({number_pattern}|{operator_pattern})')
+            tokens = token_pattern.findall(original_query)
             
-            tokens = full_pattern.findall(original_query)
-            # The findall with multiple groups returns tuples, so we get the first element.
-            processed_query = "".join([match[0] for match in tokens])
+            # Filter for valid tokens to construct the expression.
+            valid_tokens = []
+            for token in tokens:
+                if token in ALLOWED_FUNCTIONS or \
+                   token in ALLOWED_NAMES or \
+                   token in "()+-*/%**" or \
+                   re.fullmatch(r'\d+(?:\.\d+)?', token):
+                    valid_tokens.append(token)
+
+            processed_query = "".join(valid_tokens)
 
             if not processed_query:
                 await ctx.send("Please provide a mathematical expression to calculate.")
@@ -232,9 +344,13 @@ class Math(BaseCog):
 
             # Run the potentially blocking evaluation in a separate thread to avoid stalling the bot.
             result = await asyncio.to_thread(safe_eval_math, processed_query)
-            # Format the result as an integer if it's a whole number, otherwise as a float with 2 decimal places.
-            result_display = int(result) if result == int(result) else f"{result:.2f}"
             
+            # Format the result to a high precision, removing trailing zeros for clean output.
+            if result == int(result):
+                result_display = str(int(result))
+            else:
+                result_display = f"{result:.15f}".rstrip('0').rstrip('.')
+
             await ctx.send(f"{ctx.author.mention}, the result is: **{result_display}**")
 
         except (ValueError, TypeError, SyntaxError) as e:
@@ -330,8 +446,8 @@ class Math(BaseCog):
         num_coins_str = match.group(1)
         num_coins = int(num_coins_str) if num_coins_str else 1
 
-        if not (1 <= num_coins <= 40):
-            raise ValueError("Coin count is out of range (1-40 coins).")
+        if not (1 <= num_coins <= 200):
+            raise ValueError("Coin count is out of range (1-200 coins).")
 
         # The probability of heads is determined by the SP value (0-100).
         heads_prob = sp / 100.0
