@@ -353,7 +353,7 @@ class Math(BaseCog):
 
             await ctx.send(f"{ctx.author.mention}, the result is: **{result_display}**")
 
-        except (ValueError, TypeError, SyntaxError) as e:
+        except (ValueError, TypeError, SyntaxError, ZeroDivisionError) as e:
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
