@@ -74,129 +74,122 @@ class DatabaseManager:
         Ensures all necessary tables exist in the database. This is called once
         on bot startup. It creates tables for skills, reminders, user timezones,
         and configurations if they don't already exist.
+        Now only creates tables if the database is empty. No schema migrations are performed here.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
-            # Stores user-created skills with their dice rolls and aliases.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS skills (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    name TEXT NOT NULL,
-                    dice_roll TEXT NOT NULL,
-                    skill_type TEXT NOT NULL,
-                    UNIQUE(user_id, name COLLATE NOCASE)
-                )
-            ''')
-            # Stores aliases for skills, linked by skill_id.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS skill_aliases (
-                    id INTEGER PRIMARY KEY,
-                    skill_id INTEGER NOT NULL,
-                    alias TEXT NOT NULL,
-                    FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
-                    UNIQUE(skill_id, alias COLLATE NOCASE)
-                )
-            ''')
-            # Stores reminders for users, including recurring ones.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS reminders (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    reminder_time INTEGER NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    is_recurring INTEGER NOT NULL DEFAULT 0,
-                    recurrence_rule TEXT
-                )''')
-            # Add indexes for performance on the reminders table.
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders (reminder_time);')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);')
+            # Check if the database is empty (no tables)
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [row[0] async for row in cursor]
+            if not tables:
+                # Create all tables from scratch
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS skills (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        dice_roll TEXT NOT NULL,
+                        skill_type TEXT NOT NULL,
+                        UNIQUE(user_id, name COLLATE NOCASE)
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS skill_aliases (
+                        id INTEGER PRIMARY KEY,
+                        skill_id INTEGER NOT NULL,
+                        alias TEXT NOT NULL,
+                        FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                        UNIQUE(skill_id, alias COLLATE NOCASE)
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        reminder_time INTEGER NOT NULL,
+                        message TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        is_recurring INTEGER NOT NULL DEFAULT 0,
+                        recurrence_rule TEXT
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS user_timezones (
+                        user_id INTEGER PRIMARY KEY,
+                        timezone TEXT NOT NULL
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS user_config (
+                        user_id INTEGER NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        PRIMARY KEY(user_id, key)
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS config (
+                        key TEXT PRIMARY KEY,
+                        value INTEGER NOT NULL
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS guild_config (
+                        guild_id INTEGER NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        PRIMARY KEY(guild_id, key)
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS starboard (
+                        original_message_id INTEGER PRIMARY KEY,
+                        starboard_message_id INTEGER NOT NULL,
+                        guild_id INTEGER NOT NULL,
+                        starboard_reply_id INTEGER,
+                        original_channel_id INTEGER
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS bod_usage (
+                        user_id INTEGER PRIMARY KEY,
+                        last_used_timestamp INTEGER NOT NULL DEFAULT 0,
+                        current_chain INTEGER NOT NULL DEFAULT 0,
+                        last_channel_id INTEGER NOT NULL DEFAULT 0
+                    )
+                ''')
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS bod_leaderboard (
+                        user_id INTEGER PRIMARY KEY,
+                        user_name TEXT NOT NULL,
+                        best_chain INTEGER NOT NULL DEFAULT 0
+                    )
+                ''')
+                await db.commit()
+                logger.info("All database tables initialized.")
+            else:
+                # Check for schema mismatches
+                expected_tables = {
+                    "skills", "skill_aliases", "reminders", "user_timezones", "user_config", "config", "guild_config", "starboard", "bod_usage", "bod_leaderboard"
+                }
+                missing_tables = expected_tables - set(tables)
+                if missing_tables:
+                    logger.warning(f"Database is missing tables: {missing_tables}. Please run migrate_db.py.")
+                    await self._warn_and_backup_db(missing_tables)
+                # Check for missing columns in starboard
+                cursor = await db.execute("PRAGMA table_info(starboard);")
+                starboard_columns = [row[1] async for row in cursor]
+                expected_starboard_columns = {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"}
+                if set(starboard_columns) != expected_starboard_columns:
+                    logger.warning("Database schema for 'starboard' table is outdated. Please run migrate_db.py.")
+                    await self._warn_and_backup_db("starboard table columns")
 
-            # Stores the preferred timezone for each user.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_timezones (
-                    user_id INTEGER PRIMARY KEY,
-                    timezone TEXT NOT NULL
-                )''')
-            # Stores user-specific configurations, like a custom skill limit.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_config (
-                    user_id INTEGER NOT NULL,
-                    key TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    PRIMARY KEY(user_id, key)
-                )''')
-            # Stores global bot configurations.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS config (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL
-                )''')
-
-            # Stores guild-specific configurations for features like the starboard.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS guild_config (
-                    guild_id INTEGER NOT NULL,
-                    key TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    PRIMARY KEY(guild_id, key)
-                )''')
-
-            # Stores messages that have been posted to the starboard.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS starboard (
-                    original_message_id INTEGER PRIMARY KEY,
-                    starboard_message_id INTEGER NOT NULL,
-                    guild_id INTEGER NOT NULL,
-                    starboard_reply_id INTEGER
-                )
-            ''')
-
-            # Stores usage and chain data for the 'bod' command.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS bod_usage (
-                    user_id INTEGER PRIMARY KEY,
-                    last_used_timestamp INTEGER NOT NULL DEFAULT 0,
-                    current_chain INTEGER NOT NULL DEFAULT 0,
-                    last_channel_id INTEGER NOT NULL DEFAULT 0
-                )
-            ''')
-
-            # Stores the global leaderboard for the 'bod' command.
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS bod_leaderboard (
-                    user_id INTEGER PRIMARY KEY,
-                    user_name TEXT NOT NULL,
-                    best_chain INTEGER NOT NULL DEFAULT 0
-                )
-            ''')
-            
-            # --- Schema Migrations ---
-            # Add starboard_reply_id column if it doesn't exist (for older DBs)
-            try:
-                await db.execute("ALTER TABLE starboard ADD COLUMN starboard_reply_id INTEGER")
-                logger.info("Migrated starboard table: Added 'starboard_reply_id' column.")
-            except aiosqlite.OperationalError as e:
-                if "duplicate column name" not in str(e):
-                    raise # Re-raise if it's not the expected error
-
-            # Add last_channel_id to bod_usage if it doesn't exist
-            try:
-                await db.execute("ALTER TABLE bod_usage ADD COLUMN last_channel_id INTEGER NOT NULL DEFAULT 0")
-                logger.info("Migrated bod_usage table: Added 'last_channel_id' column.")
-            except aiosqlite.OperationalError as e:
-                if "duplicate column name" not in str(e):
-                    raise
-            
-            # Set a default global skill limit if one isn't already in the database.
-            cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")
-            if await cursor.fetchone() is None:
-                await db.execute("INSERT INTO config (key, value) VALUES ('skill_limit', ?)", (self.skill_limit,))
-            
-            await db.commit()
-            logger.info("All database tables initialized.")
+    async def _warn_and_backup_db(self, issue):
+        import shutil
+        backup_path = self.db_path + ".backup"
+        shutil.copyfile(self.db_path, backup_path)
+        logger.warning(f"Database schema issue detected: {issue}. A backup has been created at {backup_path}. Please run migrate_db.py at your earliest convenience.")
 
     async def _load_skill_limit(self) -> None:
         """Loads the global skill limit from the database into the instance."""
@@ -301,12 +294,12 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, starboard_reply_id: Optional[int] = None) -> None:
+    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: int, starboard_reply_id: Optional[int] = None) -> None:
         """Saves a new starboard entry to the database."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, starboard_reply_id) VALUES (?, ?, ?, ?)",
-                (original_message_id, starboard_message_id, guild_id, starboard_reply_id)
+                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
+                (original_message_id, starboard_message_id, guild_id, channel_id, starboard_reply_id)
             )
             await db.commit()
 
@@ -317,6 +310,21 @@ class DatabaseManager:
             cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def get_all_starboard_entries_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
+        """Retrieves all starboard entries for a specific guild."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM starboard WHERE guild_id = ?", (guild_id,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_starboard_for_guild(self, guild_id: int) -> None:
+        """Deletes all starboard entries for a specific guild."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM starboard WHERE guild_id = ?", (guild_id,))
+            await db.commit()
+            logger.info(f"Cleared all starboard entries for guild {guild_id}.")
 
     async def remove_starboard_entry(self, original_message_id: int) -> None:
         """Removes a starboard entry from the database."""

@@ -175,9 +175,8 @@ class Reminders(BaseCog):
             await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Unexpected error in reminder task {reminder['id']}: {e}", exc_info=True)
-        finally:
-            # Clean up the completed/cancelled task from our tracking dictionary.
-            self.scheduled_tasks.pop(reminder['id'], None)
+        # The task is now complete, cancelled, or has failed. The done callback will handle
+        # cleanup of the database entry and the scheduled_tasks dictionary.
 
     async def _reschedule_or_cleanup(self, reminder: dict[str, Any]) -> None:
         """Handles the logic for rescheduling a recurring reminder or deleting a one-off."""

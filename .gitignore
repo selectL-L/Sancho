@@ -211,7 +211,6 @@ __marimo__/
 
 # Local files that are created/required
 info.env
-migrate_db.py
 *.db
 *.db.backup
 *.log
