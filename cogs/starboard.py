@@ -63,7 +63,6 @@ class Starboard(BaseCog):
             await ctx.send(f"Starboard threshold set to {threshold}")
 
     @starboard_group.command(name="reload")
-    @commands.is_owner()
     async def reload_starboard(self, ctx: commands.Context):
         """
         DEV COMMAND: Deletes and remakes all starboard messages in the guild.
