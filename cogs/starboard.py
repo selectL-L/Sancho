@@ -62,6 +62,104 @@ class Starboard(BaseCog):
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_threshold", str(threshold))
             await ctx.send(f"Starboard threshold set to {threshold}")
 
+    @starboard_group.command(name="reload")
+    @commands.is_owner()
+    async def reload_starboard(self, ctx: commands.Context):
+        """
+        DEV COMMAND: Deletes and remakes all starboard messages in the guild.
+        Only usable by the bot owner when DEV_MODE is True.
+        """
+        from config import DEV_MODE
+        if not DEV_MODE:
+            await ctx.send("This command is only available in developer mode.")
+            return
+
+        if not ctx.guild:
+            await ctx.send("This command must be used in a guild.")
+            return
+
+        await ctx.send("Starting starboard reload...")
+        logger.info(f"DEV_MODE: Starting starboard reload for guild {ctx.guild.id} triggered by {ctx.author.id}.")
+
+        starboard_channel_id, starboard_emoji, starboard_threshold = await self.get_starboard_config(ctx.guild.id)
+        if not starboard_channel_id:
+            await ctx.send("Starboard channel is not configured.")
+            return
+        
+        starboard_channel = self.bot.get_channel(starboard_channel_id)
+        if not isinstance(starboard_channel, discord.TextChannel):
+            await ctx.send("Starboard channel not found.")
+            return
+
+        all_entries = await self.db_manager.get_all_starboard_entries_for_guild(ctx.guild.id)
+        if not all_entries:
+            await ctx.send("No starboard entries found to reload.")
+            return
+            
+        # Store original message info before deleting
+        messages_to_recreate = [
+            {'message_id': entry['original_message_id'], 'channel_id': entry['original_channel_id']}
+            for entry in all_entries if entry.get('original_channel_id')
+        ]
+
+        # --- Deletion Phase ---
+        logger.info(f"Deleting {len(all_entries)} existing starboard messages...")
+        deleted_count = 0
+        for entry in all_entries:
+            try:
+                # Delete the main starboard message
+                msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
+                await msg.delete()
+                deleted_count += 1
+            except discord.NotFound:
+                pass # Message already gone
+            except discord.HTTPException as e:
+                logger.error(f"Failed to delete starboard message {entry['starboard_message_id']}: {e}")
+
+            # Delete the context message if it exists
+            if entry.get('starboard_reply_id'):
+                try:
+                    reply_msg = await starboard_channel.fetch_message(entry['starboard_reply_id'])
+                    await reply_msg.delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to delete starboard reply context {entry['starboard_reply_id']}: {e}")
+        
+        await self.db_manager.clear_starboard_for_guild(ctx.guild.id)
+        await ctx.send(f"Deleted {deleted_count} starboard messages and cleared database entries.")
+
+        # --- Recreation Phase ---
+        logger.info(f"Attempting to recreate {len(messages_to_recreate)} posts...")
+        recreated_count = 0
+        failed_count = 0
+
+        for msg_info in messages_to_recreate:
+            original_channel = self.bot.get_channel(msg_info['channel_id'])
+            if not isinstance(original_channel, discord.TextChannel):
+                logger.warning(f"Could not find original channel {msg_info['channel_id']}. Skipping message {msg_info['message_id']}.")
+                failed_count += 1
+                continue
+            
+            try:
+                message = await original_channel.fetch_message(msg_info['message_id'])
+                star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
+
+                if star_reaction and star_reaction.count >= starboard_threshold:
+                    await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
+                    recreated_count += 1
+                    await asyncio.sleep(1) # Avoid rate limits
+                else:
+                    logger.info(f"Message {message.id} no longer meets threshold. Not recreating.")
+            except discord.NotFound:
+                logger.warning(f"Original message {msg_info['message_id']} not found in channel {msg_info['channel_id']}. Skipping.")
+                failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to recreate starboard post for message {msg_info['message_id']}: {e}")
+                failed_count += 1
+
+        await ctx.send(f"Starboard reload complete. Recreated {recreated_count} posts. Failed to recreate {failed_count} posts.")
+
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if not payload.guild_id or not self.bot.user or payload.user_id == self.bot.user.id:
@@ -143,7 +241,9 @@ class Starboard(BaseCog):
 
                 # 3. Save to DB with both IDs
                 if message.guild:
-                    await self.db_manager.add_starboard_entry(message.id, starboard_message.id, message.guild.id, reply_context_message.id)
+                    await self.db_manager.add_starboard_entry(
+                        message.id, starboard_message.id, message.guild.id, message.channel.id, reply_context_message.id
+                    )
 
             except discord.NotFound:
                 # If the replied-to message is gone, just post the main message as a normal post.
@@ -161,7 +261,7 @@ class Starboard(BaseCog):
         try:
             starboard_message = await starboard_channel.send(content=content, embed=embed, files=files)
             if message.guild:
-                await self.db_manager.add_starboard_entry(message.id, starboard_message.id, message.guild.id)
+                await self.db_manager.add_starboard_entry(message.id, starboard_message.id, message.guild.id, message.channel.id)
         except discord.HTTPException as e:
             logger.error(f"Failed to create single starboard post: {e}")
         finally:
@@ -169,17 +269,16 @@ class Starboard(BaseCog):
                 file.close()
 
     async def create_starboard_embed_and_files(self, message: discord.Message) -> tuple[discord.Embed, list[discord.File]]:
-        """Creates a text-only embed and a list of discord.File objects for all attachments."""
-        embed = discord.Embed(
-            description=message.content,
-            color=discord.Color.gold(),
-            timestamp=message.created_at
-        )
-        embed.set_author(name=f"{message.author.display_name} ({message.author.name})", icon_url=message.author.display_avatar.url)
-        embed.set_footer(text=f"ID: {message.id}")
-        embed.add_field(name="Original Message", value=f"[Jump to Message]({message.jump_url})", inline=False)
-
+        """Creates an embed and a list of discord.File objects for a starboard message, handling regular content, attachments, and embeds."""
+        
+        description_parts = []
         files = []
+
+        # 1. Always start with the message's direct text content, if any.
+        if message.content:
+            description_parts.append(message.content)
+
+        # 2. Process direct attachments on the main message.
         for attachment in message.attachments:
             try:
                 async with self.http_session.get(attachment.url) as resp:
@@ -187,9 +286,56 @@ class Starboard(BaseCog):
                         data = io.BytesIO(await resp.read())
                         files.append(discord.File(data, filename=attachment.filename, spoiler=attachment.is_spoiler()))
             except Exception as e:
-                logger.error(f"Failed to download attachment for starboard: {e}")
+                logger.error(f"Failed to download direct attachment for starboard: {e}")
+
+        # 3. Process message snapshots for forwarded content.
+        if hasattr(message, 'message_snapshots') and message.message_snapshots:
+            for snapshot in message.message_snapshots:
+                if snapshot.content:
+                    description_parts.append(snapshot.content)
+                # Process attachments within the snapshot.
+                for attachment in snapshot.attachments:
+                    try:
+                        async with self.http_session.get(attachment.url) as resp:
+                            if resp.status == 200:
+                                data = io.BytesIO(await resp.read())
+                                files.append(discord.File(data, filename=attachment.filename, spoiler=attachment.is_spoiler()))
+                    except Exception as e:
+                        logger.error(f"Failed to download snapshot attachment for starboard: {e}")
         
-        return embed, files
+        # 4. Handle embeds as a fallback or for link previews.
+        elif message.embeds:
+            embed = message.embeds[0]
+            if embed.description:
+                description_parts.append(embed.description)
+            # Download image from the embed if it exists.
+            if embed.image and embed.image.url:
+                try:
+                    async with self.http_session.get(embed.image.url) as resp:
+                        if resp.status == 200:
+                            data = io.BytesIO(await resp.read())
+                            filename = embed.image.url.split('/')[-1].split('?')[0] or "embedded_image.png"
+                            files.append(discord.File(data, filename=filename))
+                except Exception as e:
+                    logger.error(f"Failed to download embedded image for starboard: {e}")
+
+        # Join all collected parts into a single description string.
+        description = "\n\n".join(description_parts)
+
+        # Truncate the final description if it's too long for an embed.
+        if len(description) > 4096:
+            description = description[:4093] + "..."
+
+        new_embed = discord.Embed(
+            description=description,
+            color=discord.Color.gold(),
+            timestamp=message.created_at
+        )
+        new_embed.set_author(name=f"{message.author.display_name} ({message.author.name})", icon_url=message.author.display_avatar.url)
+        new_embed.set_footer(text=f"ID: {message.id}")
+        new_embed.add_field(name="Original Message", value=f"[Jump to Message]({message.jump_url})", inline=False)
+        
+        return new_embed, files
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
