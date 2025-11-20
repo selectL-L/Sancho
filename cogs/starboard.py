@@ -66,7 +66,7 @@ class Starboard(BaseCog):
     async def reload_starboard(self, ctx: commands.Context):
         """
         DEV COMMAND: Deletes and remakes all starboard messages in the guild.
-        Only usable by the bot owner when DEV_MODE is True.
+        Only usable when DEV_MODE is True.
         """
         from config import DEV_MODE
         if not DEV_MODE:
