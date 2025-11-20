@@ -63,28 +63,20 @@ class Starboard(BaseCog):
             await ctx.send(f"Starboard threshold set to {threshold}")
 
     @starboard_group.command(name="reload")
-    async def reload_starboard(self, ctx: commands.Context):
+    @commands.is_owner()
+    async def reload_starboard(self, ctx: commands.Context, mode: str):
         """
-        DEV COMMAND: Deletes and remakes all starboard messages in the guild.
-        Only usable when DEV_MODE is True.
+        Reloads or fixes starboard messages. Only callable by the bot owner.
+        Usage: .starboard reload <remake|fix>
         """
-        from config import DEV_MODE
-        if not DEV_MODE:
-            await ctx.send("This command is only available in developer mode.")
-            return
-
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
             return
-
-        await ctx.send("Starting starboard reload...")
-        logger.info(f"DEV_MODE: Starting starboard reload for guild {ctx.guild.id} triggered by {ctx.author.id}.")
 
         starboard_channel_id, starboard_emoji, starboard_threshold = await self.get_starboard_config(ctx.guild.id)
         if not starboard_channel_id:
             await ctx.send("Starboard channel is not configured.")
             return
-        
         starboard_channel = self.bot.get_channel(starboard_channel_id)
         if not isinstance(starboard_channel, discord.TextChannel):
             await ctx.send("Starboard channel not found.")
@@ -92,72 +84,121 @@ class Starboard(BaseCog):
 
         all_entries = await self.db_manager.get_all_starboard_entries_for_guild(ctx.guild.id)
         if not all_entries:
-            await ctx.send("No starboard entries found to reload.")
+            await ctx.send("No starboard entries found.")
             return
-            
-        # Store original message info before deleting
-        messages_to_recreate = [
-            {'message_id': entry['original_message_id'], 'channel_id': entry['original_channel_id']}
-            for entry in all_entries if entry.get('original_channel_id')
-        ]
 
-        # --- Deletion Phase ---
-        logger.info(f"Deleting {len(all_entries)} existing starboard messages...")
-        deleted_count = 0
-        for entry in all_entries:
-            try:
-                # Delete the main starboard message
-                msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
-                await msg.delete()
-                deleted_count += 1
-            except discord.NotFound:
-                pass # Message already gone
-            except discord.HTTPException as e:
-                logger.error(f"Failed to delete starboard message {entry['starboard_message_id']}: {e}")
+        if mode.lower() == "remake":
+            await ctx.send("Starting starboard remake...")
+            logger.info(f"Starboard remake for guild {ctx.guild.id} triggered by {ctx.author.id}.")
 
-            # Delete the context message if it exists
-            if entry.get('starboard_reply_id'):
+            messages_to_recreate = [
+                {'message_id': entry['original_message_id'], 'channel_id': entry['original_channel_id']}
+                for entry in all_entries if entry.get('original_channel_id')
+            ]
+
+            # --- Deletion Phase ---
+            logger.info(f"Deleting {len(all_entries)} existing starboard messages...")
+            deleted_count = 0
+            for entry in all_entries:
                 try:
-                    reply_msg = await starboard_channel.fetch_message(entry['starboard_reply_id'])
-                    await reply_msg.delete()
+                    msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
+                    await msg.delete()
+                    deleted_count += 1
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    logger.error(f"Failed to delete starboard reply context {entry['starboard_reply_id']}: {e}")
-        
-        await self.db_manager.clear_starboard_for_guild(ctx.guild.id)
-        await ctx.send(f"Deleted {deleted_count} starboard messages and cleared database entries.")
+                    logger.error(f"Failed to delete starboard message {entry['starboard_message_id']}: {e}")
 
-        # --- Recreation Phase ---
-        logger.info(f"Attempting to recreate {len(messages_to_recreate)} posts...")
-        recreated_count = 0
-        failed_count = 0
+                if entry.get('starboard_reply_id'):
+                    try:
+                        reply_msg = await starboard_channel.fetch_message(entry['starboard_reply_id'])
+                        await reply_msg.delete()
+                    except discord.NotFound:
+                        pass
+                    except discord.HTTPException as e:
+                        logger.error(f"Failed to delete starboard reply context {entry['starboard_reply_id']}: {e}")
 
-        for msg_info in messages_to_recreate:
-            original_channel = self.bot.get_channel(msg_info['channel_id'])
-            if not isinstance(original_channel, discord.TextChannel):
-                logger.warning(f"Could not find original channel {msg_info['channel_id']}. Skipping message {msg_info['message_id']}.")
-                failed_count += 1
-                continue
-            
-            try:
-                message = await original_channel.fetch_message(msg_info['message_id'])
-                star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
+            await self.db_manager.clear_starboard_for_guild(ctx.guild.id)
+            await ctx.send(f"Deleted {deleted_count} starboard messages and cleared database entries.")
 
-                if star_reaction and star_reaction.count >= starboard_threshold:
-                    await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
-                    recreated_count += 1
-                    await asyncio.sleep(1) # Avoid rate limits
-                else:
-                    logger.info(f"Message {message.id} no longer meets threshold. Not recreating.")
-            except discord.NotFound:
-                logger.warning(f"Original message {msg_info['message_id']} not found in channel {msg_info['channel_id']}. Skipping.")
-                failed_count += 1
-            except Exception as e:
-                logger.error(f"Failed to recreate starboard post for message {msg_info['message_id']}: {e}")
-                failed_count += 1
+            # --- Recreation Phase ---
+            logger.info(f"Attempting to recreate {len(messages_to_recreate)} posts...")
+            recreated_count = 0
+            failed_count = 0
 
-        await ctx.send(f"Starboard reload complete. Recreated {recreated_count} posts. Failed to recreate {failed_count} posts.")
+            for msg_info in messages_to_recreate:
+                original_channel = self.bot.get_channel(msg_info['channel_id'])
+                if not isinstance(original_channel, discord.TextChannel):
+                    logger.warning(f"Could not find original channel {msg_info['channel_id']}. Skipping message {msg_info['message_id']}.")
+                    failed_count += 1
+                    continue
+                try:
+                    message = await original_channel.fetch_message(msg_info['message_id'])
+                    star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
+                    if star_reaction and star_reaction.count >= starboard_threshold:
+                        await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
+                        recreated_count += 1
+                        await asyncio.sleep(1)
+                    else:
+                        logger.info(f"Message {message.id} no longer meets threshold. Not recreating.")
+                except discord.NotFound:
+                    logger.warning(f"Original message {msg_info['message_id']} not found in channel {msg_info['channel_id']}. Skipping.")
+                    failed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to recreate starboard post for message {msg_info['message_id']}: {e}")
+                    failed_count += 1
+
+            await ctx.send(f"Starboard remake complete. Recreated {recreated_count} posts. Failed to recreate {failed_count} posts.")
+
+        elif mode.lower() == "fix":
+            await ctx.send("Starting starboard fix...")
+            logger.info(f"Starboard fix for guild {ctx.guild.id} triggered by {ctx.author.id}.")
+            fixed_count = 0
+            failed_count = 0
+            for entry in all_entries:
+                # Only attempt to fix entries with missing info except original_message_id
+                missing_fields = []
+                for field in ["starboard_message_id", "guild_id", "original_channel_id", "starboard_reply_id"]:
+                    if not entry.get(field):
+                        missing_fields.append(field)
+                if not missing_fields:
+                    continue
+                # Try to fill in missing info
+                try:
+                    # starboard_message_id: try to find in starboard channel by searching for messages with jump_url to original
+                    if entry.get("original_message_id") and entry.get("original_channel_id"):
+                        original_channel = self.bot.get_channel(entry["original_channel_id"])
+                        if isinstance(original_channel, discord.TextChannel):
+                            try:
+                                original_message = await original_channel.fetch_message(entry["original_message_id"])
+                                # Search starboard channel for messages referencing this original message
+                                async for msg in starboard_channel.history(limit=200):
+                                    if msg.embeds:
+                                        embed = msg.embeds[0]
+                                        for field in embed.fields:
+                                            if field.name == "Original Message" and entry["original_message_id"] in field.value:
+                                                # Found candidate
+                                                if not entry.get("starboard_message_id"):
+                                                    entry["starboard_message_id"] = msg.id
+                                                if not entry.get("guild_id"):
+                                                    entry["guild_id"] = ctx.guild.id
+                                                if not entry.get("original_channel_id"):
+                                                    entry["original_channel_id"] = original_channel.id
+                                                # Try to find reply context
+                                                if not entry.get("starboard_reply_id") and msg.reference:
+                                                    entry["starboard_reply_id"] = msg.reference.message_id
+                                                break
+                            except discord.NotFound:
+                                pass
+                    # Save fixed entry
+                    await self.db_manager.update_starboard_entry(entry)
+                    fixed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to fix starboard entry for message {entry.get('original_message_id')}: {e}")
+                    failed_count += 1
+            await ctx.send(f"Starboard fix complete. Fixed {fixed_count} entries. Failed to fix {failed_count} entries.")
+        else:
+            await ctx.send("Invalid mode. Use 'remake' or 'fix'.")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
