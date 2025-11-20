@@ -580,28 +580,6 @@ class Skills(BaseCog):
         else:
             await ctx.send("Something went wrong. I couldn't delete that skill.")
 
-    @commands.command(name="setskilllimit", hidden=True)
-    @commands.has_permissions(administrator=True)
-    async def set_skill_limit_command(self, ctx: commands.Context, limit: int):
-        """Admin command to set the global maximum number of skills a user can have."""
-        if not (0 < limit <= 100):
-            await ctx.send("Please provide a limit between 1 and 100.")
-            return
-        
-        await self.db_manager.set_skill_limit(limit)
-        await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
-
-    @commands.command(name="setuserskilllimit", hidden=True)
-    @commands.has_permissions(administrator=True)
-    async def set_user_skill_limit_command(self, ctx: commands.Context, user: discord.Member, limit: int):
-        """Admin command to set the skill limit for a specific user."""
-        if not (0 < limit <= 100):
-            await ctx.send("Please provide a limit between 1 and 100.")
-            return
-        
-        await self.db_manager.set_user_skill_limit(user.id, limit)
-        await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
-
 async def setup(bot: SanchoBot) -> None:
     """Standard setup function to add the cog to the bot."""
     await bot.add_cog(Skills(bot))

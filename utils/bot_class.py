@@ -71,7 +71,14 @@ class SanchoBot(commands.Bot):
         # For user input errors (e.g., missing arguments), show the command's help message
         # to guide the user on correct usage.
         if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
-            await ctx.send_help(ctx.command)
+            help_cog = self.get_cog('Help')
+            if help_cog:
+                # We need to tell Pylance that this cog has the method.
+                # In a real scenario, you might define a Protocol for this.
+                await getattr(help_cog, "send_command_help")(ctx, ctx.command)
+            else:
+                # Fallback to default behavior if Help cog isn't available
+                await ctx.send_help(ctx.command)
             return
 
         # Handle permission errors gracefully. `NotOwner` is a subclass of `CheckFailure`.

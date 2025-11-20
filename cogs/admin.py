@@ -20,11 +20,12 @@ class StatusView(discord.ui.View):
     for each user.
     """
     def __init__(self, bot: SanchoBot, user_pages: List[discord.Embed], author_id: int):
-        super().__init__(timeout=120.0)
+        super().__init__(timeout=60.0)
         self.bot = bot
         self.user_pages = user_pages
         self.author_id = author_id
         self.current_page = 0
+        self.message: typing.Optional[discord.Message] = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Ensures only the command author can use the buttons."""
@@ -61,14 +62,20 @@ class StatusView(discord.ui.View):
             self.current_page += 1
             await self.update_view(interaction)
 
-    @discord.ui.button(label="⏹️ Stop", style=discord.ButtonStyle.danger)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Stops the view and disables all buttons."""
+
+    async def on_timeout(self):
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
+        # Try to edit the message to disable buttons
+        # Note: discord.py 2.x requires storing the message reference
+        if hasattr(self, 'message') and self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+import typing
 
 class AdminCog(BaseCog):
     """
@@ -77,15 +84,45 @@ class AdminCog(BaseCog):
 
     def __init__(self, bot: SanchoBot):
         super().__init__(bot)
-        # This assertion helps the type checker understand that db_manager will not be None.
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
 
+    @commands.command(name="global_limit", hidden=True)
+    @commands.has_permissions(manage_guild=True)
+    @app_commands.describe(limit="The new global skill limit (1-100).")
+    async def global_limit(self, ctx: commands.Context, limit: int):
+        """
+        Set the global skill limit for all users.
+        """
+        if not (0 < limit <= 100):
+            await ctx.send("Please provide a limit between 1 and 100.")
+            return
+        await self.db_manager.set_skill_limit(limit)
+        await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
+
+    @commands.command(name="user_limit", hidden=True)
+    @commands.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        user="The user to set the limit for. (this can be a mention or an ID)",
+        limit="The new skill limit for the user (1-100)."
+    )
+    async def user_limit(self, ctx: commands.Context, user: discord.Member, limit: int):
+        """
+        Set the skill limit for a specific user.
+        """
+        if not (0 < limit <= 100):
+            await ctx.send("Please provide a limit between 1 and 100.")
+            return
+        await self.db_manager.set_user_skill_limit(user.id, limit)
+        await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
+
+
     @commands.command(name="status", hidden=True)
     @commands.is_owner()
-    async def status(self, ctx: commands.Context):
+    async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None):
         """
-        Displays an interactive status report of all users' skills and reminders.
+        Displays a status report of all users' skills and reminders.
+        Usage: .status [full|print]
         """
         await ctx.send("`Generating status report...`")
 
@@ -97,7 +134,6 @@ class AdminCog(BaseCog):
 
             for skill in all_skills:
                 user_data[skill['user_id']]['skills'].append(skill)
-            
             for reminder in all_reminders:
                 user_data[reminder['user_id']]['reminders'].append(reminder)
 
@@ -140,26 +176,59 @@ class AdminCog(BaseCog):
                 else:
                     reminders_text = "No reminders found."
                 embed.add_field(name="Reminders", value=reminders_text, inline=False)
-                
                 user_pages.append(embed)
 
             if not user_pages:
                 await ctx.send("Failed to generate report pages.")
                 return
 
-            # We pass self.bot here, which is correctly typed as SanchoBot from the cog's __init__
+            if mode == "full":
+                for embed in user_pages:
+                    await ctx.send(embed=embed)
+                return
+
+            if mode == "print":
+                import tempfile
+                import os
+                report_lines = []
+                for i, user_id in enumerate(user_ids):
+                    try:
+                        user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                        user_name = f"{user.name} ({user.id})"
+                    except discord.NotFound:
+                        user_name = f"Unknown User ({user_id})"
+                    report_lines.append(f"Status for {user_name}\n{'='*40}")
+                    if user_data[user_id]['skills']:
+                        for skill in user_data[user_id]['skills']:
+                            aliases = skill.get('aliases')
+                            alias_str = f" (aliases: {aliases})" if aliases else ""
+                            report_lines.append(f"Skill: {skill['name']} | Dice: {skill['dice_roll']}{alias_str}")
+                    else:
+                        report_lines.append("No skills found.")
+                    if user_data[user_id]['reminders']:
+                        for reminder in user_data[user_id]['reminders']:
+                            report_lines.append(f"Reminder ID {reminder['id']}: '{reminder['message']}' @ {reminder['reminder_time']}")
+                    else:
+                        report_lines.append("No reminders found.")
+                    report_lines.append("\n")
+                with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_status_report.txt") as f:
+                    f.write("\n".join(report_lines))
+                    temp_path = f.name
+                await ctx.send("Status report attached:", file=discord.File(temp_path, filename="status_report.txt"))
+                os.remove(temp_path)
+                return
+
+            # Default: interactive view
             view = StatusView(self.bot, user_pages, ctx.author.id)
-            
             previous_button = view.children[0]
             if isinstance(previous_button, discord.ui.Button):
                 previous_button.disabled = True
-
             if len(user_pages) == 1:
                 next_button = view.children[1]
                 if isinstance(next_button, discord.ui.Button):
                     next_button.disabled = True
-
-            await ctx.send(embed=user_pages[0], view=view)
+            sent_msg = await ctx.send(embed=user_pages[0], view=view)
+            view.message = sent_msg
 
         except Exception as e:
             logging.error("Error generating status report:", exc_info=True)

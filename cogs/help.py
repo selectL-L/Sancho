@@ -18,6 +18,7 @@ Key Features:
 """
 import discord
 from discord.ext import commands
+from discord import app_commands
 import logging
 
 import config
@@ -49,6 +50,73 @@ class Help(BaseCog):
                 await ctx.send(f"Sorry, I don't have a command called `{command_name}`.")
         else:
             await self.send_bot_help(ctx)
+
+    async def send_command_help(self, ctx: commands.Context, command: commands.Command):
+        """
+        Provides help for a specific command, attempting to pull parameter
+        descriptions from a corresponding slash command.
+        """
+        self.logger.info(f"Generating help for command: {command.name}")
+        if not command.enabled:
+            self.logger.warning(f"Attempted to get help for disabled command: {command.name}")
+            return
+
+        # --- Create the base embed ---
+        embed = discord.Embed(
+            title=f"Help: `{ctx.prefix}{command.name}`",
+            description=command.help or "No description available.",
+            color=discord.Color.green()
+        )
+        if command.aliases:
+            embed.add_field(name="Aliases", value=", ".join(f"`{a}`" for a in command.aliases), inline=False)
+
+        # --- Find parameter descriptions from app_commands ---
+        param_descriptions = {}
+        # The bot's command tree holds the slash commands
+        if hasattr(self.bot, 'tree'):
+            self.logger.info("Bot has a command tree. Searching for corresponding app command...")
+            app_command = self.bot.tree.get_command(command.name)
+
+            if app_command and isinstance(app_command, app_commands.Command):
+                self.logger.info(f"Found matching app command: {app_command.name}")
+                for param in app_command.parameters:
+                    param_descriptions[param.name] = param.description
+                self.logger.info(f"Extracted parameter descriptions: {param_descriptions}")
+            else:
+                self.logger.warning(f"Could not find a matching app command for '{command.name}'.")
+                
+                # Fallback to reading the decorator directly from the callback
+                if hasattr(command.callback, '__discord_app_commands_param_description__'):
+                    self.logger.info(f"Falling back to reading decorator directly for '{command.name}'.")
+                    descriptions = getattr(command.callback, '__discord_app_commands_param_description__', {})
+                    if descriptions:
+                        param_descriptions.update(descriptions)
+                        self.logger.info(f"Extracted descriptions from decorator: {param_descriptions}")
+
+        else:
+            self.logger.warning("Bot does not have a command tree, cannot look for app command descriptions.")
+
+        # --- Format the usage and parameters ---
+        # We use the command's signature directly
+        signature = f"{ctx.prefix}{command.name} {command.signature}"
+        embed.add_field(name="Usage", value=f"```{signature}```", inline=False)
+
+        # --- Build the parameters/arguments field ---
+        if command.clean_params:
+            param_details = []
+            for name, param in command.clean_params.items():
+                # Get description from app_command or default
+                description = param_descriptions.get(name, "No description given")
+                param_details.append(f"**`{name}`**: {description}")
+
+            if param_details:
+                embed.add_field(
+                    name="Arguments",
+                    value="\n".join(param_details),
+                    inline=False
+                )
+
+        await ctx.send(embed=embed)
 
     async def send_bot_help(self, ctx: commands.Context):
         """Sends a general help embed listing all commands and NLP capabilities."""
@@ -174,29 +242,6 @@ class Help(BaseCog):
                 "Please be patient with both me and my creator as things change and improve!"
             )
         )
-        await ctx.send(embed=embed)
-
-    async def send_command_help(self, ctx: commands.Context, command: commands.Command):
-        """Sends a detailed help embed for a specific standard command."""
-        prefixes = await self.bot.get_prefix(ctx.message)
-        example_prefix = prefixes[0] if prefixes else ''
-
-        embed = discord.Embed(
-            title=f"Help for: `{command.name}`",
-            description=command.help or "No description available.",
-            color=discord.Color.green()
-        )
-        
-        # Show command aliases if they exist.
-        if command.aliases:
-            embed.add_field(name="Aliases", value=", ".join(f"`{alias}`" for alias in command.aliases), inline=False)
-        
-        # Construct the usage string, including the signature (e.g., <argument>).
-        usage = f"{example_prefix.strip()} {command.name}"
-        if command.signature:
-            usage += f" {command.signature}"
-        embed.add_field(name="Usage", value=f"`{usage}`", inline=False)
-
         await ctx.send(embed=embed)
 
 async def setup(bot: SanchoBot):
