@@ -4,6 +4,8 @@ from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 import logging
+import datetime
+import inspect
 from typing import Optional
 import io
 import aiohttp
@@ -20,6 +22,12 @@ class Starboard(BaseCog):
         self.starboard_threshold = 3
         self.http_session = aiohttp.ClientSession()
         self._locks = {} # For preventing race conditions
+        # Rate-limiting controls for slow 'fix' operations
+        self._fix_semaphore = asyncio.Semaphore(1)
+        self._fix_delay = 0.6  # seconds between external calls
+        self._fix_retries = 4
+        # Fast-mode override (disabled by default). When True, bypass rate-limits and thresholds.
+        self._fast_mode = False
 
     async def cog_unload(self):
         await self.http_session.close()
@@ -64,7 +72,7 @@ class Starboard(BaseCog):
 
     @starboard_group.command(name="reload")
     @commands.is_owner()
-    async def reload_starboard(self, ctx: commands.Context, mode: str):
+    async def reload_starboard(self, ctx: commands.Context, mode: str, *flags):
         """
         Reloads or fixes starboard messages. Only callable by the bot owner.
         Usage: .starboard reload <remake|fix>
@@ -87,118 +95,432 @@ class Starboard(BaseCog):
             await ctx.send("No starboard entries found.")
             return
 
+        logger.debug(f"reload_starboard called with mode={mode}, flags={flags}, fast_mode={self._fast_mode}")
+        logger.debug(f"Configuration: starboard_channel_id={starboard_channel_id}, emoji={starboard_emoji}, threshold={starboard_threshold}")
+        logger.debug(f"Entries to process: {len(all_entries)}")
+
+        # Support a '--fast' override flag passed as an extra argument: `.starboard reload fix --fast`
+        fast_requested = any(f == '--fast' for f in flags) or ('--fast' in mode)
+        if fast_requested:
+            # Present a modal to the caller for explicit confirmation
+            future: asyncio.Future = asyncio.get_event_loop().create_future()
+
+            class FastConfirmModal(discord.ui.Modal):
+                def __init__(self, future: asyncio.Future):
+                    super().__init__(title="Confirm Fast Mode")
+                    # Single short text field where the user must type the exact phrase
+                    self.add_item(discord.ui.TextInput(label="Type 'I understand the risks' to confirm", style=discord.TextStyle.short, placeholder="I understand the risks"))
+                    self.future = future
+
+                async def on_submit(self, interaction: discord.Interaction):
+                    value = getattr(self.children[0], 'value', '')
+                    try:
+                        value = value.strip().lower()
+                    except Exception:
+                        value = ""
+                    if value == 'i understand the risks':
+                        await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits.', ephemeral=True)
+                        if not self.future.done():
+                            self.future.set_result(True)
+                    else:
+                        await interaction.response.send_message('Fast mode cancelled (incorrect confirmation).', ephemeral=True)
+                        if not self.future.done():
+                            self.future.set_result(False)
+
+            modal = FastConfirmModal(future)
+            # Send the modal and wait for the future to be set by the modal submit handler
+            # Attempt to send the modal if the context supports it; otherwise fall back to text confirmation
+            send_modal = getattr(ctx, 'send_modal', None)
+            if callable(send_modal):
+                try:
+                    res = send_modal(modal)
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:
+                    # If something goes wrong with modal sending, fall back to text confirmation
+                    send_modal = None
+
+            if not callable(send_modal):
+                await ctx.send("WARNING: Modals unavailable — please reply with 'I understand the risks' to confirm fast mode.")
+                try:
+                    def _check(m: discord.Message):
+                        return m.author == ctx.author and m.channel == ctx.channel and m.content.strip().lower() == 'i understand the risks'
+
+                    await self.bot.wait_for('message', check=_check, timeout=30.0)
+                    confirmed = True
+                except asyncio.TimeoutError:
+                    await ctx.send('Fast mode cancelled (no confirmation).')
+                    return
+                if not confirmed:
+                    return
+                self._fast_mode = True
+            else:
+                try:
+                    confirmed = await asyncio.wait_for(future, timeout=30.0)
+                except asyncio.TimeoutError:
+                    await ctx.send('Fast mode cancelled (no confirmation).')
+                    return
+                if not confirmed:
+                    return
+                # Mark fast mode and write an audit log entry
+                self._fast_mode = True
+                logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {ctx.guild.id} at {datetime.datetime.utcnow().isoformat()}")
+
         if mode.lower() == "remake":
             await ctx.send("Starting starboard remake...")
             logger.info(f"Starboard remake for guild {ctx.guild.id} triggered by {ctx.author.id}.")
-
-            messages_to_recreate = [
-                {'message_id': entry['original_message_id'], 'channel_id': entry['original_channel_id']}
-                for entry in all_entries if entry.get('original_channel_id')
+            # Only remake entries that have complete stored information
+            # (original_message_id, starboard_message_id, guild_id, original_channel_id)
+            valid_entries = [
+                entry for entry in all_entries
+                if entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')
             ]
 
-            # --- Deletion Phase ---
-            logger.info(f"Deleting {len(all_entries)} existing starboard messages...")
+            logger.info(f"Deleting {len(valid_entries)} existing starboard messages and their reply contexts...")
             deleted_count = 0
-            for entry in all_entries:
+            # We'll collect recreation targets from the valid entries before clearing DB
+            recreation_targets = []
+            for entry in valid_entries:
+                logger.debug(f"Remake processing DB entry id={entry.get('original_message_id')} starboard_id={entry.get('starboard_message_id')}")
+                recreation_targets.append({
+                    'original_message_id': entry['original_message_id'],
+                    'original_channel_id': entry['original_channel_id'],
+                    'guild_id': entry['guild_id']
+                })
+
+                # Delete the main starboard message if it exists
                 try:
-                    msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
-                    await msg.delete()
-                    deleted_count += 1
-                except discord.NotFound:
+                    if entry.get('starboard_message_id'):
+                        logger.debug(f"Fetching starboard message {entry['starboard_message_id']} for deletion")
+                        msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
+                        logger.debug(f"Deleting starboard message {msg.id}")
+                        await msg.delete()
+                        logger.info(f"Deleted starboard message {entry['starboard_message_id']}")
+                        deleted_count += 1
+                except (discord.NotFound, KeyError):
+                    logger.debug(f"Starboard message {entry.get('starboard_message_id')} not found when attempting deletion")
                     pass
                 except discord.HTTPException as e:
-                    logger.error(f"Failed to delete starboard message {entry['starboard_message_id']}: {e}")
+                    logger.error(f"Failed to delete starboard message {entry.get('starboard_message_id')}: {e}")
 
-                if entry.get('starboard_reply_id'):
+                # Delete the reply context message if present
+                reply_id = entry.get('starboard_reply_id')
+                if reply_id is not None:
                     try:
-                        reply_msg = await starboard_channel.fetch_message(entry['starboard_reply_id'])
+                        logger.debug(f"Fetching starboard reply context {reply_id} for deletion")
+                        reply_msg = await starboard_channel.fetch_message(reply_id)
                         await reply_msg.delete()
-                    except discord.NotFound:
+                        logger.info(f"Deleted starboard reply context {reply_id}")
+                    except (discord.NotFound, KeyError):
+                        logger.debug(f"Starboard reply context {reply_id} not found during deletion")
                         pass
                     except discord.HTTPException as e:
-                        logger.error(f"Failed to delete starboard reply context {entry['starboard_reply_id']}: {e}")
+                        logger.error(f"Failed to delete starboard reply context {reply_id}: {e}")
 
+            # Clear DB entries for this guild so we can recreate fresh
             await self.db_manager.clear_starboard_for_guild(ctx.guild.id)
             await ctx.send(f"Deleted {deleted_count} starboard messages and cleared database entries.")
+            logger.info(f"Cleared starboard entries for guild {ctx.guild.id}; preparing to recreate {len(recreation_targets)} entries.")
 
             # --- Recreation Phase ---
-            logger.info(f"Attempting to recreate {len(messages_to_recreate)} posts...")
+            logger.info(f"Attempting to recreate {len(recreation_targets)} posts (ignoring current reaction counts)...")
             recreated_count = 0
             failed_count = 0
 
-            for msg_info in messages_to_recreate:
-                original_channel = self.bot.get_channel(msg_info['channel_id'])
+            for tgt in recreation_targets:
+                logger.debug(f"Recreation target: {tgt}")
+                original_channel = self.bot.get_channel(tgt['original_channel_id'])
                 if not isinstance(original_channel, discord.TextChannel):
-                    logger.warning(f"Could not find original channel {msg_info['channel_id']}. Skipping message {msg_info['message_id']}.")
+                    logger.warning(f"Could not find original channel {tgt['original_channel_id']}. Skipping message {tgt['original_message_id']}.")
                     failed_count += 1
                     continue
                 try:
-                    message = await original_channel.fetch_message(msg_info['message_id'])
+                    logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
+                    message = await original_channel.fetch_message(tgt['original_message_id'])
+                    logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author,'id',None)})")
+                    # Only recreate if the message still meets the starboard threshold
                     star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
-                    if star_reaction and star_reaction.count >= starboard_threshold:
-                        await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
+                    current_count = star_reaction.count if star_reaction else 0
+                    logger.debug(f"Original message {message.id} has {current_count} '{starboard_emoji}' reactions; threshold={starboard_threshold}")
+                    # If fast mode requested, recreate regardless of the current reaction count
+                    if self._fast_mode or (star_reaction and current_count >= starboard_threshold):
+                        logger.info(f"Recreating starboard post for original message {message.id}")
+                        await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, current_count)
+                        logger.debug(f"Requested creation of starboard post for {message.id}")
                         recreated_count += 1
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
                     else:
-                        logger.info(f"Message {message.id} no longer meets threshold. Not recreating.")
+                        logger.info(f"Message {message.id} no longer meets threshold ({current_count} < {starboard_threshold}). Skipping recreation.")
+                        # Do not create a tombstone for messages that are simply under threshold; skip.
+                        continue
                 except discord.NotFound:
-                    logger.warning(f"Original message {msg_info['message_id']} not found in channel {msg_info['channel_id']}. Skipping.")
-                    failed_count += 1
+                    # Original message deleted -> create a tombstone
+                    try:
+                        logger.info(f"Original message {tgt['original_message_id']} not found — creating tombstone.")
+                        tomb = await starboard_channel.send("🪦")
+                        await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt.get('guild_id'), None)
+                        logger.debug(f"Tombstone created with id {tomb.id} for original {tgt['original_message_id']}")
+                        recreated_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to create tombstone for missing original {tgt['original_message_id']}: {e}")
+                        failed_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to recreate starboard post for message {msg_info['message_id']}: {e}")
+                    logger.error(f"Failed to recreate starboard post for message {tgt['original_message_id']}: {e}")
                     failed_count += 1
 
             await ctx.send(f"Starboard remake complete. Recreated {recreated_count} posts. Failed to recreate {failed_count} posts.")
+            # Reset fast mode to avoid affecting future operations
+            self._fast_mode = False
 
         elif mode.lower() == "fix":
-            await ctx.send("Starting starboard fix...")
+            await ctx.send("Starting starboard fix and verification...")
             logger.info(f"Starboard fix for guild {ctx.guild.id} triggered by {ctx.author.id}.")
             fixed_count = 0
             failed_count = 0
+            verified_count = 0
+            missing_reports = []
+
+            # Start a periodic status notifier so the caller sees progress for long runs
+            stop_event = asyncio.Event()
+            progress = {'done': 0, 'total': len(all_entries), 'elapsed': 0}
+            status_msg = await ctx.send(f"Starboard fix started. Processed 0/{len(all_entries)}. Elapsed: 0s. Please wait.")
+            status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=30.0))
+            logger.debug("Status editor task started for fix operation")
+
             for entry in all_entries:
-                # Only attempt to fix entries with missing info except original_message_id
-                missing_fields = []
-                for field in ["starboard_message_id", "guild_id", "original_channel_id", "starboard_reply_id"]:
-                    if not entry.get(field):
-                        missing_fields.append(field)
-                if not missing_fields:
-                    continue
-                # Try to fill in missing info
                 try:
-                    # starboard_message_id: try to find in starboard channel by searching for messages with jump_url to original
-                    if entry.get("original_message_id") and entry.get("original_channel_id"):
-                        original_channel = self.bot.get_channel(entry["original_channel_id"])
-                        if isinstance(original_channel, discord.TextChannel):
-                            try:
-                                original_message = await original_channel.fetch_message(entry["original_message_id"])
-                                # Search starboard channel for messages referencing this original message
-                                async for msg in starboard_channel.history(limit=200):
-                                    if msg.embeds:
-                                        embed = msg.embeds[0]
-                                        for field in embed.fields:
-                                            if field.name == "Original Message" and entry["original_message_id"] in field.value:
-                                                # Found candidate
-                                                if not entry.get("starboard_message_id"):
-                                                    entry["starboard_message_id"] = msg.id
-                                                if not entry.get("guild_id"):
-                                                    entry["guild_id"] = ctx.guild.id
-                                                if not entry.get("original_channel_id"):
-                                                    entry["original_channel_id"] = original_channel.id
-                                                # Try to find reply context
-                                                if not entry.get("starboard_reply_id") and msg.reference:
-                                                    entry["starboard_reply_id"] = msg.reference.message_id
+                    logger.debug(f"Fix processing DB entry: {entry}")
+                    # 1) If we have a starboard_message_id, use that message to recover original metadata
+                    missing_sb = False
+                    if entry.get('starboard_message_id'):
+                        try:
+                            logger.debug(f"Attempting to fetch starboard message id {entry['starboard_message_id']} via rate-limited runner")
+                            sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, entry['starboard_message_id'])
+                            logger.debug(f"Fetched starboard message id {entry['starboard_message_id']} successfully")
+                        except discord.NotFound:
+                            # Treat the entry as if it has no starboard message when it cannot be found
+                            sb_msg = None
+                            missing_sb = True
+                            logger.info(f"Starboard message {entry.get('starboard_message_id')} not found; will attempt recovery")
+                        except Exception as e:
+                            # For other errors, log and mark missing so we can try recovering from original
+                            logger.warning(f"Error fetching starboard message {entry.get('starboard_message_id')}: {e}")
+                            sb_msg = None
+                            missing_sb = True
+
+                        # If the starboard message was missing, build a report of other missing fields
+                        if missing_sb:
+                            missing_fields = []
+                            # guild_id
+                            if not entry.get('guild_id'):
+                                missing_fields.append('guild_id')
+                            # original_channel_id
+                            if not entry.get('original_channel_id'):
+                                missing_fields.append('original_channel_id')
+
+                            # Check whether the original message can be found
+                            orig_id = entry.get('original_message_id')
+                            original_found = False
+                            if orig_id:
+                                # Try stored channel first
+                                if entry.get('original_channel_id'):
+                                    ch = self.bot.get_channel(entry['original_channel_id'])
+                                    logger.debug(f"Trying stored original_channel {entry['original_channel_id']} to find original message {orig_id}")
+                                    fetch = getattr(ch, 'fetch_message', None) if ch is not None else None
+                                    if callable(fetch):
+                                        try:
+                                            # Bypass rate-limiting in fast mode
+                                            if self._fast_mode:
+                                                logger.debug(f"Fast mode: fetching original {orig_id} directly from channel {getattr(ch,'id',None)}")
+                                                await fetch(orig_id)  # type: ignore
+                                            else:
+                                                logger.debug(f"Rate-limited fetch of original {orig_id} from channel {getattr(ch,'id',None)}")
+                                                await self._run_rate_limited(fetch, orig_id)  # type: ignore
+                                            original_found = True
+                                            logger.debug(f"Found original {orig_id} in stored channel {entry['original_channel_id']}")
+                                        except Exception as e:
+                                            original_found = False
+                                            logger.debug(f"Failed to fetch original {orig_id} from stored channel {entry.get('original_channel_id')}: {e}")
+
+                                # If not found yet, try scanning the stored guild's channels (admin operation - acceptable)
+                                if not original_found:
+                                    target_guild_for_lookup = None
+                                    if entry.get('guild_id'):
+                                        target_guild_for_lookup = self.bot.get_guild(entry['guild_id'])
+                                    if not target_guild_for_lookup:
+                                        target_guild_for_lookup = ctx.guild
+
+                                    if target_guild_for_lookup:
+                                        logger.debug(f"Scanning guild {getattr(target_guild_for_lookup, 'id', None)} channels to find original {orig_id}")
+                                        for ch in target_guild_for_lookup.channels:
+                                            fetch = getattr(ch, 'fetch_message', None)
+                                            if not callable(fetch):
+                                                continue
+                                            try:
+                                                if self._fast_mode:
+                                                    logger.debug(f"Fast mode: attempting fetch in channel {getattr(ch,'id',None)} for message {orig_id}")
+                                                    await fetch(orig_id)  # type: ignore
+                                                else:
+                                                    logger.debug(f"Rate-limited attempt to fetch message {orig_id} in channel {getattr(ch,'id',None)}")
+                                                    await self._run_rate_limited(fetch, orig_id)  # type: ignore
+                                                original_found = True
+                                                logger.debug(f"Found original {orig_id} in channel {getattr(ch,'id',None)}")
                                                 break
-                            except discord.NotFound:
-                                pass
-                    # Save fixed entry
-                    await self.db_manager.update_starboard_entry(entry)
-                    fixed_count += 1
+                                            except Exception as e:
+                                                logger.debug(f"Channel {getattr(ch,'id',None)} did not contain message {orig_id}: {e}")
+                                                continue
+
+                            if not original_found:
+                                missing_fields.append('original_message')
+
+                            missing_reports.append({'original_message_id': orig_id, 'missing': missing_fields})
+
+                        if sb_msg and sb_msg.embeds:
+                            # Parse jump URL from the embed's 'Original Message' field
+                            embed = sb_msg.embeds[0]
+                            original_id = None
+                            original_channel_id = None
+                            guild_id = None
+                            for field in embed.fields:
+                                if field.name == 'Original Message' and field.value:
+                                    import re
+                                    m = re.search(r"/channels/(\d+)/(\d+)/(\d+)", field.value)
+                                    if m:
+                                        guild_id = int(m.group(1))
+                                        original_channel_id = int(m.group(2))
+                                        original_id = int(m.group(3))
+                                    break
+
+                            updated = False
+                            if original_id and entry.get('original_message_id') != original_id:
+                                entry['original_message_id'] = original_id
+                                updated = True
+                            if guild_id and entry.get('guild_id') != guild_id:
+                                entry['guild_id'] = guild_id
+                                updated = True
+                            if original_channel_id and entry.get('original_channel_id') != original_channel_id:
+                                entry['original_channel_id'] = original_channel_id
+                                updated = True
+
+                            # starboard_reply_id: may be present as a message reference on the starboard post
+                            found_reply_id = sb_msg.reference.message_id if sb_msg.reference else None
+                            if entry.get('starboard_reply_id') != found_reply_id:
+                                entry['starboard_reply_id'] = found_reply_id
+                                updated = True
+
+                            if updated:
+                                await self.db_manager.update_starboard_entry(entry)
+                                fixed_count += 1
+                            else:
+                                verified_count += 1
+                            progress['done'] += 1
+                            continue
+
+                    # 2) If we only have an original_message_id (no starboard_message_id), try to locate it and repost
+                    # If the DB lacks a starboard_message_id OR the stored starboard message was not found,
+                    # attempt to locate the original message and recreate the starboard post.
+                    if entry.get('original_message_id') and (not entry.get('starboard_message_id') or missing_sb):
+                        original_id = entry['original_message_id']
+                        original_channel = None
+                        original_message = None
+
+                        # Try stored channel first
+                        if entry.get('original_channel_id'):
+                            ch = self.bot.get_channel(entry['original_channel_id'])
+                            fetch = getattr(ch, 'fetch_message', None) if ch is not None else None
+                            if callable(fetch):
+                                try:
+                                    if self._fast_mode:
+                                        original_message = await fetch(original_id)  # type: ignore
+                                    else:
+                                        original_message = await self._run_rate_limited(fetch, original_id)  # type: ignore
+                                    original_channel = ch
+                                except discord.NotFound:
+                                    original_message = None
+                                except discord.Forbidden:
+                                    original_message = None
+                                except Exception:
+                                    original_message = None
+
+                        # Fallback: scan the stored guild's channels (prefer entry.guild_id) to find the message
+                        if not original_message:
+                            target_guild_for_lookup = None
+                            if entry.get('guild_id'):
+                                target_guild_for_lookup = self.bot.get_guild(entry['guild_id'])
+                            if not target_guild_for_lookup:
+                                target_guild_for_lookup = ctx.guild
+
+                            if target_guild_for_lookup:
+                                for ch in target_guild_for_lookup.channels:
+                                    fetch = getattr(ch, 'fetch_message', None)
+                                    if not callable(fetch):
+                                        continue
+                                    try:
+                                        if self._fast_mode:
+                                            original_message = await fetch(original_id)  # type: ignore
+                                        else:
+                                            original_message = await self._run_rate_limited(fetch, original_id)  # type: ignore
+                                        original_channel = ch
+                                        break
+                                    except discord.NotFound:
+                                        continue
+                                    except discord.Forbidden:
+                                        continue
+                                    except Exception:
+                                        continue
+
+                        if original_message:
+                            star_reaction = discord.utils.get(original_message.reactions, emoji=starboard_emoji)
+                            star_count = star_reaction.count if star_reaction else 0
+                            if self._fast_mode:
+                                await self.post_to_starboard(original_message, starboard_channel_id, starboard_emoji, star_count)
+                            else:
+                                await self._run_rate_limited(self.post_to_starboard, original_message, starboard_channel_id, starboard_emoji, star_count)
+                            fixed_count += 1
+                        else:
+                            failed_count += 1
+
+                        progress['done'] += 1
+
                 except Exception as e:
-                    logger.error(f"Failed to fix starboard entry for message {entry.get('original_message_id')}: {e}")
+                    logger.error(f"Failed to fix/verify starboard entry for row {entry}: {e}")
                     failed_count += 1
-            await ctx.send(f"Starboard fix complete. Fixed {fixed_count} entries. Failed to fix {failed_count} entries.")
+                    progress['done'] += 1
+
+            # Stop the periodic status task and await it to finish
+            stop_event.set()
+            try:
+                await status_task
+            except Exception:
+                # If the status task was cancelled or errored, ignore
+                pass
+
+            await ctx.send(f"Starboard fix complete. Fixed {fixed_count} entries, verified {verified_count} entries, failed {failed_count} entries.")
+            # Reset fast mode to avoid affecting future operations
+            self._fast_mode = False
+
+            # If there were missing starboard messages, send a helpful summary of what other data is missing
+            if missing_reports:
+                lines = ["Missing starboard messages detected. Summary per original message ID:"]
+                for rep in missing_reports:
+                    orig = rep.get('original_message_id')
+                    missing = rep.get('missing') or []
+                    if not missing:
+                        lines.append(f"- {orig}: only starboard message missing")
+                    else:
+                        lines.append(f"- {orig}: missing {', '.join(missing)}")
+
+                # Send as one message (may be long); trim if necessary
+                report_text = "\n".join(lines)
+                if len(report_text) > 1900:
+                    # If too long, send in chunks
+                    for i in range(0, len(report_text), 1900):
+                        await ctx.send(report_text[i:i+1900])
+                else:
+                    await ctx.send(report_text)
         else:
             await ctx.send("Invalid mode. Use 'remake' or 'fix'.")
+            self._fast_mode = False
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -376,6 +698,67 @@ class Starboard(BaseCog):
         new_embed.add_field(name="Original Message", value=f"[Jump to Message]({message.jump_url})", inline=False)
         
         return new_embed, files
+
+    async def _run_rate_limited(self, coro_func, *args, delay: float | None = None, retries: int | None = None):
+        """Run the provided coroutine-callable under the fix semaphore with simple backoff.
+
+        coro_func: a callable that returns an awaitable when called with *args (e.g., channel.fetch_message)
+        """
+        if delay is None:
+            delay = self._fix_delay
+        if retries is None:
+            retries = self._fix_retries
+
+        async with self._fix_semaphore:
+            backoff = 1.0
+            last_exc = None
+            for attempt in range(retries):
+                try:
+                    logger.debug(f"_run_rate_limited attempt {attempt+1}/{retries} for {getattr(coro_func, '__name__', repr(coro_func))} args={args}")
+                    result = await coro_func(*args)
+                    # gentle delay after a successful call
+                    try:
+                        await asyncio.sleep(delay)
+                    except Exception:
+                        pass
+                    return result
+                except (discord.HTTPException, aiohttp.ClientError) as e:
+                    last_exc = e
+                    # exponential backoff
+                    wait = backoff
+                    logger.debug(f"_run_rate_limited HTTP error on attempt {attempt+1}: {e}; backing off {wait}s")
+                    backoff = min(backoff * 2, 30)
+                    await asyncio.sleep(wait)
+                    continue
+                except Exception as e:
+                    # Non-http error — re-raise
+                    raise
+            # If we exhausted retries, raise the last HTTP-related exception
+            if last_exc:
+                raise last_exc
+            return None
+
+    async def _status_editor(self, status_message: discord.Message, progress: dict, stop_event: asyncio.Event, interval: float = 30.0):
+        """Edit a single status message every `interval` seconds until `stop_event` is set.
+
+        `progress` is a mutable dict with keys 'done', 'total', and 'elapsed' (seconds).
+        The function will mock elapsed time by incrementing `progress['elapsed']` by `interval` each tick.
+        """
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(interval)
+                progress['elapsed'] = progress.get('elapsed', 0) + int(interval)
+                done = progress.get('done', 0)
+                total = progress.get('total', '?')
+                elapsed = progress.get('elapsed', 0)
+                try:
+                    logger.debug(f"Editing status message: processed {done}/{total}, elapsed {elapsed}s")
+                    await status_message.edit(content=f"Starboard fix running... processed {done}/{total}. Elapsed: {elapsed}s. Please wait.")
+                except Exception:
+                    # Ignore edit/send errors; keep looping until stop_event is set
+                    pass
+        except asyncio.CancelledError:
+            return
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):

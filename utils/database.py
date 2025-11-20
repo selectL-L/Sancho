@@ -316,7 +316,7 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: int, starboard_reply_id: Optional[int] = None) -> None:
+    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: Optional[int], starboard_reply_id: Optional[int] = None) -> None:
         """Saves a new starboard entry to the database."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
