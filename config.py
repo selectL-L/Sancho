@@ -161,6 +161,8 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         ((r'\bbod\b',), 'Fun', 'bod'),
         # Sanitize
         ((r'\bsanitize\b', r'\bsanitise\b'), 'Fun', 'sanitize'),
+        # Pear Wiggler
+        ((r'\bpear\s?wiggler\b',), 'Fun', 'pear_wiggler'),
         # Issues
         ((r'\bissues\b', r'\bissue\b'), 'Fun', 'issues'),
     ]

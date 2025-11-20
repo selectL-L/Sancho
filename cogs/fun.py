@@ -36,6 +36,11 @@ class Fun(BaseCog):
                 'file': 'sanitize.webp',
                 'error_message': "I couldn't find my sanitizer!"
             },
+            'pear_wiggler': {
+                'type': 'image',
+                'file': 'pearwiggler.gif',
+                'error_message': "I couldn't find the wiggler of the pear variety!"
+            },
             'issues': {
                 'type': 'text',
                 'content': 'My issues page is [here](https://github.com/selectL-L/Sancho/issues) please write your suggestions and issues over there!'
@@ -313,6 +318,10 @@ class Fun(BaseCog):
     async def sanitize(self, ctx: commands.Context, *, query: str):
         """NLP handler for the sanitize command."""
         await self.fun_command_handler(ctx, 'sanitize')
+
+    async def pear_wiggler(self, ctx: commands.Context, *, query: str):
+        """NLP handler for the pear wiggler command."""
+        await self.fun_command_handler(ctx, 'pear_wiggler')
 
     async def issues(self, ctx: commands.Context, *, query: str):
         """NLP handler for the issues command."""
