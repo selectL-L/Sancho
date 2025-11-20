@@ -27,6 +27,28 @@ class DatabaseManager:
     for interacting with the SQLite database.
     """
 
+    async def update_starboard_entry(self, entry: dict) -> None:
+        """Updates an existing starboard entry in the database. Expects all relevant keys in entry dict."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE starboard SET
+                    starboard_message_id = ?,
+                    guild_id = ?,
+                    original_channel_id = ?,
+                    starboard_reply_id = ?
+                WHERE original_message_id = ?
+                """,
+                (
+                    entry.get("starboard_message_id"),
+                    entry.get("guild_id"),
+                    entry.get("original_channel_id"),
+                    entry.get("starboard_reply_id"),
+                    entry["original_message_id"]
+                )
+            )
+            await db.commit()
+
     def __init__(self, db_path: str):
         """
         Initializes the DatabaseManager.
