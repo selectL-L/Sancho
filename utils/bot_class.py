@@ -10,7 +10,8 @@ This class is the central hub of the bot's functionality. It is responsible for:
 from __future__ import annotations
 import discord
 from discord.ext import commands
-from typing import Optional, TYPE_CHECKING, Any
+from discord import app_commands
+from typing import Optional, TYPE_CHECKING, Any, Protocol, runtime_checkable
 from collections.abc import Callable
 import asyncio
 import logging
@@ -54,9 +55,182 @@ class SanchoBot(commands.Bot):
         self.console_task: Optional[asyncio.Task] = None
         self.start_time: float = time.time()
 
+    @runtime_checkable
+    class ContextLike(Protocol):
+        """A Protocol describing the minimal Context-like object required by NLP handlers."""
+        author: Any
+        guild: Any
+        channel: Any
+        async def send(self, *args, **kwargs) -> Any: ...
+
+    async def dispatch_nlp(self, ctx: "SanchoBot.ContextLike", query: str) -> None:
+        """Dispatch a natural-language `query` using the same NLP dispatcher logic
+        that `on_message` uses. This allows hybrid/slash commands to forward a
+        query while preserving the original context (`ctx`).
+
+        This method intentionally mirrors the command-dispatch portion of the
+        `on_message` pipeline and will call the matched cog method with
+        `await method(ctx, query=query)`.
+        """
+        try:
+            q_lower = query.lower()
+            handler = self.find_nlp_handler(q_lower)
+            if not handler:
+                return
+
+            cog, method, method_name = handler
+            if asyncio.iscoroutinefunction(method):
+                await method(ctx, query=query)
+            else:
+                assert method is not None
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: method(ctx, query=query))
+        except Exception:
+            try:
+                logging.getLogger(__name__).exception("Error dispatching NLP query")
+            except Exception:
+                pass
+
+    def find_nlp_handler(self, query_lower: str) -> Optional[tuple[object, Callable[..., Any], str]]:
+        """Find the best matching NLP handler for `query_lower`.
+
+        Returns a tuple `(cog, method, method_name)` or `None` if no handler
+        matched. This centralizes the NLP matching logic so both `on_message`
+        and `dispatch_nlp` can reuse it.
+        """
+        # Step 1: Find a candidate per group (first matching command in a group)
+        candidate_commands = []
+        for group in config.NLP_COMMANDS:
+            for keywords, cog_name, method_name in group:
+                for keyword in keywords:
+                    try:
+                        m = re.search(keyword, query_lower)
+                    except Exception:
+                        m = None
+
+                    if m:
+                        candidate_commands.append({'match_pos': m.start(), 'cog': cog_name, 'method': method_name})
+                        break
+                else:
+                    continue
+                break
+
+        if not candidate_commands:
+            return None
+
+        # Step 2: Pick the earliest match across groups
+        best_command = min(candidate_commands, key=lambda x: x['match_pos'])
+        cog_name = best_command['cog']
+        method_name = best_command['method']
+
+        cog = self.get_cog(cog_name)
+        if not cog:
+            logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
+            return None
+
+        method = getattr(cog, method_name, None)
+        if not method:
+            logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' not found.")
+            return None
+
+        return cog, method, method_name
+
+    class InteractionContextAdapter:
+        """A thin adapter that exposes the subset of `commands.Context` used by
+        NLP handlers, backed by a `discord.Interaction`.
+
+        Many NLP handlers expect `ctx.author`, `ctx.guild`, `ctx.channel`, and
+        `await ctx.send(...)`. This adapter provides those attributes and maps
+        `send` to the interaction response/followup so slash commands can use the
+        same handlers without modification.
+        """
+        def __init__(self, bot: "SanchoBot", interaction: discord.Interaction):
+            self.bot = bot
+            self.interaction = interaction
+            self.author = interaction.user
+            self.guild = interaction.guild
+            # `interaction.channel` can be None in some contexts; keep reference
+            self.channel = interaction.channel
+
+        async def _send_to_channel(self, *args, **kwargs):
+            """Helper to attempt sending via the channel if possible and return
+            the sent Message when available."""
+            try:
+                if self.channel and isinstance(self.channel, discord.abc.Messageable):
+                    return await self.channel.send(*args, **kwargs)
+            except Exception:
+                # Channel send failed; fall through to interaction-based sending.
+                pass
+            return None
+
+        async def send(self, *args, **kwargs):
+            # Prefer sending directly to the channel (makes behavior match
+            # prefix-based flows). When using slash commands we defer the
+            # interaction, so sending to the channel is safe. If channel-based
+            # sending fails, fall back to the interaction response/followup.
+            try:
+                sent = await self._send_to_channel(*args, **kwargs)
+                if sent is not None:
+                    return sent
+
+                if not self.interaction.response.is_done():
+                    await self.interaction.response.send_message(*args, **kwargs)
+                    # Try to capture the original response as a Message and update channel.
+                    try:
+                        msg = await self.interaction.original_response()
+                        if msg and hasattr(msg, 'channel') and msg.channel is not None:
+                            self.channel = msg.channel
+                        return msg
+                    except Exception:
+                        return None
+                else:
+                    return await self.interaction.followup.send(*args, **kwargs)
+            except Exception:
+                # As a final fallback, DM the author.
+                try:
+                    return await self.author.send(*args, **kwargs)
+                except Exception:
+                    return None
+
     async def on_ready(self):
         """Called when the bot is ready; triggers the startup handler."""
         await startup_handler(self)
+
+        # Register an application command for forwarding NLP queries if it isn't already registered.
+        # The command lives in the bots core just like NLP does.
+        try:
+            if not self.tree.get_command('nlp'):
+                async def _nlp_app(interaction: discord.Interaction, query: str):
+                    # Immediately acknowledge the slash command with a short,
+                    # ephemeral message so the user sees the command was received
+                    # and there's no persistent "thinking" state. Then hand off
+                    # processing to the NLP dispatcher which will post normal
+                    # messages into the channel as needed.
+                    try:
+                        await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
+                    except Exception:
+                        # If sending the ephemeral message fails, try to defer as a fallback. (honest to god, I hate this)
+                        try:
+                            await interaction.response.defer()
+                        except Exception:
+                            pass
+
+                    ctx_adapter = SanchoBot.InteractionContextAdapter(self, interaction)
+                    # Run the NLP dispatcher; no need to await in a special way —
+                    # the user already received the ephemeral message.
+                    await self.dispatch_nlp(ctx_adapter, query)
+
+                cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
+                self.tree.add_command(cmd)
+
+                # Note: global sync can takeup to an hour to propagate to all guilds.
+                try:
+                    await self.tree.sync()
+                    logging.info("Synced app commands globally")
+                except Exception:
+                    logging.exception("Failed to sync app commands globally")
+        except Exception:
+            logging.exception('Failed to register NLP application command')
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         """
@@ -129,67 +303,34 @@ class SanchoBot(commands.Bot):
         content_lower = message.content.lower()
         for p in config.BOT_PREFIX:
             if content_lower.startswith(p.lower()):
-                # Find the actual prefix used from the original message content
-                # to correctly slice it off later.
                 prefix_used = message.content[:len(p)]
                 break
 
-        # If no valid prefix was found, it's not an NLP command, so we ignore it.
         if not prefix_used:
             return
 
-        # Extract the user's query by removing the prefix and any leading/trailing whitespace.
         query = message.content[len(prefix_used):].strip()
         if not query:
-            return  # Ignore messages that are just the prefix.
+            return
 
         query_lower = query.lower()
         logging.info(f"NLP query from '{message.author}': '{query}'")
 
-        # --- NLP Command Matching Logic ---
-        
-        # Step 1: Find the best candidate from each command group.
-        # A candidate is the first command in a group that matches the query.
-        candidate_commands = []
-        for group in config.NLP_COMMANDS:
-            for keywords, cog_name, method_name in group:
-                for keyword in keywords:
-                    match = re.search(keyword, query_lower)
-                    if match:
-                        # Found a winner for this group. Store it and move to the next group.
-                        candidate_commands.append({'match_pos': match.start(), 'cog': cog_name, 'method': method_name})
-                        break  # Stop searching this group
-                else:
-                    # If the inner loop (keywords) completes without a match, continue to the next command.
-                    continue
-                # If the inner loop was broken (a match was found), break the outer loop to move to the next group.
-                break
-        
-        # If no commands matched at all, do nothing.
-        if not candidate_commands:
+        # Use the centralized NLP matcher to find the handler.
+        handler = self.find_nlp_handler(query_lower)
+        if not handler:
             return
 
-        # Step 2: From the candidates, find the one that appears earliest in the query.
-        best_command = min(candidate_commands, key=lambda x: x['match_pos'])
-        
-        cog_name = best_command['cog']
-        method_name = best_command['method']
-
-        cog = self.get_cog(cog_name)
-        if not cog:
-            logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
-            return
-
-        method: Optional[Callable[..., Any]] = getattr(cog, method_name, None)
-        if not (method and asyncio.iscoroutinefunction(method)):
-            logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' is not an awaitable coroutine.")
-            return
-
+        cog, method, method_name = handler
         try:
-            # Call the winning NLP handler.
-            await method(ctx, query=query)
+            if asyncio.iscoroutinefunction(method):
+                await method(ctx, query=query)
+            else:
+                assert method is not None
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: method(ctx, query=query))
         except Exception as e:
-            logging.error(f"Error in NLP command '{cog_name}.{method_name}': {e}", exc_info=True)
+            logging.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
             await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
 
     def _get_case_insensitive_prefix(self, bot: "SanchoBot", message: discord.Message) -> list[str]:
