@@ -33,7 +33,11 @@ class Help(BaseCog):
         # This is crucial to replace the default help command with our own.
         self.bot.remove_command('help')
 
-    @commands.hybrid_command(name='help', help="Shows this message.")
+   
+    @commands.hybrid_command(name='help', help="The help message itself!", description="Shows what commands are available and provides examples for them!")
+    @app_commands.describe(
+        command_name="The command to show detailed help for (optional!)"
+    )
     async def custom_help(self, ctx: commands.Context, *, command_name: str | None = None):
         """
         The main help command entry point.

@@ -43,11 +43,13 @@ class Starboard(BaseCog):
         
         return channel_id, emoji, threshold
 
-    @commands.group(name="starboard", invoke_without_command=True, hidden=True)
-    @commands.has_permissions(manage_guild=True)
+    @commands.hybrid_group(name="starboard")
+    @commands.has_guild_permissions(manage_guild=True)
     async def starboard_group(self, ctx: commands.Context):
         """Manages starboard settings."""
         await ctx.send_help(ctx.command)
+    # Keep the group hidden in text help while using hybrid registration
+    starboard_group.hidden = True
 
     @starboard_group.command(name="channel")
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -72,10 +74,10 @@ class Starboard(BaseCog):
 
     @starboard_group.command(name="reload")
     @commands.is_owner()
-    async def reload_starboard(self, ctx: commands.Context, mode: str, *flags):
+    async def reload_starboard(self, ctx: commands.Context, mode: str, fast: bool = False):
         """
         Reloads or fixes starboard messages. Only callable by the bot owner.
-        Usage: .starboard reload <remake|fix>
+        Usage: /starboard reload <mode> [fast]
         """
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
@@ -95,12 +97,14 @@ class Starboard(BaseCog):
             await ctx.send("No starboard entries found.")
             return
 
-        logger.debug(f"reload_starboard called with mode={mode}, flags={flags}, fast_mode={self._fast_mode}")
+        logger.debug(f"reload_starboard called with mode={mode}, fast_mode={self._fast_mode}")
         logger.debug(f"Configuration: starboard_channel_id={starboard_channel_id}, emoji={starboard_emoji}, threshold={starboard_threshold}")
         logger.debug(f"Entries to process: {len(all_entries)}")
 
-        # Support a '--fast' override flag passed as an extra argument: `.starboard reload fix --fast`
-        fast_requested = any(f == '--fast' for f in flags) or ('--fast' in mode)
+        # Support an explicit `fast` boolean option for slash commands or prefix callers.
+        msg = getattr(ctx, 'message', None)
+        msg_content = msg.content.lower() if msg and getattr(msg, 'content', None) else ''
+        fast_requested = bool(fast) or ('--fast' in mode.lower()) or ('--fast' in msg_content)
         if fast_requested:
             # Present a modal to the caller for explicit confirmation
             future: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -130,9 +134,16 @@ class Starboard(BaseCog):
             modal = FastConfirmModal(future)
             # Send the modal and wait for the future to be set by the modal submit handler
             # Attempt to send the modal if the context supports it; otherwise fall back to text confirmation
-            send_modal = getattr(ctx, 'send_modal', None)
+            # For interaction-based invocations `ctx.interaction` exists and supports `response` + `send_modal`.
+            send_modal = None
+            if getattr(ctx, 'interaction', None):
+                send_modal = getattr(ctx.interaction, 'response', None)
+            # Fallback to Context.send_modal (older shims / wrappers)
+            if not send_modal:
+                send_modal = getattr(ctx, 'send_modal', None)
             if callable(send_modal):
                 try:
+                    # If we have an interaction response, use `send_modal` via that interface.
                     res = send_modal(modal)
                     if inspect.isawaitable(res):
                         await res
