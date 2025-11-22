@@ -426,13 +426,13 @@ class Reminders(BaseCog):
         # Further cleanup of conversational fillers.
         # We look at the first few words to remove things like "me to", "us to", "him", etc.
         words = sanitized_query.split()
-        if len(words) > 0:
-            if words[0].lower() in ["me", "us", "him", "her", "them"]:
-                words.pop(0)
-            # Check again after popping, as we might have "me to" -> pop "me" -> now "to" is first.
-            if words and words[0].lower() in ["to", "for", "that", "about"]:
-                words.pop(0)
-            sanitized_query = " ".join(words)
+        
+        # Iteratively remove common filler words from the start of the query.
+        # This handles "me to...", "for me...", "to...", etc.
+        while words and words[0].lower() in ["me", "us", "him", "her", "them", "to", "for", "that", "about"]:
+            words.pop(0)
+            
+        sanitized_query = " ".join(words)
 
         if not sanitized_query:
             return None
