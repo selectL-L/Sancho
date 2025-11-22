@@ -33,7 +33,8 @@ from utils.lifecycle import shutdown_handler
 from utils.extensions import discover_cogs
 
 # Set up logging immediately to capture any issues during startup.
-setup_logging()
+log_level = "DEBUG" if config.DEV_MODE else "INFO"
+setup_logging(level=log_level)
 
 # --- Configuration Validation ---
 # Ensure the bot's token is present, as it's impossible to run without it.

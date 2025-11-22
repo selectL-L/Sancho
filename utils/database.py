@@ -316,6 +316,26 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else None
 
+    async def set_user_config(self, user_id: int, key: str, value: str) -> None:
+        """Sets a generic configuration value for a specific user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, ?, ?)",
+                (user_id, key, value)
+            )
+            await db.commit()
+        logger.info(f"User config for {user_id} set: {key} = {value}")
+
+    async def get_user_config(self, user_id: int, key: str) -> Optional[str]:
+        """Gets a generic configuration value for a specific user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM user_config WHERE user_id = ? AND key = ?",
+                (user_id, key)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
     async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: Optional[int], starboard_reply_id: Optional[int] = None) -> None:
         """Saves a new starboard entry to the database."""
         async with aiosqlite.connect(self.db_path) as db:
@@ -539,6 +559,23 @@ class DatabaseManager:
             )
             await db.commit()
             return cursor.lastrowid
+
+    async def update_reminder(self, reminder_id: int, user_id: int, updates: Dict[str, Any]) -> int:
+        """
+        Updates specific fields of a reminder for a user.
+        """
+        if not updates:
+            return 0
+
+        async with aiosqlite.connect(self.db_path) as db:
+            set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
+            params = list(updates.values())
+            params.extend([reminder_id, user_id])
+            
+            query = f"UPDATE reminders SET {set_clause} WHERE id = ? AND user_id = ?"
+            cursor = await db.execute(query, params)
+            await db.commit()
+            return cursor.rowcount
 
     async def update_reminder_time(self, reminder_id: int, new_time: int) -> None:
         """Updates the trigger time (`reminder_time`) for a specific reminder."""

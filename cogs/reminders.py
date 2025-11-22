@@ -31,6 +31,7 @@ from datetime import datetime
 import asyncio
 from dateutil.rrule import rrule, rrulestr, WEEKLY, DAILY, HOURLY, MINUTELY, MONTHLY, YEARLY
 from dateutil.parser import parse as dateutil_parse
+import config
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -104,6 +105,12 @@ class Reminders(BaseCog):
         data and provides a function that checks the task's state before cleanup.
         """
         def done_callback(task: asyncio.Task[None]) -> None:
+            # Remove the task from the tracking dictionary to prevent memory leaks.
+            # We check if the task in the dictionary is THIS task before removing it.
+            # This prevents removing a newly scheduled task if this one was cancelled/replaced.
+            if self.scheduled_tasks.get(reminder['id']) == task:
+                self.scheduled_tasks.pop(reminder['id'], None)
+
             # --- This is the core of the fix ---
             # Only proceed with cleanup if the task was NOT cancelled.
             # This prevents the database entry from being deleted on cog reloads.
@@ -151,17 +158,43 @@ class Reminders(BaseCog):
 
             # Fetch the user and channel to send the reminder to.
             user = self.bot.get_user(reminder['user_id']) or await self.bot.fetch_user(reminder['user_id'])
-            channel = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
+            
+            # Check user preference for reminder destination
+            destination_pref = await self.db_manager.get_user_config(reminder['user_id'], 'reminder_destination')
+            
+            targetable = None
+            
+            if destination_pref == 'dm':
+                targetable = user
+            elif destination_pref and destination_pref.isdigit():
+                # Specific channel preference
+                try:
+                    chan_id = int(destination_pref)
+                    targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+                except (discord.NotFound, discord.Forbidden):
+                    self.logger.warning(f"Preferred channel {destination_pref} not found/accessible. Falling back to DM.")
+                    targetable = user
+            else:
+                # Default to origin channel ('origin', 'channel', or None)
+                try:
+                    targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
+                except (discord.NotFound, discord.Forbidden):
+                    self.logger.warning(f"Original channel {reminder['channel_id']} not found/accessible. Falling back to DM.")
+                    targetable = user
 
-            if isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+            if targetable and hasattr(targetable, 'send'):
                 overdue_message = ""
                 # If the reminder was overdue, add a note indicating how long ago it was due.
                 if delay <= 0:
                     overdue_seconds = time.time() - reminder['reminder_time']
                     overdue_message = f" (This was due {self._format_overdue_time(overdue_seconds)})"
 
-                await channel.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}")
-                self.logger.info(f"Sent reminder {reminder['id']} to user {user.id}.")
+                # Cast to Messageable to satisfy static analysis
+                targetable_dest = cast(discord.abc.Messageable, targetable)
+                await targetable_dest.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}")
+                self.logger.info(f"Sent reminder {reminder['id']} to user {user.id} via {destination_pref or 'channel'}.")
+            else:
+                 self.logger.error(f"Could not find a valid destination for reminder {reminder['id']}.")
 
         except asyncio.CancelledError:
             # This is expected when the cog is unloaded. The done callback will see the
@@ -300,12 +333,89 @@ class Reminders(BaseCog):
             self.logger.error(f"Failed to parse rrule string '{rule_str}': {e}")
             return f"Repeats: {rule_str}" # Fallback to raw rule
 
+    def _extract_recurrence_rule(self, text: str) -> tuple[Optional[str], str]:
+        """
+        Extracts a recurrence rule from the given text.
+        Returns a tuple of (recurrence_rule_string, matched_text).
+        """
+        recurrence_rule = None
+        matched_text = ""
+
+        # Pattern A: Simple frequencies like "Daily", "Weekly", "Bi-weekly"
+        simple_freq_match = re.search(r'\b(daily|weekly|bi-?weekly|monthly|yearly)\b', text, re.IGNORECASE)
+        if simple_freq_match:
+            matched_text = simple_freq_match.group(0)
+            freq_map = {
+                'daily': 'DAILY', 'weekly': 'WEEKLY', 'monthly': 'MONTHLY', 
+                'yearly': 'YEARLY', 'bi-weekly': 'WEEKLY;INTERVAL=2'
+            }
+            clean_freq = simple_freq_match.group(1).lower().replace('-', '')
+            recurrence_rule = f"FREQ={freq_map.get(clean_freq, 'DAILY')}"
+            return recurrence_rule, matched_text
+
+        # Pattern B: "Every Xth of the month"
+        month_day_match = re.search(r'\bevery\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month\b', text, re.IGNORECASE)
+        if month_day_match:
+            matched_text = month_day_match.group(0)
+            day_of_month = int(month_day_match.group('month_day'))
+            recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
+            return recurrence_rule, matched_text
+
+        # Pattern C: Complex phrases like "Every 2 days", "Every other Monday", "Every weekend"
+        complex_freq_match = re.search(
+            r'\bevery\s+(?:(?P<other>other)\s+)?(?:(?P<interval>\d+)\s+)?(?P<unit>second|minute|hour|day|week|month|year|weekend|weekday|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b',
+            text, re.IGNORECASE
+        )
+
+        if complex_freq_match:
+            matched_text = complex_freq_match.group(0)
+            groups = complex_freq_match.groupdict()
+            
+            interval = 1
+            if groups.get('interval'):
+                interval = int(groups['interval'])
+            if groups.get('other'):
+                interval *= 2
+            
+            unit = groups['unit'].lower()
+            
+            day_map = {
+                'sun': 'SU', 'sunday': 'SU', 'mon': 'MO', 'monday': 'MO',
+                'tue': 'TU', 'tuesday': 'TU', 'wed': 'WE', 'wednesday': 'WE',
+                'thu': 'TH', 'thursday': 'TH', 'fri': 'FR', 'friday': 'FR',
+                'sat': 'SA', 'saturday': 'SA'
+            }
+
+            if unit in ['day', 'days']:
+                recurrence_rule = f"FREQ=DAILY;INTERVAL={interval}"
+            elif unit in ['week', 'weeks']:
+                recurrence_rule = f"FREQ=WEEKLY;INTERVAL={interval}"
+            elif unit in ['month', 'months']:
+                recurrence_rule = f"FREQ=MONTHLY;INTERVAL={interval}"
+            elif unit in ['year', 'years']:
+                recurrence_rule = f"FREQ=YEARLY;INTERVAL={interval}"
+            elif unit == 'weekday':
+                recurrence_rule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+            elif unit == 'weekend':
+                recurrence_rule = "FREQ=WEEKLY;BYDAY=SA,SU"
+            elif unit in day_map:
+                recurrence_rule = f"FREQ=WEEKLY;BYDAY={day_map[unit]};INTERVAL={interval}"
+            
+            return recurrence_rule, matched_text
+
+        return None, ""
+
     async def _parse_reminder(self, query: str) -> tuple[str | None, str, str | None] | None:
         """
-        Parses a query to separate the reminder message from the time string using a multi-stage approach.
-        Returns a tuple of (message, time_string, recurrence_rule).
+        Parses a query to separate the reminder message from the time string.
+        Robustly handles recurrence and split-time entities (e.g. "On Dec 21 ... at 5am").
         """
-        # --- Stage 1: Initial Sanitization ---
+        # ==========================================
+        # Stage 1: Initial Sanitization & Triggers
+        # ==========================================
+        # We start by cleaning up the input. Users often speak to the bot conversationally,
+        # saying things like "remind me to..." or "set a reminder for...".
+        # We want to strip these trigger phrases so we can focus on the actual content.
         trigger_patterns = [
             r'\bremind\b', r'\breminder\b', r'\bremember\b',
             r'set\s+a\s+reminder', r'set\s.*reminder'
@@ -313,146 +423,229 @@ class Reminders(BaseCog):
         combined_pattern = r'^\s*(' + '|'.join(f'({p})' for p in trigger_patterns) + r')\s*'
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Further cleanup of conversational padding using a match-case like structure
-        # to prevent fall-through errors.
-        words = sanitized_query.lower().split()
-        if len(words) > 1:
-            match words[0]:
-                case "me":
-                    if words[1] == "to":
-                        sanitized_query = sanitized_query[6:].lstrip() # "me to"
-                    else:
-                        sanitized_query = sanitized_query[3:].lstrip() # "me"
-                case "to":
-                    sanitized_query = sanitized_query[3:].lstrip()
-                case "for":
-                    sanitized_query = sanitized_query[4:].lstrip()
+        # Further cleanup of conversational fillers.
+        # We look at the first few words to remove things like "me to", "us to", "him", etc.
+        words = sanitized_query.split()
+        if len(words) > 0:
+            if words[0].lower() in ["me", "us", "him", "her", "them"]:
+                words.pop(0)
+            # Check again after popping, as we might have "me to" -> pop "me" -> now "to" is first.
+            if words and words[0].lower() in ["to", "for", "that", "about"]:
+                words.pop(0)
+            sanitized_query = " ".join(words)
 
         if not sanitized_query:
             return None
 
-        # --- Stage 2: Detect and Extract Recurrence (High Priority) ---
+        # ==========================================
+        # Stage 2: Recurrence Extraction
+        # ==========================================
+        # We prioritize extracting recurrence rules (e.g., "every day") because they fundamentally
+        # change how the reminder behaves. We use regex to find these patterns.
         recurrence_rule = None
-        recurrence_match = re.search(
-            r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
-            sanitized_query,
-            re.IGNORECASE
-        )
-        if recurrence_match:
-            groups = recurrence_match.groupdict()
-            interval = int(groups.get('interval') or 1)
-            
-            if groups.get('weekday') == 'weekday':
-                recurrence_rule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
-            elif groups.get('day_name'):
-                day_map = {'sunday': 'SU', 'monday': 'MO', 'tuesday': 'TU', 'wednesday': 'WE', 'thursday': 'TH', 'friday': 'FR', 'saturday': 'SA'}
-                day = day_map[groups['day_name'].lower()]
-                recurrence_rule = f"FREQ=WEEKLY;BYDAY={day};INTERVAL={interval}"
-            elif groups.get('month_day'):
-                day_of_month = int(groups['month_day'])
-                recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
-            else:
-                freq_map = {
-                    'second': 'SECONDLY', 'minute': 'MINUTELY', 'hour': 'HOURLY',
-                    'day': 'DAILY', 'week': 'WEEKLY', 'month': 'MONTHLY', 'year': 'YEARLY'
-                }
-                freq_str = groups['freq'].lower()
-                freq = freq_map.get(freq_str)
-                if freq:
-                    recurrence_rule = f"FREQ={freq};INTERVAL={interval}"
-
-            if recurrence_rule:
-                self.logger.info(f"Detected recurrence rule: {recurrence_rule}")
-                message = sanitized_query.replace(recurrence_match.group(0), '', 1).strip()
-                # For recurring reminders, the first occurrence starts relative to 'now'.
-                return (message, "now", recurrence_rule)
-
-        # --- Stage 3: Detect and Extract High-Priority Time Modifiers ---
-        time_modifier = ""
-        modifier_patterns = [
-            r'\btomorrow\b',
-            r'\btonight\b',
-            r'\bnext\s+(week|month|year)\b',
-            r'\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b'
-        ]
-        modifier_regex = re.compile('|'.join(modifier_patterns), re.IGNORECASE)
         
-        def find_and_remove_modifier(q: str) -> tuple[str, str]:
-            match = modifier_regex.search(q)
-            if match:
-                modifier = match.group(0)
-                self.logger.info(f"Found time modifier: '{modifier}'")
-                # Remove the modifier from the query to prevent it from being parsed again.
-                # Use word boundaries to avoid partial matches in words.
-                q = re.sub(r'\b' + re.escape(modifier) + r'\b', '', q, count=1, flags=re.IGNORECASE).strip()
-                return q, modifier
-            return q, ""
+        # Extract recurrence rule using the new helper method
+        recurrence_rule, matched_recurrence_text = self._extract_recurrence_rule(sanitized_query)
 
-        sanitized_query, time_modifier = find_and_remove_modifier(sanitized_query)
+        if recurrence_rule:
+            self.logger.info(f"Detected recurrence: {recurrence_rule}")
+            sanitized_query = sanitized_query.replace(matched_recurrence_text, '', 1)
+            # Clean up any double spaces left behind by the removal
+            sanitized_query = re.sub(r'\s+', ' ', sanitized_query).strip()
 
-        # --- Stage 4: Sliding Window Search for Specific Time ---
+        # ==========================================
+        # Stage 3 & 4: Split-Head/Tail Time Extraction
+        # ==========================================
+        # Natural language is messy. The time at the start ("Tomorrow go to the store"
+        # or at the end ("Go to the store tomorrow"). Sometimes they split it ("On Friday go to the store at 5pm").
+        # Instead attempt to "eat" valid time phrases from both ends of the sentence.
+        
         words = sanitized_query.split()
-        parsed_time = ""
-        message_part = sanitized_query  # Default message is the whole query
-
-        # Check from the end of the string first
-        for i in range(len(words)):
-            # Create a phrase from the end of the sentence.
-            potential_time = ' '.join(words[i:])
-            
-            # Guard against parsing single, non-numeric words as a time (e.g., "laundry").
-            if len(potential_time.split()) == 1 and not any(char.isdigit() for char in potential_time):
-                 continue
-
-            # Prevent dateparser from greedily consuming "to" or "for"
-            if potential_time.lower().endswith(("to", "for")):
-                continue
-
-            # Asynchronously check if the phrase is a valid time.
-            if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
-                message_part = ' '.join(words[:i])
-                parsed_time = potential_time
-                self.logger.info(f"Parsed specific time at back: '{parsed_time}'")
-                break
         
-        # If no time found at the back, check from the front
-        if not parsed_time:
-            for i in range(len(words), 0, -1):
-                potential_time = ' '.join(words[:i])
-                if len(potential_time.split()) == 1 and not any(char.isdigit() for char in potential_time):
+        # --- Helper to consume words and check validity ---
+        async def get_longest_valid_date_segment(candidate_words: list[str], direction: str) -> tuple[str, int]:
+            """
+            Tries to form a valid date string by incrementally adding words from the list.
+            Returns the longest string that dateparser accepts as a valid date, 
+            and the number of words consumed.
+            """
+            valid_segment = ""
+            valid_count = 0
+            
+            # We try building phrases: "On", "On Dec", "On Dec 21"... 
+            for i in range(1, len(candidate_words) + 1):
+                phrase = " ".join(candidate_words[:i])
+                
+                # Optimization: Don't ask dateparser about obviously non-date single words
+                # unless they are digits. This saves processing time.
+                if i == 1 and (len(phrase) < 3 and not phrase[0].isdigit()):
+                    if config.DEV_MODE:
+                        self.logger.debug(f"[{direction}] Skipping short single word: '{phrase}'")
                     continue
-                if await asyncio.to_thread(dateparser.parse, potential_time, settings={'PREFER_DATES_FROM': 'future'}):
-                    message_part = ' '.join(words[i:])
-                    parsed_time = potential_time
-                    self.logger.info(f"Parsed specific time at front: '{parsed_time}'")
-                    break
+                
+                # Optimization: Stop if we hit a pure stop-word that rarely starts/ends a date
+                # but is common in messages. This prevents "at 5pm to" where "to" is part of the message.
+                word_to_check = candidate_words[i-1].lower()
+                if i > 1 and word_to_check in ['to', 'that', 'my', 'the']:
+                    # Special handling for "the": allow it if it looks like part of a date phrase
+                    # e.g. "on the 25th", "on the next Friday"
+                    should_stop = True
+                    if word_to_check == 'the' and i < len(candidate_words):
+                        next_word = candidate_words[i].lower()
+                        # Check if next word is a digit (25th) or a relative keyword or day/month
+                        if (next_word[0].isdigit() or 
+                            next_word in ['next', 'last', 'following', 'first', 'second', 'third', 'fourth', 'fifth'] or
+                            next_word in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+                                          'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+                                          'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+                                          'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']):
+                            should_stop = False
+                        
+                    if should_stop:
+                        if config.DEV_MODE:
+                            self.logger.debug(f"[{direction}] Stopping at stop-word '{candidate_words[i-1]}' in phrase: '{phrase}'")
+                        break
 
-        # --- Stage 5: Combine Modifier and Parsed Time ---
-        final_time_str = f"{time_modifier} {parsed_time}".strip()
-        final_message = message_part.strip()
+                # --- Pre-processing ---
+                # We manually strip common prepositions from the start of the phrase.
+                # This helps avoid false positives or confusion, and allows us to use
+                # STRICT_PARSING: False safely.
+                clean_phrase = phrase
+                words_in_phrase = phrase.split()
+                if words_in_phrase and words_in_phrase[0].lower() in ['on', 'at', 'in', 'for', 'by', 'from']:
+                    # Remove the first word (the preposition)
+                    clean_phrase = " ".join(words_in_phrase[1:])
+                
+                # If the cleaned phrase is empty or too short (and not a digit), skip it.
+                # This prevents "on" -> "" -> Now, or "on a" -> "a" -> ?
+                if not clean_phrase or (len(clean_phrase) < 3 and not clean_phrase[0].isdigit()):
+                    continue
 
-        # --- Stage 6: Final Message Sanitization ---
-        # After parsing, clean up any leftover conjunctions or filler words.
-        junk_words = ['to', 'that', 'for', 'and', 'then', 'now', 'a', "from"]
-        words = final_message.split()
-        
-        # Remove leading junk words
-        while words and words[0].lower() in junk_words:
-            words.pop(0)
-        
-        # Remove trailing junk words
-        while words and words[-1].lower() in junk_words:
-            words.pop()
+                # Prepare the phrase for checking.
+                # If we are checking backwards, the phrase is reversed (e.g. "5pm at").
+                # We must un-reverse it so dateparser sees natural order (e.g. "at 5pm").
+                check_phrase = clean_phrase
+                if direction == "BACK":
+                    check_phrase = " ".join(clean_phrase.split()[::-1])
+
+                # Check validity using dateparser with STRICT_PARSING: False.
+                # We use False because True is too strict (fails on normal dates such as "December 21st").
+                # We rely on our incremental build and stop-words to avoid over-consuming.
+                is_valid = await asyncio.to_thread(
+                    dateparser.parse, 
+                    check_phrase, 
+                    settings={'PREFER_DATES_FROM': 'future', 'STRICT_PARSING': False}
+                )
+                
+                if config.DEV_MODE:
+                    self.logger.debug(f"[{direction}] Checking phrase: '{phrase}' (check: '{check_phrase}') -> Valid: {bool(is_valid)}")
+
+                if is_valid:
+                    valid_segment = phrase
+                    valid_count = i
             
-        final_message = ' '.join(words)
+            return valid_segment, valid_count
 
-        # --- Stage 7: Fallback ---
-        # If no time is found anywhere, assume the whole query is the message.
-        if not final_time_str:
-            self.logger.warning(f"Could not find a time string in '{query}'. Assuming it's all a message.")
-            return (query, "", None)
+        # 1. Try consuming time info from the FRONT of the sentence
+        if config.DEV_MODE:
+            self.logger.debug(f"Starting Front Time Extraction with words: {words}")
+        front_time_str, front_word_count = await get_longest_valid_date_segment(words, "FRONT")
+        
+        # 2. Try consuming time info from the BACK of the sentence
+        # We only look at the back if we haven't already consumed the whole string from the front.
+        back_time_str = ""
+        back_word_count = 0
+        
+        remaining_words_at_back = len(words) - front_word_count
+        if remaining_words_at_back > 0:
+            if config.DEV_MODE:
+                self.logger.debug(f"Starting Back Time Extraction. Remaining words: {remaining_words_at_back}")
+            
+            # Prepare words for back extraction (reverse them)
+            # We take the words that were NOT consumed by the front extraction
+            words_for_back = words[front_word_count:]
+            reversed_words = words_for_back[::-1]
+            
+            # Use the helper to find the longest valid segment from the back
+            back_segment, back_count = await get_longest_valid_date_segment(reversed_words, "BACK")
+            
+            if back_segment:
+                # The segment returned is reversed (e.g. "am 5 at"). We need to un-reverse it.
+                back_time_str = " ".join(back_segment.split()[::-1])
+                back_word_count = back_count
+                if config.DEV_MODE:
+                    self.logger.debug(f"Found back time: '{back_time_str}' ({back_word_count} words)")
+        
+        # ==========================================
+        # Stage 5: Synthesis and Validation
+        # ==========================================
+        # Now we decide what the final time string and message are based on what we found.
+        
+        final_time_string = ""
+        message_words = words # Default to assuming everything is the message if no time found
 
-        return (final_message or None, final_time_str, None)
+        # Case A: Split Time ("On Monday" ... "at 5pm")
+        # We found valid time parts at BOTH ends. We try to combine them.
+        if front_time_str and back_time_str:
+            self.logger.info(f"Found split time: '{front_time_str}' AND '{back_time_str}'")
+            combined_candidate = f"{front_time_str} {back_time_str}"
+            
+            # Validate that the combined string makes sense
+            if await asyncio.to_thread(dateparser.parse, combined_candidate, settings={'PREFER_DATES_FROM': 'future'}):
+                final_time_string = combined_candidate
+                # The message is whatever is left in the middle
+                message_words = words[front_word_count : len(words) - back_word_count]
+            else:
+                # If they don't combine validly, we have to pick one. 
+                # We default to the front one as a heuristic.
+                final_time_string = front_time_str
+                message_words = words[front_word_count:]
+
+        # Case B: Front only ("Tomorrow go to store")
+        elif front_time_str:
+            self.logger.info(f"Found time at front: '{front_time_str}'")
+            final_time_string = front_time_str
+            message_words = words[front_word_count:]
+
+        # Case C: Back only ("Go to store tomorrow")
+        elif back_time_str:
+            self.logger.info(f"Found time at back: '{back_time_str}'")
+            final_time_string = back_time_str
+            message_words = words[:len(words) - back_word_count]
+            
+        # ==========================================
+        # Stage 6: Final Cleanup
+        # ==========================================
+        
+        # If we found a recurrence rule but NO specific time (e.g. "Every day"),
+        # we set the time to "now" so the recurrence starts immediately.
+        # (Again this differs from the previous implementation but is better)
+        if not final_time_string and recurrence_rule:
+            final_time_string = "now"
+
+        # If we still have no time string, we failed to parse a reminder.
+        if not final_time_string:
+            self.logger.warning(f"No time found in: '{query}'")
+            return (sanitized_query, "", None)
+
+        # Reassemble the message from the remaining words
+        final_message = " ".join(message_words)
+        
+        # Clean junk words from message boundaries (e.g. "to", "that")
+        junk_words = ['to', 'that', 'for', 'and', 'then', 'now', 'a', 'the', 'my']
+        
+        # Clean Start
+        msg_words = final_message.split()
+        while msg_words and msg_words[0].lower() in junk_words:
+            msg_words.pop(0)
+        # Clean End
+        while msg_words and msg_words[-1].lower() in junk_words:
+            msg_words.pop()
+            
+        final_message = " ".join(msg_words)
+
+        return (final_message, final_time_string, recurrence_rule)
+        # Pray that this works, because no god can ever fix this if it doesn't.
 
     async def _interactive_reminder_flow(self, ctx: 'commands.Context', initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
         """Guides the user through creating a reminder interactively."""
@@ -493,37 +686,12 @@ class Reminders(BaseCog):
                 
                 # Check for recurrence in the time string if not already provided
                 if not recurrence_rule:
-                    recurrence_match = re.search(
-                        r'\b(every\s+(?:(?P<interval>\d+)\s+)?(?P<freq>second|minute|hour|day|week|month|year)s?|every\s+(?P<weekday>weekday|(?P<day_name>sunday|monday|tuesday|wednesday|thursday|friday|saturday))|every\s+(?P<month_day>\d{1,2})(?:st|nd|rd|th)\s+of\s+the\s+month)\b',
-                        time_str, re.IGNORECASE
-                    )
-                    if recurrence_match:
-                        groups = recurrence_match.groupdict()
-                        interval = int(groups.get('interval') or 1)
-                        
-                        if groups.get('weekday') == 'weekday':
-                            recurrence_rule = "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
-                        elif groups.get('day_name'):
-                            day_map = {'sunday': 'SU', 'monday': 'MO', 'tuesday': 'TU', 'wednesday': 'WE', 'thursday': 'TH', 'friday': 'FR', 'saturday': 'SA'}
-                            day = day_map[groups['day_name'].lower()]
-                            recurrence_rule = f"FREQ=WEEKLY;BYDAY={day};INTERVAL={interval}"
-                        elif groups.get('month_day'):
-                            day_of_month = int(groups['month_day'])
-                            recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
-                        else:
-                            freq_map = {
-                                'second': 'SECONDLY', 'minute': 'MINUTELY', 'hour': 'HOURLY',
-                                'day': 'DAILY', 'week': 'WEEKLY', 'month': 'MONTHLY', 'year': 'YEARLY'
-                            }
-                            freq_str = groups['freq'].lower()
-                            freq = freq_map.get(freq_str)
-                            if freq:
-                                recurrence_rule = f"FREQ={freq};INTERVAL={interval}"
-                        
-                        if recurrence_rule:
-                            self.logger.info(f"Detected recurrence rule in interactive flow: {recurrence_rule}")
-                            # Strip the recurrence part to help dateparser
-                            time_str = time_str.replace(recurrence_match.group(0), '', 1).strip()
+                    recurrence_rule, matched_text = self._extract_recurrence_rule(time_str)
+                    
+                    if recurrence_rule:
+                        self.logger.info(f"Detected recurrence rule in interactive flow: {recurrence_rule}")
+                        # Strip the recurrence part to help dateparser
+                        time_str = time_str.replace(matched_text, '', 1).strip()
 
                 dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
 
@@ -613,6 +781,20 @@ class Reminders(BaseCog):
             else:
                 # Otherwise, parse the time string as usual.
                 dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                
+                # If we have a recurrence rule, ensure the first occurrence aligns with it.
+                # e.g. "Every Friday at 7am" (parsed as Sunday 7am) -> Should be next Friday 7am.
+                if dt_object and recurrence_rule:
+                    try:
+                        rule = rrulestr(recurrence_rule, dtstart=dt_object)
+                        # Get the first occurrence that matches the rule, starting from dt_object.
+                        # inc=True means if dt_object itself matches, use it.
+                        next_occurrence = rule.after(dt_object, inc=True)
+                        if next_occurrence:
+                            dt_object = next_occurrence
+                            self.logger.info(f"Aligned initial reminder time to recurrence rule: {dt_object}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to align time with recurrence rule: {e}")
             
             # This check is a safeguard, but _parse_reminder should have validated the time string.
             if not dt_object:
@@ -891,6 +1073,230 @@ class Reminders(BaseCog):
             self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
 
+    async def edit_reminder_nlp(self, ctx: commands.Context, *, query: str):
+        """
+        Initiates an interactive conversation to edit an existing reminder.
+        The user can choose to edit the reminder's message, time, or recurrence.
+        """
+        # Find the number in the query (e.g., "edit reminder 3").
+        match = re.search(r'\d+', query)
+        if not match:
+            await ctx.send("Please specify the number of the reminder you want to edit. Use `.sancho check reminders` to see the numbers.")
+            return
+
+        try:
+            reminder_num_to_edit = int(match.group(0))
+        except (ValueError, IndexError):
+            await ctx.send("Invalid reminder number provided.")
+            return
+
+        user_reminders = await self.db_manager.get_user_reminders(ctx.author.id)
+
+        if not (1 <= reminder_num_to_edit <= len(user_reminders)):
+            await ctx.send(f"Invalid number. You only have {len(user_reminders)} reminders.")
+            return
+
+        # Map the user-facing number (1-based) to the actual reminder object
+        reminder_to_edit = user_reminders[reminder_num_to_edit - 1]
+
+        def check(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            await ctx.send(
+                f"What would you like to edit for reminder **#{reminder_num_to_edit}** (\"{reminder_to_edit['message']}\")?\n"
+                "1. Message\n"
+                "2. Time\n"
+                "3. Recurrence\n"
+                "Please respond with the number of your choice, or say `exit` to cancel."
+            )
+            choice_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+            choice = choice_msg.content.strip()
+
+            if choice.lower() in ['exit', 'cancel']:
+                await ctx.send("Edit cancelled.")
+                return
+
+            updates: dict[str, Any] = {}
+            should_reschedule = False
+
+            match choice:
+                case '1':  # Edit Message
+                    await ctx.send("What should the new message be?")
+                    msg_response = await self.bot.wait_for('message', check=check, timeout=60.0)
+                    new_message = msg_response.content.strip()
+                    
+                    if new_message.lower() in ['exit', 'cancel']:
+                        await ctx.send("Edit cancelled.")
+                        return
+                    
+                    updates['message'] = new_message
+
+                case '2':  # Edit Time
+                    await ctx.send("When should the new time be? (e.g., 'in 2 hours', 'tomorrow at 5pm')")
+                    time_response = await self.bot.wait_for('message', check=check, timeout=60.0)
+                    time_str = time_response.content.strip()
+                    
+                    if time_str.lower() in ['exit', 'cancel']:
+                        await ctx.send("Edit cancelled.")
+                        return
+
+                    # Use existing logic to parse time
+                    user_tz_str = await self._get_user_timezone(ctx.author.id)
+                    date_settings = {
+                        'PREFER_DATES_FROM': 'future',
+                        'TIMEZONE': user_tz_str,
+                        'RETURN_AS_TIMEZONE_AWARE': True
+                    }
+                    
+                    dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                    
+                    if not dt_object or dt_object.timestamp() <= time.time():
+                        await ctx.send("I couldn't understand that time or it's in the past. Edit cancelled.")
+                        return
+
+                    updates['reminder_time'] = int(dt_object.timestamp())
+                    should_reschedule = True
+
+                case '3':  # Edit Recurrence
+                    await ctx.send("What should the recurrence be? (e.g., 'every day', 'weekly', or 'none' to remove)")
+                    recurrence_response = await self.bot.wait_for('message', check=check, timeout=60.0)
+                    recurrence_str = recurrence_response.content.strip()
+                    
+                    if recurrence_str.lower() in ['exit', 'cancel']:
+                        await ctx.send("Edit cancelled.")
+                        return
+                    
+                    if recurrence_str.lower() == 'none':
+                        updates['is_recurring'] = False
+                        updates['recurrence_rule'] = None
+                    else:
+                        # Use the helper method to extract the recurrence rule
+                        recurrence_rule, _ = self._extract_recurrence_rule(recurrence_str)
+                        
+                        if recurrence_rule:
+                            updates['is_recurring'] = True
+                            updates['recurrence_rule'] = recurrence_rule
+                            should_reschedule = True # Recurrence change might affect next run time logic if we were fancy, but definitely needs DB update
+                        else:
+                            await ctx.send("I couldn't understand that recurrence rule. Edit cancelled.")
+                            return
+
+                case _:
+                    await ctx.send("Invalid choice. Edit cancelled.")
+                    return
+
+            if updates:
+                rows_affected = await self.db_manager.update_reminder(reminder_to_edit['id'], ctx.author.id, updates)
+                if rows_affected > 0:
+                    await ctx.send(f"✅ Successfully updated reminder **#{reminder_num_to_edit}**.")
+                    self.logger.info(f"User {ctx.author.id} updated reminder {reminder_to_edit['id']}.")
+                    
+                    if should_reschedule:
+                        # Fetch the updated reminder data to ensure we have the full state
+                        updated_reminder = await self.db_manager.get_reminder_by_id(reminder_to_edit['id'])
+                        if updated_reminder:
+                            self._schedule_reminder_task(updated_reminder)
+                else:
+                    await ctx.send("Something went wrong. I couldn't update that reminder.")
+            else:
+                await ctx.send("No changes were made.")
+
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Edit cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error editing reminder for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred while editing the reminder.")
+
+    async def reminder_settings_nlp(self, ctx: commands.Context, *, query: str):
+        """
+        Opens an interactive settings menu for reminders.
+        """
+        # Fetch current settings
+        dest_pref = await self.db_manager.get_user_config(ctx.author.id, 'reminder_destination') or 'origin'
+        
+        # Format display string
+        display_dest = "Origin Channel"
+        if dest_pref == 'dm':
+            display_dest = "Direct Messages"
+        elif dest_pref.isdigit():
+            channel = self.bot.get_channel(int(dest_pref))
+            # Check if channel has a name attribute (TextChannel, VoiceChannel, etc.)
+            if channel and hasattr(channel, 'name'):
+                display_dest = f"#{getattr(channel, 'name')}"
+            else:
+                display_dest = f"Unknown Channel (ID: {dest_pref})"
+        elif dest_pref == 'channel': # Handle legacy value
+            display_dest = "Origin Channel"
+        
+        embed = discord.Embed(title="Reminder Settings", color=discord.Color.blue())
+        embed.description = (
+            f"**1. Destination:** `{display_dest}`\n"
+            "(Where reminders are sent)\n\n"
+            "Reply with the number of the setting you want to change, or `exit`."
+        )
+        
+        await ctx.send(embed=embed)
+        
+        def check(m: discord.Message):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            choice = msg.content.strip().lower()
+            
+            if choice in ['exit', 'cancel']:
+                await ctx.send("Settings closed.")
+                return
+                
+            if choice == '1':
+                await ctx.send(
+                    "Where should I send your reminders?\n"
+                    "1. **DMs** (Direct Messages)\n"
+                    "2. **Origin** (The channel where you set the reminder)\n"
+                    "3. **Specific Channel** (Link a specific channel)\n"
+                    "Reply with the number."
+                )
+                
+                sub_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                sub_choice = sub_msg.content.strip()
+                
+                if sub_choice == '1':
+                    await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'dm')
+                    await ctx.send("✅ Destination set to **Direct Messages**.")
+                elif sub_choice == '2':
+                    await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'origin')
+                    await ctx.send("✅ Destination set to **Origin Channel**.")
+                elif sub_choice == '3':
+                    await ctx.send("Please mention the channel you want to use (e.g. `#general`).")
+                    chan_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                    
+                    # Extract channel ID from mention or raw ID
+                    chan_match = re.search(r'<#(\d+)>', chan_msg.content)
+                    chan_id = None
+                    if chan_match:
+                        chan_id = int(chan_match.group(1))
+                    elif chan_msg.content.strip().isdigit():
+                        chan_id = int(chan_msg.content.strip())
+                        
+                    if chan_id:
+                        # Verify bot can see the channel
+                        channel = self.bot.get_channel(chan_id)
+                        if channel:
+                            await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', str(chan_id))
+                            mention_str = getattr(channel, 'mention', f"#{getattr(channel, 'name', chan_id)}")
+                            await ctx.send(f"✅ Destination set to {mention_str}.")
+                        else:
+                            await ctx.send("I can't find that channel or I don't have access to it.")
+                    else:
+                        await ctx.send("Invalid channel.")
+                else:
+                    await ctx.send("Invalid choice.")
+            else:
+                await ctx.send("Invalid choice.")
+                
+        except asyncio.TimeoutError:
+            await ctx.send("Settings timed out.")
 
 async def setup(bot: SanchoBot, **kwargs) -> None:
     """Standard setup, receiving the database path via kwargs from main.py."""
