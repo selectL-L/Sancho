@@ -201,12 +201,10 @@ class SanchoBot(commands.Bot):
         try:
             if not self.tree.get_command('nlp'):
                 async def _nlp_app(interaction: discord.Interaction, query: str):
-                    # Immediately acknowledge the slash command with a short,
-                    # ephemeral message so the user sees the command was received
-                    # and there's no persistent "thinking" state. Then hand off
-                    # processing to the NLP dispatcher which will post normal
-                    # messages into the channel as needed.
+                    # Log command usage similar to how prefix-based NLP does it.
+                    logging.info(f"slash NLP query from '{interaction.user}': '{query}'")
                     try:
+                        # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
                         await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
                     except Exception:
                         # If sending the ephemeral message fails, try to defer as a fallback. (honest to god, I hate this)
@@ -314,9 +312,9 @@ class SanchoBot(commands.Bot):
             return
 
         query_lower = query.lower()
-        logging.info(f"NLP query from '{message.author}': '{query}'")
+        logging.info(f"prefix NLP query from '{message.author}': '{query}'")
 
-        # Use the centralized NLP matcher to find the handler.
+        # Use the NLP matcher to find the handler.
         handler = self.find_nlp_handler(query_lower)
         if not handler:
             return

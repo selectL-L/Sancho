@@ -10,6 +10,7 @@ from discord import app_commands
 import logging
 from collections import defaultdict
 from typing import List, Dict, Any
+import typing
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -75,8 +76,6 @@ class StatusView(discord.ui.View):
             except Exception:
                 pass
 
-import typing
-
 class AdminCog(BaseCog):
     """
     Administrative and owner-only commands.
@@ -87,9 +86,11 @@ class AdminCog(BaseCog):
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
 
-    @commands.command(name="global_limit", hidden=True)
+    @commands.hybrid_command(name="global_limit", hidden=True, description="Set the global skill limit for all users.")
     @commands.has_permissions(manage_guild=True)
-    @app_commands.describe(limit="The new global skill limit (1-100).")
+    @app_commands.describe(
+        limit="The new global skill limit (1-100)."
+    )
     async def global_limit(self, ctx: commands.Context, limit: int):
         """
         Set the global skill limit for all users.
@@ -100,7 +101,7 @@ class AdminCog(BaseCog):
         await self.db_manager.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
 
-    @commands.command(name="user_limit", hidden=True)
+    @commands.hybrid_command(name="user_limit", hidden=True, description="Set the skill limit for a specific user.")
     @commands.has_permissions(manage_guild=True)
     @app_commands.describe(
         user="The user to set the limit for. (this can be a mention or an ID)",
@@ -117,8 +118,9 @@ class AdminCog(BaseCog):
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
 
-    @commands.command(name="status", hidden=True)
+    @commands.hybrid_command(name="status", hidden=True, description="Display a status report of all users' skills and reminders.")
     @commands.is_owner()
+    @app_commands.describe(mode="Optional: 'full' to post all embeds, or 'print' to attach a text report.")
     async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None):
         """
         Displays a status report of all users' skills and reminders.
