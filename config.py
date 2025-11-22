@@ -139,14 +139,14 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         ((r'^\s*(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
         # Editing reminders
         ((r'^\s*(edit|change|update)\b.*\breminder',), 'Reminders', 'edit_reminder_nlp'),
-        # Setting reminders
-        ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
         # Checking reminders (catches "check my reminders", "show reminders", etc.)
         ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
         # Setting user timezone
         ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*timezone\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
         # Reminder Settings
         ((r'^\s*reminder\s+settings\b', r'^\s*reminders\s+settings\b'), 'Reminders', 'reminder_settings_nlp'),
+        # Setting reminders
+        ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
     ],
     # --- Image Group ---
     [

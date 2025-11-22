@@ -220,7 +220,9 @@ class Help(BaseCog):
                 "• `Sancho remind me to check the oven in 15 minutes`\n"
                 "• `Sancho set a reminder to walk the dog every day at 8am`\n"
                 "• `Sancho show my reminders`\n"
+                "• `Sancho edit reminder 3`\n"
                 "• `Sancho delete reminder 2`\n"
+                "• `Sancho reminder settings`\n"
                 "• `Sancho timezone America/New_York or GMT-5 (prefers IANA timezones)`\n\n"
                 "DISCLAIMER: Reminders are a work in progress and may not work perfectly yet."
             ),
