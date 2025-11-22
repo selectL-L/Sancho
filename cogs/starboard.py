@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -6,7 +7,7 @@ from utils.database import DatabaseManager
 import logging
 import datetime
 import inspect
-from typing import Optional
+from typing import Optional, Any
 import io
 import aiohttp
 import asyncio
@@ -47,7 +48,12 @@ class Starboard(BaseCog):
     @commands.has_guild_permissions(manage_guild=True)
     async def starboard_group(self, ctx: commands.Context):
         """Manages starboard settings."""
-        await ctx.send_help(ctx.command)
+        if ctx.invoked_subcommand is None:
+            help_cog: Any = self.bot.get_cog('Help')
+            if help_cog and hasattr(help_cog, 'send_command_help'):
+                await help_cog.send_command_help(ctx, ctx.command)
+            else:
+                await ctx.send_help(ctx.command)
     # Keep the group hidden in text help while using hybrid registration
     starboard_group.hidden = True
 
@@ -74,6 +80,10 @@ class Starboard(BaseCog):
 
     @starboard_group.command(name="reload")
     @commands.is_owner()
+    @app_commands.describe(
+        mode="The operation mode: 'remake' to recreate posts, 'fix' to repair DB entries.",
+        fast="If True, skips rate limits and confirmations (Dangerous!)."
+    )
     async def reload_starboard(self, ctx: commands.Context, mode: str, fast: bool = False):
         """
         Reloads or fixes starboard messages. Only callable by the bot owner.
@@ -337,16 +347,16 @@ class Starboard(BaseCog):
                                 if entry.get('original_channel_id'):
                                     ch = self.bot.get_channel(entry['original_channel_id'])
                                     logger.debug(f"Trying stored original_channel {entry['original_channel_id']} to find original message {orig_id}")
-                                    fetch = getattr(ch, 'fetch_message', None) if ch is not None else None
-                                    if callable(fetch):
+                                    
+                                    if isinstance(ch, discord.abc.Messageable):
                                         try:
                                             # Bypass rate-limiting in fast mode
                                             if self._fast_mode:
-                                                logger.debug(f"Fast mode: fetching original {orig_id} directly from channel {getattr(ch,'id',None)}")
-                                                await fetch(orig_id)  # type: ignore
+                                                logger.debug(f"Fast mode: fetching original {orig_id} directly from channel {ch.id}")
+                                                await ch.fetch_message(orig_id) 
                                             else:
-                                                logger.debug(f"Rate-limited fetch of original {orig_id} from channel {getattr(ch,'id',None)}")
-                                                await self._run_rate_limited(fetch, orig_id)  # type: ignore
+                                                logger.debug(f"Rate-limited fetch of original {orig_id} from channel {ch.id}")
+                                                await self._run_rate_limited(ch.fetch_message, orig_id) 
                                             original_found = True
                                             logger.debug(f"Found original {orig_id} in stored channel {entry['original_channel_id']}")
                                         except Exception as e:
@@ -364,21 +374,20 @@ class Starboard(BaseCog):
                                     if target_guild_for_lookup:
                                         logger.debug(f"Scanning guild {getattr(target_guild_for_lookup, 'id', None)} channels to find original {orig_id}")
                                         for ch in target_guild_for_lookup.channels:
-                                            fetch = getattr(ch, 'fetch_message', None)
-                                            if not callable(fetch):
+                                            if not isinstance(ch, discord.abc.Messageable):
                                                 continue
                                             try:
                                                 if self._fast_mode:
-                                                    logger.debug(f"Fast mode: attempting fetch in channel {getattr(ch,'id',None)} for message {orig_id}")
-                                                    await fetch(orig_id)  # type: ignore
+                                                    logger.debug(f"Fast mode: attempting fetch in channel {ch.id} for message {orig_id}")
+                                                    await ch.fetch_message(orig_id) 
                                                 else:
-                                                    logger.debug(f"Rate-limited attempt to fetch message {orig_id} in channel {getattr(ch,'id',None)}")
-                                                    await self._run_rate_limited(fetch, orig_id)  # type: ignore
+                                                    logger.debug(f"Rate-limited attempt to fetch message {orig_id} in channel {ch.id}")
+                                                    await self._run_rate_limited(ch.fetch_message, orig_id) 
                                                 original_found = True
-                                                logger.debug(f"Found original {orig_id} in channel {getattr(ch,'id',None)}")
+                                                logger.debug(f"Found original {orig_id} in channel {ch.id}")
                                                 break
                                             except Exception as e:
-                                                logger.debug(f"Channel {getattr(ch,'id',None)} did not contain message {orig_id}: {e}")
+                                                logger.debug(f"Channel {ch.id} did not contain message {orig_id}: {e}")
                                                 continue
 
                             if not original_found:
@@ -438,13 +447,12 @@ class Starboard(BaseCog):
                         # Try stored channel first
                         if entry.get('original_channel_id'):
                             ch = self.bot.get_channel(entry['original_channel_id'])
-                            fetch = getattr(ch, 'fetch_message', None) if ch is not None else None
-                            if callable(fetch):
+                            if isinstance(ch, discord.abc.Messageable):
                                 try:
                                     if self._fast_mode:
-                                        original_message = await fetch(original_id)  # type: ignore
+                                        original_message = await ch.fetch_message(original_id) 
                                     else:
-                                        original_message = await self._run_rate_limited(fetch, original_id)  # type: ignore
+                                        original_message = await self._run_rate_limited(ch.fetch_message, original_id) 
                                     original_channel = ch
                                 except discord.NotFound:
                                     original_message = None
@@ -463,14 +471,13 @@ class Starboard(BaseCog):
 
                             if target_guild_for_lookup:
                                 for ch in target_guild_for_lookup.channels:
-                                    fetch = getattr(ch, 'fetch_message', None)
-                                    if not callable(fetch):
+                                    if not isinstance(ch, discord.abc.Messageable):
                                         continue
                                     try:
                                         if self._fast_mode:
-                                            original_message = await fetch(original_id)  # type: ignore
+                                            original_message = await ch.fetch_message(original_id) 
                                         else:
-                                            original_message = await self._run_rate_limited(fetch, original_id)  # type: ignore
+                                            original_message = await self._run_rate_limited(ch.fetch_message, original_id) 
                                         original_channel = ch
                                         break
                                     except discord.NotFound:

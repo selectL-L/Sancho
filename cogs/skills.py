@@ -23,7 +23,7 @@ Key Features:
 import discord
 from discord.ext import commands
 import asyncio
-from typing import Optional
+from typing import Optional, cast
 import re
 
 from utils.base_cog import BaseCog
@@ -352,7 +352,7 @@ class Skills(BaseCog):
             return
 
         # 4. Get the Math cog to perform the roll.
-        math_cog: Optional[Math] = self.bot.get_cog('Math') # type: ignore
+        math_cog: Optional[Math] = cast(Optional[Math], self.bot.get_cog('Math'))
         if not math_cog:
             self.logger.error("Math cog not found, cannot perform skill roll.")
             await ctx.send("Internal error: The dice rolling module is not available.")
