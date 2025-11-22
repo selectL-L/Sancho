@@ -44,8 +44,8 @@ class Starboard(BaseCog):
         
         return channel_id, emoji, threshold
 
-    @commands.hybrid_group(name="starboard")
-    @commands.has_guild_permissions(manage_guild=True)
+    @commands.hybrid_group(name="starboard", hidden=True, usage="<subcommand>")
+    @commands.has_guild_permissions(manage_channels=True)
     async def starboard_group(self, ctx: commands.Context):
         """Manages starboard settings."""
         if ctx.invoked_subcommand is None:
@@ -54,8 +54,6 @@ class Starboard(BaseCog):
                 await help_cog.send_command_help(ctx, ctx.command)
             else:
                 await ctx.send_help(ctx.command)
-    # Keep the group hidden in text help while using hybrid registration
-    starboard_group.hidden = True
 
     @starboard_group.command(name="channel")
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):

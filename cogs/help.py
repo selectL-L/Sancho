@@ -47,8 +47,19 @@ class Help(BaseCog):
         self.logger.info(f"Help command used by {ctx.author} for command: {command_name or 'general'}")
         if command_name:
             command = self.bot.get_command(command_name)
-            # Ensure the command exists and is not hidden from the help menu.
-            if command and not command.hidden:
+            
+            should_show = False
+            if command:
+                if not command.hidden:
+                    should_show = True
+                else:
+                    try:
+                        if await command.can_run(ctx):
+                            should_show = True
+                    except Exception:
+                        pass
+
+            if should_show and command:
                 await self.send_command_help(ctx, command)
             else:
                 await ctx.send(f"Sorry, I don't have a command called `{command_name}`.")
@@ -69,7 +80,7 @@ class Help(BaseCog):
         embed = discord.Embed(
             title=f"Help: `{ctx.prefix}{command.name}`",
             description=command.help or "No description available.",
-            color=discord.Color.green()
+            color=discord.Color.purple()
         )
         if command.aliases:
             embed.add_field(name="Aliases", value=", ".join(f"`{a}`" for a in command.aliases), inline=False)
@@ -101,8 +112,12 @@ class Help(BaseCog):
             self.logger.warning("Bot does not have a command tree, cannot look for app command descriptions.")
 
         # --- Format the usage and parameters ---
-        # We use the command's signature directly
-        signature = f"{ctx.prefix}{command.name} {command.signature}"
+        # Use the command's usage if provided, otherwise generate signature
+        if command.usage:
+            signature = f"{ctx.prefix}{command.name} {command.usage}"
+        else:
+            signature = f"{ctx.prefix}{command.name} {command.signature}"
+        
         embed.add_field(name="Usage", value=f"```{signature}```", inline=False)
 
         # --- Build the parameters/arguments field ---
@@ -153,7 +168,7 @@ class Help(BaseCog):
                 "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),
-            color=discord.Color.gold()
+            color=discord.Color.purple()
         )
 
         # Find all cogs that have visible commands to display.
