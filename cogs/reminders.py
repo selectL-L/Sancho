@@ -413,9 +413,7 @@ class Reminders(BaseCog):
         # ==========================================
         # Stage 1: Initial Sanitization & Triggers
         # ==========================================
-        # We start by cleaning up the input. Users often speak to the bot conversationally,
-        # saying things like "remind me to..." or "set a reminder for...".
-        # We want to strip these trigger phrases so we can focus on the actual content.
+        # Strip NLP trigger phrases so we can focus on the actual content.
         trigger_patterns = [
             r'\bremind\b', r'\breminder\b', r'\bremember\b',
             r'set\s+a\s+reminder', r'set\s.*reminder'
@@ -423,8 +421,9 @@ class Reminders(BaseCog):
         combined_pattern = r'^\s*(' + '|'.join(f'({p})' for p in trigger_patterns) + r')\s*'
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Further cleanup of conversational fillers.
-        # We look at the first few words to remove things like "me to", "us to", "him", etc.
+        # Cleanup of conversational fillers.
+
+        # Split the query into words for easier manipulation.
         words = sanitized_query.split()
         
         # Iteratively remove common filler words from the start of the query.
@@ -440,11 +439,11 @@ class Reminders(BaseCog):
         # ==========================================
         # Stage 2: Recurrence Extraction
         # ==========================================
-        # We prioritize extracting recurrence rules (e.g., "every day") because they fundamentally
-        # change how the reminder behaves. We use regex to find these patterns.
+        # We prioritize extracting recurrence rules (e.g., "every day") because they fundamentally change how the reminder behaves.
+        # (This is code for "dateparser is stupid")
         recurrence_rule = None
         
-        # Extract recurrence rule using the new helper method
+        # Extract recurrence rule using the helper method
         recurrence_rule, matched_recurrence_text = self._extract_recurrence_rule(sanitized_query)
 
         if recurrence_rule:
@@ -459,6 +458,7 @@ class Reminders(BaseCog):
         # Natural language is messy. The time at the start ("Tomorrow go to the store"
         # or at the end ("Go to the store tomorrow"). Sometimes they split it ("On Friday go to the store at 5pm").
         # Instead attempt to "eat" valid time phrases from both ends of the sentence.
+        # (This is the bread and butter of the function)
         
         words = sanitized_query.split()
         
@@ -596,10 +596,9 @@ class Reminders(BaseCog):
                 # The message is whatever is left in the middle
                 message_words = words[front_word_count : len(words) - back_word_count]
             else:
-                # If they don't combine validly, we have to pick one. 
-                # We default to the front one as a heuristic.
-                final_time_string = front_time_str
-                message_words = words[front_word_count:]
+                # If they don't combine validly, we abort to avoid malformed reminders.
+                self.logger.warning(f"Split time found but failed to combine: '{combined_candidate}'. Aborting.")
+                return None
 
         # Case B: Front only ("Tomorrow go to store")
         elif front_time_str:
