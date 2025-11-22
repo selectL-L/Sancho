@@ -120,6 +120,20 @@ class Help(BaseCog):
                     inline=False
                 )
 
+        # --- Handle Subcommands for Groups ---
+        if isinstance(command, commands.Group):
+            subcommands = [c for c in command.commands if not c.hidden]
+            if subcommands:
+                subcommand_details = []
+                for sub in subcommands:
+                    subcommand_details.append(f"**`{sub.name}`**: {sub.short_doc or 'No description'}")
+                
+                embed.add_field(
+                    name="Subcommands",
+                    value="\n".join(subcommand_details),
+                    inline=False
+                )
+
         await ctx.send(embed=embed)
 
     async def send_bot_help(self, ctx: commands.Context):
