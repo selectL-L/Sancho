@@ -29,6 +29,7 @@ import re
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
+from utils.views import get_selection
 from .math import Math, DICE_NOTATION_REGEX, COIN_FLIP_REGEX, safe_eval_math
 
 class Skills(BaseCog):
@@ -232,7 +233,7 @@ class Skills(BaseCog):
             # --- Step 3: Get Dice Roll and Validate ---
             dice_roll = ""
             while True:
-                await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `1d20kh1`, `4c + 2`)")
+                await ctx.send(f"What is the dice roll equation for `{skill_name}`? (e.g., `2d8 + 5`, `4d20kh1`, `4c + 2`)")
                 roll_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
                 if roll_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -329,22 +330,40 @@ class Skills(BaseCog):
             return
 
         # 3. Find which of the user's skills the query starts with.
-        for name in all_skill_names:
-            # Check if the cleaned query starts with the skill name.
-            # We use a regex that checks for the name followed by either a word boundary
-            # (like a space, or the end of the string) or a non-word character that is
-            # part of the name itself. This handles names with punctuation like "attack!".
-            match = re.match(r'^' + re.escape(name) + r'(?=\b|\s|$)', cleaned_query, re.IGNORECASE)
-            if match:
-                # Find the full skill dictionary object corresponding to the matched name/alias.
-                for s in user_skills:
-                    aliases = [alias.strip().lower() for alias in s['aliases'].split('|')] if s['aliases'] else []
-                    if s['name'].lower() == name.lower() or name.lower() in aliases:
-                        found_skill = s
+        # We loop to handle cases where multiple trigger words are used (e.g., "cast skill blast").
+        while True:
+            for name in all_skill_names:
+                # Check if the cleaned query starts with the skill name.
+                # We use a regex that checks for the name followed by either a word boundary
+                # (like a space, or the end of the string) or a non-word character that is
+                # part of the name itself. This handles names with punctuation like "attack!".
+                match = re.match(r'^' + re.escape(name) + r'(?=\b|\s|$)', cleaned_query, re.IGNORECASE)
+                if match:
+                    # Find the full skill dictionary object corresponding to the matched name/alias.
+                    for s in user_skills:
+                        aliases = [alias.strip().lower() for alias in s['aliases'].split('|')] if s['aliases'] else []
+                        if s['name'].lower() == name.lower() or name.lower() in aliases:
+                            found_skill = s
+                            break
+                    
+                    # The rest of the query contains any modifiers (e.g., "+ 5").
+                    rest_of_query = cleaned_query[len(name):].strip()
+                    break
+            
+            if found_skill:
+                break
+
+            # If no skill found, try to strip another trigger word from the start
+            stripped_again = False
+            temp_search = cleaned_query.lower()
+            for word in trigger_words:
+                if temp_search.startswith(word):
+                    if len(temp_search) == len(word) or temp_search[len(word)].isspace():
+                        cleaned_query = cleaned_query[len(word):].lstrip()
+                        stripped_again = True
                         break
-                
-                # The rest of the query contains any modifiers (e.g., "+ 5").
-                rest_of_query = cleaned_query[len(name):].strip()
+            
+            if not stripped_again or not cleaned_query:
                 break
         
         if not found_skill:
@@ -397,18 +416,27 @@ class Skills(BaseCog):
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
-            await ctx.send(
-                f"What would you like to edit for **{skill_to_edit['name']}**?\n"
-                "1. Name\n"
-                "2. Aliases\n"
-                "3. Dice Roll\n"
-                "4. Type\n"
-                "Please respond with the number of your choice, or say `exit` to cancel."
+            embed = discord.Embed(
+                title=f"Edit Skill: {skill_to_edit['name']}",
+                description="What would you like to edit?",
+                color=discord.Color.blue()
             )
-            choice_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
-            choice = choice_msg.content.strip()
+            embed.add_field(name="1. Name", value=skill_to_edit['name'], inline=False)
+            embed.add_field(name="2. Aliases", value=skill_to_edit['aliases'] or "None", inline=False)
+            embed.add_field(name="3. Dice Roll", value=skill_to_edit['dice_roll'], inline=False)
+            embed.add_field(name="4. Type", value=skill_to_edit['skill_type'], inline=False)
+            embed.set_footer(text="Click a button or reply with the number.")
 
-            if choice.lower() in ['exit', 'cancel']:
+            options = {
+                "1️⃣ Name": "1",
+                "2️⃣ Aliases": "2",
+                "3️⃣ Dice Roll": "3",
+                "4️⃣ Type": "4"
+            }
+
+            choice = await get_selection(ctx, embed, options, timeout=30.0)
+
+            if not choice or choice.lower() in ['exit', 'cancel']:
                 await ctx.send("Edit cancelled.")
                 return
 
@@ -464,7 +492,7 @@ class Skills(BaseCog):
 
                 case '3':  # Edit Dice Roll
                     while True:
-                        await ctx.send(f"What is the new dice roll equation for `{skill_to_edit['name']}`?")
+                        await ctx.send(f"What is the new dice roll equation for `{skill_to_edit['name']}`? (e.g., `2d8 + 5`, `4d20kh1`, `4c + 2`)")
                         roll_msg = await self.bot.wait_for('message', check=check, timeout=35.0)
                         new_roll = roll_msg.content.strip()
                         if new_roll.lower() in ['exit', 'cancel']:
@@ -481,12 +509,15 @@ class Skills(BaseCog):
 
                 case '4':  # Edit Type
                     while True:
-                        await ctx.send("Should this be an `attack` or `defense` skill?")
-                        type_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
-                        new_type = type_msg.content.strip().lower()
-                        if new_type in ['exit', 'cancel']:
+                        embed = discord.Embed(title="Select Skill Type", description="Is this an `attack` or `defense` skill?", color=discord.Color.blue())
+                        options = {"⚔️ Attack": "attack", "🛡️ Defense": "defense"}
+                        new_type = await get_selection(ctx, embed, options, timeout=20.0)
+                        
+                        if not new_type or new_type.lower() in ['exit', 'cancel']:
                             await ctx.send("Edit cancelled.")
                             return
+                        
+                        new_type = new_type.lower()
                         if new_type not in ['attack', 'defense']:
                             await ctx.send("Invalid type. Please choose `attack` or `defense`.")
                             continue

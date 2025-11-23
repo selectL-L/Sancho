@@ -133,7 +133,8 @@ class DatabaseManager:
                         message TEXT NOT NULL,
                         created_at INTEGER NOT NULL,
                         is_recurring INTEGER NOT NULL DEFAULT 0,
-                        recurrence_rule TEXT
+                        recurrence_rule TEXT,
+                        reply_message_id INTEGER
                     )
                 ''')
                 await db.execute('''
@@ -545,17 +546,18 @@ class DatabaseManager:
 
     async def add_reminder(
         self, user_id: int, channel_id: int, reminder_time: int, message: str,
-        created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None
+        created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None,
+        reply_message_id: Optional[int] = None
     ) -> Optional[int]:
         """Adds a reminder to the database and returns the new reminder's ID."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO reminders
-                (user_id, channel_id, reminder_time, message, created_at, is_recurring, recurrence_rule)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (user_id, channel_id, reminder_time, message, created_at, is_recurring, recurrence_rule, reply_message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, channel_id, reminder_time, message, created_at, 1 if is_recurring else 0, recurrence_rule)
+                (user_id, channel_id, reminder_time, message, created_at, 1 if is_recurring else 0, recurrence_rule, reply_message_id)
             )
             await db.commit()
             return cursor.lastrowid

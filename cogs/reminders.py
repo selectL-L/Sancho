@@ -36,6 +36,7 @@ import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
+from utils.views import get_selection
 
 class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
@@ -191,7 +192,29 @@ class Reminders(BaseCog):
 
                 # Cast to Messageable to satisfy static analysis
                 targetable_dest = cast(discord.abc.Messageable, targetable)
-                await targetable_dest.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}")
+                
+                # Check if we should reply to a specific message
+                reply_message_id = reminder.get('reply_message_id')
+                sent_as_reply = False
+                
+                if reply_message_id:
+                    try:
+                        # We can only reply if the targetable is a channel (has fetch_message)
+                        if hasattr(targetable, 'fetch_message'):
+                            # Cast to Any to bypass static analysis complaints about specific channel types
+                            targetable_with_fetch = cast(Any, targetable)
+                            original_message = await targetable_with_fetch.fetch_message(reply_message_id)
+                            await original_message.reply(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}")
+                            sent_as_reply = True
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        self.logger.warning(f"Could not reply to linked message {reply_message_id}. Sending normally.")
+
+                if not sent_as_reply:
+                    extra_msg = ""
+                    if reply_message_id:
+                        extra_msg = "\n(and sorry to say but I couldn't find the reply you mentioned!)"
+                    await targetable_dest.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}{extra_msg}")
+                
                 self.logger.info(f"Sent reminder {reminder['id']} to user {user.id} via {destination_pref or 'channel'}.")
             else:
                  self.logger.error(f"Could not find a valid destination for reminder {reminder['id']}.")
@@ -819,6 +842,12 @@ class Reminders(BaseCog):
             if recurrence_rule:
                 confirmation_text += "\nThis reminder will repeat."
             
+            # Check if this is a reply to link context
+            reply_message_id = None
+            if ctx.message.reference and ctx.message.reference.message_id:
+                reply_message_id = ctx.message.reference.message_id
+                confirmation_text += "\nI'll also reply to the message you linked!"
+
             await ctx.send(
                 f"{confirmation_text}\n"
                 "Is this correct? (`yes` to confirm, `edit` to change, or `no` to cancel)"
@@ -831,13 +860,13 @@ class Reminders(BaseCog):
                     is_recurring = recurrence_rule is not None
                     new_reminder_id = await self.db_manager.add_reminder(
                         ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
-                        is_recurring, recurrence_rule
+                        is_recurring, recurrence_rule, reply_message_id
                     )
                     
                     new_reminder_data = {
                         'id': new_reminder_id, 'user_id': ctx.author.id, 'channel_id': ctx.channel.id,
                         'reminder_time': timestamp, 'message': reminder_message, 'created_at': int(time.time()),
-                        'is_recurring': is_recurring, 'recurrence_rule': recurrence_rule
+                        'is_recurring': is_recurring, 'recurrence_rule': recurrence_rule, 'reply_message_id': reply_message_id
                     }
                     self._schedule_reminder_task(new_reminder_data)
                     
@@ -1102,17 +1131,25 @@ class Reminders(BaseCog):
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
-            await ctx.send(
-                f"What would you like to edit for reminder **#{reminder_num_to_edit}** (\"{reminder_to_edit['message']}\")?\n"
-                "1. Message\n"
-                "2. Time\n"
-                "3. Recurrence\n"
-                "Please respond with the number of your choice, or say `exit` to cancel."
+            embed = discord.Embed(
+                title=f"Edit Reminder #{reminder_num_to_edit}",
+                description="What would you like to edit?",
+                color=discord.Color.blue()
             )
-            choice_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
-            choice = choice_msg.content.strip()
+            embed.add_field(name="1. Message", value=reminder_to_edit['message'], inline=False)
+            embed.add_field(name="2. Time", value=f"<t:{int(reminder_to_edit['reminder_time'])}:F>", inline=False)
+            embed.add_field(name="3. Recurrence", value=reminder_to_edit['recurrence_rule'] or 'None', inline=False)
+            embed.set_footer(text="Click a button or reply with the number.")
 
-            if choice.lower() in ['exit', 'cancel']:
+            options = {
+                "1️⃣ Message": "1",
+                "2️⃣ Time": "2",
+                "3️⃣ Recurrence": "3"
+            }
+
+            choice = await get_selection(ctx, embed, options, timeout=30.0)
+
+            if not choice or choice.lower() in ['exit', 'cancel']:
                 await ctx.send("Edit cancelled.")
                 return
 
@@ -1231,71 +1268,66 @@ class Reminders(BaseCog):
         embed = discord.Embed(title="Reminder Settings", color=discord.Color.blue())
         embed.description = (
             f"**1. Destination:** `{display_dest}`\n"
-            "(Where reminders are sent)\n\n"
-            "Reply with the number of the setting you want to change, or `exit`."
+            "(Where reminders are sent)"
         )
-        
-        await ctx.send(embed=embed)
-        
-        def check(m: discord.Message):
-            return m.author == ctx.author and m.channel == ctx.channel
+        embed.set_footer(text="Click a button or reply with the number.")
 
-        try:
-            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-            choice = msg.content.strip().lower()
+        options = {
+            "1️⃣ Destination": "1"
+        }
+        
+        choice = await get_selection(ctx, embed, options, timeout=60.0)
+        
+        if not choice or choice.lower() in ['exit', 'cancel']:
+            await ctx.send("Settings closed.")
+            return
             
-            if choice in ['exit', 'cancel']:
-                await ctx.send("Settings closed.")
-                return
+        if choice == '1':
+            embed = discord.Embed(title="Select Destination", description="Where should I send your reminders?", color=discord.Color.blue())
+            options = {
+                "1️⃣ DMs": "1",
+                "2️⃣ Origin": "2",
+                "3️⃣ Specific Channel": "3"
+            }
+            sub_choice = await get_selection(ctx, embed, options, timeout=60.0)
+            
+            if not sub_choice:
+                 await ctx.send("Settings timed out.")
+                 return
+
+            if sub_choice == '1':
+                await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'dm')
+                await ctx.send("✅ Destination set to **Direct Messages**.")
+            elif sub_choice == '2':
+                await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'origin')
+                await ctx.send("✅ Destination set to **Origin Channel**.")
+            elif sub_choice == '3':
+                await ctx.send("Please mention the channel you want to use (e.g. `#general`).")
+                def check(m):
+                    return m.author == ctx.author and m.channel == ctx.channel
+                chan_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
                 
-            if choice == '1':
-                await ctx.send(
-                    "Where should I send your reminders?\n"
-                    "1. **DMs** (Direct Messages)\n"
-                    "2. **Origin** (The channel where you set the reminder)\n"
-                    "3. **Specific Channel** (Link a specific channel)\n"
-                    "Reply with the number."
-                )
-                
-                sub_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-                sub_choice = sub_msg.content.strip()
-                
-                if sub_choice == '1':
-                    await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'dm')
-                    await ctx.send("✅ Destination set to **Direct Messages**.")
-                elif sub_choice == '2':
-                    await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'origin')
-                    await ctx.send("✅ Destination set to **Origin Channel**.")
-                elif sub_choice == '3':
-                    await ctx.send("Please mention the channel you want to use (e.g. `#general`).")
-                    chan_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                # Extract channel ID from mention or raw ID
+                chan_match = re.search(r'<#(\d+)>', chan_msg.content)
+                chan_id = None
+                if chan_match:
+                    chan_id = int(chan_match.group(1))
+                elif chan_msg.content.strip().isdigit():
+                    chan_id = int(chan_msg.content.strip())
                     
-                    # Extract channel ID from mention or raw ID
-                    chan_match = re.search(r'<#(\d+)>', chan_msg.content)
-                    chan_id = None
-                    if chan_match:
-                        chan_id = int(chan_match.group(1))
-                    elif chan_msg.content.strip().isdigit():
-                        chan_id = int(chan_msg.content.strip())
-                        
-                    if chan_id:
-                        # Verify bot can see the channel
-                        channel = self.bot.get_channel(chan_id)
-                        if channel:
-                            await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', str(chan_id))
-                            mention_str = getattr(channel, 'mention', f"#{getattr(channel, 'name', chan_id)}")
-                            await ctx.send(f"✅ Destination set to {mention_str}.")
-                        else:
-                            await ctx.send("I can't find that channel or I don't have access to it.")
+                if chan_id:
+                    # Verify bot can see the channel
+                    channel = self.bot.get_channel(chan_id)
+                    if channel:
+                        await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', str(chan_id))
+                        mention_str = getattr(channel, 'mention', f"#{getattr(channel, 'name', chan_id)}")
+                        await ctx.send(f"✅ Destination set to {mention_str}.")
                     else:
-                        await ctx.send("Invalid channel.")
+                        await ctx.send("I can't find that channel or I don't have access to it.")
                 else:
-                    await ctx.send("Invalid choice.")
+                    await ctx.send("Invalid channel.")
             else:
                 await ctx.send("Invalid choice.")
-                
-        except asyncio.TimeoutError:
-            await ctx.send("Settings timed out.")
 
 async def setup(bot: SanchoBot, **kwargs) -> None:
     """Standard setup, receiving the database path via kwargs from main.py."""
