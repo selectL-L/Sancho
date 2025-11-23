@@ -8,7 +8,7 @@ and defining static configurations such as the NLP command registry.
 import os
 import sys
 import logging
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from utils.extensions import discover_cogs
 
 # --- Pathing ---
@@ -39,28 +39,72 @@ COGS_PATH = os.path.join(APP_PATH, 'cogs')
 def check_and_create_env_file():
     """
     Checks for the existence of the `info.env` file. If it doesn't exist,
-    it creates a template file and exits the application with instructions
-    for the user. This ensures the bot isn't run without a configuration file.
+    it creates a template file. If it exists, it checks for missing fields
+    and updates the file if necessary by recreating it with preserved data.
     """
+    required_fields = {
+        "DISCORD_TOKEN": "",
+        "BOT_PREFIX": "",
+        "OWNER_ID": "",
+        "SYSTEM_CHANNEL_ID": "",
+        "DEV_MODE": "False",
+        "DEV_GUILD": ""
+    }
+    
+    field_comments = {
+        "DISCORD_TOKEN": "# Discord Token for bot start up.",
+        "BOT_PREFIX": "# Bot Prefixes, ensure they're seperated with commas.",
+        "OWNER_ID": "# (Optional) Owner ID for owner specific commands.",
+        "SYSTEM_CHANNEL_ID": "# (Optional) Channel ID for system messages.",
+        "DEV_MODE": "# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.",
+        "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True."
+    }
+
     if not os.path.exists(ENV_PATH):
         logging.warning(f"'{os.path.basename(ENV_PATH)}' not found. Creating a new one.")
-        with open(ENV_PATH, 'w') as f:
-            f.write("# Discord Token for bot start up.\n")
-            f.write("DISCORD_TOKEN=\n\n")
-            f.write("# Bot Prefixes, ensure they're seperated with commas.\n")
-            f.write("BOT_PREFIX=\n\n")
-            f.write("# (Optional) Owner ID for owner specific commands.\n")
-            f.write("OWNER_ID=\n\n")
-            f.write("# (Optional) Channel ID for system messages.\n")
-            f.write("SYSTEM_CHANNEL_ID=\n\n")
-            f.write("# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.\n")
-            f.write("DEV_MODE=False\n")
+        try:
+            with open(ENV_PATH, 'w') as f:
+                for key, default_val in required_fields.items():
+                    f.write(f"{field_comments[key]}\n")
+                    f.write(f"{key}={default_val}\n\n")
+        except Exception as e:
+            logging.critical(f"Failed to create {ENV_PATH}: {e}")
+            sys.exit(f"Exiting: Failed to create {ENV_PATH}.")
+
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
         print("\nPlease open this file and add your bot's DISCORD_TOKEN and BOT_PREFIX.")
         print("The OWNER_ID is optional but recommended.")
         sys.exit("Exiting: Bot token and prefix not configured.")
+    
+    else:
+        # Check for missing fields
+        current_values = dotenv_values(ENV_PATH)
+        missing_keys = [key for key in required_fields if key not in current_values]
+        
+        if missing_keys:
+            logging.info(f"Updating {os.path.basename(ENV_PATH)} with missing keys: {missing_keys}")
+            print(f"Updating {os.path.basename(ENV_PATH)} with new configuration fields...")
+            
+            # Prepare new content preserving existing values
+            new_content = []
+            for key in required_fields:
+                value = current_values.get(key, required_fields[key])
+                new_content.append(f"{field_comments[key]}\n")
+                new_content.append(f"{key}={value}\n\n")
+            
+            try:
+                os.remove(ENV_PATH)
+                with open(ENV_PATH, 'w') as f:
+                    f.writelines(new_content)
+                print(f"Successfully updated {os.path.basename(ENV_PATH)}.")
+            except Exception as e:
+                logging.critical(f"Failed to update {ENV_PATH}. Data preserved: {current_values}")
+                print(f"CRITICAL ERROR: Failed to update {ENV_PATH}.")
+                print(f"Your existing data has been logged to {LOG_PATH}.")
+                print(f"Error: {e}")
+                sys.exit("Exiting: Failed to update configuration file.")
 
 # Check for and/or create the .env file before trying to load from it.
 check_and_create_env_file()
@@ -87,6 +131,9 @@ SYSTEM_CHANNEL_ID = int(raw_system_channel_id) if raw_system_channel_id and raw_
 
 raw_dev_mode = os.getenv('DEV_MODE', 'False')
 DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
+
+raw_dev_guild = os.getenv('DEV_GUILD')
+DEV_GUILD = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
 
 # --- Logging Configuration ---
 # These are default values that can be used by the logging setup function.

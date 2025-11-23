@@ -216,14 +216,29 @@ def migrate_database():
                     insert_columns = [col for col in new_columns if col in old_columns]
                     missing_columns = [col for col in new_columns if col not in old_columns]
                     extra_columns = [col for col in old_columns if col not in new_columns]
+                    
                     if missing_columns:
                         logging.warning(f"Table '{table_name}' missing columns in old DB: {missing_columns}. Filling with NULL/defaults.")
                     if extra_columns:
                         logging.warning(f"Table '{table_name}' has extra columns in old DB: {extra_columns}. Data will be dropped.")
+                    
                     placeholders = ', '.join('?' for _ in new_columns)
                     query = f"INSERT INTO {table_name} ({', '.join(new_columns)}) VALUES ({placeholders})"
+                    
                     for row in rows:
-                        values = [row.get(col, None) for col in new_columns]
+                        values = []
+                        for col in new_columns:
+                            if col in row:
+                                values.append(row[col])
+                            else:
+                                # Handle missing columns with defaults
+                                if col == 'is_recurring':
+                                    values.append(0)
+                                elif col == 'created_at':
+                                    import time
+                                    values.append(int(time.time()))
+                                else:
+                                    values.append(None)
                         cursor.execute(query, values)
             cursor.execute("PRAGMA foreign_keys = ON;")
             new_conn.commit()

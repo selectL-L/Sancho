@@ -223,10 +223,16 @@ class SanchoBot(commands.Bot):
 
                 # Note: global sync can takeup to an hour to propagate to all guilds.
                 try:
-                    await self.tree.sync()
-                    logging.info("Synced app commands globally")
+                    if config.DEV_MODE and config.DEV_GUILD:
+                        guild = discord.Object(id=config.DEV_GUILD)
+                        self.tree.copy_global_to(guild=guild)
+                        await self.tree.sync(guild=guild)
+                        logging.info(f"Synced app commands to dev guild {config.DEV_GUILD}")
+                    else:
+                        await self.tree.sync()
+                        logging.info("Synced app commands globally")
                 except Exception:
-                    logging.exception("Failed to sync app commands globally")
+                    logging.exception("Failed to sync app commands")
         except Exception:
             logging.exception('Failed to register NLP application command')
 
@@ -246,7 +252,6 @@ class SanchoBot(commands.Bot):
             help_cog = self.get_cog('Help')
             if help_cog:
                 # We need to tell Pylance that this cog has the method.
-                # In a real scenario, you might define a Protocol for this.
                 await getattr(help_cog, "send_command_help")(ctx, ctx.command)
             else:
                 # Fallback to default behavior if Help cog isn't available
@@ -258,7 +263,7 @@ class SanchoBot(commands.Bot):
             logging.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
             # Send a silent or ephemeral message if possible, or just a simple public one.
             try:
-                await ctx.send("Sorry, you don't have permission to use this command.", delete_after=8)
+                await ctx.send("Sorry, you don't have permission to use this command!", delete_after=8)
             except discord.HTTPException:
                 pass # Ignore if we can't send the message
             return
@@ -268,7 +273,7 @@ class SanchoBot(commands.Bot):
 
         # Notify the user that a generic, unexpected error occurred.
         try:
-            await ctx.send("Sorry, an unexpected error occurred. The issue has been logged.")
+            await ctx.send("Sorry, an unexpected error occurred. The issue has been logged. Please contact my author!")
         except discord.HTTPException:
             logging.error(f"Failed to send error message to channel {ctx.channel.id}")
 
@@ -354,8 +359,7 @@ class SanchoBot(commands.Bot):
     async def close(self) -> None:
         """
         Overrides the default close method to ensure a clean shutdown.
-        The actual shutdown message is now handled by the signal handler
-        in `shutdown_logic.py`.
+        The actual shutdown message is handled by the signal handler in `shutdown_logic.py`.
         """
         # Cancel the console listener task if it's running
         if self.console_task and not self.console_task.done():
