@@ -93,39 +93,31 @@ class DatabaseManager:
 
     async def _setup_databases(self) -> None:
         """
-        Ensures all necessary tables exist in the database. This is called once
-        on bot startup. It creates tables for skills, reminders, user timezones,
-        and configurations if they don't already exist.
-        Now only creates tables if the database is empty. No schema migrations are performed here.
+        Ensures all necessary tables exist in the database.
+        Creates missing tables automatically.
+        Checks for schema mismatches in existing tables and warns if found.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
-            # Check if the database is empty (no tables)
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = [row[0] async for row in cursor]
-            if not tables:
-                # Create all tables from scratch
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS skills (
+            
+            # 1. Define Table Schemas (Creation SQL)
+            table_schemas = {
+                "skills": '''CREATE TABLE IF NOT EXISTS skills (
                         id INTEGER PRIMARY KEY,
                         user_id INTEGER NOT NULL,
                         name TEXT NOT NULL,
                         dice_roll TEXT NOT NULL,
                         skill_type TEXT NOT NULL,
                         UNIQUE(user_id, name COLLATE NOCASE)
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS skill_aliases (
+                    )''',
+                "skill_aliases": '''CREATE TABLE IF NOT EXISTS skill_aliases (
                         id INTEGER PRIMARY KEY,
                         skill_id INTEGER NOT NULL,
                         alias TEXT NOT NULL,
                         FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
                         UNIQUE(skill_id, alias COLLATE NOCASE)
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS reminders (
+                    )''',
+                "reminders": '''CREATE TABLE IF NOT EXISTS reminders (
                         id INTEGER PRIMARY KEY,
                         user_id INTEGER NOT NULL,
                         channel_id INTEGER NOT NULL,
@@ -135,78 +127,96 @@ class DatabaseManager:
                         is_recurring INTEGER NOT NULL DEFAULT 0,
                         recurrence_rule TEXT,
                         reply_message_id INTEGER
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS user_timezones (
+                    )''',
+                "user_timezones": '''CREATE TABLE IF NOT EXISTS user_timezones (
                         user_id INTEGER PRIMARY KEY,
                         timezone TEXT NOT NULL
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS user_config (
+                    )''',
+                "user_config": '''CREATE TABLE IF NOT EXISTS user_config (
                         user_id INTEGER NOT NULL,
                         key TEXT NOT NULL,
                         value TEXT NOT NULL,
                         PRIMARY KEY(user_id, key)
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS config (
+                    )''',
+                "config": '''CREATE TABLE IF NOT EXISTS config (
                         key TEXT PRIMARY KEY,
                         value INTEGER NOT NULL
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS guild_config (
+                    )''',
+                "guild_config": '''CREATE TABLE IF NOT EXISTS guild_config (
                         guild_id INTEGER NOT NULL,
                         key TEXT NOT NULL,
                         value TEXT NOT NULL,
                         PRIMARY KEY(guild_id, key)
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS starboard (
+                    )''',
+                "starboard": '''CREATE TABLE IF NOT EXISTS starboard (
                         original_message_id INTEGER PRIMARY KEY,
                         starboard_message_id INTEGER NOT NULL,
                         guild_id INTEGER NOT NULL,
                         starboard_reply_id INTEGER,
                         original_channel_id INTEGER
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS bod_usage (
+                    )''',
+                "bod_usage": '''CREATE TABLE IF NOT EXISTS bod_usage (
                         user_id INTEGER PRIMARY KEY,
                         last_used_timestamp INTEGER NOT NULL DEFAULT 0,
                         current_chain INTEGER NOT NULL DEFAULT 0,
                         last_channel_id INTEGER NOT NULL DEFAULT 0
-                    )
-                ''')
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS bod_leaderboard (
+                    )''',
+                "bod_leaderboard": '''CREATE TABLE IF NOT EXISTS bod_leaderboard (
                         user_id INTEGER PRIMARY KEY,
                         user_name TEXT NOT NULL,
                         best_chain INTEGER NOT NULL DEFAULT 0
-                    )
-                ''')
-                await db.commit()
-                logger.info("All database tables initialized.")
+                    )'''
+            }
+
+            # 2. Get existing tables
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            existing_tables = {row[0] async for row in cursor}
+            
+            # 3. Create missing tables
+            for table, sql in table_schemas.items():
+                if table not in existing_tables:
+                    await db.execute(sql)
+                    logger.info(f"Created missing table: {table}")
+                    existing_tables.add(table)
+
+            await db.commit()
+
+            # 4. Check for schema mismatches (Columns)
+            expected_schema = {
+                "skills": {"id", "user_id", "name", "dice_roll", "skill_type"},
+                "skill_aliases": {"id", "skill_id", "alias"},
+                "reminders": {"id", "user_id", "channel_id", "reminder_time", "message", "created_at", "is_recurring", "recurrence_rule", "reply_message_id"},
+                "user_timezones": {"user_id", "timezone"},
+                "user_config": {"user_id", "key", "value"},
+                "config": {"key", "value"},
+                "guild_config": {"guild_id", "key", "value"},
+                "starboard": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
+                "bod_usage": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id"},
+                "bod_leaderboard": {"user_id", "user_name", "best_chain"}
+            }
+
+            schema_issues = []
+            
+            for table, expected_columns in expected_schema.items():
+                if table in existing_tables:
+                    cursor = await db.execute(f"PRAGMA table_info({table});")
+                    columns = {row[1] async for row in cursor}
+                    if columns != expected_columns:
+                        missing_cols = expected_columns - columns
+                        extra_cols = columns - expected_columns
+                        issue_parts = []
+                        if missing_cols:
+                            issue_parts.append(f"missing: {missing_cols}")
+                        if extra_cols:
+                            issue_parts.append(f"extra: {extra_cols}")
+                        schema_issues.append(f"Table '{table}' mismatch ({', '.join(issue_parts)})")
+
+            if schema_issues:
+                issue_summary = "; ".join(schema_issues)
+                logger.warning(f"Database schema issues detected: {issue_summary}. Please run migrate_db.py.")
+                await self._warn_and_backup_db(issue_summary)
             else:
-                # Check for schema mismatches
-                expected_tables = {
-                    "skills", "skill_aliases", "reminders", "user_timezones", "user_config", "config", "guild_config", "starboard", "bod_usage", "bod_leaderboard"
-                }
-                missing_tables = expected_tables - set(tables)
-                if missing_tables:
-                    logger.warning(f"Database is missing tables: {missing_tables}. Please run migrate_db.py.")
-                    await self._warn_and_backup_db(missing_tables)
-                # Check for missing columns in starboard
-                cursor = await db.execute("PRAGMA table_info(starboard);")
-                starboard_columns = [row[1] async for row in cursor]
-                expected_starboard_columns = {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"}
-                if set(starboard_columns) != expected_starboard_columns:
-                    logger.warning("Database schema for 'starboard' table is outdated. Please run migrate_db.py.")
-                    await self._warn_and_backup_db("starboard table columns")
+                logger.info("Database schema verified.")
 
     async def _warn_and_backup_db(self, issue):
         import shutil
