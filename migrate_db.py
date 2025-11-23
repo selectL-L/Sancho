@@ -52,7 +52,8 @@ TABLE_SCHEMAS = {
             message TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             is_recurring INTEGER NOT NULL DEFAULT 0,
-            recurrence_rule TEXT
+            recurrence_rule TEXT,
+            reply_message_id INTEGER
         )
     """,
     "user_timezones": """
