@@ -1,5 +1,4 @@
-"""
-cogs/reminders.py
+"""cogs/reminders.py
 
 This cog is responsible for all reminder-related functionality. It allows users
 to set, view, and delete reminders using natural language.
@@ -18,45 +17,52 @@ Key Features:
   bot can be updated without losing reminders.
 - Interactive Flow: If the initial NLP parsing fails, it guides the user
   through a step-by-step process to create a reminder.
-(Damn I'm eloquent)
 """
-import discord
-from discord.ext import commands, tasks
-import time
-import dateparser
-import re
-from typing import Optional, cast, Any, List, Callable
-import pytz
-from datetime import datetime
-import asyncio
-from dateutil.rrule import rrule, rrulestr, WEEKLY, DAILY, HOURLY, MINUTELY, MONTHLY, YEARLY
-from dateutil.parser import parse as dateutil_parse
-import config
 
+import asyncio
+import re
+import time
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+
+import dateparser
+import discord
+import pytz
+from dateutil.rrule import (DAILY, HOURLY, MINUTELY, MONTHLY, WEEKLY, YEARLY, rrule, rrulestr)
+from discord.ext import commands
+
+import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
 
+
 class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
+
     def __init__(self, bot: SanchoBot):
+        """Initializes the Reminders cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager: DatabaseManager = bot.db_manager
         # Stores active reminder tasks, mapping reminder ID to the asyncio.Task instance.
         # This allows us to cancel reminders if they are deleted or the cog is reloaded.
-        self.scheduled_tasks: dict[int, asyncio.Task[None]] = {}
+        self.scheduled_tasks: Dict[int, asyncio.Task[None]] = {}
 
     async def cog_load(self) -> None:
         """Schedules all pending reminders from the database when the cog is loaded."""
         self.logger.info("Scheduling existing reminders from database...")
-        # Use create_task to run this in the background without blocking cog loading.
+        # Run in background to avoid blocking.
         self.bot.loop.create_task(self._schedule_existing_reminders())
 
     async def cog_unload(self) -> None:
         """Cancels all running reminder tasks when the cog is unloaded."""
-        # This prevents reminders from firing while the cog is inactive or being reloaded.
+        # Prevent firing during reload/shutdown.
         for task in self.scheduled_tasks.values():
             task.cancel()
         self.scheduled_tasks.clear()
@@ -73,8 +79,12 @@ class Reminders(BaseCog):
         except Exception as e:
             self.logger.error(f"Failed to schedule existing reminders: {e}", exc_info=True)
 
-    def _schedule_reminder_task(self, reminder: dict[str, Any]) -> None:
-        """Creates and stores an asyncio.Task for a given reminder."""
+    def _schedule_reminder_task(self, reminder: Dict[str, Any]) -> None:
+        """Creates and stores an asyncio.Task for a given reminder.
+
+        Args:
+            reminder (Dict[str, Any]): The reminder data dictionary.
+        """
         reminder_id = reminder['id']
         
         # If a task for this reminder already exists, cancel it before creating a new one.
@@ -100,10 +110,17 @@ class Reminders(BaseCog):
             task.add_done_callback(self._create_done_callback(reminder))
             self.scheduled_tasks[reminder_id] = task
 
-    def _create_done_callback(self, reminder: dict[str, Any]) -> "Callable[[asyncio.Task[None]], None]":
-        """
-        Creates a closure for the task's done callback. This captures the reminder
-        data and provides a function that checks the task's state before cleanup.
+    def _create_done_callback(self, reminder: Dict[str, Any]) -> Callable[[asyncio.Task[None]], None]:
+        """Creates a closure for the task's done callback.
+
+        This captures the reminder data and provides a function that checks the
+        task's state before cleanup.
+
+        Args:
+            reminder (Dict[str, Any]): The reminder data dictionary.
+
+        Returns:
+            Callable[[asyncio.Task[None]], None]: The callback function.
         """
         def done_callback(task: asyncio.Task[None]) -> None:
             # Remove the task from the tracking dictionary to prevent memory leaks.
@@ -134,7 +151,14 @@ class Reminders(BaseCog):
         return done_callback
 
     def _format_overdue_time(self, seconds: float) -> str:
-        """Formats a duration in seconds into a human-readable string."""
+        """Formats a duration in seconds into a human-readable string.
+
+        Args:
+            seconds (float): The duration in seconds.
+
+        Returns:
+            str: A human-readable string (e.g., "5 minutes ago").
+        """
         seconds = abs(seconds)
         if seconds < 60:
             return "just now"
@@ -147,10 +171,14 @@ class Reminders(BaseCog):
         days = int(seconds // 86400)
         return f"{days} day{'s' if days > 1 else ''} ago"
 
-    async def _send_reminder_after_delay(self, delay: float, reminder: dict[str, Any]) -> None:
-        """
-        Waits for a specified delay, then sends the reminder.
+    async def _send_reminder_after_delay(self, delay: float, reminder: Dict[str, Any]) -> None:
+        """Waits for a specified delay, then sends the reminder.
+
         Cleanup and rescheduling are now handled by the task's done callback.
+
+        Args:
+            delay (float): The delay in seconds.
+            reminder (Dict[str, Any]): The reminder data dictionary.
         """
         try:
             # Only sleep if the reminder is in the future. Overdue reminders run immediately.
@@ -234,8 +262,12 @@ class Reminders(BaseCog):
         # The task is now complete, cancelled, or has failed. The done callback will handle
         # cleanup of the database entry and the scheduled_tasks dictionary.
 
-    async def _reschedule_or_cleanup(self, reminder: dict[str, Any]) -> None:
-        """Handles the logic for rescheduling a recurring reminder or deleting a one-off."""
+    async def _reschedule_or_cleanup(self, reminder: Dict[str, Any]) -> None:
+        """Handles the logic for rescheduling a recurring reminder or deleting a one-off.
+
+        Args:
+            reminder (Dict[str, Any]): The reminder data dictionary.
+        """
         reminder_id = reminder['id']
         
         # First, check if the reminder still exists. It might have been deleted while the task was running.
@@ -287,9 +319,16 @@ class Reminders(BaseCog):
             self.logger.info(f"Cleaned up non-recurring reminder {reminder_id} from database.")
 
     async def _get_user_timezone(self, user_id: int) -> str:
-        """
-        Fetches a user's timezone string and converts it to a pytz-compatible format 
-        if it's a GMT/UTC offset. Defaults to UTC.
+        """Fetches a user's timezone string.
+
+        Converts it to a pytz-compatible format if it's a GMT/UTC offset.
+        Defaults to UTC.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            str: The timezone string.
         """
         tz_str = await self.db_manager.get_user_timezone(user_id) or "UTC"
 
@@ -305,7 +344,14 @@ class Reminders(BaseCog):
         return tz_str
 
     def _format_recurrence_rule(self, rule_str: str) -> str:
-        """Formats an rrule string into a human-readable format."""
+        """Formats an rrule string into a human-readable format.
+
+        Args:
+            rule_str (str): The recurrence rule string.
+
+        Returns:
+            str: A human-readable description of the recurrence.
+        """
         if not rule_str:
             return ""
 
@@ -356,10 +402,15 @@ class Reminders(BaseCog):
             self.logger.error(f"Failed to parse rrule string '{rule_str}': {e}")
             return f"Repeats: {rule_str}" # Fallback to raw rule
 
-    def _extract_recurrence_rule(self, text: str) -> tuple[Optional[str], str]:
-        """
-        Extracts a recurrence rule from the given text.
-        Returns a tuple of (recurrence_rule_string, matched_text).
+    def _extract_recurrence_rule(self, text: str) -> Tuple[Optional[str], str]:
+        """Extracts a recurrence rule from the given text.
+
+        Args:
+            text (str): The text to parse.
+
+        Returns:
+            Tuple[Optional[str], str]: A tuple containing the recurrence rule string
+            (or None) and the matched text.
         """
         recurrence_rule = None
         matched_text = ""
@@ -428,10 +479,17 @@ class Reminders(BaseCog):
 
         return None, ""
 
-    async def _parse_reminder(self, query: str) -> tuple[str | None, str, str | None] | None:
-        """
-        Parses a query to separate the reminder message from the time string.
+    async def _parse_reminder(self, query: str) -> Optional[Tuple[Optional[str], str, Optional[str]]]:
+        """Parses a query to separate the reminder message from the time string.
+
         Robustly handles recurrence and split-time entities (e.g. "On Dec 21 ... at 5am").
+
+        Args:
+            query (str): The user's input string.
+
+        Returns:
+            Optional[Tuple[Optional[str], str, Optional[str]]]: A tuple containing
+            (message, time_string, recurrence_rule), or None if parsing fails.
         """
         # ==========================================
         # Stage 1: Initial Sanitization & Triggers
@@ -444,8 +502,6 @@ class Reminders(BaseCog):
         combined_pattern = r'^\s*(' + '|'.join(f'({p})' for p in trigger_patterns) + r')\s*'
         sanitized_query = re.sub(combined_pattern, '', query, count=1, flags=re.IGNORECASE).strip()
         
-        # Cleanup of conversational fillers.
-
         # Split the query into words for easier manipulation.
         words = sanitized_query.split()
         
@@ -464,7 +520,7 @@ class Reminders(BaseCog):
         # Stage 2: Recurrence Extraction
         # ==========================================
         # We prioritize extracting recurrence rules (e.g., "every day") because they fundamentally change how the reminder behaves.
-        # (This is code for "dateparser is stupid")
+        # Workaround for dateparser recurrence limitations
         recurrence_rule = None
         
         # Extract recurrence rule using the helper method
@@ -482,12 +538,11 @@ class Reminders(BaseCog):
         # Natural language is messy. The time at the start ("Tomorrow go to the store"
         # or at the end ("Go to the store tomorrow"). Sometimes they split it ("On Friday go to the store at 5pm").
         # Instead attempt to "eat" valid time phrases from both ends of the sentence.
-        # (This is the bread and butter of the function)
         
         words = sanitized_query.split()
         
         # --- Helper to consume words and check validity ---
-        async def get_longest_valid_date_segment(candidate_words: list[str], direction: str) -> tuple[str, int]:
+        async def get_longest_valid_date_segment(candidate_words: List[str], direction: str) -> Tuple[str, int]:
             """
             Tries to form a valid date string by incrementally adding words from the list.
             Returns the longest string that dateparser accepts as a valid date, 
@@ -642,7 +697,7 @@ class Reminders(BaseCog):
         
         # If we found a recurrence rule but NO specific time (e.g. "Every day"),
         # we set the time to "now" so the recurrence starts immediately.
-        # (Again this differs from the previous implementation but is better)
+        # Default to immediate execution if no time specified
         if not final_time_string and recurrence_rule:
             final_time_string = "now"
 
@@ -664,11 +719,16 @@ class Reminders(BaseCog):
         final_message = " ".join(msg_words)
 
         return (final_message, final_time_string, recurrence_rule)
-        # Pray that this works, because no god can ever fix this if it doesn't.
-        # Swear to god this entire parsing logic is held together with spit and shine.
 
-    async def _interactive_reminder_flow(self, ctx: 'commands.Context', initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
-        """Guides the user through creating a reminder interactively."""
+    async def _interactive_reminder_flow(self, ctx: commands.Context, initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
+        """Guides the user through creating a reminder interactively.
+
+        Args:
+            ctx (commands.Context): The command context.
+            initial_message (str): The initial message, if any.
+            initial_time (str): The initial time string, if any.
+            initial_recurrence (Optional[str]): The initial recurrence rule, if any.
+        """
         
         def check(m: discord.Message) -> bool:
             return m.author == ctx.author and m.channel == ctx.channel
@@ -766,8 +826,13 @@ class Reminders(BaseCog):
             self.logger.error(f"Error in interactive reminder flow for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while creating the reminder.")
 
-    async def remind(self, ctx: 'commands.Context', *, query: str) -> None:
-        """The NLP handler for all reminder requests."""
+    async def remind(self, ctx: commands.Context, *, query: str) -> None:
+        """The NLP handler for all reminder requests.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+        """
         try:
             if not query.strip():
                 await self._interactive_reminder_flow(ctx)
@@ -885,8 +950,13 @@ class Reminders(BaseCog):
             self.logger.error(f"Error setting reminder for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, an error occurred while setting your reminder.")
 
-    async def check_reminders_nlp(self, ctx: commands.Context, *, query: str):
-        """NLP handler for checking reminders."""
+    async def check_reminders_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for checking reminders.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+        """
         self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         try:
             reminders = await self.db_manager.get_user_reminders(ctx.author.id)
@@ -921,8 +991,13 @@ class Reminders(BaseCog):
             self.logger.error(f"Error checking reminders for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An error occurred while fetching your reminders.")
 
-    async def delete_reminders_nlp(self, ctx: commands.Context, *, query: str):
-        """NLP handler for deleting reminders."""
+    async def delete_reminders_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for deleting reminders.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+        """
         self.logger.info(f"Handling NLP request for deleting reminders from user {ctx.author.id}: '{query}'")
         
         # Find all numbers in the query string to allow for deleting multiple reminders at once.
@@ -986,8 +1061,13 @@ class Reminders(BaseCog):
             self.logger.error(f"Unexpected error in reminderdelete NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
 
-    async def set_timezone_nlp(self, ctx: commands.Context, *, query: str):
-        """NLP handler for setting a user's timezone."""
+    async def set_timezone_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for setting a user's timezone.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+        """
         # Clean the query to get just the timezone string
         timezone_str = re.sub(r'\b(set|change)\b|\b(timezone|tz)\b', '', query, flags=re.IGNORECASE).strip()
 
@@ -1099,10 +1179,14 @@ class Reminders(BaseCog):
             self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
 
-    async def edit_reminder_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Initiates an interactive conversation to edit an existing reminder.
+    async def edit_reminder_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Initiates an interactive conversation to edit an existing reminder.
+
         The user can choose to edit the reminder's message, time, or recurrence.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         # Find the number in the query (e.g., "edit reminder 3").
         match = re.search(r'\d+', query)
@@ -1125,7 +1209,7 @@ class Reminders(BaseCog):
         # Map the user-facing number (1-based) to the actual reminder object
         reminder_to_edit = user_reminders[reminder_num_to_edit - 1]
 
-        def check(m: discord.Message):
+        def check(m: discord.Message) -> bool:
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
@@ -1151,7 +1235,7 @@ class Reminders(BaseCog):
                 await ctx.send("Edit cancelled.")
                 return
 
-            updates: dict[str, Any] = {}
+            updates: Dict[str, Any] = {}
             should_reschedule = False
 
             match choice:
@@ -1242,9 +1326,12 @@ class Reminders(BaseCog):
             self.logger.error(f"Error editing reminder for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while editing the reminder.")
 
-    async def reminder_settings_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Opens an interactive settings menu for reminders.
+    async def reminder_settings_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Opens an interactive settings menu for reminders.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         # Fetch current settings
         dest_pref = await self.db_manager.get_user_config(ctx.author.id, 'reminder_destination') or 'origin'
@@ -1301,7 +1388,7 @@ class Reminders(BaseCog):
                 await ctx.send("✅ Destination set to **Origin Channel**.")
             elif sub_choice == '3':
                 await ctx.send("Please mention the channel you want to use (e.g. `#general`).")
-                def check(m):
+                def check(m: discord.Message) -> bool:
                     return m.author == ctx.author and m.channel == ctx.channel
                 chan_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
                 
@@ -1327,6 +1414,12 @@ class Reminders(BaseCog):
             else:
                 await ctx.send("Invalid choice.")
 
-async def setup(bot: SanchoBot, **kwargs) -> None:
-    """Standard setup, receiving the database path via kwargs from main.py."""
+
+async def setup(bot: SanchoBot, **kwargs: Any) -> None:
+    """Standard setup, receiving the database path via kwargs from main.py.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+        **kwargs: Additional keyword arguments.
+    """
     await bot.add_cog(Reminders(bot))

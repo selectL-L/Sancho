@@ -1,8 +1,19 @@
-import os
-import sqlite3
-import shutil
+"""migrate_db.py
+
+This script performs a safe migration of the Sancho database.
+It backs up the existing database, creates a new one with the updated schema,
+and migrates the data.
+
+Usage:
+    python migrate_db.py
+"""
+
 import logging
-from datetime import datetime
+import os
+import shutil
+import sqlite3
+import time
+from typing import Any, Dict, List
 
 # --- Configuration ---
 # Set up basic logging to see the script's progress.
@@ -115,9 +126,10 @@ INDEX_SCHEMAS = [
     "CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);"
 ]
 
-def migrate_database():
-    """
-    Performs a safe migration of the Sancho database.
+
+def migrate_database() -> None:
+    """Performs a safe migration of the Sancho database.
+
     1. Backs up the existing database.
     2. Reads all data from the backup.
     3. Creates a new database with the updated schema.
@@ -139,7 +151,7 @@ def migrate_database():
 
     # 3. Read all data from the backup database.
     logging.info("Reading data from backup database...")
-    data_store = {}
+    data_store: Dict[str, Dict[str, Any]] = {}
     try:
         with sqlite3.connect(BACKUP_PATH) as backup_conn:
             backup_conn.row_factory = sqlite3.Row
@@ -235,7 +247,6 @@ def migrate_database():
                                 if col == 'is_recurring':
                                     values.append(0)
                                 elif col == 'created_at':
-                                    import time
                                     values.append(int(time.time()))
                                 else:
                                     values.append(None)
@@ -249,6 +260,7 @@ def migrate_database():
 
     logging.info("\nMigration complete! Your old database is saved as 'sanchobase.db.backup'.")
     logging.info("You can now start the bot.")
+
 
 if __name__ == "__main__":
     migrate_database()

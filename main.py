@@ -1,42 +1,39 @@
-"""
-main.py
+"""main.py
 
 This is the primary entry point for the Sancho-Bot. Its responsibilities are:
-
-1.  Performing initial setup: logging, configuration validation from `info.env`.
-2.  Instantiating the custom `SanchoBot` class from `utils.bot_class`.
-3.  Defining console and signal handlers for graceful startup and shutdown.
-4.  Orchestrating the bot's asynchronous startup sequence via the `main()` function,
-    which initializes the database, loads cogs, and connects to Discord.
+- Performing initial setup: logging, configuration validation from `info.env`.
+- Instantiating the custom `SanchoBot` class from `utils.bot_class`.
+- Defining console and signal handlers for graceful startup and shutdown.
+- Orchestrating the bot's asynchronous startup sequence via the `main()` function,
+  which initializes the database, loads cogs, and connects to Discord.
 
 This script acts as the "launcher" for the bot; the core logic, event handlers,
 and command processing are defined within the `SanchoBot` class itself.
 """
-import discord
-from discord.ext import commands
-import logging
+
 import asyncio
+import logging
 import os
 import signal
 import sys
-import time
-import psutil
-from datetime import timedelta
 
-# --- 1. Setup and Configuration ---
+import discord
+from discord.ext import commands
+
+# Setup and Configuration
 # Import necessary configurations and utility functions.
 import config
-from utils.logging_config import setup_logging
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
-from utils.lifecycle import shutdown_handler
 from utils.extensions import discover_cogs
+from utils.lifecycle import shutdown_handler
+from utils.logging_config import setup_logging
 
 # Set up logging immediately to capture any issues during startup.
 log_level = "DEBUG" if config.DEV_MODE else "INFO"
 setup_logging(level=log_level)
 
-# --- Configuration Validation ---
+# Configuration Validation
 # Ensure the bot's token is present, as it's impossible to run without it.
 if not config.TOKEN:
     logging.critical(
@@ -61,7 +58,7 @@ if not config.SYSTEM_CHANNEL_ID:
         "The bot will run, but startup/shutdown messages will not be sent."
     )
 
-# --- 2. Bot Initialization ---
+# Bot Initialization
 
 # Define the bot's intents. `message_content` is required for reading messages
 # for NLP commands.
@@ -78,22 +75,28 @@ print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 # The db_manager will be attached in main() after async initialization.
 
 
-# --- 3. Core Bot Commands ---
+# Core Bot Commands
     
 @bot.command(name="ping", help="Check if the bot is responsive.")
 async def ping(ctx: commands.Context) -> None:
-    """
-    Simple ping command to check bot responsiveness.
+    """Simple ping command to check bot responsiveness.
+
+    Args:
+        ctx (commands.Context): The command context.
     """
     await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
-    logging.info(f"Ping command used by {ctx.author}.")# --- 4. Main Bot Execution ---
+    logging.info(f"Ping command used by {ctx.author}.")
 
-# --- 4. Main Bot Execution ---
 
-async def console_input_handler(bot: SanchoBot):
-    """
-    Listens for console input and triggers a graceful shutdown if 'exit' is typed.
+# Main Bot Execution
+
+async def console_input_handler(bot: SanchoBot) -> None:
+    """Listens for console input and triggers a graceful shutdown if 'exit' is typed.
+
     This implementation uses a platform-specific approach for compatibility.
+
+    Args:
+        bot (SanchoBot): The bot instance to control.
     """
     loop = asyncio.get_running_loop()
     try:
@@ -137,9 +140,12 @@ async def console_input_handler(bot: SanchoBot):
         logging.error(f"Error in console input handler: {e}", exc_info=False)
 
 async def main() -> None:
-    """
-    The main asynchronous entry point for initializing and running the bot.
+    """The main asynchronous entry point for initializing and running the bot.
+
     This function orchestrates the entire startup process.
+
+    Raises:
+        ValueError: If DB_PATH or TOKEN is not configured.
     """
     logging.info("Sancho is starting...")
     
@@ -169,10 +175,9 @@ async def main() -> None:
         # Start the bot and connect to Discord.
         await bot.start(config.TOKEN)
 
-async def run_bot_with_handlers():
-    """
-    Wraps the main bot logic with signal and console handlers for graceful shutdown.
-    """
+
+async def run_bot_with_handlers() -> None:
+    """Wraps the main bot logic with signal and console handlers for graceful shutdown."""
     loop = asyncio.get_running_loop()
 
     # Add signal handlers for SIGINT/SIGTERM on Linux for systemd integration.

@@ -1,5 +1,4 @@
-"""
-cogs/skills.py
+"""cogs/skills.py
 
 This cog manages the creation, use, and storage of user-defined "skills".
 Skills are essentially named shortcuts for complex dice rolls or calculations.
@@ -20,31 +19,37 @@ Key Features:
 - Alias System: Skills can be given multiple names (aliases) for more flexible
   and natural invocation.
 """
+
+import asyncio
+import re
+from typing import Any, Dict, List, Optional, Tuple, cast
+
 import discord
 from discord.ext import commands
-import asyncio
-from typing import Optional, cast
-import re
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
-from .math import Math, DICE_NOTATION_REGEX, COIN_FLIP_REGEX, safe_eval_math
+from .math import COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
+
 
 class Skills(BaseCog):
-    """
-    The cog for creating, managing, and using custom user-defined skills.
-    """
+    """The cog for creating, managing, and using custom user-defined skills."""
 
     def __init__(self, bot: SanchoBot):
+        """Initializes the Skills cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager: DatabaseManager = bot.db_manager
 
     def _sync_evaluate_max_roll(self, dice_roll: str) -> int:
-        """
-        Synchronously evaluates the maximum possible result of a dice expression.
+        """Synchronously evaluates the maximum possible result of a dice expression.
+
         This is a helper function designed to be run in a separate thread to avoid
         blocking the bot's main event loop. It replaces dice notation (e.g., 2d6)
         with their maximum possible value (e.g., 2*6) and then safely evaluates
@@ -85,24 +90,31 @@ class Skills(BaseCog):
             return 9999
 
     async def _evaluate_max_roll(self, dice_roll: str) -> int:
-        """
-        Asynchronously evaluates the maximum possible result of a dice expression
-        by running the synchronous evaluation in a separate thread. This prevents
+        """Asynchronously evaluates the maximum possible result of a dice expression.
+
+        Runs the synchronous evaluation in a separate thread. This prevents
         potentially complex calculations from blocking the bot's event loop.
+
+        Args:
+            dice_roll (str): The dice roll string.
+
+        Returns:
+            int: The maximum possible result.
         """
         return await asyncio.to_thread(self._sync_evaluate_max_roll, dice_roll)
 
-    async def _validate_roll_logic(self, dice_roll: str) -> tuple[bool, str]:
-        """
-        Validates a dice roll string against several criteria: complexity and max value.
-        It checks all dice and coin notations in the string and provides a comprehensive
-        error message if any limits are exceeded.
+    async def _validate_roll_logic(self, dice_roll: str) -> Tuple[bool, str]:
+        """Validates a dice roll string against several criteria.
+
+        Checks complexity and max value. It checks all dice and coin notations
+        in the string and provides a comprehensive error message if any limits
+        are exceeded.
 
         Args:
             dice_roll (str): The dice roll string to validate.
 
         Returns:
-            A tuple containing:
+            Tuple[bool, str]: A tuple containing:
             - bool: True if the roll is valid, False otherwise.
             - str: A detailed error message if invalid, or an empty string if valid.
         """
@@ -150,9 +162,9 @@ class Skills(BaseCog):
 
         return True, ""
 
-    async def save_skill_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Initiates an interactive conversation with the user to create and save a new skill.
+    async def save_skill_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Initiates an interactive conversation to create and save a new skill.
+
         This function guides the user through several steps:
         1.  Checking if they have available skill slots.
         2.  Naming the skill and ensuring the name is unique.
@@ -160,6 +172,10 @@ class Skills(BaseCog):
         4.  Defining and validating the dice roll formula.
         5.  Categorizing the skill type (e.g., 'attack').
         6.  Saving the completed skill to the database.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         
         user_skills = await self.db_manager.get_user_skills(ctx.author.id)
@@ -170,7 +186,7 @@ class Skills(BaseCog):
             await ctx.send(f"You have reached your skill limit of **{user_skill_limit}** skills. Please delete a skill before adding a new one.")
             return
 
-        # Pre-gather all existing names and aliases for efficient duplicate checking.
+        # Cache names for duplicate checking.
         existing_names_and_aliases = set()
         for skill in user_skills:
             existing_names_and_aliases.add(skill['name'].lower())
@@ -179,8 +195,8 @@ class Skills(BaseCog):
                     if alias.strip():
                         existing_names_and_aliases.add(alias.strip().lower())
 
-        def check(m: discord.Message):
-            """A check function for message waits, ensuring the message is from the original author."""
+        def check(m: discord.Message) -> bool:
+            """Verify message author."""
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
@@ -196,12 +212,11 @@ class Skills(BaseCog):
                 
                 skill_name = name_msg.content.strip()
                 
-                # Check for uniqueness.
                 if skill_name.lower() in existing_names_and_aliases:
                     await ctx.send(f"You already have a skill or alias with the name `{skill_name}`. Skill names and aliases must be unique. Please try again.")
                     continue
                 
-                break # Name is valid and unique.
+                break
 
             # --- Step 2: Get Aliases ---
             aliases = []
@@ -218,7 +233,7 @@ class Skills(BaseCog):
                 if aliases_raw.lower() != 'none':
                     aliases = [alias.strip() for alias in aliases_raw.split('|') if alias.strip()]
                     
-                    # Check for duplicates within the input and against existing names.
+                    # Check for duplicates.
                     newly_added_names = {skill_name.lower()}
                     for alias in aliases:
                         if alias.lower() in existing_names_and_aliases or alias.lower() in newly_added_names:
@@ -228,7 +243,7 @@ class Skills(BaseCog):
                         newly_added_names.add(alias.lower())
                 
                 if is_valid:
-                    break # Aliases are valid.
+                    break
 
             # --- Step 3: Get Dice Roll and Validate ---
             dice_roll = ""
@@ -245,7 +260,7 @@ class Skills(BaseCog):
                     await ctx.send(error_message)
                     continue
                 
-                break # Roll is valid.
+                break
 
             # --- Step 4: Get Skill Type ---
             skill_type = ""
@@ -261,7 +276,7 @@ class Skills(BaseCog):
                     await ctx.send("That's not a valid skill type. Please choose `attack` or `defense`.")
                     continue
                 
-                break # Type is valid.
+                break
 
             # --- Step 5: Save to Database ---
             await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type)
@@ -279,9 +294,10 @@ class Skills(BaseCog):
             self.logger.error(f"Error creating skill for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while creating the skill.")
 
-    async def use_skill_nlp(self, ctx: commands.Context, query: str):
-        """
-        Handles the NLP intent for using a saved skill. This function:
+    async def use_skill_nlp(self, ctx: commands.Context, query: str) -> None:
+        """Handles the NLP intent for using a saved skill.
+
+        This function:
         1.  Fetches all of the user's skills from the database.
         2.  Parses the user's query to identify which skill is being invoked. It prioritizes
             longer, more specific names to resolve ambiguity (e.g., "big attack" vs. "attack").
@@ -289,14 +305,17 @@ class Skills(BaseCog):
         4.  Constructs a final dice roll expression by combining the skill's base formula
             with the modifiers.
         5.  Delegates the actual roll and response formatting to the `Math` cog.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
-        # 1. Fetch all user skills.
         user_skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not user_skills:
             await ctx.send("You have no saved skills to use. Use `.sancho save skill` to create one.")
             return
 
-        # 2. Create a sorted list of all names and aliases, from longest to shortest.
+        # Sort names by length for matching.
         # This ensures that more specific names (e.g., "heavy slash") are matched before
         # less specific ones (e.g., "slash").
         all_skill_names = []
@@ -309,18 +328,14 @@ class Skills(BaseCog):
         found_skill = None
         rest_of_query = ""
 
-        # The query from the NLP dispatcher includes the command. We need to find which
-        # trigger word was used and separate it from the rest of the query.
+        # List of NLP trigger phrases. (Keep in sync with NLP dispatcher logic.)
         trigger_words = ["cast", "skill", "use"]
         
-        # Find which trigger word the query starts with and remove it.
-        # This leaves us with the skill name and any modifiers.
         temp_query = query.strip().lower()
         cleaned_query = ""
         for word in trigger_words:
-            # Check if the query starts with the trigger word, followed by a space or nothing.
+            # Check for trigger word.
             if temp_query.startswith(word):
-                # Check for an exact match (e.g., "cast") or a match followed by a space.
                 if len(temp_query) == len(word) or temp_query[len(word)].isspace():
                     cleaned_query = query.strip()[len(word):].lstrip()
                     break
@@ -329,31 +344,30 @@ class Skills(BaseCog):
             await ctx.send("You didn't specify a skill. Try `.s cast <skill_name>`.")
             return
 
-        # 3. Find which of the user's skills the query starts with.
-        # We loop to handle cases where multiple trigger words are used (e.g., "cast skill blast").
+        # Match query to skill.
+        # Handle multiple trigger words.
         while True:
             for name in all_skill_names:
-                # Check if the cleaned query starts with the skill name.
-                # We use a regex that checks for the name followed by either a word boundary
+                # Match name with word boundary.
                 # (like a space, or the end of the string) or a non-word character that is
                 # part of the name itself. This handles names with punctuation like "attack!".
                 match = re.match(r'^' + re.escape(name) + r'(?=\b|\s|$)', cleaned_query, re.IGNORECASE)
                 if match:
-                    # Find the full skill dictionary object corresponding to the matched name/alias.
+                    # Find matching skill object.
                     for s in user_skills:
                         aliases = [alias.strip().lower() for alias in s['aliases'].split('|')] if s['aliases'] else []
                         if s['name'].lower() == name.lower() or name.lower() in aliases:
                             found_skill = s
                             break
                     
-                    # The rest of the query contains any modifiers (e.g., "+ 5").
+                    # Extract modifiers.
                     rest_of_query = cleaned_query[len(name):].strip()
                     break
             
             if found_skill:
                 break
 
-            # If no skill found, try to strip another trigger word from the start
+            # Retry stripping trigger word.
             stripped_again = False
             temp_search = cleaned_query.lower()
             for word in trigger_words:
@@ -370,28 +384,30 @@ class Skills(BaseCog):
             await ctx.send(f"I couldn't find the skill: `{cleaned_query}`. Use `.s list skills` to see your available skills.")
             return
 
-        # 4. Get the Math cog to perform the roll.
         math_cog: Optional[Math] = cast(Optional[Math], self.bot.get_cog('Math'))
         if not math_cog:
             self.logger.error("Math cog not found, cannot perform skill roll.")
             await ctx.send("Internal error: The dice rolling module is not available.")
             return
 
-        # 5. Construct the final roll query and delegate to the Math cog.
-        # The skill's base roll is wrapped in parentheses to ensure correct order of operations
+        # Construct final roll.
+        # Wrap base roll in parens.
         # when modifiers are added. Example: (2d6+2) + 5
         final_roll_query = f"({found_skill['dice_roll']}) {rest_of_query}"
         
         self.logger.info(f"Executing skill '{found_skill['name']}' for {ctx.author.id}. Original query: '{query}', constructed roll: '{final_roll_query}'")
 
-        # The Math cog's roll method handles the calculation and response formatting.
-        # We pass `skill_info` so the response can be customized with the skill's name.
+        # Delegate to Math cog.
         await math_cog.roll(ctx, query=final_roll_query, skill_info=found_skill)
 
-    async def edit_skill_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Initiates an interactive conversation to edit an existing skill.
+    async def edit_skill_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Initiates an interactive conversation to edit an existing skill.
+
         The user can choose to edit the skill's name, aliases, dice roll, or type.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         match = re.search(r'\d+', query)
         if not match:
@@ -412,7 +428,7 @@ class Skills(BaseCog):
 
         skill_to_edit = user_skills[skill_num_to_edit - 1]
 
-        def check(m: discord.Message):
+        def check(m: discord.Message) -> bool:
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
@@ -440,7 +456,7 @@ class Skills(BaseCog):
                 await ctx.send("Edit cancelled.")
                 return
 
-            updates: dict[str, str | list[str]] = {}
+            updates: Dict[str, Any] = {}
             
             existing_names_and_aliases = set()
             for skill in user_skills:
@@ -507,7 +523,7 @@ class Skills(BaseCog):
                         updates['dice_roll'] = new_roll
                         break
 
-                case '4':  # Edit Type
+                case '4':  # Edit Skill Type
                     while True:
                         embed = discord.Embed(title="Select Skill Type", description="Is this an `attack` or `defense` skill?", color=discord.Color.blue())
                         options = {"⚔️ Attack": "attack", "🛡️ Defense": "defense"}
@@ -544,11 +560,15 @@ class Skills(BaseCog):
             self.logger.error(f"Error editing skill for {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred while editing the skill.")
 
-    async def list_skills_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Handles the NLP intent for listing all of a user's saved skills.
+    async def list_skills_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Handles the NLP intent for listing all of a user's saved skills.
+
         It formats the skills into a clean, readable embed, showing the name,
         aliases, roll formula, type, and a unique ID for deletion.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not skills:
@@ -569,11 +589,11 @@ class Skills(BaseCog):
             value.append(f"**Roll:** `{skill['dice_roll']}` | **Type:** `{skill['skill_type']}` | **ID:** `{skill['id']}`")
             skill_fields.append({"name": name, "value": "\n".join(value), "inline": False})
 
-        # Use a more compact description for long lists to avoid a cluttered embed.
-        if len(skills) <= 5: # Use fields for shorter lists.
+        # Compact display for long lists.
+        if len(skills) <= 5:
             for field in skill_fields:
                 embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
-        else: # Use the description for longer lists.
+        else:
             description = []
             for field in skill_fields:
                 description.append(f"{field['name']}\n{field['value']}")
@@ -583,12 +603,17 @@ class Skills(BaseCog):
         embed.set_footer(text=f"You are using {len(skills)}/{user_skill_limit} skill slots. Use '.sancho delete skill <id>' to remove one.")
         await ctx.send(embed=embed)
 
-    async def delete_skill_nlp(self, ctx: commands.Context, *, query: str):
+    async def delete_skill_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Handles the NLP intent for deleting a skill.
+
+        It parses the skill's number from the query, confirms it's a valid skill,
+        and removes it from the database.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
-        Handles the NLP intent for deleting a skill. It parses the skill's number
-        from the query, confirms it's a valid skill, and removes it from the database.
-        """
-        # Find the number in the query (e.g., "delete skill 3").
+        # Extract skill index.
         match = re.search(r'\d+', query)
         if not match:
             await ctx.send("Please specify the number of the skill you want to delete. Use `.sancho skill list` to see the numbers.")
@@ -597,7 +622,7 @@ class Skills(BaseCog):
         skill_num_to_delete = int(match.group(0))
         skills = await self.db_manager.get_user_skills(ctx.author.id)
 
-        # Validate the provided number against the user's actual skill list.
+        # Validate index.
         if not (1 <= skill_num_to_delete <= len(skills)):
             await ctx.send(f"Invalid number. You only have {len(skills)} skills.")
             return
@@ -611,6 +636,11 @@ class Skills(BaseCog):
         else:
             await ctx.send("Something went wrong. I couldn't delete that skill.")
 
+
 async def setup(bot: SanchoBot) -> None:
-    """Standard setup function to add the cog to the bot."""
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(Skills(bot))

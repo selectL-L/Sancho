@@ -1,19 +1,34 @@
+"""utils/lifecycle.py
+
+Handles the bot's startup and shutdown sequences.
+
+This includes sending startup/shutdown messages to a configured channel and
+detecting system reboots on Linux systems.
+"""
+
 import logging
+import os
 import signal
 import subprocess
 import sys
-import os
 from typing import TYPE_CHECKING
+
 import discord
+
 import config
 
 if TYPE_CHECKING:
     from .bot_class import SanchoBot
 
 
-def is_system_rebooting():
-    """Checks if the system is in the process of rebooting or shutting down."""
-    # This check is only relevant on Linux systems with systemd.
+def is_system_rebooting() -> bool:
+    """Checks if the system is in the process of rebooting or shutting down.
+
+    This check is only relevant on Linux systems with systemd.
+
+    Returns:
+        bool: True if a reboot/shutdown is detected, False otherwise.
+    """
     if not sys.platform.startswith('linux'):
         return False
 
@@ -34,9 +49,13 @@ def is_system_rebooting():
     return False
 
 
-async def startup_handler(bot: "SanchoBot"):
-    """
-    Handles the bot's startup sequence, including logging and sending a startup message.
+async def startup_handler(bot: "SanchoBot") -> None:
+    """Handles the bot's startup sequence.
+
+    Includes logging and sending a startup message.
+
+    Args:
+        bot (SanchoBot): The bot instance.
     """
     if bot.user:
         logging.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
@@ -69,9 +88,12 @@ async def startup_handler(bot: "SanchoBot"):
             logging.error(f"Failed to send startup message: {e}")
 
 
-async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot"):
-    """
-    Handles the graceful shutdown of the bot when a signal is received.
+async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot") -> None:
+    """Handles the graceful shutdown of the bot when a signal is received.
+
+    Args:
+        sig (signal.Signals): The signal received.
+        bot (SanchoBot): The bot instance.
     """
     logging.info(f"Received exit signal {sig.name}...")
 

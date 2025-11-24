@@ -1,5 +1,4 @@
-"""
-database.py
+"""utils/database.py
 
 This module contains the DatabaseManager class, which handles all interactions
 with the SQLite database for the bot. It abstracts away the SQL queries and
@@ -11,24 +10,41 @@ by a pipe character (|).
 Responsibilities:
 - Establishing a connection to the database.
 - Creating necessary tables on startup (`setup_databases`).
-- Handling all CRUD (Create, Read, Update, Delete) operations. Period.
+- Handling all CRUD (Create, Read, Update, Delete) operations.
 """
 
-import time
-import aiosqlite
 import logging
-from typing import Optional, List, Dict, Any
+import time
+from typing import Any, Dict, List, Optional
+
+import aiosqlite
 
 logger = logging.getLogger(__name__)
 
+
 class DatabaseManager:
-    """
-    Manages all database operations for Sancho, providing an async interface
-    for interacting with the SQLite database.
+    """Manages all database operations for Sancho.
+
+    Provides an async interface for interacting with the SQLite database.
     """
 
+    def __init__(self, db_path: str):
+        """Initializes the DatabaseManager.
+
+        Args:
+            db_path (str): The file path to the SQLite database.
+        """
+        self.db_path = db_path
+        self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
+
     async def update_starboard_entry(self, entry: dict) -> None:
-        """Updates an existing starboard entry in the database. Expects all relevant keys in entry dict."""
+        """Updates an existing starboard entry in the database.
+
+        Expects all relevant keys in entry dict.
+
+        Args:
+            entry (dict): The dictionary containing starboard entry data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
@@ -49,19 +65,8 @@ class DatabaseManager:
             )
             await db.commit()
 
-    def __init__(self, db_path: str):
-        """
-        Initializes the DatabaseManager.
-
-        Args:
-            db_path (str): The file path to the SQLite database.
-        """
-        self.db_path = db_path
-        self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
-
     async def ping(self) -> float:
-        """
-        Performs a quick, simple query to the database to measure latency.
+        """Performs a quick, simple query to the database to measure latency.
 
         Returns:
             float: The latency in milliseconds.
@@ -74,8 +79,7 @@ class DatabaseManager:
 
     @classmethod
     async def create(cls, db_path: str) -> "DatabaseManager":
-        """
-        Creates and initializes a new DatabaseManager instance.
+        """Creates and initializes a new DatabaseManager instance.
 
         This factory method handles the asynchronous setup, including creating
         tables and loading initial configuration from the database.
@@ -92,15 +96,15 @@ class DatabaseManager:
         return manager
 
     async def _setup_databases(self) -> None:
-        """
-        Ensures all necessary tables exist in the database.
+        """Ensures all necessary tables exist in the database.
+
         Creates missing tables automatically.
         Checks for schema mismatches in existing tables and warns if found.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
             
-            # 1. Define Table Schemas (Creation SQL)
+            # Define Table Schemas (Creation SQL)
             table_schemas = {
                 "skills": '''CREATE TABLE IF NOT EXISTS skills (
                         id INTEGER PRIMARY KEY,
@@ -168,11 +172,11 @@ class DatabaseManager:
                     )'''
             }
 
-            # 2. Get existing tables
+            # Get existing tables
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table';")
             existing_tables = {row[0] async for row in cursor}
             
-            # 3. Create missing tables
+            # Create missing tables
             for table, sql in table_schemas.items():
                 if table not in existing_tables:
                     await db.execute(sql)
@@ -181,7 +185,7 @@ class DatabaseManager:
 
             await db.commit()
 
-            # 4. Check for schema mismatches (Columns)
+            # Check for schema mismatches (Columns)
             expected_schema = {
                 "skills": {"id", "user_id", "name", "dice_roll", "skill_type"},
                 "skill_aliases": {"id", "skill_id", "alias"},
@@ -218,7 +222,7 @@ class DatabaseManager:
             else:
                 logger.info("Database schema verified.")
 
-    async def _warn_and_backup_db(self, issue):
+    async def _warn_and_backup_db(self, issue: str) -> None:
         import shutil
         backup_path = self.db_path + ".backup"
         shutil.copyfile(self.db_path, backup_path)
@@ -234,7 +238,11 @@ class DatabaseManager:
                 logger.info(f"Loaded skill limit from database: {self.skill_limit}")
 
     async def set_skill_limit(self, limit: int) -> None:
-        """Sets the global skill limit in the database and updates the instance."""
+        """Sets the global skill limit in the database and updates the instance.
+
+        Args:
+            limit (int): The new skill limit.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('skill_limit', ?)", (limit,))
             await db.commit()
@@ -242,9 +250,15 @@ class DatabaseManager:
         logger.info(f"Global skill limit set to {limit}.")
 
     async def get_bod_usage(self, user_id: int) -> Dict[str, Any]:
-        """
-        Retrieves the last usage time, current chain, and last channel for a user's 'bod' command.
+        """Retrieves the last usage time, current chain, and last channel for a user's 'bod' command.
+
         If the user is not in the table, it returns default values.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing usage data.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -255,9 +269,15 @@ class DatabaseManager:
             return {'last_used_timestamp': 0, 'current_chain': 0, 'last_channel_id': 0}
 
     async def update_bod_usage(self, user_id: int, last_used_timestamp: int, current_chain: int, channel_id: Optional[int] = None) -> None:
-        """
-        Updates or inserts a user's 'bod' command usage data.
+        """Updates or inserts a user's 'bod' command usage data.
+
         If channel_id is not provided, it remains unchanged.
+
+        Args:
+            user_id (int): The user's ID.
+            last_used_timestamp (int): The timestamp of the last usage.
+            current_chain (int): The current chain length.
+            channel_id (Optional[int]): The channel ID where the command was used.
         """
         async with aiosqlite.connect(self.db_path) as db:
             if channel_id is not None:
@@ -266,7 +286,7 @@ class DatabaseManager:
                     (user_id, last_used_timestamp, current_chain, channel_id)
                 )
             else:
-                # This logic ensures we don't overwrite last_channel_id with 0 if it's not passed.
+                # Ensure we don't overwrite last_channel_id with 0 if it's not passed.
                 await db.execute(
                     "INSERT INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_usage WHERE user_id = ?))"
                     "ON CONFLICT(user_id) DO UPDATE SET last_used_timestamp = excluded.last_used_timestamp, current_chain = excluded.current_chain",
@@ -275,7 +295,11 @@ class DatabaseManager:
             await db.commit()
 
     async def get_all_active_bod_chains(self) -> List[Dict[str, Any]]:
-        """Retrieves all users who are currently in an active 'bod' chain."""
+        """Retrieves all users who are currently in an active 'bod' chain.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing user chain data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT user_id, last_channel_id, current_chain FROM bod_usage WHERE current_chain > 0")
@@ -283,7 +307,11 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def get_bod_leaderboard(self) -> List[Dict[str, Any]]:
-        """Retrieves the entire 'bod' leaderboard, ordered by best chain."""
+        """Retrieves the entire 'bod' leaderboard, ordered by best chain.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing leaderboard data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT user_name, best_chain FROM bod_leaderboard ORDER BY best_chain DESC")
@@ -291,14 +319,27 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def get_user_bod_best(self, user_id: int) -> int:
-        """Retrieves a single user's best chain from the leaderboard."""
+        """Retrieves a single user's best chain from the leaderboard.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            int: The user's best chain length.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT best_chain FROM bod_leaderboard WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
             return row[0] if row else 0
 
     async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int) -> None:
-        """Updates the 'bod' leaderboard with a user's new best score."""
+        """Updates the 'bod' leaderboard with a user's new best score.
+
+        Args:
+            user_id (int): The user's ID.
+            user_name (str): The user's name.
+            chain_length (int): The new best chain length.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO bod_leaderboard (user_id, user_name, best_chain) VALUES (?, ?, ?)",
@@ -308,7 +349,13 @@ class DatabaseManager:
             logger.info(f"New BOD leaderboard score for {user_name}: {chain_length}.")
 
     async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
-        """Sets a configuration value for a specific guild."""
+        """Sets a configuration value for a specific guild.
+
+        Args:
+            guild_id (int): The guild's ID.
+            key (str): The configuration key.
+            value (str): The configuration value.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)",
@@ -318,7 +365,15 @@ class DatabaseManager:
         logger.info(f"Guild config for {guild_id} set: {key} = {value}")
 
     async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
-        """Gets a configuration value for a specific guild."""
+        """Gets a configuration value for a specific guild.
+
+        Args:
+            guild_id (int): The guild's ID.
+            key (str): The configuration key.
+
+        Returns:
+            Optional[str]: The configuration value, or None if not found.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
@@ -328,7 +383,13 @@ class DatabaseManager:
             return row[0] if row else None
 
     async def set_user_config(self, user_id: int, key: str, value: str) -> None:
-        """Sets a generic configuration value for a specific user."""
+        """Sets a generic configuration value for a specific user.
+
+        Args:
+            user_id (int): The user's ID.
+            key (str): The configuration key.
+            value (str): The configuration value.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, ?, ?)",
@@ -338,7 +399,15 @@ class DatabaseManager:
         logger.info(f"User config for {user_id} set: {key} = {value}")
 
     async def get_user_config(self, user_id: int, key: str) -> Optional[str]:
-        """Gets a generic configuration value for a specific user."""
+        """Gets a generic configuration value for a specific user.
+
+        Args:
+            user_id (int): The user's ID.
+            key (str): The configuration key.
+
+        Returns:
+            Optional[str]: The configuration value, or None if not found.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 "SELECT value FROM user_config WHERE user_id = ? AND key = ?",
@@ -348,7 +417,15 @@ class DatabaseManager:
             return row[0] if row else None
 
     async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: Optional[int], starboard_reply_id: Optional[int] = None) -> None:
-        """Saves a new starboard entry to the database."""
+        """Saves a new starboard entry to the database.
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            starboard_message_id (int): The ID of the message in the starboard channel.
+            guild_id (int): The guild's ID.
+            channel_id (Optional[int]): The ID of the original channel.
+            starboard_reply_id (Optional[int]): The ID of the reply message in the starboard channel.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
@@ -357,7 +434,14 @@ class DatabaseManager:
             await db.commit()
 
     async def get_starboard_entry(self, original_message_id: int) -> Optional[Dict[str, Any]]:
-        """Retrieves a starboard entry by the original message's ID."""
+        """Retrieves a starboard entry by the original message's ID.
+
+        Args:
+            original_message_id (int): The ID of the original message.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing the starboard entry data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
@@ -365,7 +449,14 @@ class DatabaseManager:
             return dict(row) if row else None
 
     async def get_all_starboard_entries_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all starboard entries for a specific guild."""
+        """Retrieves all starboard entries for a specific guild.
+
+        Args:
+            guild_id (int): The guild's ID.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing starboard entry data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM starboard WHERE guild_id = ?", (guild_id,))
@@ -373,20 +464,33 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def clear_starboard_for_guild(self, guild_id: int) -> None:
-        """Deletes all starboard entries for a specific guild."""
+        """Deletes all starboard entries for a specific guild.
+
+        Args:
+            guild_id (int): The guild's ID.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM starboard WHERE guild_id = ?", (guild_id,))
             await db.commit()
             logger.info(f"Cleared all starboard entries for guild {guild_id}.")
 
     async def remove_starboard_entry(self, original_message_id: int) -> None:
-        """Removes a starboard entry from the database."""
+        """Removes a starboard entry from the database.
+
+        Args:
+            original_message_id (int): The ID of the original message.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM starboard WHERE original_message_id = ?", (original_message_id,))
             await db.commit()
 
     async def set_user_skill_limit(self, user_id: int, limit: int) -> None:
-        """Sets a skill limit override for a specific user."""
+        """Sets a skill limit override for a specific user.
+
+        Args:
+            user_id (int): The user's ID.
+            limit (int): The new skill limit.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, 'skill_limit', ?)",
@@ -396,9 +500,15 @@ class DatabaseManager:
         logger.info(f"Skill limit for user {user_id} set to {limit}.")
 
     async def get_user_skill_limit(self, user_id: int) -> int:
-        """
-        Gets a user's skill limit, checking for a user-specific override
-        before falling back to the global limit.
+        """Gets a user's skill limit.
+
+        Checks for a user-specific override before falling back to the global limit.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            int: The user's skill limit.
         """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
@@ -411,16 +521,30 @@ class DatabaseManager:
         return self.skill_limit
 
     async def count_user_skills(self, user_id: int) -> int:
-        """Counts the total number of skills a user has created."""
+        """Counts the total number of skills a user has created.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            int: The number of skills.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT COUNT(*) FROM skills WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
             return row[0] if row else 0
 
     async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str) -> None:
-        """
-        Saves a new skill and its aliases to the database.
+        """Saves a new skill and its aliases to the database.
+
         This is a transactional operation to ensure data integrity.
+
+        Args:
+            user_id (int): The user's ID.
+            name (str): The skill name.
+            aliases (List[str]): A list of aliases for the skill.
+            dice_roll (str): The dice roll string.
+            skill_type (str): The skill type.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
@@ -446,9 +570,16 @@ class DatabaseManager:
             await db.commit()
 
     async def get_skill(self, user_id: int, skill_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieves a skill by its name or one of its aliases for a specific user.
+        """Retrieves a skill by its name or one of its aliases for a specific user.
+
         It joins the skills and skill_aliases tables to perform the search.
+
+        Args:
+            user_id (int): The user's ID.
+            skill_name (str): The name or alias of the skill.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing the skill data.
         """
         query = """
             SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
@@ -468,7 +599,14 @@ class DatabaseManager:
             return dict(row) if row else None
 
     async def get_user_skills(self, user_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all skills for a specific user, including their aliases."""
+        """Retrieves all skills for a specific user, including their aliases.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing skill data.
+        """
         query = """
             SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
                    GROUP_CONCAT(sa.alias, '|') as aliases
@@ -485,7 +623,11 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def get_all_skills(self) -> List[Dict[str, Any]]:
-        """Retrieves all skills for all users, including their aliases."""
+        """Retrieves all skills for all users, including their aliases.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing skill data.
+        """
         query = """
             SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
                    GROUP_CONCAT(sa.alias, '|') as aliases
@@ -501,9 +643,16 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def delete_skill(self, user_id: int, skill_id: int) -> int:
-        """
-        Deletes a skill by its unique ID for a specific user.
+        """Deletes a skill by its unique ID for a specific user.
+
         The `ON DELETE CASCADE` constraint will automatically delete its aliases.
+
+        Args:
+            user_id (int): The user's ID.
+            skill_id (int): The skill's ID.
+
+        Returns:
+            int: The number of rows deleted.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
@@ -512,9 +661,17 @@ class DatabaseManager:
             return cursor.rowcount
 
     async def update_skill(self, skill_id: int, user_id: int, updates: Dict[str, Any]) -> int:
-        """
-        Updates specific fields of a skill for a user.
+        """Updates specific fields of a skill for a user.
+
         If aliases are updated, it replaces all existing aliases for the skill.
+
+        Args:
+            skill_id (int): The skill's ID.
+            user_id (int): The user's ID.
+            updates (Dict[str, Any]): A dictionary of fields to update.
+
+        Returns:
+            int: The number of rows affected.
         """
         if not updates:
             return 0
@@ -559,7 +716,21 @@ class DatabaseManager:
         created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None,
         reply_message_id: Optional[int] = None
     ) -> Optional[int]:
-        """Adds a reminder to the database and returns the new reminder's ID."""
+        """Adds a reminder to the database and returns the new reminder's ID.
+
+        Args:
+            user_id (int): The user's ID.
+            channel_id (int): The channel ID.
+            reminder_time (int): The reminder time.
+            message (str): The reminder message.
+            created_at (int): The creation timestamp.
+            is_recurring (bool): Whether the reminder is recurring.
+            recurrence_rule (Optional[str]): The recurrence rule.
+            reply_message_id (Optional[int]): The ID of the message to reply to.
+
+        Returns:
+            Optional[int]: The new reminder's ID.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 """
@@ -573,8 +744,15 @@ class DatabaseManager:
             return cursor.lastrowid
 
     async def update_reminder(self, reminder_id: int, user_id: int, updates: Dict[str, Any]) -> int:
-        """
-        Updates specific fields of a reminder for a user.
+        """Updates specific fields of a reminder for a user.
+
+        Args:
+            reminder_id (int): The reminder's ID.
+            user_id (int): The user's ID.
+            updates (Dict[str, Any]): A dictionary of fields to update.
+
+        Returns:
+            int: The number of rows affected.
         """
         if not updates:
             return 0
@@ -590,7 +768,12 @@ class DatabaseManager:
             return cursor.rowcount
 
     async def update_reminder_time(self, reminder_id: int, new_time: int) -> None:
-        """Updates the trigger time (`reminder_time`) for a specific reminder."""
+        """Updates the trigger time (`reminder_time`) for a specific reminder.
+
+        Args:
+            reminder_id (int): The reminder's ID.
+            new_time (int): The new reminder time.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE reminders SET reminder_time = ? WHERE id = ?",
@@ -599,7 +782,14 @@ class DatabaseManager:
             await db.commit()
 
     async def get_due_reminders(self, current_time: int) -> List[Dict[str, Any]]:
-        """Fetches all reminders that are due to be sent (time is in the past)."""
+        """Fetches all reminders that are due to be sent (time is in the past).
+
+        Args:
+            current_time (int): The current timestamp.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM reminders WHERE reminder_time <= ?", (current_time,))
@@ -607,7 +797,11 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def get_all_reminders(self) -> List[Dict[str, Any]]:
-        """Retrieves all reminders for all users, ordered by user_id."""
+        """Retrieves all reminders for all users, ordered by user_id.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM reminders ORDER BY user_id, reminder_time ASC")
@@ -615,7 +809,11 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def delete_reminders(self, reminder_ids: List[int]) -> None:
-        """Deletes one or more reminders from the database by their IDs."""
+        """Deletes one or more reminders from the database by their IDs.
+
+        Args:
+            reminder_ids (List[int]): A list of reminder IDs to delete.
+        """
         if not reminder_ids:
             return
         async with aiosqlite.connect(self.db_path) as db:
@@ -624,7 +822,14 @@ class DatabaseManager:
             await db.commit()
 
     async def get_user_reminders(self, user_id: int) -> List[Dict[str, Any]]:
-        """Fetches all reminders for a specific user, ordered by due time."""
+        """Fetches all reminders for a specific user, ordered by due time.
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -635,7 +840,14 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     async def get_reminder_by_id(self, reminder_id: int) -> Optional[Dict[str, Any]]:
-        """Fetches a single reminder by its unique ID."""
+        """Fetches a single reminder by its unique ID.
+
+        Args:
+            reminder_id (int): The reminder's ID.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing the reminder data.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,))
@@ -643,14 +855,26 @@ class DatabaseManager:
             return dict(row) if row else None
 
     async def get_user_timezone(self, user_id: int) -> Optional[str]:
-        """Fetches a user's saved timezone string (e.g., 'America/New_York')."""
+        """Fetches a user's saved timezone string (e.g., 'America/New_York').
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            Optional[str]: The timezone string, or None if not found.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT timezone FROM user_timezones WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
             return row[0] if row else None
 
     async def set_user_timezone(self, user_id: int, timezone: str) -> None:
-        """Saves or updates a user's timezone."""
+        """Saves or updates a user's timezone.
+
+        Args:
+            user_id (int): The user's ID.
+            timezone (str): The timezone string.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
             await db.commit()

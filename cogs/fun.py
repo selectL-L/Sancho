@@ -1,32 +1,38 @@
-"""
-cogs/fun.py
+"""cogs/fun.py
 
 This cog contains miscellaneous "fun" commands that don't fit into other categories.
 It includes commands like a magic 8-ball and other simple, interactive features.
 """
-import discord
-from discord.ext import commands
-import random
-import os
-import time
-import asyncio
-import re
-from typing import TYPE_CHECKING, cast, Dict
 
+import asyncio
+import logging
+import os
+import random
+import re
+import time
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
-import config
 
 if TYPE_CHECKING:
     from cogs.math import Math
 
 
 class Fun(BaseCog):
-    """
-    A cog for fun, miscellaneous commands.
-    """
+    """A cog for fun, miscellaneous commands."""
 
     def __init__(self, bot: SanchoBot):
+        """Initializes the Fun cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         # Load the 8-ball responses from the assets file upon initialization.
         self.responses = self._load_8ball_responses()
@@ -49,9 +55,8 @@ class Fun(BaseCog):
         self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
         self.has_cleaned_up_chains = False
 
-    async def fun_command_handler(self, ctx: commands.Context, command: str):
-        """
-        A generic handler for "fun" commands that post content like images, text, or links.
+    async def fun_command_handler(self, ctx: commands.Context, command: str) -> None:
+        """A generic handler for "fun" commands that post content like images, text, or links.
 
         Args:
             ctx (commands.Context): The context of the command.
@@ -92,13 +97,11 @@ class Fun(BaseCog):
             await ctx.reply("Something went wrong. Please try again.")
             self.logger.error(f"Error in fun_command_handler for '{command}': {e}", exc_info=True)
 
-    def _load_8ball_responses(self) -> list[str]:
-        """
-        Loads the magic 8-ball responses from the `8ball.txt` file located
-        in the assets directory.
+    def _load_8ball_responses(self) -> List[str]:
+        """Loads the magic 8-ball responses from the `8ball.txt` file.
 
         Returns:
-            list[str]: A list of response strings. Returns a default list
+            List[str]: A list of response strings. Returns a default list
                        if the file is not found or is empty.
         """
         responses_path = os.path.join(config.ASSETS_PATH, '8ball.txt')
@@ -113,7 +116,7 @@ class Fun(BaseCog):
             self.logger.error("8ball.txt not found. 8ball command will not work.")
             return ["I seem to have lost my magic 8-ball..."]
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         """Clean up tasks when the cog is unloaded."""
         self.logger.info(f"Unloading Fun cog. Cancelling {len(self.bod_timeout_tasks)} BOD timeout tasks.")
         
@@ -131,10 +134,12 @@ class Fun(BaseCog):
         
         self.logger.info("All BOD timeout tasks have been successfully cancelled and cleaned up.")
 
-    async def _handle_bod_session_timeout(self, user_id: int, channel_id: int):
-        """
-        A background task that waits 20 minutes, ending a user's BOD session 
-        if they are still in an active chain.
+    async def _handle_bod_session_timeout(self, user_id: int, channel_id: int) -> None:
+        """A background task that waits 20 minutes, ending a user's BOD session.
+
+        Args:
+            user_id (int): The user ID.
+            channel_id (int): The channel ID to send the timeout message to.
         """
         try:
             await asyncio.sleep(20 * 60)
@@ -186,12 +191,16 @@ class Fun(BaseCog):
                 self.bod_timeout_tasks.pop(user_id, None)
                 self.logger.info(f"Removed BOD task for user {user_id} from tracking.")
 
-    async def bod(self, ctx: commands.Context, query: str):
-        """
-        A special command that rolls a 1d4. On a result of 1-3, it sends a
-        common "fail" image. On a 4, it sends a rare "complete" image.
+    async def bod(self, ctx: commands.Context, query: str) -> None:
+        """A special command that rolls a 1d4.
+
+        On a result of 1-3, it sends a common "fail" image. On a 4, it sends a rare "complete" image.
         This command has a 12-hour cooldown. Once off cooldown, the user has a
         20-minute session to build their chain.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query (unused).
         """
         BOD_CHAIN_DIALOGUE = [
             "First…", "Second…", "Third…", "Fourth…", "Fifth…",
@@ -208,7 +217,7 @@ class Fun(BaseCog):
             self.logger.error("DatabaseManager not found in bot instance.")
             return
 
-        # --- Check Cooldowns ---
+        # Check cooldowns.
         usage_data = await db_manager.get_bod_usage(user_id)
         last_used = usage_data.get('last_used_timestamp', 0)
         current_chain = usage_data.get('current_chain', 0)
@@ -224,13 +233,13 @@ class Fun(BaseCog):
             await ctx.reply(f"Yujin is tired. You can use BOD again in {int(hours)}h {int(minutes)}m.")
             return
 
-        # --- Start a new session if applicable ---
+        # Start session.
         if user_id not in self.bod_timeout_tasks and current_chain == 0:
             task = asyncio.create_task(self._handle_bod_session_timeout(user_id, ctx.channel.id))
             self.bod_timeout_tasks[user_id] = task
             self.logger.info(f"BOD session started for user {user_id}. Creating timeout task.")
 
-        # --- Perform Dice Roll ---
+        # Perform roll.
         math_cog = cast("Math", self.bot.get_cog('Math'))
         if not math_cog:
             await ctx.reply("I can't find my dice right now. Please try again later.")
@@ -293,9 +302,9 @@ class Fun(BaseCog):
 
 
     async def eight_ball(self, ctx: commands.Context, *, query: str) -> None:
-        """
-        NLP handler for the 8-ball command. It picks a random response from the
-        pre-loaded list and sends it to the channel.
+        """NLP handler for the 8-ball command.
+
+        It picks a random response from the pre-loaded list and sends it to the channel.
 
         Args:
             ctx (commands.Context): The context of the command.
@@ -315,29 +324,43 @@ class Fun(BaseCog):
         await ctx.reply(response)
         self.logger.info(f"8ball command used by {ctx.author} with query '{cleaned_query}'. Response: '{response}'")
 
-    async def sanitize(self, ctx: commands.Context, *, query: str):
-        """NLP handler for the sanitize command."""
+    async def sanitize(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for the sanitize command.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query.
+        """
         await self.fun_command_handler(ctx, 'sanitize')
 
-    async def pear_wiggler(self, ctx: commands.Context, *, query: str):
-        """NLP handler for the pear wiggler command."""
+    async def pear_wiggler(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for the pear wiggler command.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query.
+        """
         await self.fun_command_handler(ctx, 'pear_wiggler')
 
-    async def issues(self, ctx: commands.Context, *, query: str):
-        """NLP handler for the issues command."""
+    async def issues(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for the issues command.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query.
+        """
         await self.fun_command_handler(ctx, 'issues')
 
-    async def cog_load(self):
-        """
-        Schedules a one-time task to clean up active BOD chains after a restart/reload.
+    async def cog_load(self) -> None:
+        """Schedules a one-time task to clean up active BOD chains after a restart/reload.
+
         This is non-blocking to avoid deadlocking the bot's startup process.
         """
         asyncio.create_task(self._cleanup_chains_task())
 
-    async def _cleanup_chains_task(self):
-        """
-        Waits for the bot to be ready, then checks for any chains that were active
-        before a restart/reload, notifies the users, and resets their state.
+    async def _cleanup_chains_task(self) -> None:
+        """Waits for the bot to be ready, then checks for any chains that were active.
+
         This runs only once per startup.
         """
         # Wait for the bot to be fully ready before proceeding,
@@ -402,9 +425,12 @@ class Fun(BaseCog):
         self.has_cleaned_up_chains = True
         self.logger.info("Finished cleaning up all active BOD chains.")
 
-    async def bod_leaderboard(self, ctx: commands.Context, query: str):
-        """
-        Displays the top 10 BOD chain scores from the leaderboard.
+    async def bod_leaderboard(self, ctx: commands.Context, query: str) -> None:
+        """Displays the top 10 BOD chain scores from the leaderboard.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query (unused).
         """
         db_manager = self.bot.db_manager
         if not db_manager:
@@ -463,5 +489,9 @@ class Fun(BaseCog):
 
 
 async def setup(bot: SanchoBot) -> None:
-    """Standard setup function to add the cog to the bot."""
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(Fun(bot))
