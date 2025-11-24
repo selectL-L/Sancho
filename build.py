@@ -2,6 +2,11 @@ import os
 import sys
 import PyInstaller.__main__
 
+# Force UTF-8 output for Windows consoles to support emojis
+if sys.platform == "win32":
+    # Pylance doesn't know sys.stdout is a TextIOWrapper here
+    sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
+
 # Get the absolute path to the workspace root
 HERE = os.path.dirname(os.path.abspath(__file__))
 
