@@ -5,12 +5,18 @@ This cog contains owner-only commands for administrative tasks, such as
 viewing bot status and managing configurations.
 """
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import logging
 from collections import defaultdict
 from typing import List, Dict, Any
 import typing
+import time
+import psutil
+import os
+from datetime import timedelta
+import config
+from utils.extensions import discover_cogs
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
@@ -85,6 +91,32 @@ class AdminCog(BaseCog):
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
+        self.process = psutil.Process()
+        self.process.cpu_percent() # Initialize for accurate subsequent readings
+        self.usage_history = []
+        self.record_usage.start()
+
+    async def cog_unload(self):
+        self.record_usage.cancel()
+
+    @tasks.loop(minutes=30)
+    async def record_usage(self):
+        try:
+            memory_info = self.process.memory_info()
+            cpu_usage = self.process.cpu_percent(interval=None)
+            ram_usage = memory_info.rss / (1024 * 1024)
+            timestamp = discord.utils.utcnow()
+            self.usage_history.append({
+                'timestamp': timestamp,
+                'cpu': cpu_usage,
+                'ram': ram_usage
+            })
+        except Exception as e:
+            logging.error(f"Error recording usage stats: {e}")
+
+    @record_usage.before_loop
+    async def before_record_usage(self):
+        await self.bot.wait_until_ready()
 
     @commands.hybrid_command(name="global_limit", hidden=True, description="Set the global skill limit for all users.")
     @commands.has_permissions(manage_guild=True)
@@ -118,13 +150,13 @@ class AdminCog(BaseCog):
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
 
-    @commands.hybrid_command(name="status", hidden=True, description="Display a status report of all users' skills and reminders.")
+    @commands.hybrid_command(name="report", hidden=True, description="Display a report of all users' skills and reminders.")
     @commands.is_owner()
     @app_commands.describe(mode="Optional: 'full' to post all embeds, or 'print' to attach a text report.")
-    async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None):
+    async def report(self, ctx: commands.Context, mode: typing.Optional[str] = None):
         """
         Displays a status report of all users' skills and reminders.
-        Usage: .status [full|print]
+        Usage: .report [full|print]
         """
         await ctx.send("`Generating status report...`")
 
@@ -235,6 +267,112 @@ class AdminCog(BaseCog):
         except Exception as e:
             logging.error("Error generating status report:", exc_info=True)
             await ctx.send(f"An error occurred while generating the report: {e}")
+
+    @commands.hybrid_command(name="status", hidden=True, description="Provides a comprehensive health and status check for the bot.")
+    @commands.is_owner()
+    @app_commands.describe(mode="Optional: 'history' to view historical resource usage.")
+    async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
+        """
+        Provides a comprehensive health and status check for the bot, including
+        latency, uptime, cog status, database health, and resource usage.
+        Usage: .status [history]
+        """
+        if mode and mode.lower() == "history":
+            if not self.usage_history:
+                await ctx.send("No historical data recorded yet (updates every 30 mins).")
+                return
+            
+            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10}"]
+            lines.append("-" * 50)
+            for entry in self.usage_history:
+                ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f}")
+            
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_usage_history.txt") as f:
+                f.write("\n".join(lines))
+                temp_path = f.name
+            
+            await ctx.send("Historical resource usage attached:", file=discord.File(temp_path, filename="usage_history.txt"))
+            os.remove(temp_path)
+            return
+
+        # 1. Initial "Pinging..." message
+        start_time = time.monotonic()
+        message = await ctx.send("Checking status...")
+        end_time = time.monotonic()
+
+        # 2. Gather all metrics
+        # Latencies
+        roundtrip_latency = (end_time - start_time) * 1000
+        gateway_latency = self.bot.latency * 1000
+        db_latency = await self.db_manager.ping() if self.db_manager else -1
+
+        # Uptime & Start Time
+        start_timestamp = int(self.bot.start_time)
+        uptime_delta = timedelta(seconds=time.time() - self.bot.start_time)
+        days, remainder = divmod(uptime_delta.total_seconds(), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m"
+
+        # Cogs
+        loaded_cogs = self.bot.extensions.keys()
+        total_cogs = len(discover_cogs(config.COGS_PATH))
+        cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
+        
+        # Resource Usage
+        memory_info = self.process.memory_info()
+        cpu_usage = self.process.cpu_percent(interval=None) # Use interval=None for non-blocking call
+        ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
+
+        # 3. Create Embed
+        embed = discord.Embed(
+            title="Sancho Status Report",
+            color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
+        )
+        if self.bot.user and self.bot.user.display_avatar:
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+
+        embed.add_field(
+            name="Timings",
+            value=f"**Gateway:** `{gateway_latency:.2f}ms`\n"
+                  f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
+                  f"**Database:** `{db_latency:.2f}ms`",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Status",
+            value=f"**Uptime:** `{uptime_str}`\n"
+                  f"**Started:** <t:{start_timestamp}:f>\n"
+                  f"**Cogs Loaded:** `{cogs_status}`",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Resource Usage",
+            value=f"**CPU:** `{cpu_usage:.1f}%`\n"
+                  f"**RAM:** `{ram_usage:.2f} MB`",
+            inline=True
+        )
+
+        # Add a field for loaded cogs, formatted nicely
+        if loaded_cogs:
+            # Format cog names by removing 'cogs.' prefix and joining them
+            cog_list_str = ", ".join([cog.replace('cogs.', '') for cog in sorted(loaded_cogs)])
+            embed.add_field(
+                name="Loaded Cogs",
+                value=f"```{cog_list_str}```",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+        embed.timestamp = discord.utils.utcnow()
+
+        # 4. Edit the original message with the embed
+        await message.edit(content=None, embed=embed)
+        logging.info(f"Status command used by {ctx.author}.")
 
 
 async def setup(bot: SanchoBot):
