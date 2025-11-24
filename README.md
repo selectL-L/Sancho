@@ -1,41 +1,98 @@
-# Sancho (Now offically on V0.4!)
+# Sancho (v0.5)
 
-A local discord bot, mostly designed for my own small community, but does have flexibility to be used in your servers, or even forked for your own use!
+Sancho is a local Discord bot built on a simple premise, that interacting with her SHOULD feel natural.
 
-The major design philosophy is to handle commands in a more natural way. Instead of rigid command structures, you can just talk to it. (Though some rigid commands exist for admin stuff!)
+That is to mean rather than forcing you to type rigid commands like a terminal operator, Sancho uses a custom Natural Language Processing (NLP) dispatcher to interpret your requests. It attempts to understand what you want, even if you phrase it with extreme verbosity.
 
-## What's it do?
+## Input Processing
 
-Sancho is currently equipped with a couple of handy features (more to come!):
+You are not required to memorize specific command structures (Unless you are an admin), though it would be more efficient if you did.
+As an example here are some cases Sancho can currently understand, with how easily it is for her to understand you in brackets besides each.
+- **Standard:** `.sancho roll 1d20` (Preferred.)
+- **Verbose:** `.sancho roll me a d20` (Acceptable.)
+- **Excessive:** `.sancho can you please roll a d20 for me?` (Functionally identical, if verbose.)
 
-*   **A Dice Roller:** You can use complex dice notations with it. Stuff like `.sancho roll (2d6+5)*3` or `.sancho roll 4d20kh3 with advantage` should simply just work.
-*   **Natural Language Reminders:** Set reminders just by talking to the bot (still doesn't work super well (yet)). For example: `.sancho remind me in 2 hours to check on my laundry`. It also supports custom timezones so you don't have to do any conversions.
-*   **Image Conversion:** You can convert and resize images just by asking `.sancho convert` or `.sancho resize` and either attaching your image, or replying to an image.
-*   **Skill database:** You can save dice notation as skills that can be called at any time, helps with roleplay and/or repetitive work.
-*   **General fun commands:** You can call the bot for certain more basic fun commands like 8ball or BOD (from hit game library of ruina)!
+## Modules
 
-## How to Use It
+### 🎲 Math & Dice
+*Arithmetic services.*
 
-Just start a message with `.sancho` or `.s` (by default, changeable in config.py!) and speak to it.
+- **Dice Rolling:** Supports standard notation (`2d6+5`), keep/drop (`4d6kh3`), and other common patterns. It generates random numbers.
+- **Limbus Company Coin Flips:** A simple binary outcome generator.
+- **Calculator:** Evaluates basic mathematical expressions. `.sancho calculate 5 + 5`.
 
-(List of commands removed in lieu of figuring out a better way to do so.)
+### ⚔️ Skills Database
+*Macro management.*
 
-## How to Get It Running
+Allows users to save complex dice notations as "skills" to avoid repetitive typing.
+- **Save:** `.sancho save skill Fireball 8d6`
+- **Use:** `.sancho cast Fireball`
+- **Manage:** CRUD operations for user-defined skills.
+- **Limits:** Configurable caps to prevent database bloat.
 
-1.  **Clone the repo.**
-2.  **Create an `info.env` file** in the main directory. You only have to fill in the token:
-    ```
-    DISCORD_TOKEN=YourSuperSecretBotTokenHere
-    ```
-3.  **Install the good stuff:**
-    ```
-    pip install -r requirements.txt
-    ```
-4.  **Run it! (or don't, we don't judge):**
-    ```
-    python main.py
-    ```
+### ⏰ Reminders
+*Externalized memory.*
 
-## Want to build it yourself?
+Set reminders using natural language.
+- **Set:** `.sancho remind me in 2 hours to check the logs`
+- **Timezones:** Handles local time conversion. `.sancho set timezone EST`
+- **Manage:** Review and delete pending alerts.
 
-If you want to bundle this up into a neat little executable (THAT MAY OR MAY NOT WORK), check out the [**Build Guide**](BUILD.md).
+### 🖼️ Image Tools
+*Basic media manipulation.*
+
+- **Resize:** `.sancho resize` (reply/attach an image).
+- **Convert:** `.sancho convert` (reply/attach an image). Changes file formats.
+
+### ⭐ Starboard
+*Message aggregation.*
+
+Automatically reposts messages that meet a specific reaction threshold.
+- **Context Awareness:** Preserves reply chains for context.
+- **Configuration:** Adjustable channel targets, emojis, and thresholds.
+- **Maintenance:** Tools for database synchronization and reloading.
+
+### 🎰 Misc
+*Various time sinks, sorry I mean fun commands.*
+(please note that the dispatcher for commands like pear wiggler and sanitize is exceptionally flexible
+included commands are examples and not requirements.)
+
+- **BOD (Boundary of Death):** A probability game sponsored by Yujin.
+    - *Cooldown:* 12 hours.
+    - *Session:* 20 minutes.
+    - *Leaderboard:* Tracks statistical outliers. (I know who you are)
+- **Magic 8-Ball:** Returns a randomized string from a pre-defined list.
+- **Pear Wiggler:** Posts a gif of the "pear wiggler".
+- **Sanitize:** Posts an image of the youtube sanitization guide.
+
+## Administration
+*System operations.*
+
+- **Status:** Displays latency, uptime, and resource consumption.
+- **Reports:** Generates data dumps on user skills and reminders.
+- **Limits:** Global and per-user configuration.
+
+## Installation
+
+If you want to run your own instance:
+
+1.  **Clone.**
+2.  **Configure:** Create `info.env` with `DISCORD_TOKEN` and `BOT_PREFIX`.
+3.  **Install:** `pip install -r requirements.txt`
+4.  **Execute:** `python main.py`
+
+## Building
+
+### Automated Builds
+We have set up a GitHub Actions workflow to automatically build the bot for **Windows**, **Linux** (Ubuntu), and **macOS** whenever the `Master` branch is updated.
+1.  Go to the **Actions** tab in your GitHub repository.
+2.  Click on the latest workflow run.
+3.  Scroll down to the **Artifacts** section.
+4.  Download the executable for your desired platform.
+
+### Manual Builds
+If you want to build the executable yourself (e.g., for a different platform or with custom changes), please refer to [BUILD.md](BUILD.md) for detailed instructions on using our `build.py` script.
+
+## Contributing
+
+The [Issues](https://github.com/selectL-L/Sancho/issues) page is available for bug reports. Feature requests will be reviewed, eventually.

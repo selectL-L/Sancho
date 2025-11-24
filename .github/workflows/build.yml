@@ -1,0 +1,48 @@
+name: Build Sancho
+
+on:
+  push:
+    branches: [ "Master" ]
+  pull_request:
+    branches: [ "Master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build with PyInstaller
+      run: python build.py
+
+    - name: Upload Artifact (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sancho-Windows
+        path: dist/Sancho.exe
+
+    - name: Upload Artifact (Linux/macOS)
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sancho-${{ matrix.os }}
+        path: dist/Sancho

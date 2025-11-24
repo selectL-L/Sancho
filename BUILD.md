@@ -12,42 +12,47 @@ Before you can build the application, you need the following installed:
 
 ## The Build Process
 
-The build process is managed by a `sancho.spec` file, which is the standard way to configure a PyInstaller build. This file tells PyInstaller how to bundle the application, including all its cogs and data files.
+The build process is managed by a custom `build.py` script. This script automates the discovery of dynamic modules (cogs) and invokes PyInstaller with the correct arguments.
 
 ### Step 1: Install Dependencies
 
-First, ensure all required Python libraries are installed. It is highly recommended to do this in a virtual environment to avoid conflicts with other projects.
+First, ensure all required Python libraries are installed in your current environment. PyInstaller bundles the libraries installed in your environment, so this step is critical.
 
 From the project's root directory, run:
-```
+```bash
 pip install -r requirements.txt
 ```
-You will also need `pyinstaller`:
-```
+You will also need to install `pyinstaller` itself:
+```bash
 pip install pyinstaller
 ```
 
-### Step 2: Run the Build
+### Step 2: Run the Build Script
 
-Once all dependencies are installed, run PyInstaller from the project's root directory, pointing it to the spec file:
+Run the build script from the project's root directory:
 
+```bash
+python build.py
 ```
-pyinstaller sancho.spec
-```
 
-PyInstaller will handle the rest, bundling everything into a single executable.
+This script will:
+1.  Scan the `cogs/` directory to find all extension modules.
+2.  Configure PyInstaller to include these modules as "hidden imports".
+3.  Run PyInstaller to generate the executable.
 
-### Step 3: Locate the Executable
+### Step 3: Post-Build Setup
 
-If the build is successful, you will find the standalone executable in the `dist/` directory. The file will be named `sancho.exe` (on Windows) or `sancho` (on Linux/macOS).
+Once the build completes, you will find the executable in the `dist/` directory (e.g., `dist/Sancho.exe`).
 
-You can run this single file on any machine that matches the target OS, without needing to install Python or any dependencies.
+**Crucial Step:** The executable does **not** contain your configuration or assets. You must manually copy the following into the `dist/` folder (next to the executable):
+1.  The `assets/` folder.
+2.  Your `info.env` file.
 
-## Why a `.spec` file?
+Without these, the bot will crash on startup.
 
-PyInstaller analyzes `.py` files to find their dependencies, but it has limitations with dynamically loaded modules and data files. The `sancho.spec` file provides a clear and explicit configuration for:
+## Why `build.py`?
 
--   **Dynamic Imports**: The bot dynamically loads all files from the `cogs/` directory. The spec file includes logic to find and include these as "hidden imports."
--   **Data Files**: Libraries like `dateparser` and `pytz` are included. The Assets directory and info.env are **not** included as they are intended to be modifiable.
+We use a Python script instead of a static `.spec` file or command-line arguments because Sancho uses a dynamic plugin system.
 
-Using a spec file is the recommended best practice for PyInstaller, as it provides a more organized, version-controllable, and reliable build configuration than passing many arguments on the command line.
+-   **Dynamic Cogs**: The bot loads commands from the `cogs/` folder at runtime. PyInstaller cannot detect these automatically. `build.py` scans this folder and ensures every file is included in the build, so you don't have to manually update a config file every time you add a new feature.
+-   **Automation**: It handles the complex arguments required for PyInstaller, ensuring a consistent build every time.
