@@ -451,7 +451,8 @@ class Reminders(BaseCog):
         
         # Iteratively remove common filler words from the start of the query.
         # This handles "me to...", "for me...", "to...", etc.
-        while words and words[0].lower() in ["me", "us", "him", "her", "them", "to", "for", "that", "about"]:
+        # Note: "that" is NOT included here because it can be the object of the reminder (e.g. "remind me of that")
+        while words and words[0].lower() in ["me", "us", "him", "her", "them", "to", "for", "about", "of"]:
             words.pop(0)
             
         sanitized_query = " ".join(words)
@@ -650,24 +651,21 @@ class Reminders(BaseCog):
             self.logger.warning(f"No time found in: '{query}'")
             return (sanitized_query, "", None)
 
-        # Reassemble the message from the remaining words
+        # Reassemble the message from the remaining words.
         final_message = " ".join(message_words)
         
-        # Clean junk words from message boundaries (e.g. "to", "that")
-        junk_words = ['to', 'that', 'for', 'and', 'then', 'now', 'a', 'the', 'my']
-        
-        # Clean Start
+        # Clean specific unambiguous connectors from the start of the message.
+        # The list only contains "to" but can be expanded when needed.
+        junk = ['to']
+
         msg_words = final_message.split()
-        while msg_words and msg_words[0].lower() in junk_words:
+        while msg_words and msg_words[0].lower() in junk:
             msg_words.pop(0)
-        # Clean End
-        while msg_words and msg_words[-1].lower() in junk_words:
-            msg_words.pop()
-            
         final_message = " ".join(msg_words)
 
         return (final_message, final_time_string, recurrence_rule)
         # Pray that this works, because no god can ever fix this if it doesn't.
+        # Swear to god this entire parsing logic is held together with spit and shine.
 
     async def _interactive_reminder_flow(self, ctx: 'commands.Context', initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
         """Guides the user through creating a reminder interactively."""
