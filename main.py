@@ -80,90 +80,13 @@ print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 
 # --- 3. Core Bot Commands ---
     
-@bot.command(name="ping", help="Provides a comprehensive health and status check for the bot.", hidden=True)
-@commands.is_owner()
+@bot.command(name="ping", help="Check if the bot is responsive.")
 async def ping(ctx: commands.Context) -> None:
     """
-    Provides a comprehensive health and status check for the bot, including
-    latency, uptime, cog status, database health, and resource usage.
+    Simple ping command to check bot responsiveness.
     """
-    # 1. Initial "Pinging..." message
-    start_time = time.monotonic()
-    message = await ctx.send("Pinging for status...")
-    end_time = time.monotonic()
-
-    # 2. Gather all metrics
-    # Latencies
-    roundtrip_latency = (end_time - start_time) * 1000
-    gateway_latency = bot.latency * 1000
-    db_latency = await bot.db_manager.ping() if bot.db_manager else -1
-
-    # Uptime & Start Time
-    start_timestamp = int(bot.start_time)
-    uptime_delta = timedelta(seconds=time.time() - bot.start_time)
-    days, remainder = divmod(uptime_delta.total_seconds(), 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m"
-
-    # Cogs
-    loaded_cogs = bot.extensions.keys()
-    total_cogs = len(discover_cogs(config.COGS_PATH))
-    cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
-    
-    # Resource Usage
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
-    cpu_usage = psutil.cpu_percent(interval=None) # Use interval=None for non-blocking call
-    ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
-
-    # 3. Create Embed
-    embed = discord.Embed(
-        title="Sancho Status Report",
-        color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
-    )
-    if bot.user and bot.user.display_avatar:
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-
-    embed.add_field(
-        name="Timings",
-        value=f"**Gateway:** `{gateway_latency:.2f}ms`\n"
-              f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
-              f"**Database:** `{db_latency:.2f}ms`",
-        inline=True
-    )
-
-    embed.add_field(
-        name="Status",
-        value=f"**Uptime:** `{uptime_str}`\n"
-              f"**Started:** <t:{start_timestamp}:f>\n"
-              f"**Cogs Loaded:** `{cogs_status}`",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="Resource Usage",
-        value=f"**CPU:** `{cpu_usage:.1f}%`\n"
-              f"**RAM:** `{ram_usage:.2f} MB`",
-        inline=True
-    )
-
-    # Add a field for loaded cogs, formatted nicely
-    if loaded_cogs:
-        # Format cog names by removing 'cogs.' prefix and joining them
-        cog_list_str = ", ".join([cog.replace('cogs.', '') for cog in sorted(loaded_cogs)])
-        embed.add_field(
-            name="Loaded Cogs",
-            value=f"```{cog_list_str}```",
-            inline=False
-        )
-
-    embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-    embed.timestamp = discord.utils.utcnow()
-
-    # 4. Edit the original message with the embed
-    await message.edit(content=None, embed=embed)
-    logging.info(f"Ping command used by {ctx.author}.")
+    await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
+    logging.info(f"Ping command used by {ctx.author}.")# --- 4. Main Bot Execution ---
 
 # --- 4. Main Bot Execution ---
 
