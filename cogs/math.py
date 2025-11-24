@@ -1,5 +1,4 @@
-"""
-cogs/math.py
+"""cogs/math.py
 
 This cog provides a suite of mathematical and probabilistic commands for the bot.
 It includes:
@@ -11,23 +10,24 @@ It includes:
   unique probability mechanics based on Sanity Points (SP).
 - NLP handlers that allow users to trigger these commands with natural language.
 """
-import discord
-from discord.ext import commands
+
+import ast
+import asyncio
+import math
+import operator as op
 import random
 import re
-import ast
-import operator as op
-import asyncio
-from typing import Optional
-import re as _re
-import math
+from typing import Dict, List, Optional, Tuple, Union
+
+import discord
+from discord.ext import commands
+
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 
 # --- Secure Expression Evaluator ---
 
-# A whitelist of AST nodes that are allowed in mathematical expressions.
-# This prevents the execution of any functions, attribute access, or other dangerous operations.
+# Whitelist safe operations.
 ALLOWED_OPERATORS = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
     ast.Div: op.truediv, ast.USub: op.neg, ast.Pow: op.pow,
@@ -50,11 +50,23 @@ ALLOWED_NAMES = {
     'avogadro': 6.02214076e23  # Avogadro's number
 }
 
+
 def safe_eval_math(expr: str) -> float:
-    """
-    Safely evaluates a mathematical string expression using an Abstract Syntax Tree (AST) walker.
-    This method is secure because it only processes a predefined set of mathematical operations
-    and numeric constants, raising errors for any other type of node (like function calls or names).
+    """Safely evaluates a mathematical string expression using an AST walker.
+
+    This method is secure because it only processes a predefined set of
+    mathematical operations and numeric constants, raising errors for any other
+    type of node (like function calls or names).
+
+    Args:
+        expr (str): The mathematical expression to evaluate.
+
+    Returns:
+        float: The result of the evaluation.
+
+    Raises:
+        ValueError: If the expression contains disallowed values or operators.
+        TypeError: If the expression contains unsupported node types.
     """
     tree = ast.parse(expr, mode='eval').body
 
@@ -64,7 +76,7 @@ def safe_eval_math(expr: str) -> float:
             if not isinstance(node.value, (int, float)):
                 raise ValueError("Only numeric values are allowed.")
             return node.value
-        # Legacy support for Python < 3.8, where numbers were ast.Num.
+        # Legacy support for Python < 3.8.
         elif isinstance(node, ast.Num):
             value = node.n
             if not isinstance(value, (int, float)):
@@ -97,10 +109,11 @@ def safe_eval_math(expr: str) -> float:
             if node.id not in ALLOWED_NAMES:
                 raise ValueError(f"Name not allowed: {node.id}")
             return ALLOWED_NAMES[node.id]
-        # If the node is not a number or an allowed operation, raise an error.
+        
         raise TypeError(f"Unsupported node type: {type(node).__name__}")
     
     return _eval_node(tree)
+
 
 # --- Math Cog ---
 
@@ -109,57 +122,65 @@ DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
 # Regex for Limbus Company-style coin flips, e.g., "3c", "c".
 COIN_FLIP_REGEX = re.compile(r'(\d*)c', re.IGNORECASE)
 
+
 class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
+
     def __init__(self, bot: SanchoBot):
+        """Initializes the Math cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
 
-    async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str):
-        """
-        Handles Limbus Company-style rolls using a sequential parser.
+    async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str) -> None:
+        """Handles Limbus Company-style rolls using a sequential parser.
+
         It finds and consumes parameters one by one to avoid conflicts.
         If any are missing, it falls back to an interactive conversation.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
         """
         def check(m: discord.Message) -> bool:
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
             # --- 1. Sequential Parsing ---
-            # The query is padded with spaces to make regex matching more reliable at the boundaries.
+            # Pad query for reliable regex matching.
             # Each parameter (SP, Base Power, etc.) is searched for, its value extracted,
             # and the matched part is removed from the string to prevent it from being parsed again.
+            # We replace with a space to maintain word boundaries.
             work_query = f" {query.lower()} "  # Pad with spaces for easier regex
             base_power, coin_power, num_coins, sp = None, None, None, None
 
-            # Parser for SP (Sanity Points)
             sp_match = re.search(r'(?:at\s+)?(-?\d+)\s+sp\b', work_query, re.IGNORECASE)
             if sp_match:
                 sp = int(sp_match.group(1))
                 work_query = work_query.replace(sp_match.group(0), " ", 1)
             
-            # Parser for Base Power, allowing formats like "10 bp" or "bp 10".
             base_match = re.search(r'(?:(\d+)\s+\b(base\s*power|bp)\b|\b(base\s*power|bp)\b\s+(\d+))', work_query, re.IGNORECASE)
             if base_match:
                 base_power = int(base_match.group(1) or base_match.group(4))
                 work_query = work_query.replace(base_match.group(0), " ", 1)
 
-            # Parser for Coin Power, allowing formats like "+4 cp" or "cp -2".
             cp_match = re.search(r'(?:([+-]?\d+)\s+\b(coin\s*power|cp)\b|\b(coin\s*power|cp)\b\s+([+-]?\d+))', work_query, re.IGNORECASE)
             if cp_match:
                 coin_power = int(cp_match.group(1) or cp_match.group(4))
                 work_query = work_query.replace(cp_match.group(0), " ", 1)
 
-            # Parser for Number of Coins, allowing "3 coins" or "coin 3".
             num_match = re.search(r'(?:(\d+)\s+\b(coins?|coin\s*count)\b|\b(coins?|coin\s*count)\b\s+(\d+))', work_query, re.IGNORECASE)
             if num_match:
                 num_coins = int(num_match.group(1) or num_match.group(4))
                 work_query = work_query.replace(num_match.group(0), " ", 1)
 
-            # After specific keywords are removed, any remaining signed number is treated as a general modifier.
+            # Extract remaining signed number as modifier.
             mod_match = re.search(r'\s([+-]\d+)\s', work_query)
             modifier = int(mod_match.group(1)) if mod_match else 0
 
-            # --- 2. Fallback to interactive mode if values are missing ---
+            # --- 2. Fallback to interactive mode if parameters missing ---
             # If any of the essential parameters were not found, the bot will ask for them one by one.
             interactive_fallback_needed = any(v is None for v in [base_power, coin_power, num_coins, sp])
             if interactive_fallback_needed:
@@ -199,15 +220,15 @@ class Math(BaseCog):
                 raise ValueError("SP must be between -45 and 45.")
 
             # --- 4. Simulate Coin Flips ---
-            # The probability of getting heads is adjusted based on the SP value.
+            # Adjust heads probability based on SP.
             heads_prob = 0.5 + (0.01 * sp)
             heads_count = 0
             coin_results_display = []
             for _ in range(num_coins):
-                if random.random() < heads_prob: # True for Heads
+                if random.random() < heads_prob:
                     heads_count += 1
                     coin_results_display.append("H")
-                else: # Tails
+                else:
                     coin_results_display.append("T")
             
             coin_total = heads_count * coin_power
@@ -240,8 +261,12 @@ class Math(BaseCog):
             await ctx.send(f"An unexpected error occurred: {e}")
             self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
 
-    async def send_calc_help(self, ctx: commands.Context):
-        """Sends a detailed help message for the calculator command."""
+    async def send_calc_help(self, ctx: commands.Context) -> None:
+        """Sends a detailed help message for the calculator command.
+
+        Args:
+            ctx (commands.Context): The command context.
+        """
         embed = discord.Embed(
             title="Calculator Help",
             description="The calculator supports a wide range of mathematical functions and constants. Here's how to use it:",
@@ -309,7 +334,12 @@ class Math(BaseCog):
         await ctx.send(embed=embed)
 
     async def calculate(self, ctx: commands.Context, *, query: str) -> None:
-        """The NLP handler for all basic math calculation requests."""
+        """The NLP handler for all basic math calculation requests.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+        """
         try:
             # Standardize the query: lowercase, collapse whitespace, and handle common operator aliases.
             original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
@@ -319,7 +349,7 @@ class Math(BaseCog):
                 return
 
             # --- Extract Relevant Parts of the Expression ---
-            # We extract only numbers and valid mathematical operators, ignoring all other text.
+            # Extract valid math tokens.
             # This regex is designed to capture function names, numbers, and operators.
             token_pattern = re.compile(
                 r'([a-zA-Z_][a-zA-Z0-9_]*|\d+(?:\.\d+)?|\*\*|[+\-*/%()]|\S)'
@@ -327,7 +357,6 @@ class Math(BaseCog):
             
             tokens = token_pattern.findall(original_query)
             
-            # Filter for valid tokens to construct the expression.
             valid_tokens = []
             for token in tokens:
                 if token in ALLOWED_FUNCTIONS or \
@@ -342,10 +371,10 @@ class Math(BaseCog):
                 await ctx.send("Please provide a mathematical expression to calculate.")
                 return
 
-            # Run the potentially blocking evaluation in a separate thread to avoid stalling the bot.
+            # Run evaluation in thread.
             result = await asyncio.to_thread(safe_eval_math, processed_query)
             
-            # Format the result to a high precision, removing trailing zeros for clean output.
+            # Format result, removing trailing zeros.
             if result == int(result):
                 result_display = str(int(result))
             else:
@@ -357,16 +386,26 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
-    async def _roll_and_parse_notation(self, match: _re.Match[str], advantage: bool = False, disadvantage: bool = False) -> tuple[int, str]:
-        """
-        Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
+    async def _roll_and_parse_notation(self, match: re.Match, advantage: bool = False, disadvantage: bool = False) -> Tuple[int, str]:
+        """Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
+
         Handles advantage and disadvantage for the given roll. This is run in a thread to avoid blocking.
+
+        Args:
+            match (re.Match): The regex match object.
+            advantage (bool): Whether to roll with advantage.
+            disadvantage (bool): Whether to roll with disadvantage.
+
+        Returns:
+            Tuple[int, str]: The sum of the roll and a description string.
+
+        Raises:
+            ValueError: If dice or side count is out of range.
         """
         num_dice_str, num_sides_str = match.group(1), match.group(2)
         num_dice = int(num_dice_str) if num_dice_str else 1
         num_sides = int(num_sides_str)
         
-        # Parse keep-highest (kh) or keep-lowest (kl) modifiers.
         keep_mode = (match.group(3) or '').lower()
         keep_count = int(match.group(4)) if match.group(4) else 0
 
@@ -375,10 +414,10 @@ class Math(BaseCog):
         if keep_count and keep_count > num_dice:
             raise ValueError("Cannot keep more dice than are rolled.")
 
-        def _roll_dice_thread() -> tuple[list[int], list[int] | None]:
-            """Synchronous function to handle the random number generation, suitable for running in a thread."""
+        def _roll_dice_thread() -> Tuple[List[int], Optional[List[int]]]:
+            """Thread-safe random generation."""
             rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
-            # If advantage or disadvantage is needed, a second set of rolls is generated.
+            # Generate second set for adv/dis.
             if advantage or disadvantage:
                 rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
                 return rolls1, rolls2
@@ -390,10 +429,12 @@ class Math(BaseCog):
         if (advantage or disadvantage) and rolls2 is not None:
             sum1, sum2 = sum(rolls1), sum(rolls2)
 
+            # Determine which set of rolls to keep based on the mode.
+            # If advantage, keep the higher sum. If disadvantage, keep the lower.
             if advantage:
                 chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
                 other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
-            else: # Disadvantage
+            else:
                 chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
                 other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
 
@@ -405,7 +446,7 @@ class Math(BaseCog):
         rolls = rolls1
         description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
         
-        # Handle keep highest/lowest logic if specified.
+        # Apply keep/drop logic.
         kept_rolls = rolls
         if keep_mode in ('kh', 'kl') and keep_count > 0:
             sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
@@ -416,20 +457,26 @@ class Math(BaseCog):
         return sum(kept_rolls), description
 
     async def _preprocess_parentheses(self, query: str) -> str:
-        """
-        Recursively evaluates and replaces simple mathematical expressions within parentheses.
+        """Recursively evaluates and replaces simple mathematical expressions within parentheses.
+
         This simplifies the final expression before dice are rolled. E.g., "(2+3)d6" becomes "5d6".
+
+        Args:
+            query (str): The input query string.
+
+        Returns:
+            str: The processed query string.
         """
         PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
         
         while match := PARENTHESES_REGEX.search(query):
             expression = match.group(1)
-            # Skips parentheses that contain dice or coin notation, as those are handled later.
+            # Skip dice/coin notation.
             if 'd' in expression or 'c' in expression:
                 break 
 
             try:
-                # Run the potentially blocking evaluation in a separate thread.
+                # Evaluate in thread.
                 result = await asyncio.to_thread(safe_eval_math, expression)
                 result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
                 query = query.replace(match.group(0), result_str, 1)
@@ -439,9 +486,18 @@ class Math(BaseCog):
                 break
         return query
 
-    async def _roll_and_parse_coins(self, match: _re.Match[str], sp: int) -> tuple[int, str]:
-        """
-        Parses a regex match for a coin flip, flips the coins with SP influence, and returns the sum and a description.
+    async def _roll_and_parse_coins(self, match: re.Match, sp: int) -> Tuple[int, str]:
+        """Parses a regex match for a coin flip, flips the coins with SP influence, and returns the sum and a description.
+
+        Args:
+            match (re.Match): The regex match object.
+            sp (int): The Sanity Points value.
+
+        Returns:
+            Tuple[int, str]: The number of heads and a description string.
+
+        Raises:
+            ValueError: If coin count is out of range.
         """
         num_coins_str = match.group(1)
         num_coins = int(num_coins_str) if num_coins_str else 1
@@ -449,11 +505,11 @@ class Math(BaseCog):
         if not (1 <= num_coins <= 200):
             raise ValueError("Coin count is out of range (1-200 coins).")
 
-        # The probability of heads is determined by the SP value (0-100).
+        # Heads probability based on SP.
         heads_prob = sp / 100.0
         
-        def _flip_coins_thread() -> list[int]:
-            """Synchronous function to handle the random number generation for coin flips."""
+        def _flip_coins_thread() -> List[int]:
+            """Thread-safe coin flips."""
             return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
 
         flips = await asyncio.to_thread(_flip_coins_thread)
@@ -465,9 +521,18 @@ class Math(BaseCog):
         return heads_count, description
 
     async def get_roll_result(self, dice_notation: str) -> int:
-        """
-        A simple utility to roll dice and get only the integer result back.
-        Does not handle complex expressions, advantage, or send messages.
+        """A simple utility to roll dice and get only the integer result back.
+
+        Simple roll without complex logic.
+
+        Args:
+            dice_notation (str): The dice notation string (e.g., "2d20").
+
+        Returns:
+            int: The sum of the roll.
+
+        Raises:
+            ValueError: If the notation is invalid.
         """
         match = DICE_NOTATION_REGEX.fullmatch(dice_notation.strip())
         if not match:
@@ -476,19 +541,24 @@ class Math(BaseCog):
         roll_sum, _ = await self._roll_and_parse_notation(match)
         return roll_sum
 
-    async def roll(self, ctx: commands.Context, *, query: str, skill_info: Optional[dict] = None) -> None:
-        """The NLP handler for all dice rolling requests."""
+    async def roll(self, ctx: commands.Context, *, query: str, skill_info: Optional[Dict] = None) -> None:
+        """The NLP handler for all dice rolling requests.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string.
+            skill_info (Optional[Dict]): Information about the skill triggering the roll, if any.
+        """
         try:
             # --- 1. Sanitize and Detect Keywords ---
-            # Standardize the query for easier parsing.
+            # Standardize query.
             original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
             
-            # Check for advantage/disadvantage keywords. These are handled separately
-            # from the main expression.
+            # Check for advantage/disadvantage.
             adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
             dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
             
-            # Extract SP value for coin flips, defaulting to 50 if not specified.
+            # Extract SP (default 50).
             sp = 50 # Default to 50%
             sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
             if sp_match:
@@ -498,7 +568,7 @@ class Math(BaseCog):
                 original_query = original_query.replace(sp_match.group(0), '', 1)
 
             # --- 2. Extract Relevant Parts of the Expression ---
-            # Instead of removing keywords, we now extract only the parts we need:
+            # Extract relevant tokens.
             # - Dice notation (e.g., 2d20, d6, 1d10kh1)
             # - Coin notation (e.g., 3c, c)
             # - Numbers (including floating point)
@@ -509,11 +579,10 @@ class Math(BaseCog):
             number_pattern = r'\d+(\.\d+)?'
             operator_pattern = r'\*\*|[+\-*\/()]'
             
-            # Combine all patterns into one to find all relevant tokens.
             full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
             
             tokens = full_pattern.findall(original_query)
-            # The findall with multiple groups returns tuples, so we need to get the first element of each.
+            # Flatten regex groups.
             processed_query = "".join([match[0] for match in tokens])
 
             if adv and dis:
@@ -524,40 +593,35 @@ class Math(BaseCog):
             processed_query = await self._preprocess_parentheses(processed_query)
 
             # --- 4. Resolve All Rolls (Coins then Dice) ---
-            # The query is processed in stages. First, all coin notations are found,
-            # rolled, and replaced with their numeric result. Then, the same is done for dice.
+            # Resolve coins then dice.
             roll_descriptions = []
             final_query = processed_query
             
-            # Resolve coin flips first.
             while match := COIN_FLIP_REGEX.search(final_query):
                 roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
                 roll_descriptions.append(description)
                 final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
-            # Then resolve dice rolls.
             while match := DICE_NOTATION_REGEX.search(final_query):
                 roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
                 roll_descriptions.append(description)
                 final_query = final_query.replace(match.group(0), str(roll_sum), 1)
 
             # --- 5. Final Calculation ---
-            # If the query is empty after parsing rolls (e.g., user just said "roll 1d20"),
-            # we display the result directly without using the safe evaluator.
+            # Handle simple rolls without math.
             if not final_query.strip():
                 if len(roll_descriptions) == 1:
-                    # Extract the result from the single roll description.
                     match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `|: `(.*?)`', roll_descriptions[0])
                     result_display = "N/A"
                     if match:
                         result_str = next((g for g in match.groups() if g is not None), "N/A")
-                        # For dice rolls, the result is a list of numbers to be summed.
-                        # For coin flips, it's already a sum.
+                        # Sum dice results.
+                        # Coin flips are already summed.
                         try:
                             # The lambda is more explicit for the type checker and strip() handles potential whitespace.
                             result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
                         except (ValueError, TypeError):
-                             # This handles the coin flip case where the result is already a sum.
+                             # Handle pre-summed coin results.
                             result_display = result_str.split(' ')[0]
 
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
@@ -570,17 +634,17 @@ class Math(BaseCog):
                     await ctx.send("Please specify what to roll!")
                     return
             
-            # If there's a remaining expression (e.g., "1d20 + 5"), evaluate it.
+            # Evaluate remaining expression.
             result = safe_eval_math(final_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
 
             # --- 6. Format Response ---
             response_parts = []
-            # If the roll was triggered by a skill, add special formatting to the message.
+            # Format skill-triggered rolls.
             if skill_info:
                 display_formula = query.replace('(', '').replace(')', '').strip()
                 
-                # Case 1: Replying to another user (e.g., an attack).
+                # Handle reply targets.
                 if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
                     target_user = ctx.message.reference.resolved.author
                     if target_user != ctx.author and not target_user.bot:
@@ -591,13 +655,13 @@ class Math(BaseCog):
                         response_parts.append(header)
                         response_parts.append(f"`{display_formula}`")
                 
-                # Case 2: Skill used without a target.
+                # Handle untargeted skills.
                 else:
                     response_parts.append(f"**{skill_info['name']}**")
                     response_parts.append(f"`{display_formula}`")
 
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
-            # Add the detailed breakdown of each roll.
+            # Add roll breakdown.
             response_parts.extend(roll_descriptions)
             
             response = "\n".join(response_parts)
@@ -610,6 +674,11 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
 
+
 async def setup(bot: SanchoBot) -> None:
-    """Standard setup function for the cog."""
+    """Standard setup function for the cog.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(Math(bot))

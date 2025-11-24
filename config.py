@@ -1,23 +1,30 @@
-"""
-config.py
+"""config.py
 
 This module centralizes all configuration settings for the Sancho bot.
 It handles path definitions, loading environment variables (like the bot token),
 and defining static configurations such as the NLP command registry.
 """
+
+import logging
 import os
 import sys
-import logging
-from dotenv import load_dotenv, dotenv_values
+from typing import List, Tuple
+
+from dotenv import dotenv_values, load_dotenv
+
 from utils.extensions import discover_cogs
 
-# --- Pathing ---
+# Pathing
 
 def get_application_path() -> str:
-    """
-    Determines the base path for the application. This is crucial for ensuring
-    that file paths work correctly whether the application is running from source
-    or as a bundled executable (e.g., via PyInstaller).
+    """Determines the base path for the application.
+
+    This is crucial for ensuring that file paths work correctly whether the
+    application is running from source or as a bundled executable (e.g., via
+    PyInstaller).
+
+    Returns:
+        str: The absolute path to the application's root directory.
     """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         # Running as a bundled executable
@@ -25,7 +32,7 @@ def get_application_path() -> str:
     # Running as a script from source
     return os.path.dirname(os.path.abspath(__file__))
 
-# --- Core Paths ---
+# Core Paths
 # Define all essential paths based on the application's root directory.
 APP_PATH = get_application_path()
 ASSETS_PATH = os.path.join(APP_PATH, 'assets')
@@ -34,13 +41,17 @@ LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
 DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
-# --- Bot Configuration ---
+# Bot Configuration
 
-def check_and_create_env_file():
-    """
-    Checks for the existence of the `info.env` file. If it doesn't exist,
-    it creates a template file. If it exists, it checks for missing fields
-    and updates the file if necessary by recreating it with preserved data.
+def check_and_create_env_file() -> None:
+    """Checks for the existence of the `info.env` file.
+
+    If it doesn't exist, it creates a template file. If it exists, it checks
+    for missing fields and updates the file if necessary by recreating it with
+    preserved data.
+
+    Raises:
+        SystemExit: If the file cannot be created or updated.
     """
     required_fields = {
         "DISCORD_TOKEN": "",
@@ -112,7 +123,7 @@ check_and_create_env_file()
 # Load the environment variables from the .env file.
 load_dotenv(dotenv_path=ENV_PATH)
 
-# --- Environment Variables ---
+# Environment Variables
 TOKEN = os.getenv('DISCORD_TOKEN')
 BOT_PREFIX_RAW = os.getenv('BOT_PREFIX')
 
@@ -135,31 +146,31 @@ DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
 raw_dev_guild = os.getenv('DEV_GUILD')
 DEV_GUILD = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
 
-# --- Logging Configuration ---
+# Logging Configuration
 # These are default values that can be used by the logging setup function.
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(funcName)s:%(lineno)d] - %(message)s'
 LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 LOG_BACKUP_COUNT = 5
 
-# --- NLP Command Registry ---
+# NLP Command Registry
 # This is the central registry for all NLP-based commands. It is structured
 # as a list of "groups" (each group is a list of commands).
 #
-# 1.  **Intra-Group Priority**: Within each group, the commands are checked in
-#     the order they are defined. The first one that matches becomes the "group winner".
-#     This means more specific commands should always be placed before more general ones
-#     (e.g., 'delete skill' before 'skill').
-# 2.  **Inter-Group Priority**: After finding a winner from each group that has a match,
-#     the bot compares the position of the matched keywords in the user's query.
-#     The group winner whose keyword appeared earliest in the query is the final command executed.
+# Intra-Group Priority: Within each group, the commands are checked in
+# the order they are defined. The first one that matches becomes the "group winner".
+# This means more specific commands should always be placed before more general ones.
+#
+# Inter-Group Priority: After finding a winner from each group that has a match,
+# the bot compares the position of the matched keywords in the user's query.
+# The group winner whose keyword appeared earliest in the query is the final command executed.
 #
 # Format: [
 #   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 1
 #   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 2
 # ]
-NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
-    # --- Math Group ---
+NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
+    # Math Group
     [
         # Limbus Company coin flip
         ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
@@ -168,7 +179,7 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Basic calculation
         ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     ],
-    # --- Skills Group ---
+    # Skills Group
     [
         # Management commands are checked first for specific verb-noun phrases.
         ((r'\b(delete|remove)\s.*skill(s)?\b',), 'Skills', 'delete_skill_nlp'),
@@ -179,7 +190,7 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Commands for casting or using skills.
         ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
     ],
-    # --- Reminders Group --- (note: unlike other groups, this one ENFORCES matching at the front to prevent polluting the query)
+    # Reminders Group (note: unlike other groups, this one ENFORCES matching at the front to prevent polluting the query)
     [
         # Deleting reminders (catches "delete/remove reminder 1", etc.)
         # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
@@ -195,14 +206,14 @@ NLP_COMMANDS: list[list[tuple[tuple[str, ...], str, str]]] = [
         # Setting reminders
         ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
     ],
-    # --- Image Group ---
+    # Image Group
     [
         # Resize image
         ((r'\bresize\b', r'\bscale\b'), 'ImageCog', 'resize'),
         # Convert image format
         ((r'\bconvert\b', r'\bchange to\b'), 'ImageCog', 'convert'),
     ],
-    # --- Fun Group ---
+    # Fun Group
     [
         # 8-Ball
         ((r'8\s?-?ball',), 'Fun', 'eight_ball'),

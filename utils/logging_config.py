@@ -90,12 +90,12 @@ def setup_logging(
     root_logger.setLevel(log_level)
     root_logger.handlers.clear() # Prevent duplicate logs if called multiple times.
 
-    # --- Console Handler ---
+    # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(CustomFormatter())
     root_logger.addHandler(console_handler)
 
-    # --- Asynchronous File Handler ---
+    # Asynchronous File Handler
     if log_to_file:
         # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(

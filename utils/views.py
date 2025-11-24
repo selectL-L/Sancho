@@ -1,3 +1,9 @@
+"""utils/views.py
+
+This module contains reusable UI components (Views) for Discord interactions.
+It provides standard selection menus and button interfaces used across multiple cogs.
+"""
+
 import discord
 import asyncio
 from typing import Optional, Dict, cast
@@ -46,7 +52,6 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
-    # Create tasks
     view_task = asyncio.create_task(view.wait())
     msg_task = asyncio.create_task(ctx.bot.wait_for('message', check=check, timeout=timeout))
 
@@ -64,11 +69,10 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
         try:
             msg = msg_task.result()
             result = msg.content.strip()
-            view.stop() # Stop the view
+            view.stop()
         except Exception:
             pass 
 
-    # Cancel pending tasks
     for task in pending:
         task.cancel()
     

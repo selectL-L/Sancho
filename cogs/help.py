@@ -1,5 +1,4 @@
-"""
-cogs/help.py
+"""cogs/help.py
 
 This cog implements a custom, user-friendly help command that replaces the
 default discord.py help command. It is designed to provide clear and useful
@@ -12,37 +11,49 @@ Key Features:
   grouped by their respective cogs (e.g., Math, Fun). It also provides a
   dedicated section explaining the NLP commands with varied examples.
 - `send_command_help`: Provides detailed information for a specific command,
-  including its description, aliases, and usage signature. (Largely redundant, we mostly use NLP)
+  including its description, aliases, and usage signature.
 - Dynamic Prefix Display: Automatically fetches and displays the correct
   command prefixes for the server it's being used in.
 """
-import discord
-from discord.ext import commands
-from discord import app_commands
+
 import logging
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 
+
 class Help(BaseCog):
     """A custom, more detailed help command that overrides the default."""
 
     def __init__(self, bot: SanchoBot):
+        """Initializes the Help cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         # This is crucial to replace the default help command with our own.
         self.bot.remove_command('help')
 
-   
     @commands.hybrid_command(name='help', help="The help message itself!", description="Shows what commands are available and provides examples for them!")
     @app_commands.describe(
         command_name="The command to show detailed help for (optional!)"
     )
-    async def custom_help(self, ctx: commands.Context, *, command_name: str | None = None):
-        """
-        The main help command entry point.
+    async def custom_help(self, ctx: commands.Context, *, command_name: Optional[str] = None) -> None:
+        """The main help command entry point.
+
         If a command_name is provided, it shows detailed help for that command.
         Otherwise, it shows a general overview of all commands.
+
+        Args:
+            ctx (commands.Context): The command context.
+            command_name (Optional[str]): The command to show detailed help for.
         """
         self.logger.info(f"Help command used by {ctx.author} for command: {command_name or 'general'}")
         if command_name:
@@ -66,17 +77,21 @@ class Help(BaseCog):
         else:
             await self.send_bot_help(ctx)
 
-    async def send_command_help(self, ctx: commands.Context, command: commands.Command):
-        """
-        Provides help for a specific command, attempting to pull parameter
-        descriptions from a corresponding slash command.
+    async def send_command_help(self, ctx: commands.Context, command: commands.Command) -> None:
+        """Provides help for a specific command.
+
+        Attempts to pull parameter descriptions from a corresponding slash command.
+
+        Args:
+            ctx (commands.Context): The command context.
+            command (commands.Command): The command to show help for.
         """
         self.logger.info(f"Generating help for command: {command.name}")
         if not command.enabled:
             self.logger.warning(f"Attempted to get help for disabled command: {command.name}")
             return
 
-        # --- Create the base embed ---
+        # Create base embed.
         embed = discord.Embed(
             title=f"Help: `{ctx.prefix}{command.name}`",
             description=command.help or "No description available.",
@@ -85,7 +100,7 @@ class Help(BaseCog):
         if command.aliases:
             embed.add_field(name="Aliases", value=", ".join(f"`{a}`" for a in command.aliases), inline=False)
 
-        # --- Find parameter descriptions from app_commands ---
+        # Find parameter descriptions.
         param_descriptions = {}
         # The bot's command tree holds the slash commands
         if hasattr(self.bot, 'tree'):
@@ -111,7 +126,7 @@ class Help(BaseCog):
         else:
             self.logger.warning("Bot does not have a command tree, cannot look for app command descriptions.")
 
-        # --- Format the usage and parameters ---
+        # Format usage.
         # Use the command's usage if provided, otherwise generate signature
         if command.usage:
             signature = f"{ctx.prefix}{command.name} {command.usage}"
@@ -120,7 +135,7 @@ class Help(BaseCog):
         
         embed.add_field(name="Usage", value=f"```{signature}```", inline=False)
 
-        # --- Build the parameters/arguments field ---
+        # Build arguments field.
         if command.clean_params:
             param_details = []
             for name, param in command.clean_params.items():
@@ -135,7 +150,7 @@ class Help(BaseCog):
                     inline=False
                 )
 
-        # --- Handle Subcommands for Groups ---
+        # Handle subcommands.
         if isinstance(command, commands.Group):
             subcommands = [c for c in command.commands if not c.hidden]
             if subcommands:
@@ -151,8 +166,12 @@ class Help(BaseCog):
 
         await ctx.send(embed=embed)
 
-    async def send_bot_help(self, ctx: commands.Context):
-        """Sends a general help embed listing all commands and NLP capabilities."""
+    async def send_bot_help(self, ctx: commands.Context) -> None:
+        """Sends a general help embed listing all commands and NLP capabilities.
+
+        Args:
+            ctx (commands.Context): The command context.
+        """
         # The command_prefix can be a list or a callable. We need to get the
         # specific prefixes for the current context (server/message).
         prefixes = self.bot.command_prefix if isinstance(self.bot.command_prefix, list) else config.BOT_PREFIX
@@ -279,6 +298,11 @@ class Help(BaseCog):
         )
         await ctx.send(embed=embed)
 
-async def setup(bot: SanchoBot):
-    """Standard setup function to add the cog to the bot."""
+
+async def setup(bot: SanchoBot) -> None:
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(Help(bot))

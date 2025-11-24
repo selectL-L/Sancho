@@ -1,32 +1,43 @@
-"""
-cogs/admin.py
+"""cogs/admin.py
 
 This cog contains owner-only commands for administrative tasks, such as
 viewing bot status and managing configurations.
 """
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-import logging
-from collections import defaultdict
-from typing import List, Dict, Any
-import typing
-import time
-import psutil
-import os
-from datetime import timedelta
-import config
-from utils.extensions import discover_cogs
 
+import logging
+import os
+import tempfile
+import time
+import typing
+from collections import defaultdict
+from datetime import timedelta
+from typing import List
+
+import discord
+import psutil
+from discord import app_commands
+from discord.ext import commands, tasks
+
+import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
+from utils.extensions import discover_cogs
+
 
 class StatusView(discord.ui.View):
+    """A view for paginating through a status report.
+
+    Shows skills and reminders for each user.
     """
-    A view for paginating through a status report, showing skills and reminders
-    for each user.
-    """
+
     def __init__(self, bot: SanchoBot, user_pages: List[discord.Embed], author_id: int):
+        """Initializes the StatusView.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+            user_pages (List[discord.Embed]): The list of embeds to paginate.
+            author_id (int): The ID of the user who invoked the command.
+        """
         super().__init__(timeout=60.0)
         self.bot = bot
         self.user_pages = user_pages
@@ -35,15 +46,25 @@ class StatusView(discord.ui.View):
         self.message: typing.Optional[discord.Message] = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Ensures only the command author can use the buttons."""
+        """Ensures only the command author can use the buttons.
+
+        Args:
+            interaction (discord.Interaction): The interaction to check.
+
+        Returns:
+            bool: True if the user is authorized, False otherwise.
+        """
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("You are not authorized to use these buttons.", ephemeral=True)
             return False
         return True
 
-    async def update_view(self, interaction: discord.Interaction):
-        """Updates the message with the current page's embed."""
-        
+    async def update_view(self, interaction: discord.Interaction) -> None:
+        """Updates the message with the current page's embed.
+
+        Args:
+            interaction (discord.Interaction): The interaction to update.
+        """
         previous_button = self.children[0]
         if isinstance(previous_button, discord.ui.Button):
             previous_button.disabled = self.current_page == 0
@@ -58,19 +79,32 @@ class StatusView(discord.ui.View):
         )
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.grey)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Handles the previous button click.
+
+        Args:
+            interaction (discord.Interaction): The interaction.
+            button (discord.ui.Button): The button that was clicked.
+        """
         if self.current_page > 0:
             self.current_page -= 1
             await self.update_view(interaction)
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.grey)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Handles the next button click.
+
+        Args:
+            interaction (discord.Interaction): The interaction.
+            button (discord.ui.Button): The button that was clicked.
+        """
         if self.current_page < len(self.user_pages) - 1:
             self.current_page += 1
             await self.update_view(interaction)
 
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
+        """Handles the view timeout by disabling all buttons."""
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -82,12 +116,16 @@ class StatusView(discord.ui.View):
             except Exception:
                 pass
 
+
 class AdminCog(BaseCog):
-    """
-    Administrative and owner-only commands.
-    """
+    """Administrative and owner-only commands."""
 
     def __init__(self, bot: SanchoBot):
+        """Initializes the AdminCog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
@@ -96,11 +134,13 @@ class AdminCog(BaseCog):
         self.usage_history = []
         self.record_usage.start()
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
+        """Cancels the usage recording task when the cog is unloaded."""
         self.record_usage.cancel()
 
     @tasks.loop(minutes=30)
-    async def record_usage(self):
+    async def record_usage(self) -> None:
+        """Records CPU and RAM usage every 30 minutes."""
         try:
             memory_info = self.process.memory_info()
             cpu_usage = self.process.cpu_percent(interval=None)
@@ -115,7 +155,8 @@ class AdminCog(BaseCog):
             logging.error(f"Error recording usage stats: {e}")
 
     @record_usage.before_loop
-    async def before_record_usage(self):
+    async def before_record_usage(self) -> None:
+        """Waits for the bot to be ready before starting the usage recording loop."""
         await self.bot.wait_until_ready()
 
     @commands.hybrid_command(name="global_limit", hidden=True, description="Set the global skill limit for all users.")
@@ -123,9 +164,12 @@ class AdminCog(BaseCog):
     @app_commands.describe(
         limit="The new global skill limit (1-100)."
     )
-    async def global_limit(self, ctx: commands.Context, limit: int):
-        """
-        Set the global skill limit for all users.
+    async def global_limit(self, ctx: commands.Context, limit: int) -> None:
+        """Set the global skill limit for all users.
+
+        Args:
+            ctx (commands.Context): The command context.
+            limit (int): The new global skill limit (1-100).
         """
         if not (0 < limit <= 100):
             await ctx.send("Please provide a limit between 1 and 100.")
@@ -139,9 +183,13 @@ class AdminCog(BaseCog):
         user="The user to set the limit for. (this can be a mention or an ID)",
         limit="The new skill limit for the user (1-100)."
     )
-    async def user_limit(self, ctx: commands.Context, user: discord.Member, limit: int):
-        """
-        Set the skill limit for a specific user.
+    async def user_limit(self, ctx: commands.Context, user: discord.Member, limit: int) -> None:
+        """Set the skill limit for a specific user.
+
+        Args:
+            ctx (commands.Context): The command context.
+            user (discord.Member): The user to set the limit for.
+            limit (int): The new skill limit for the user (1-100).
         """
         if not (0 < limit <= 100):
             await ctx.send("Please provide a limit between 1 and 100.")
@@ -153,10 +201,14 @@ class AdminCog(BaseCog):
     @commands.hybrid_command(name="report", hidden=True, description="Display a report of all users' skills and reminders.")
     @commands.is_owner()
     @app_commands.describe(mode="Optional: 'full' to post all embeds, or 'print' to attach a text report.")
-    async def report(self, ctx: commands.Context, mode: typing.Optional[str] = None):
-        """
-        Displays a status report of all users' skills and reminders.
+    async def report(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
+        """Displays a status report of all users' skills and reminders.
+
         Usage: .report [full|print]
+
+        Args:
+            ctx (commands.Context): The command context.
+            mode (typing.Optional[str]): 'full' to post all embeds, or 'print' to attach a text report.
         """
         await ctx.send("`Generating status report...`")
 
@@ -222,8 +274,6 @@ class AdminCog(BaseCog):
                 return
 
             if mode == "print":
-                import tempfile
-                import os
                 report_lines = []
                 for i, user_id in enumerate(user_ids):
                     try:
@@ -272,10 +322,14 @@ class AdminCog(BaseCog):
     @commands.is_owner()
     @app_commands.describe(mode="Optional: 'history' to view historical resource usage.")
     async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
-        """
-        Provides a comprehensive health and status check for the bot, including
-        latency, uptime, cog status, database health, and resource usage.
+        """Provides a comprehensive health and status check for the bot.
+
+        Includes latency, uptime, cog status, database health, and resource usage.
         Usage: .status [history]
+
+        Args:
+            ctx (commands.Context): The command context.
+            mode (typing.Optional[str]): 'history' to view historical resource usage.
         """
         if mode and mode.lower() == "history":
             if not self.usage_history:
@@ -288,7 +342,6 @@ class AdminCog(BaseCog):
                 ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
                 lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f}")
             
-            import tempfile
             with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_usage_history.txt") as f:
                 f.write("\n".join(lines))
                 temp_path = f.name
@@ -297,12 +350,12 @@ class AdminCog(BaseCog):
             os.remove(temp_path)
             return
 
-        # 1. Initial "Pinging..." message
+        # Send initial message.
         start_time = time.monotonic()
         message = await ctx.send("Checking status...")
         end_time = time.monotonic()
 
-        # 2. Gather all metrics
+        # Gather metrics.
         # Latencies
         roundtrip_latency = (end_time - start_time) * 1000
         gateway_latency = self.bot.latency * 1000
@@ -326,7 +379,7 @@ class AdminCog(BaseCog):
         cpu_usage = self.process.cpu_percent(interval=None) # Use interval=None for non-blocking call
         ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
 
-        # 3. Create Embed
+        # Create status embed.
         embed = discord.Embed(
             title="Sancho Status Report",
             color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
@@ -370,10 +423,15 @@ class AdminCog(BaseCog):
         embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
         embed.timestamp = discord.utils.utcnow()
 
-        # 4. Edit the original message with the embed
+        # Update message.
         await message.edit(content=None, embed=embed)
         logging.info(f"Status command used by {ctx.author}.")
 
 
-async def setup(bot: SanchoBot):
+async def setup(bot: SanchoBot) -> None:
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(AdminCog(bot))

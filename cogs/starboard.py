@@ -1,28 +1,62 @@
+"""cogs/starboard.py
+
+This cog implements a "Starboard" feature, which is a popular way to highlight
+interesting or funny messages in a server. When a message receives a certain
+number of "star" (⭐) reactions, it is reposted to a designated starboard channel.
+
+Key Features:
+- Configurable Settings: Guild admins can set the target channel, the emoji to
+  use (defaulting to ⭐), and the reaction threshold required to post.
+- Automatic Posting: Monitors reactions and automatically posts messages that
+  meet the threshold.
+- Updates and Deletions: Updates the star count on the starboard post as more
+  reactions are added. Removes the post if the reaction count drops below the
+  threshold.
+- Rich Content Support: Handles text, images, attachments, and even forwarded
+  message snapshots, ensuring the starboard post faithfully represents the original.
+- Reply Context: If the starred message is a reply to another message, the
+  starboard post attempts to show that context by posting the parent message first.
+- Maintenance Tools: Includes a powerful `reload` command to rebuild the starboard
+  from history or fix database inconsistencies, with support for a "fast mode"
+  to bypass rate limits in emergencies.
+"""
+
+import asyncio
+import datetime
+import inspect
+import io
+import logging
+import re
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
-import logging
-import datetime
-import inspect
-from typing import Optional, Any
-import io
-import aiohttp
-import asyncio
 
 logger = logging.getLogger(__name__)
 
+
 class Starboard(BaseCog):
+    """The cog for managing the Starboard feature."""
+
     def __init__(self, bot: SanchoBot):
+        """Initializes the Starboard cog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager: DatabaseManager = bot.db_manager
         self.starboard_emoji = "⭐"
         self.starboard_threshold = 3
         self.http_session = aiohttp.ClientSession()
-        self._locks = {} # For preventing race conditions
+        self._locks: Dict[int, asyncio.Lock] = {}  # For preventing race conditions
         # Rate-limiting controls for slow 'fix' operations
         self._fix_semaphore = asyncio.Semaphore(1)
         self._fix_delay = 0.6  # seconds between external calls
@@ -30,11 +64,22 @@ class Starboard(BaseCog):
         # Fast-mode override (disabled by default). When True, bypass rate-limits and thresholds.
         self._fast_mode = False
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
+        """Clean up resources when the cog is unloaded."""
         await self.http_session.close()
 
-    async def get_starboard_config(self, guild_id: int) -> tuple[Optional[int], str, int]:
-        """Fetches starboard configuration for a guild, with defaults."""
+    async def get_starboard_config(self, guild_id: int) -> Tuple[Optional[int], str, int]:
+        """Fetches starboard configuration for a guild, with defaults.
+
+        Args:
+            guild_id (int): The ID of the guild.
+
+        Returns:
+            Tuple[Optional[int], str, int]: A tuple containing:
+                - The starboard channel ID (or None if not set).
+                - The starboard emoji string.
+                - The reaction threshold.
+        """
         channel_id_str = await self.db_manager.get_guild_config(guild_id, "starboard_channel_id")
         emoji = await self.db_manager.get_guild_config(guild_id, "starboard_emoji") or self.starboard_emoji
         threshold_str = await self.db_manager.get_guild_config(guild_id, "starboard_threshold")
@@ -46,8 +91,12 @@ class Starboard(BaseCog):
 
     @commands.hybrid_group(name="starboard", hidden=True, usage="<subcommand>")
     @commands.has_guild_permissions(manage_channels=True)
-    async def starboard_group(self, ctx: commands.Context):
-        """Manages starboard settings."""
+    async def starboard_group(self, ctx: commands.Context) -> None:
+        """Manages starboard settings.
+
+        Args:
+            ctx (commands.Context): The command context.
+        """
         if ctx.invoked_subcommand is None:
             help_cog: Any = self.bot.get_cog('Help')
             if help_cog and hasattr(help_cog, 'send_command_help'):
@@ -56,22 +105,37 @@ class Starboard(BaseCog):
                 await ctx.send_help(ctx.command)
 
     @starboard_group.command(name="channel")
-    async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Sets the channel for the starboard."""
+    async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        """Sets the channel for the starboard.
+
+        Args:
+            ctx (commands.Context): The command context.
+            channel (discord.TextChannel): The channel to use for the starboard.
+        """
         if ctx.guild:
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_channel_id", str(channel.id))
             await ctx.send(f"Starboard channel set to {channel.mention}")
 
     @starboard_group.command(name="emoji")
-    async def set_emoji(self, ctx: commands.Context, emoji: str):
-        """Sets the emoji for the starboard."""
+    async def set_emoji(self, ctx: commands.Context, emoji: str) -> None:
+        """Sets the emoji for the starboard.
+
+        Args:
+            ctx (commands.Context): The command context.
+            emoji (str): The emoji to use.
+        """
         if ctx.guild:
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_emoji", emoji)
             await ctx.send(f"Starboard emoji set to {emoji}")
 
     @starboard_group.command(name="threshold")
-    async def set_threshold(self, ctx: commands.Context, threshold: int):
-        """Sets the reaction threshold for the starboard."""
+    async def set_threshold(self, ctx: commands.Context, threshold: int) -> None:
+        """Sets the reaction threshold for the starboard.
+
+        Args:
+            ctx (commands.Context): The command context.
+            threshold (int): The minimum number of reactions required.
+        """
         if ctx.guild and threshold > 0:
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_threshold", str(threshold))
             await ctx.send(f"Starboard threshold set to {threshold}")
@@ -82,10 +146,15 @@ class Starboard(BaseCog):
         mode="The operation mode: 'remake' to recreate posts, 'fix' to repair DB entries.",
         fast="If True, skips rate limits and confirmations (Dangerous!)."
     )
-    async def reload_starboard(self, ctx: commands.Context, mode: str, fast: bool = False):
-        """
-        Reloads or fixes starboard messages. Only callable by the bot owner.
+    async def reload_starboard(self, ctx: commands.Context, mode: str, fast: bool = False) -> None:
+        """Reloads or fixes starboard messages. Only callable by the bot owner.
+
         Usage: /starboard reload <mode> [fast]
+
+        Args:
+            ctx (commands.Context): The command context.
+            mode (str): 'remake' or 'fix'.
+            fast (bool): Whether to enable fast mode. Defaults to False.
         """
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
@@ -124,7 +193,7 @@ class Starboard(BaseCog):
                     self.add_item(discord.ui.TextInput(label="Type 'I understand the risks' to confirm", style=discord.TextStyle.short, placeholder="I understand the risks"))
                     self.future = future
 
-                async def on_submit(self, interaction: discord.Interaction):
+                async def on_submit(self, interaction: discord.Interaction) -> None:
                     value = getattr(self.children[0], 'value', '')
                     try:
                         value = value.strip().lower()
@@ -162,7 +231,7 @@ class Starboard(BaseCog):
             if not callable(send_modal):
                 await ctx.send("WARNING: Modals unavailable — please reply with 'I understand the risks' to confirm fast mode.")
                 try:
-                    def _check(m: discord.Message):
+                    def _check(m: discord.Message) -> bool:
                         return m.author == ctx.author and m.channel == ctx.channel and m.content.strip().lower() == 'i understand the risks'
 
                     await self.bot.wait_for('message', check=_check, timeout=30.0)
@@ -401,7 +470,6 @@ class Starboard(BaseCog):
                             guild_id = None
                             for field in embed.fields:
                                 if field.name == 'Original Message' and field.value:
-                                    import re
                                     m = re.search(r"/channels/(\d+)/(\d+)/(\d+)", field.value)
                                     if m:
                                         guild_id = int(m.group(1))
@@ -539,7 +607,12 @@ class Starboard(BaseCog):
             self._fast_mode = False
 
     @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """Handles raw reaction add events to check for starboard triggers.
+
+        Args:
+            payload (discord.RawReactionActionEvent): The reaction event payload.
+        """
         if not payload.guild_id or not self.bot.user or payload.user_id == self.bot.user.id:
             return
 
@@ -548,7 +621,8 @@ class Starboard(BaseCog):
         if not starboard_channel_id or str(payload.emoji) != starboard_emoji:
             return
 
-        # Use a lock to prevent race conditions from multiple simultaneous reactions
+        # Use a lock to prevent race conditions from multiple simultaneous reactions.
+        # This ensures we don't post the same message multiple times or desync the count.
         lock = self._locks.setdefault(payload.message_id, asyncio.Lock())
         async with lock:
             channel = self.bot.get_channel(payload.channel_id)
@@ -573,7 +647,15 @@ class Starboard(BaseCog):
         if lock.locked() is False:
             self._locks.pop(payload.message_id, None)
 
-    async def post_to_starboard(self, message: discord.Message, starboard_channel_id: int, starboard_emoji: str, star_count: int):
+    async def post_to_starboard(self, message: discord.Message, starboard_channel_id: int, starboard_emoji: str, star_count: int) -> None:
+        """Posts or updates a message on the starboard.
+
+        Args:
+            message (discord.Message): The original message.
+            starboard_channel_id (int): The ID of the starboard channel.
+            starboard_emoji (str): The emoji used for the starboard.
+            star_count (int): The current number of reactions.
+        """
         starboard_channel = self.bot.get_channel(starboard_channel_id)
         if not isinstance(starboard_channel, discord.TextChannel):
             logger.error(f"Starboard channel with ID {starboard_channel_id} not found or is not a text channel.")
@@ -595,10 +677,16 @@ class Starboard(BaseCog):
         else:
             await self.create_new_starboard_post(message, starboard_channel, content)
 
-    async def create_new_starboard_post(self, message: discord.Message, starboard_channel: discord.TextChannel, content: str):
-        """
-        Creates a new starboard post. If the message is a reply, it posts the replied-to message first,
+    async def create_new_starboard_post(self, message: discord.Message, starboard_channel: discord.TextChannel, content: str) -> None:
+        """Creates a new starboard post.
+
+        If the message is a reply, it posts the replied-to message first,
         then replies to that with the starred message.
+
+        Args:
+            message (discord.Message): The original message.
+            starboard_channel (discord.TextChannel): The starboard channel.
+            content (str): The content string (e.g., "⭐ 5 in #general").
         """
         # If it's a reply, handle the two-message system
         if message.reference and message.reference.message_id and isinstance(message.channel, discord.TextChannel):
@@ -633,8 +721,14 @@ class Starboard(BaseCog):
         else:
             await self.create_single_starboard_post(message, starboard_channel, content)
 
-    async def create_single_starboard_post(self, message: discord.Message, starboard_channel: discord.TextChannel, content: str):
-        """Creates a single starboard post, used for non-reply messages or as a fallback."""
+    async def create_single_starboard_post(self, message: discord.Message, starboard_channel: discord.TextChannel, content: str) -> None:
+        """Creates a single starboard post, used for non-reply messages or as a fallback.
+
+        Args:
+            message (discord.Message): The original message.
+            starboard_channel (discord.TextChannel): The starboard channel.
+            content (str): The content string.
+        """
         embed, files = await self.create_starboard_embed_and_files(message)
         try:
             starboard_message = await starboard_channel.send(content=content, embed=embed, files=files)
@@ -646,17 +740,26 @@ class Starboard(BaseCog):
             for file in files:
                 file.close()
 
-    async def create_starboard_embed_and_files(self, message: discord.Message) -> tuple[discord.Embed, list[discord.File]]:
-        """Creates an embed and a list of discord.File objects for a starboard message, handling regular content, attachments, and embeds."""
+    async def create_starboard_embed_and_files(self, message: discord.Message) -> Tuple[discord.Embed, List[discord.File]]:
+        """Creates an embed and a list of discord.File objects for a starboard message.
+
+        Handles regular content, attachments, and embeds.
+
+        Args:
+            message (discord.Message): The message to convert.
+
+        Returns:
+            Tuple[discord.Embed, List[discord.File]]: The embed and list of files.
+        """
         
         description_parts = []
         files = []
 
-        # 1. Always start with the message's direct text content, if any.
+        # Add message content.
         if message.content:
             description_parts.append(message.content)
 
-        # 2. Process direct attachments on the main message.
+        # Process attachments.
         for attachment in message.attachments:
             try:
                 async with self.http_session.get(attachment.url) as resp:
@@ -666,7 +769,7 @@ class Starboard(BaseCog):
             except Exception as e:
                 logger.error(f"Failed to download direct attachment for starboard: {e}")
 
-        # 3. Process message snapshots for forwarded content.
+        # Process forwarded snapshots.
         if hasattr(message, 'message_snapshots') and message.message_snapshots:
             for snapshot in message.message_snapshots:
                 if snapshot.content:
@@ -681,7 +784,7 @@ class Starboard(BaseCog):
                     except Exception as e:
                         logger.error(f"Failed to download snapshot attachment for starboard: {e}")
         
-        # 4. Handle embeds as a fallback or for link previews.
+        # Handle embeds.
         elif message.embeds:
             embed = message.embeds[0]
             if embed.description:
@@ -715,10 +818,17 @@ class Starboard(BaseCog):
         
         return new_embed, files
 
-    async def _run_rate_limited(self, coro_func, *args, delay: float | None = None, retries: int | None = None):
+    async def _run_rate_limited(self, coro_func: Any, *args: Any, delay: Optional[float] = None, retries: Optional[int] = None) -> Any:
         """Run the provided coroutine-callable under the fix semaphore with simple backoff.
 
-        coro_func: a callable that returns an awaitable when called with *args (e.g., channel.fetch_message)
+        Args:
+            coro_func (Any): A callable that returns an awaitable when called with *args.
+            *args (Any): Arguments to pass to coro_func.
+            delay (Optional[float]): Delay in seconds after success. Defaults to self._fix_delay.
+            retries (Optional[int]): Number of retries. Defaults to self._fix_retries.
+
+        Returns:
+            Any: The result of the coroutine.
         """
         if delay is None:
             delay = self._fix_delay
@@ -754,11 +864,14 @@ class Starboard(BaseCog):
                 raise last_exc
             return None
 
-    async def _status_editor(self, status_message: discord.Message, progress: dict, stop_event: asyncio.Event, interval: float = 30.0):
+    async def _status_editor(self, status_message: discord.Message, progress: Dict[str, Any], stop_event: asyncio.Event, interval: float = 30.0) -> None:
         """Edit a single status message every `interval` seconds until `stop_event` is set.
 
-        `progress` is a mutable dict with keys 'done', 'total', and 'elapsed' (seconds).
-        The function will mock elapsed time by incrementing `progress['elapsed']` by `interval` each tick.
+        Args:
+            status_message (discord.Message): The message to edit.
+            progress (Dict[str, Any]): A mutable dict with keys 'done', 'total', and 'elapsed'.
+            stop_event (asyncio.Event): Event to signal stopping.
+            interval (float): Update interval in seconds.
         """
         try:
             while not stop_event.is_set():
@@ -777,7 +890,12 @@ class Starboard(BaseCog):
             return
 
     @commands.Cog.listener()
-    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        """Handles raw reaction remove events to check for starboard deletions.
+
+        Args:
+            payload (discord.RawReactionActionEvent): The reaction event payload.
+        """
         if not payload.guild_id:
             return
 
@@ -826,5 +944,11 @@ class Starboard(BaseCog):
             # In any case, the entry is now invalid.
             await self.db_manager.remove_starboard_entry(payload.message_id)
 
-async def setup(bot: SanchoBot):
+
+async def setup(bot: SanchoBot) -> None:
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(Starboard(bot))

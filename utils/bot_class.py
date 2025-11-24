@@ -1,4 +1,5 @@
-"""
+"""utils/bot_class.py
+
 Defines the custom bot class, `SanchoBot`, which extends `discord.ext.commands.Bot`.
 
 This class is the central hub of the bot's functionality. It is responsible for:
@@ -7,34 +8,40 @@ This class is the central hub of the bot's functionality. It is responsible for:
 - Processing incoming messages to dispatch both standard and NLP-based commands.
 - Encapsulating bot-specific configuration and helper methods.
 """
+
 from __future__ import annotations
-import discord
-from discord.ext import commands
-from discord import app_commands
-from typing import Optional, TYPE_CHECKING, Any, Protocol, runtime_checkable
-from collections.abc import Callable
+
 import asyncio
 import logging
-import config
-import time
 import re
-from utils.lifecycle import startup_handler
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+import config
 from utils.extensions import discover_cogs
+from utils.lifecycle import startup_handler
 
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
 if TYPE_CHECKING:
     from utils.database import DatabaseManager
 
-class SanchoBot(commands.Bot):
-    """
-    The main bot class, extending `discord.ext.commands.Bot` to integrate
-    custom functionality and centralize event handling.
 
-    This class holds shared resources like the database manager and defines the
+class SanchoBot(commands.Bot):
+    """The main bot class, extending `discord.ext.commands.Bot`.
+
+    This class integrates custom functionality and centralizes event handling.
+    It holds shared resources like the database manager and defines the
     core logic for command processing, including the NLP dispatcher.
     """
+
     def __init__(self, **kwargs):
+        """Initializes the SanchoBot instance."""
         # Define intents directly within the class for encapsulation.
         intents = discord.Intents.default()
         intents.messages = True
@@ -64,13 +71,15 @@ class SanchoBot(commands.Bot):
         async def send(self, *args, **kwargs) -> Any: ...
 
     async def dispatch_nlp(self, ctx: "SanchoBot.ContextLike", query: str) -> None:
-        """Dispatch a natural-language `query` using the same NLP dispatcher logic
-        that `on_message` uses. This allows hybrid/slash commands to forward a
-        query while preserving the original context (`ctx`).
+        """Dispatch a natural-language `query` using the NLP dispatcher logic.
 
-        This method intentionally mirrors the command-dispatch portion of the
-        `on_message` pipeline and will call the matched cog method with
-        `await method(ctx, query=query)`.
+        This allows hybrid/slash commands to forward a query while preserving
+        the original context (`ctx`). This method intentionally mirrors the
+        command-dispatch portion of the `on_message` pipeline.
+
+        Args:
+            ctx (SanchoBot.ContextLike): The context-like object.
+            query (str): The natural language query to dispatch.
         """
         try:
             q_lower = query.lower()
@@ -94,11 +103,17 @@ class SanchoBot(commands.Bot):
     def find_nlp_handler(self, query_lower: str) -> Optional[tuple[object, Callable[..., Any], str]]:
         """Find the best matching NLP handler for `query_lower`.
 
-        Returns a tuple `(cog, method, method_name)` or `None` if no handler
-        matched. This centralizes the NLP matching logic so both `on_message`
+        This centralizes the NLP matching logic so both `on_message`
         and `dispatch_nlp` can reuse it.
+
+        Args:
+            query_lower (str): The query string in lowercase.
+
+        Returns:
+            Optional[tuple[object, Callable[..., Any], str]]: A tuple containing
+            (cog, method, method_name) or `None` if no handler matched.
         """
-        # Step 1: Find a candidate per group (first matching command in a group)
+        # Find a candidate per group (first matching command in a group)
         candidate_commands = []
         for group in config.NLP_COMMANDS:
             for keywords, cog_name, method_name in group:
@@ -118,7 +133,7 @@ class SanchoBot(commands.Bot):
         if not candidate_commands:
             return None
 
-        # Step 2: Pick the earliest match across groups
+        # Pick the earliest match across groups
         best_command = min(candidate_commands, key=lambda x: x['match_pos'])
         cog_name = best_command['cog']
         method_name = best_command['method']
@@ -136,15 +151,20 @@ class SanchoBot(commands.Bot):
         return cog, method, method_name
 
     class InteractionContextAdapter:
-        """A thin adapter that exposes the subset of `commands.Context` used by
-        NLP handlers, backed by a `discord.Interaction`.
+        """A thin adapter that exposes the subset of `commands.Context` used by NLP handlers.
 
-        Many NLP handlers expect `ctx.author`, `ctx.guild`, `ctx.channel`, and
-        `await ctx.send(...)`. This adapter provides those attributes and maps
-        `send` to the interaction response/followup so slash commands can use the
-        same handlers without modification.
+        Backed by a `discord.Interaction`. Many NLP handlers expect `ctx.author`,
+        `ctx.guild`, `ctx.channel`, and `await ctx.send(...)`. This adapter
+        provides those attributes and maps `send` to the interaction response/followup.
         """
+
         def __init__(self, bot: "SanchoBot", interaction: discord.Interaction):
+            """Initializes the InteractionContextAdapter.
+
+            Args:
+                bot (SanchoBot): The bot instance.
+                interaction (discord.Interaction): The interaction to adapt.
+            """
             self.bot = bot
             self.interaction = interaction
             self.author = interaction.user
@@ -153,8 +173,11 @@ class SanchoBot(commands.Bot):
             self.channel = interaction.channel
 
         async def _send_to_channel(self, *args, **kwargs):
-            """Helper to attempt sending via the channel if possible and return
-            the sent Message when available."""
+            """Helper to attempt sending via the channel if possible.
+
+            Returns:
+                Optional[discord.Message]: The sent message, or None if failed.
+            """
             try:
                 if self.channel and isinstance(self.channel, discord.abc.Messageable):
                     return await self.channel.send(*args, **kwargs)
@@ -164,10 +187,13 @@ class SanchoBot(commands.Bot):
             return None
 
         async def send(self, *args, **kwargs):
-            # Prefer sending directly to the channel (makes behavior match
-            # prefix-based flows). When using slash commands we defer the
-            # interaction, so sending to the channel is safe. If channel-based
-            # sending fails, fall back to the interaction response/followup.
+            """Sends a message using the interaction or channel.
+
+            Prefer sending directly to the channel (makes behavior match
+            prefix-based flows). When using slash commands we defer the
+            interaction, so sending to the channel is safe. If channel-based
+            sending fails, fall back to the interaction response/followup.
+            """
             try:
                 sent = await self._send_to_channel(*args, **kwargs)
                 if sent is not None:
@@ -207,7 +233,7 @@ class SanchoBot(commands.Bot):
                         # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
                         await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
                     except Exception:
-                        # If sending the ephemeral message fails, try to defer as a fallback. (honest to god, I hate this)
+                        # If sending the ephemeral message fails, try to defer as a fallback.
                         try:
                             await interaction.response.defer()
                         except Exception:
@@ -237,9 +263,13 @@ class SanchoBot(commands.Bot):
             logging.exception('Failed to register NLP application command')
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
-        """
-        Global error handler for all standard `discord.ext.commands`.
+        """Global error handler for all standard `discord.ext.commands`.
+
         This catches errors from commands defined with `@bot.command()`.
+
+        Args:
+            ctx (commands.Context): The command context.
+            error (commands.CommandError): The error that occurred.
         """
         # Ignore `CommandNotFound` errors, as the `on_message` handler will treat
         # these as potential NLP commands. This prevents duplicate error messages.
@@ -278,9 +308,12 @@ class SanchoBot(commands.Bot):
             logging.error(f"Failed to send error message to channel {ctx.channel.id}")
 
     async def on_message(self, message: discord.Message) -> None:
-        """
-        The main event handler for processing all incoming messages.
+        """The main event handler for processing all incoming messages.
+
         This function serves as the core dispatcher for NLP-based commands.
+
+        Args:
+            message (discord.Message): The incoming message.
         """
         # Ignore messages from the bot itself to prevent loops.
         if message.author.bot:
@@ -337,15 +370,22 @@ class SanchoBot(commands.Bot):
             await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
 
     def _get_case_insensitive_prefix(self, bot: "SanchoBot", message: discord.Message) -> list[str]:
-        """
-        A callable that returns a list of prefixes, making them case-insensitive.
+        """A callable that returns a list of prefixes, making them case-insensitive.
+
         This is a method of the bot class for better encapsulation.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+            message (discord.Message): The message to check.
+
+        Returns:
+            list[str]: A list of matching prefixes.
         """
         content_lower = message.content.lower()
-        
+
         # Find all prefixes that match the start of the message.
         matching_prefixes = [p for p in config.BOT_PREFIX if content_lower.startswith(p.lower())]
-        
+
         if matching_prefixes:
             # Sort by length descending to handle overlapping prefixes (e.g., '!' and '!!')
             matching_prefixes.sort(key=len, reverse=True)
@@ -357,8 +397,8 @@ class SanchoBot(commands.Bot):
         return commands.when_mentioned(bot, message)
 
     async def close(self) -> None:
-        """
-        Overrides the default close method to ensure a clean shutdown.
+        """Overrides the default close method to ensure a clean shutdown.
+
         The actual shutdown message is handled by the signal handler in `shutdown_logic.py`.
         """
         # Cancel the console listener task if it's running
@@ -370,9 +410,9 @@ class SanchoBot(commands.Bot):
         logging.info("Connection closed.")
 
     async def reload_all_cogs(self):
-        """
-        Asynchronously discovers and reloads all cogs, handling new, removed,
-        and updated extensions.
+        """Asynchronously discovers and reloads all cogs.
+
+        Handles new, removed, and updated extensions.
         """
         logging.info("Starting cog reload process...")
 
@@ -393,8 +433,7 @@ class SanchoBot(commands.Bot):
         cogs_to_unload = loaded_cogs - discovered_cogs
         cogs_to_reload = loaded_cogs.intersection(discovered_cogs)
 
-        # --- Perform actions ---
-        # 1. Unload cogs that have been removed.
+        # Unload cogs that have been removed.
         for extension in cogs_to_unload:
             try:
                 await self.unload_extension(extension)
@@ -402,7 +441,7 @@ class SanchoBot(commands.Bot):
             except Exception:
                 logging.error(f'Failed to unload extension {extension}.', exc_info=True)
 
-        # 2. Load new cogs that have been added.
+        # Load new cogs that have been added.
         for extension in cogs_to_load:
             try:
                 await self.load_extension(extension)
@@ -410,7 +449,7 @@ class SanchoBot(commands.Bot):
             except Exception:
                 logging.error(f'Failed to load new extension {extension}.', exc_info=True)
 
-        # 3. Reload existing cogs to apply any changes.
+        # Reload existing cogs to apply any changes.
         for extension in cogs_to_reload:
             try:
                 await self.reload_extension(extension)

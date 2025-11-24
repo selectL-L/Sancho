@@ -1,5 +1,4 @@
-"""
-cogs/image.py
+"""cogs/image.py
 
 This cog contains commands for basic image manipulation, such as resizing
 and converting formats. It uses the Pillow (PIL) library for processing.
@@ -8,33 +7,47 @@ A key feature of this cog is the use of `asyncio.to_thread` to run the
 synchronous, blocking image processing functions in a separate thread. This
 prevents the bot's main event loop from being blocked, ensuring the bot
 remains responsive while handling potentially time-consuming image operations.
-(And trust me, this is a requirement)
 """
-import discord
-from discord.ext import commands
+
+import asyncio
 import io
 import re
-import asyncio
+from typing import Optional, Tuple
+
+import discord
+from discord.ext import commands
 from PIL import Image as PILImage
-from typing import Optional
 
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
+
 
 class ImageCog(BaseCog):
     """A cog for handling image manipulation commands."""
 
     def __init__(self, bot: SanchoBot):
+        """Initializes the ImageCog.
+
+        Args:
+            bot (SanchoBot): The bot instance.
+        """
         super().__init__(bot)
 
     async def _find_image_attachment(self, message: discord.Message) -> Optional[discord.Attachment]:
-        """Finds a valid image attachment in the message or its reply context."""
-        # 1. Check attachments on the current message
+        """Finds a valid image attachment in the message or its reply context.
+
+        Args:
+            message (discord.Message): The message to check.
+
+        Returns:
+            Optional[discord.Attachment]: The found attachment, or None.
+        """
+        # Check current message attachments.
         for attachment in message.attachments:
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 return attachment
 
-        # 2. If it's a reply, check the referenced message's attachments.
+        # Check reply attachments.
         if message.reference and isinstance(message.reference.resolved, discord.Message):
             for attachment in message.reference.resolved.attachments:
                 if attachment.content_type and attachment.content_type.startswith('image/'):
@@ -43,9 +56,14 @@ class ImageCog(BaseCog):
         return None
 
     async def resize(self, ctx: commands.Context, *, query: str) -> None:
-        """
-        NLP handler for resizing an image. It parses dimensions (e.g., "500x500")
-        from the query and resizes the attached or replied-to image.
+        """NLP handler for resizing an image.
+
+        It parses dimensions (e.g., "500x500") from the query and resizes the
+        attached or replied-to image.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string containing dimensions.
         """
         # Parse dimensions like "500x500" or "500 x 500" from the query.
         match = re.search(r'(\d+)\s*x\s*(\d+)', query)
@@ -64,10 +82,18 @@ class ImageCog(BaseCog):
             await ctx.send("Please attach an image or reply to a message with an image to resize.")
             return
 
-        def _processing_thread(image_bytes: bytes, size: tuple[int, int]) -> io.BytesIO:
-            """
-            Contains the synchronous, blocking image processing code. This function
-            is intended to be run in a separate thread.
+        def _processing_thread(image_bytes: bytes, size: Tuple[int, int]) -> io.BytesIO:
+            """Contains the synchronous, blocking image processing code.
+
+            This function is intended to be run in a separate thread via asyncio.to_thread
+            to avoid blocking the main event loop during heavy image operations.
+
+            Args:
+                image_bytes (bytes): The raw image data.
+                size (Tuple[int, int]): The target width and height.
+
+            Returns:
+                io.BytesIO: The resized image data.
             """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
                 img = img.resize(size)
@@ -95,9 +121,14 @@ class ImageCog(BaseCog):
             await ctx.send("Sorry, I encountered an error trying to resize that image.")
 
     async def convert(self, ctx: commands.Context, *, query: str) -> None:
-        """
-        NLP handler for converting an image's format. It parses the target format
-        (e.g., "png") from the query and converts the image.
+        """NLP handler for converting an image's format.
+
+        It parses the target format (e.g., "png") from the query and converts
+        the image.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's input string containing the target format.
         """
         # Alias 'jpg' to 'jpeg' to handle common user input.
         query = re.sub(r'\bjpg\b', 'jpeg', query, flags=re.IGNORECASE)
@@ -123,9 +154,17 @@ class ImageCog(BaseCog):
             return
 
         def _processing_thread(image_bytes: bytes, format_str: str) -> io.BytesIO:
-            """
-            Contains the synchronous, blocking image conversion code. This function
-            is intended to be run in a separate thread.
+            """Contains the synchronous, blocking image conversion code.
+
+            This function is intended to be run in a separate thread via asyncio.to_thread
+            to avoid blocking the main event loop during heavy image operations.
+
+            Args:
+                image_bytes (bytes): The raw image data.
+                format_str (str): The target format (e.g., 'PNG', 'JPEG').
+
+            Returns:
+                io.BytesIO: The converted image data.
             """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
                 # Handle transparency for formats that don't support it (like JPEG and PDF).
@@ -155,6 +194,11 @@ class ImageCog(BaseCog):
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to convert that image.")
 
-async def setup(bot: SanchoBot):
-    """Sets up the Image cog."""
+
+async def setup(bot: SanchoBot) -> None:
+    """Standard setup function to add the cog to the bot.
+
+    Args:
+        bot (SanchoBot): The bot instance.
+    """
     await bot.add_cog(ImageCog(bot))
