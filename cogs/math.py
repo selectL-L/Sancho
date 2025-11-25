@@ -17,7 +17,7 @@ import math
 import operator as op
 import random
 import re
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -87,13 +87,13 @@ def safe_eval_math(expr: str) -> float:
             op_type = type(node.op)
             if op_type not in ALLOWED_OPERATORS:
                 raise ValueError(f"Operator not allowed: {op_type.__name__}")
-            
+
             # Recursively evaluate the child nodes.
             if isinstance(node, ast.BinOp):
                 left = _eval_node(node.left)
                 right = _eval_node(node.right)
                 return ALLOWED_OPERATORS[op_type](left, right)
-            else: # UnaryOp (e.g., -5)
+            else:  # UnaryOp (e.g., -5)
                 operand = _eval_node(node.operand)
                 return ALLOWED_OPERATORS[op_type](operand)
         # Handles function calls (e.g., sin(pi)).
@@ -101,7 +101,7 @@ def safe_eval_math(expr: str) -> float:
             if not isinstance(node.func, ast.Name) or node.func.id not in ALLOWED_FUNCTIONS:
                 func_name = node.func.id if isinstance(node.func, ast.Name) else 'unknown'
                 raise ValueError(f"Function not allowed: {func_name}")
-            
+
             args = [_eval_node(arg) for arg in node.args]
             return ALLOWED_FUNCTIONS[node.func.id](*args)
         # Handles named constants (e.g., pi, e).
@@ -109,9 +109,9 @@ def safe_eval_math(expr: str) -> float:
             if node.id not in ALLOWED_NAMES:
                 raise ValueError(f"Name not allowed: {node.id}")
             return ALLOWED_NAMES[node.id]
-        
+
         raise TypeError(f"Unsupported node type: {type(node).__name__}")
-    
+
     return _eval_node(tree)
 
 
@@ -160,7 +160,7 @@ class Math(BaseCog):
             if sp_match:
                 sp = int(sp_match.group(1))
                 work_query = work_query.replace(sp_match.group(0), " ", 1)
-            
+
             base_match = re.search(r'(?:(\d+)\s+\b(base\s*power|bp)\b|\b(base\s*power|bp)\b\s+(\d+))', work_query, re.IGNORECASE)
             if base_match:
                 base_power = int(base_match.group(1) or base_match.group(4))
@@ -203,7 +203,7 @@ class Math(BaseCog):
                 await ctx.send("How many coins?")
                 msg = await self.bot.wait_for('message', check=check, timeout=30.0)
                 num_coins = int(msg.content)
-            
+
             if sp is None:
                 await ctx.send("SP? (optional, press enter to skip)")
                 msg = await self.bot.wait_for('message', check=check, timeout=30.0)
@@ -230,14 +230,14 @@ class Math(BaseCog):
                     coin_results_display.append("H")
                 else:
                     coin_results_display.append("T")
-            
+
             coin_total = heads_count * coin_power
             final_result = base_power + coin_total + modifier
 
             # --- 5. Format and Send Response ---
             coin_part_str = f"{heads_count}H {len(coin_results_display) - heads_count}T"
             coin_value_str = f"+{coin_power}" if coin_power >= 0 else str(coin_power)
-            
+
             sp_info = f" at **{sp} SP** (Heads Chance: **{heads_prob:.0%}**)" if sp != 0 else ""
 
             description = (
@@ -328,7 +328,7 @@ class Math(BaseCog):
             ),
             inline=False
         )
-        
+
         embed.set_footer(text="Expressions are parsed for safety. Only the functions and constants listed are available.")
 
         await ctx.send(embed=embed)
@@ -354,9 +354,9 @@ class Math(BaseCog):
             token_pattern = re.compile(
                 r'([a-zA-Z_][a-zA-Z0-9_]*|\d+(?:\.\d+)?|\*\*|[+\-*/%()]|\S)'
             )
-            
+
             tokens = token_pattern.findall(original_query)
-            
+
             valid_tokens = []
             for token in tokens:
                 if token in ALLOWED_FUNCTIONS or \
@@ -373,7 +373,7 @@ class Math(BaseCog):
 
             # Run evaluation in thread.
             result = await asyncio.to_thread(safe_eval_math, processed_query)
-            
+
             # Format result, removing trailing zeros.
             if result == int(result):
                 result_display = str(int(result))
@@ -405,7 +405,7 @@ class Math(BaseCog):
         num_dice_str, num_sides_str = match.group(1), match.group(2)
         num_dice = int(num_dice_str) if num_dice_str else 1
         num_sides = int(num_sides_str)
-        
+
         keep_mode = (match.group(3) or '').lower()
         keep_count = int(match.group(4)) if match.group(4) else 0
 
@@ -445,7 +445,7 @@ class Math(BaseCog):
         # --- Standard Roll Logic ---
         rolls = rolls1
         description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
-        
+
         # Apply keep/drop logic.
         kept_rolls = rolls
         if keep_mode in ('kh', 'kl') and keep_count > 0:
@@ -468,12 +468,12 @@ class Math(BaseCog):
             str: The processed query string.
         """
         PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
-        
+
         while match := PARENTHESES_REGEX.search(query):
             expression = match.group(1)
             # Skip dice/coin notation.
             if 'd' in expression or 'c' in expression:
-                break 
+                break
 
             try:
                 # Evaluate in thread.
@@ -507,16 +507,16 @@ class Math(BaseCog):
 
         # Heads probability based on SP.
         heads_prob = sp / 100.0
-        
+
         def _flip_coins_thread() -> List[int]:
             """Thread-safe coin flips."""
             return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
 
         flips = await asyncio.to_thread(_flip_coins_thread)
         heads_count = sum(flips)
-        
+
         flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
-        
+
         description = f"{match.group(0)}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T)"
         return heads_count, description
 
@@ -537,7 +537,7 @@ class Math(BaseCog):
         match = DICE_NOTATION_REGEX.fullmatch(dice_notation.strip())
         if not match:
             raise ValueError(f"Invalid simple dice notation provided: '{dice_notation}'")
-        
+
         roll_sum, _ = await self._roll_and_parse_notation(match)
         return roll_sum
 
@@ -553,13 +553,13 @@ class Math(BaseCog):
             # --- 1. Sanitize and Detect Keywords ---
             # Standardize query.
             original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
-            
+
             # Check for advantage/disadvantage.
             adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
             dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
-            
+
             # Extract SP (default 50).
-            sp = 50 # Default to 50%
+            sp = 50  # Default to 50%
             sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
             if sp_match:
                 sp = int(sp_match.group(2))
@@ -578,9 +578,9 @@ class Math(BaseCog):
             coin_pattern = r'(\d*)c'
             number_pattern = r'\d+(\.\d+)?'
             operator_pattern = r'\*\*|[+\-*\/()]'
-            
+
             full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
-            
+
             tokens = full_pattern.findall(original_query)
             # Flatten regex groups.
             processed_query = "".join([match[0] for match in tokens])
@@ -596,7 +596,7 @@ class Math(BaseCog):
             # Resolve coins then dice.
             roll_descriptions = []
             final_query = processed_query
-            
+
             while match := COIN_FLIP_REGEX.search(final_query):
                 roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
                 roll_descriptions.append(description)
@@ -621,7 +621,7 @@ class Math(BaseCog):
                             # The lambda is more explicit for the type checker and strip() handles potential whitespace.
                             result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
                         except (ValueError, TypeError):
-                             # Handle pre-summed coin results.
+                            # Handle pre-summed coin results.
                             result_display = result_str.split(' ')[0]
 
                     response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
@@ -633,7 +633,7 @@ class Math(BaseCog):
                 else:
                     await ctx.send("Please specify what to roll!")
                     return
-            
+
             # Evaluate remaining expression.
             result = safe_eval_math(final_query)
             result_display = int(result) if result == int(result) else f"{result:.2f}"
@@ -643,18 +643,18 @@ class Math(BaseCog):
             # Format skill-triggered rolls.
             if skill_info:
                 display_formula = query.replace('(', '').replace(')', '').strip()
-                
+
                 # Handle reply targets.
                 if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
                     target_user = ctx.message.reference.resolved.author
                     if target_user != ctx.author and not target_user.bot:
                         if skill_info['skill_type'] == 'attack':
                             header = f"{ctx.author.mention} attacked {target_user.mention} with **{skill_info['name']}**"
-                        else: # defense
+                        else:  # defense
                             header = f"{ctx.author.mention} defended against {target_user.mention} with **{skill_info['name']}**"
                         response_parts.append(header)
                         response_parts.append(f"`{display_formula}`")
-                
+
                 # Handle untargeted skills.
                 else:
                     response_parts.append(f"**{skill_info['name']}**")
@@ -663,7 +663,7 @@ class Math(BaseCog):
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
             # Add roll breakdown.
             response_parts.extend(roll_descriptions)
-            
+
             response = "\n".join(response_parts)
             if len(response) > 3500:
                 await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")

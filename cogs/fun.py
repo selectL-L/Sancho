@@ -5,15 +5,13 @@ It includes commands like a magic 8-ball and other simple, interactive features.
 """
 
 import asyncio
-import logging
 import os
 import random
 import re
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Dict, List, cast
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -75,7 +73,7 @@ class Fun(BaseCog):
                 if not image_file:
                     self.logger.error(f"Image command '{command}' is missing 'file' in its configuration.")
                     return
-                
+
                 file_path = os.path.join(config.ASSETS_PATH, image_file)
                 await ctx.reply(file=discord.File(file_path))
                 self.logger.info(f"Image command '{command}' used by {ctx.author}.")
@@ -85,7 +83,7 @@ class Fun(BaseCog):
                 if not content:
                     self.logger.error(f"Text command '{command}' is missing 'content' in its configuration.")
                     return
-                
+
                 await ctx.reply(content)
                 self.logger.info(f"Text command '{command}' used by {ctx.author}.")
 
@@ -119,7 +117,7 @@ class Fun(BaseCog):
     async def cog_unload(self) -> None:
         """Clean up tasks when the cog is unloaded."""
         self.logger.info(f"Unloading Fun cog. Cancelling {len(self.bod_timeout_tasks)} BOD timeout tasks.")
-        
+
         # Create a list of tasks to cancel
         tasks_to_cancel = list(self.bod_timeout_tasks.values())
         if not tasks_to_cancel:
@@ -131,7 +129,7 @@ class Fun(BaseCog):
 
         # Wait for all tasks to acknowledge cancellation
         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-        
+
         self.logger.info("All BOD timeout tasks have been successfully cancelled and cleaned up.")
 
     async def _handle_bod_session_timeout(self, user_id: int, channel_id: int) -> None:
@@ -143,7 +141,7 @@ class Fun(BaseCog):
         """
         try:
             await asyncio.sleep(20 * 60)
-            
+
             db_manager = self.bot.db_manager
             if not db_manager:
                 self.logger.error(f"BOD session timeout: DatabaseManager not found for user {user_id}.")
@@ -166,13 +164,13 @@ class Fun(BaseCog):
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
                 await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
-                reply_message += f"\n**Congratulations! You set a new personal best!**"
+                reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
-            
+
             # Reset chain, start the 12-hour cooldown from now.
-            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id) 
-            
+            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id)
+
             if channel and isinstance(channel, discord.TextChannel):
                 await channel.send(f"<@{user_id}>, {reply_message}")
             else:
@@ -252,7 +250,7 @@ class Fun(BaseCog):
                 roll_result = 4
             else:
                 roll_result = await math_cog.get_roll_result("1d4")
-            
+
             if roll_result == 4:
                 # Successful roll, continue the chain
                 new_chain = current_chain + 1
@@ -274,7 +272,7 @@ class Fun(BaseCog):
                     # The task is removed from the dict in the finally block of the task handler
 
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_fail.jpg')
-                
+
                 if current_chain > 0:
                     reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
                     self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
@@ -288,9 +286,9 @@ class Fun(BaseCog):
                 else:
                     reply_message = f"You rolled a {roll_result}. Yujin has collapsed!"
                     self.logger.info(f"BOD chain for user {user_id} failed at chain 0 with a roll of {roll_result}.")
-                
+
                 # Reset chain and start the 12-hour cooldown from now.
-                await db_manager.update_bod_usage(user_id, int(current_time), 0, ctx.channel.id) 
+                await db_manager.update_bod_usage(user_id, int(current_time), 0, ctx.channel.id)
                 await ctx.reply(reply_message, file=discord.File(file_path))
 
         except FileNotFoundError as e:
@@ -299,7 +297,6 @@ class Fun(BaseCog):
         except Exception as e:
             await ctx.reply("Something went wrong with the dice roll. Please try again.")
             self.logger.error(f"Error in Fun.bod: {e}", exc_info=True)
-
 
     async def eight_ball(self, ctx: commands.Context, *, query: str) -> None:
         """NLP handler for the 8-ball command.
@@ -369,7 +366,7 @@ class Fun(BaseCog):
 
         if self.has_cleaned_up_chains:
             return
-        
+
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
         await asyncio.sleep(2)
@@ -404,13 +401,13 @@ class Fun(BaseCog):
 
             user = self.bot.get_user(user_id)
             user_name = user.display_name if user else "User"
-            
+
             reply_message = f"It looks like I had to restart or reload, which has unfortunately broken your chain of {current_chain}."
-            
+
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
                 await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
-                reply_message += f"\n**However, you set a new personal best! Congratulations!**"
+                reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
 
@@ -456,7 +453,7 @@ class Fun(BaseCog):
             rank = i + 1
             user_name = entry['user_name']
             chain = entry['best_chain']
-            
+
             if rank == 1:
                 board_string += f"🥇 **{user_name}** - Chain of **{chain}**\n"
             elif rank == 2:
@@ -465,16 +462,16 @@ class Fun(BaseCog):
                 board_string += f"🥉 **{user_name}** - Chain of **{chain}**\n"
             else:
                 board_string += f"**{rank}.** {user_name} - Chain of {chain}\n"
-        
+
         embed.add_field(name="Top 10", value=board_string, inline=False)
-        
+
         # Add user's rank if they are not in the top 10
         user_id = ctx.author.id
-        user_in_top_10 = any(entry['user_name'] == ctx.author.display_name for entry in leaderboard_data[:10])
+        user_in_top_10 = any(entry['user_id'] == user_id for entry in leaderboard_data[:10])
 
         if not user_in_top_10:
             for i, entry in enumerate(leaderboard_data):
-                if entry['user_name'] == ctx.author.display_name:
+                if entry['user_id'] == user_id:
                     rank = i + 1
                     chain = entry['best_chain']
                     embed.add_field(

@@ -16,7 +16,6 @@ Key Features:
   command prefixes for the server it's being used in.
 """
 
-import logging
 from typing import Optional
 
 import discord
@@ -58,7 +57,7 @@ class Help(BaseCog):
         self.logger.info(f"Help command used by {ctx.author} for command: {command_name or 'general'}")
         if command_name:
             command = self.bot.get_command(command_name)
-            
+
             should_show = False
             if command:
                 if not command.hidden:
@@ -114,7 +113,7 @@ class Help(BaseCog):
                 self.logger.info(f"Extracted parameter descriptions: {param_descriptions}")
             else:
                 self.logger.warning(f"Could not find a matching app command for '{command.name}'.")
-                
+
                 # Fallback to reading the decorator directly from the callback
                 if hasattr(command.callback, '__discord_app_commands_param_description__'):
                     self.logger.info(f"Falling back to reading decorator directly for '{command.name}'.")
@@ -132,7 +131,7 @@ class Help(BaseCog):
             signature = f"{ctx.prefix}{command.name} {command.usage}"
         else:
             signature = f"{ctx.prefix}{command.name} {command.signature}"
-        
+
         embed.add_field(name="Usage", value=f"```{signature}```", inline=False)
 
         # Build arguments field.
@@ -157,7 +156,7 @@ class Help(BaseCog):
                 subcommand_details = []
                 for sub in subcommands:
                     subcommand_details.append(f"**`{sub.name}`**: {sub.short_doc or 'No description'}")
-                
+
                 embed.add_field(
                     name="Subcommands",
                     value="\n".join(subcommand_details),
@@ -175,7 +174,7 @@ class Help(BaseCog):
         # The command_prefix can be a list or a callable. We need to get the
         # specific prefixes for the current context (server/message).
         prefixes = self.bot.command_prefix if isinstance(self.bot.command_prefix, list) else config.BOT_PREFIX
-        
+
         # Format prefixes for display, e.g., "`.s`", "`.sancho`"
         formatted_prefixes = ", ".join(f"`{p.strip()}`" for p in prefixes)
         # Get the first prefix to use in examples.
@@ -216,7 +215,7 @@ class Help(BaseCog):
                             current_chunk += command
                     if current_chunk:
                         chunks.append(current_chunk)
-                    
+
                     for i, chunk in enumerate(chunks):
                         embed.add_field(
                             name=f"**{cog.qualified_name} Commands! (Part {i+1})**",
@@ -229,7 +228,7 @@ class Help(BaseCog):
                         value=value_str,
                         inline=False
                     )
-        
+
         # This section is crucial for explaining the bot's primary functionality.
         # Split into multiple fields to avoid exceeding character limits.
         embed.add_field(

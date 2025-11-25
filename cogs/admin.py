@@ -72,7 +72,7 @@ class StatusView(discord.ui.View):
         next_button = self.children[1]
         if isinstance(next_button, discord.ui.Button):
             next_button.disabled = self.current_page == len(self.user_pages) - 1
-        
+
         await interaction.response.edit_message(
             embed=self.user_pages[self.current_page],
             view=self
@@ -102,7 +102,6 @@ class StatusView(discord.ui.View):
             self.current_page += 1
             await self.update_view(interaction)
 
-
     async def on_timeout(self) -> None:
         """Handles the view timeout by disabling all buttons."""
         for child in self.children:
@@ -130,7 +129,7 @@ class AdminCog(BaseCog):
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
         self.process = psutil.Process()
-        self.process.cpu_percent() # Initialize for accurate subsequent readings
+        self.process.cpu_percent()  # Initialize for accurate subsequent readings
         self.usage_history = []
         self.record_usage.start()
 
@@ -196,7 +195,6 @@ class AdminCog(BaseCog):
             return
         await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
-
 
     @commands.hybrid_command(name="report", hidden=True, description="Display a report of all users' skills and reminders.")
     @commands.is_owner()
@@ -335,17 +333,17 @@ class AdminCog(BaseCog):
             if not self.usage_history:
                 await ctx.send("No historical data recorded yet (updates every 30 mins).")
                 return
-            
+
             lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10}"]
             lines.append("-" * 50)
             for entry in self.usage_history:
                 ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
                 lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f}")
-            
+
             with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_usage_history.txt") as f:
                 f.write("\n".join(lines))
                 temp_path = f.name
-            
+
             await ctx.send("Historical resource usage attached:", file=discord.File(temp_path, filename="usage_history.txt"))
             os.remove(temp_path)
             return
@@ -373,10 +371,10 @@ class AdminCog(BaseCog):
         loaded_cogs = self.bot.extensions.keys()
         total_cogs = len(discover_cogs(config.COGS_PATH))
         cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
-        
+
         # Resource Usage
         memory_info = self.process.memory_info()
-        cpu_usage = self.process.cpu_percent(interval=None) # Use interval=None for non-blocking call
+        cpu_usage = self.process.cpu_percent(interval=None)  # Use interval=None for non-blocking call
         ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
 
         # Create status embed.
@@ -390,23 +388,23 @@ class AdminCog(BaseCog):
         embed.add_field(
             name="Timings",
             value=f"**Gateway:** `{gateway_latency:.2f}ms`\n"
-                  f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
-                  f"**Database:** `{db_latency:.2f}ms`",
+            f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
+            f"**Database:** `{db_latency:.2f}ms`",
             inline=True
         )
 
         embed.add_field(
             name="Status",
             value=f"**Uptime:** `{uptime_str}`\n"
-                  f"**Started:** <t:{start_timestamp}:f>\n"
-                  f"**Cogs Loaded:** `{cogs_status}`",
+            f"**Started:** <t:{start_timestamp}:f>\n"
+            f"**Cogs Loaded:** `{cogs_status}`",
             inline=True
         )
-        
+
         embed.add_field(
             name="Resource Usage",
             value=f"**CPU:** `{cpu_usage:.1f}%`\n"
-                  f"**RAM:** `{ram_usage:.2f} MB`",
+            f"**RAM:** `{ram_usage:.2f} MB`",
             inline=True
         )
 

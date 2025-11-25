@@ -22,7 +22,7 @@ Key Features:
 
 import asyncio
 import re
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
 import discord
 from discord.ext import commands
@@ -81,7 +81,7 @@ class Skills(BaseCog):
             expr_str = DICE_NOTATION_REGEX.sub(max_dice_value, expr_str)
             # Remove keep/drop modifiers as they don't affect the max of the base dice.
             expr_str = re.sub(r'kh\d+|kl\d+', '', expr_str)
-            
+
             # Use the safe evaluation function from the Math cog.
             return int(safe_eval_math(expr_str))
         except Exception as e:
@@ -129,7 +129,7 @@ class Skills(BaseCog):
         max_sides_limit = 100
         max_coins_limit = 80
         max_total_roll_limit = 5000
-        
+
         error_messages = []
 
         for match in dice_matches:
@@ -145,7 +145,7 @@ class Skills(BaseCog):
             num_coins = int(num_coins_str) if num_coins_str else 1
             if num_coins > max_coins_limit:
                 error_messages.append(f"exceeds the **{max_coins_limit}** coins limit")
-        
+
         if error_messages:
             # Join unique error messages
             unique_errors = sorted(list(set(error_messages)))
@@ -177,7 +177,7 @@ class Skills(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
-        
+
         user_skills = await self.db_manager.get_user_skills(ctx.author.id)
         current_skills_count = len(user_skills)
         user_skill_limit = await self.db_manager.get_user_skill_limit(ctx.author.id)
@@ -205,17 +205,17 @@ class Skills(BaseCog):
             while True:
                 await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")
                 name_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
-                
+
                 if name_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
-                
+
                 skill_name = name_msg.content.strip()
-                
+
                 if skill_name.lower() in existing_names_and_aliases:
                     await ctx.send(f"You already have a skill or alias with the name `{skill_name}`. Skill names and aliases must be unique. Please try again.")
                     continue
-                
+
                 break
 
             # --- Step 2: Get Aliases ---
@@ -227,12 +227,12 @@ class Skills(BaseCog):
                 if aliases_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
-                
+
                 aliases_raw = aliases_msg.content.strip()
                 is_valid = True
                 if aliases_raw.lower() != 'none':
                     aliases = [alias.strip() for alias in aliases_raw.split('|') if alias.strip()]
-                    
+
                     # Check for duplicates.
                     newly_added_names = {skill_name.lower()}
                     for alias in aliases:
@@ -241,7 +241,7 @@ class Skills(BaseCog):
                             is_valid = False
                             break
                         newly_added_names.add(alias.lower())
-                
+
                 if is_valid:
                     break
 
@@ -259,28 +259,28 @@ class Skills(BaseCog):
                 if not is_valid:
                     await ctx.send(error_message)
                     continue
-                
+
                 break
 
             # --- Step 4: Get Skill Type ---
             skill_type = ""
             while True:
-                await ctx.send(f"Is this an `attack` or a `defense` skill?")
+                await ctx.send("Is this an `attack` or a `defense` skill?")
                 type_msg = await self.bot.wait_for('message', check=check, timeout=20.0)
                 if type_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
                     return
-                
+
                 skill_type = type_msg.content.strip().lower()
                 if skill_type not in ['attack', 'defense']:
                     await ctx.send("That's not a valid skill type. Please choose `attack` or `defense`.")
                     continue
-                
+
                 break
 
             # --- Step 5: Save to Database ---
             await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type)
-            
+
             confirmation_message = f"✅ Skill saved for you! You can now use `.sancho skill {skill_name}`. Please note your skills are tied to your ID!"
             if aliases:
                 confirmation_message += f"\nIt can also be called by: `{' | '.join(aliases)}`"
@@ -330,7 +330,7 @@ class Skills(BaseCog):
 
         # List of NLP trigger phrases. (Keep in sync with NLP dispatcher logic.)
         trigger_words = ["cast", "skill", "use"]
-        
+
         temp_query = query.strip().lower()
         cleaned_query = ""
         for word in trigger_words:
@@ -359,11 +359,11 @@ class Skills(BaseCog):
                         if s['name'].lower() == name.lower() or name.lower() in aliases:
                             found_skill = s
                             break
-                    
+
                     # Extract modifiers.
                     rest_of_query = cleaned_query[len(name):].strip()
                     break
-            
+
             if found_skill:
                 break
 
@@ -376,10 +376,10 @@ class Skills(BaseCog):
                         cleaned_query = cleaned_query[len(word):].lstrip()
                         stripped_again = True
                         break
-            
+
             if not stripped_again or not cleaned_query:
                 break
-        
+
         if not found_skill:
             await ctx.send(f"I couldn't find the skill: `{cleaned_query}`. Use `.s list skills` to see your available skills.")
             return
@@ -394,7 +394,7 @@ class Skills(BaseCog):
         # Wrap base roll in parens.
         # when modifiers are added. Example: (2d6+2) + 5
         final_roll_query = f"({found_skill['dice_roll']}) {rest_of_query}"
-        
+
         self.logger.info(f"Executing skill '{found_skill['name']}' for {ctx.author.id}. Original query: '{query}', constructed roll: '{final_roll_query}'")
 
         # Delegate to Math cog.
@@ -457,7 +457,7 @@ class Skills(BaseCog):
                 return
 
             updates: Dict[str, Any] = {}
-            
+
             existing_names_and_aliases = set()
             for skill in user_skills:
                 if skill['id'] == skill_to_edit['id']:
@@ -491,7 +491,7 @@ class Skills(BaseCog):
                         if raw_aliases.lower() in ['exit', 'cancel']:
                             await ctx.send("Edit cancelled.")
                             return
-                        
+
                         new_aliases = [a.strip() for a in raw_aliases.split('|') if a.strip()] if raw_aliases.lower() != 'none' else []
                         is_valid = True
                         seen_aliases = set()
@@ -501,7 +501,7 @@ class Skills(BaseCog):
                                 is_valid = False
                                 break
                             seen_aliases.add(alias.lower())
-                        
+
                         if is_valid:
                             updates['aliases'] = new_aliases
                             break
@@ -519,7 +519,7 @@ class Skills(BaseCog):
                         if not is_valid:
                             await ctx.send(error_message)
                             continue
-                        
+
                         updates['dice_roll'] = new_roll
                         break
 
@@ -528,18 +528,18 @@ class Skills(BaseCog):
                         embed = discord.Embed(title="Select Skill Type", description="Is this an `attack` or `defense` skill?", color=discord.Color.blue())
                         options = {"⚔️ Attack": "attack", "🛡️ Defense": "defense"}
                         new_type = await get_selection(ctx, embed, options, timeout=20.0)
-                        
+
                         if not new_type or new_type.lower() in ['exit', 'cancel']:
                             await ctx.send("Edit cancelled.")
                             return
-                        
+
                         new_type = new_type.lower()
                         if new_type not in ['attack', 'defense']:
                             await ctx.send("Invalid type. Please choose `attack` or `defense`.")
                             continue
                         updates['skill_type'] = new_type
                         break
-                
+
                 case _:
                     await ctx.send("Invalid choice. Edit cancelled.")
                     return
@@ -579,7 +579,7 @@ class Skills(BaseCog):
             title=f"{ctx.author.display_name}'s Skills",
             color=discord.Color.blue()
         )
-        
+
         skill_fields = []
         for i, skill in enumerate(skills, 1):
             name = f"**{i}. {skill['name']}**"
@@ -618,7 +618,7 @@ class Skills(BaseCog):
         if not match:
             await ctx.send("Please specify the number of the skill you want to delete. Use `.sancho skill list` to see the numbers.")
             return
-        
+
         skill_num_to_delete = int(match.group(0))
         skills = await self.db_manager.get_user_skills(ctx.author.id)
 
@@ -626,7 +626,7 @@ class Skills(BaseCog):
         if not (1 <= skill_num_to_delete <= len(skills)):
             await ctx.send(f"Invalid number. You only have {len(skills)} skills.")
             return
-        
+
         skill_to_delete = skills[skill_num_to_delete - 1]
         rows_affected = await self.db_manager.delete_skill(ctx.author.id, skill_to_delete['id'])
 

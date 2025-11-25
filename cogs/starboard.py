@@ -27,7 +27,7 @@ import inspect
 import io
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import discord
@@ -83,10 +83,10 @@ class Starboard(BaseCog):
         channel_id_str = await self.db_manager.get_guild_config(guild_id, "starboard_channel_id")
         emoji = await self.db_manager.get_guild_config(guild_id, "starboard_emoji") or self.starboard_emoji
         threshold_str = await self.db_manager.get_guild_config(guild_id, "starboard_threshold")
-        
+
         channel_id = int(channel_id_str) if channel_id_str and channel_id_str.isdigit() else None
         threshold = int(threshold_str) if threshold_str and threshold_str.isdigit() else self.starboard_threshold
-        
+
         return channel_id, emoji, threshold
 
     @commands.hybrid_group(name="starboard", hidden=True, usage="<subcommand>")
@@ -325,7 +325,7 @@ class Starboard(BaseCog):
                 try:
                     logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
                     message = await original_channel.fetch_message(tgt['original_message_id'])
-                    logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author,'id',None)})")
+                    logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author, 'id', None)})")
                     # Only recreate if the message still meets the starboard threshold
                     star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
                     current_count = star_reaction.count if star_reaction else 0
@@ -414,16 +414,16 @@ class Starboard(BaseCog):
                                 if entry.get('original_channel_id'):
                                     ch = self.bot.get_channel(entry['original_channel_id'])
                                     logger.debug(f"Trying stored original_channel {entry['original_channel_id']} to find original message {orig_id}")
-                                    
+
                                     if isinstance(ch, discord.abc.Messageable):
                                         try:
                                             # Bypass rate-limiting in fast mode
                                             if self._fast_mode:
                                                 logger.debug(f"Fast mode: fetching original {orig_id} directly from channel {ch.id}")
-                                                await ch.fetch_message(orig_id) 
+                                                await ch.fetch_message(orig_id)
                                             else:
                                                 logger.debug(f"Rate-limited fetch of original {orig_id} from channel {ch.id}")
-                                                await self._run_rate_limited(ch.fetch_message, orig_id) 
+                                                await self._run_rate_limited(ch.fetch_message, orig_id)
                                             original_found = True
                                             logger.debug(f"Found original {orig_id} in stored channel {entry['original_channel_id']}")
                                         except Exception as e:
@@ -446,10 +446,10 @@ class Starboard(BaseCog):
                                             try:
                                                 if self._fast_mode:
                                                     logger.debug(f"Fast mode: attempting fetch in channel {ch.id} for message {orig_id}")
-                                                    await ch.fetch_message(orig_id) 
+                                                    await ch.fetch_message(orig_id)
                                                 else:
                                                     logger.debug(f"Rate-limited attempt to fetch message {orig_id} in channel {ch.id}")
-                                                    await self._run_rate_limited(ch.fetch_message, orig_id) 
+                                                    await self._run_rate_limited(ch.fetch_message, orig_id)
                                                 original_found = True
                                                 logger.debug(f"Found original {orig_id} in channel {ch.id}")
                                                 break
@@ -516,9 +516,9 @@ class Starboard(BaseCog):
                             if isinstance(ch, discord.abc.Messageable):
                                 try:
                                     if self._fast_mode:
-                                        original_message = await ch.fetch_message(original_id) 
+                                        original_message = await ch.fetch_message(original_id)
                                     else:
-                                        original_message = await self._run_rate_limited(ch.fetch_message, original_id) 
+                                        original_message = await self._run_rate_limited(ch.fetch_message, original_id)
                                     original_channel = ch
                                 except discord.NotFound:
                                     original_message = None
@@ -541,9 +541,9 @@ class Starboard(BaseCog):
                                         continue
                                     try:
                                         if self._fast_mode:
-                                            original_message = await ch.fetch_message(original_id) 
+                                            original_message = await ch.fetch_message(original_id)
                                         else:
-                                            original_message = await self._run_rate_limited(ch.fetch_message, original_id) 
+                                            original_message = await self._run_rate_limited(ch.fetch_message, original_id)
                                         original_channel = ch
                                         break
                                     except discord.NotFound:
@@ -628,7 +628,7 @@ class Starboard(BaseCog):
             channel = self.bot.get_channel(payload.channel_id)
             if not isinstance(channel, discord.TextChannel) or channel.id == starboard_channel_id:
                 return
-                
+
             try:
                 message = await channel.fetch_message(payload.message_id)
             except discord.NotFound:
@@ -642,7 +642,7 @@ class Starboard(BaseCog):
 
             if star_reaction.count >= starboard_threshold:
                 await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
-        
+
         # Clean up lock if no longer needed
         if lock.locked() is False:
             self._locks.pop(payload.message_id, None)
@@ -692,7 +692,7 @@ class Starboard(BaseCog):
         if message.reference and message.reference.message_id and isinstance(message.channel, discord.TextChannel):
             try:
                 replied_to_message = await message.channel.fetch_message(message.reference.message_id)
-                
+
                 # 1. Post the context of the replied-to message.
                 reply_embed, reply_files = await self.create_starboard_embed_and_files(replied_to_message)
                 reply_context_message = await starboard_channel.send(embed=reply_embed, files=reply_files)
@@ -716,7 +716,7 @@ class Starboard(BaseCog):
                 await self.create_single_starboard_post(message, starboard_channel, content)
             except discord.HTTPException as e:
                 logger.error(f"Failed to create two-part starboard post: {e}")
-        
+
         # If it's not a reply, just post it directly
         else:
             await self.create_single_starboard_post(message, starboard_channel, content)
@@ -751,7 +751,7 @@ class Starboard(BaseCog):
         Returns:
             Tuple[discord.Embed, List[discord.File]]: The embed and list of files.
         """
-        
+
         description_parts = []
         files = []
 
@@ -783,7 +783,7 @@ class Starboard(BaseCog):
                                 files.append(discord.File(data, filename=attachment.filename, spoiler=attachment.is_spoiler()))
                     except Exception as e:
                         logger.error(f"Failed to download snapshot attachment for starboard: {e}")
-        
+
         # Handle embeds.
         elif message.embeds:
             embed = message.embeds[0]
@@ -815,7 +815,7 @@ class Starboard(BaseCog):
         new_embed.set_author(name=f"{message.author.display_name} ({message.author.name})", icon_url=message.author.display_avatar.url)
         new_embed.set_footer(text=f"ID: {message.id}")
         new_embed.add_field(name="Original Message", value=f"[Jump to Message]({message.jump_url})", inline=False)
-        
+
         return new_embed, files
 
     async def _run_rate_limited(self, coro_func: Any, *args: Any, delay: Optional[float] = None, retries: Optional[int] = None) -> Any:
@@ -856,7 +856,7 @@ class Starboard(BaseCog):
                     backoff = min(backoff * 2, 30)
                     await asyncio.sleep(wait)
                     continue
-                except Exception as e:
+                except Exception:
                     # Non-http error — re-raise
                     raise
             # If we exhausted retries, raise the last HTTP-related exception
@@ -911,7 +911,7 @@ class Starboard(BaseCog):
         starboard_channel = self.bot.get_channel(starboard_channel_id)
         if not isinstance(starboard_channel, discord.TextChannel):
             return
-        
+
         channel = self.bot.get_channel(payload.channel_id)
         if not isinstance(channel, discord.TextChannel):
             return
@@ -922,9 +922,9 @@ class Starboard(BaseCog):
             star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
             if star_reaction:
                 star_count = star_reaction.count
-            
+
             starboard_message = await starboard_channel.fetch_message(existing_entry['starboard_message_id'])
-            
+
             if star_count < starboard_threshold:
                 await starboard_message.delete()
                 # If there's a related reply context message, delete it too.
@@ -934,7 +934,7 @@ class Starboard(BaseCog):
                         await reply_context_message.delete()
                     except discord.NotFound:
                         logger.warning(f"Starboard reply context message {existing_entry['starboard_reply_id']} not found for deletion.")
-                
+
                 await self.db_manager.remove_starboard_entry(message.id)
             else:
                 content = f"{starboard_emoji} **{star_count}** in <#{message.channel.id}>"

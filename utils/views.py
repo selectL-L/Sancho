@@ -8,6 +8,7 @@ import discord
 import asyncio
 from typing import Optional, Dict, cast
 
+
 class SelectionView(discord.ui.View):
     def __init__(self, ctx, options: Dict[str, str], timeout: float = 30.0):
         super().__init__(timeout=timeout)
@@ -23,9 +24,10 @@ class SelectionView(discord.ui.View):
             await interaction.response.send_message("This menu is not for you.", ephemeral=True)
             return False
         return True
-    
+
     async def on_timeout(self):
         self.stop()
+
 
 class SelectionButton(discord.ui.Button):
     def __init__(self, label: str, value: str):
@@ -38,6 +40,7 @@ class SelectionButton(discord.ui.Button):
         view.value = self.custom_value
         await interaction.response.defer()
         view.stop()
+
 
 async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], timeout: float = 30.0) -> Optional[str]:
     """
@@ -58,7 +61,7 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
     done, pending = await asyncio.wait([view_task, msg_task], return_when=asyncio.FIRST_COMPLETED)
 
     result = None
-    
+
     if view_task in done:
         # View finished (button clicked or timeout)
         if view.value:
@@ -71,11 +74,11 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             result = msg.content.strip()
             view.stop()
         except Exception:
-            pass 
+            pass
 
     for task in pending:
         task.cancel()
-    
+
     # Cleanup / UI Update
     if result and result in options.values():
         # Find the label for this value
@@ -84,7 +87,7 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             if val == result:
                 selected_label = label
                 break
-        
+
         if selected_label:
             # Create a new view with just this button
             view.clear_items()
@@ -92,13 +95,13 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             view.add_item(b)
             try:
                 await message.edit(view=view)
-            except:
+            except Exception:
                 pass
     else:
         # Timeout or invalid selection (not in options) -> Remove buttons
         try:
             await message.edit(view=None)
-        except:
+        except Exception:
             pass
 
     return result

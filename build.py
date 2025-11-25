@@ -1,6 +1,6 @@
 import os
 import sys
-import PyInstaller.__main__
+import PyInstaller.__main__  # type: ignore
 
 # Force UTF-8 output for Windows consoles to support emojis
 if sys.platform == "win32":
@@ -10,6 +10,7 @@ if sys.platform == "win32":
 # Get the absolute path to the workspace root
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+
 def get_hidden_imports():
     """
     Scans the 'cogs' directory and returns a list of module names
@@ -17,14 +18,15 @@ def get_hidden_imports():
     """
     cogs_path = os.path.join(HERE, 'cogs')
     cogs = []
-    
+
     if os.path.exists(cogs_path):
         for filename in os.listdir(cogs_path):
             if filename.endswith('.py') and not filename.startswith('__'):
                 # Convert filename to module path: "fun.py" -> "cogs.fun"
                 cogs.append(f'cogs.{filename[:-3]}')
-    
+
     return cogs
+
 
 def build():
     print("🚀 Starting Sancho Build Process...")
@@ -34,7 +36,7 @@ def build():
     # We find them manually and tell PyInstaller to include them.
     cogs = get_hidden_imports()
     print(f"📦 Found {len(cogs)} cogs to bundle: {', '.join(cogs)}")
-    
+
     hidden_import_args = []
     for cog in cogs:
         hidden_import_args.append(f'--hidden-import={cog}')
@@ -63,6 +65,7 @@ def build():
         print("               to the same directory as the executable for it to run!")
     except Exception as e:
         print(f"\n❌ Build Failed: {e}")
+
 
 if __name__ == '__main__':
     build()

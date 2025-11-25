@@ -76,7 +76,7 @@ print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 
 
 # Core Bot Commands
-    
+
 @bot.command(name="ping", help="Check if the bot is responsive.")
 async def ping(ctx: commands.Context) -> None:
     """Simple ping command to check bot responsiveness.
@@ -121,7 +121,7 @@ async def console_input_handler(bot: SanchoBot) -> None:
             await loop.connect_read_pipe(lambda: protocol, sys.stdin)
             while True:
                 line_bytes = await reader.readline()
-                if not line_bytes: # Reached EOF
+                if not line_bytes:  # Reached EOF
                     break
                 line = line_bytes.decode().strip()
                 if line.lower() == 'exit':
@@ -139,6 +139,7 @@ async def console_input_handler(bot: SanchoBot) -> None:
         # Log other potential errors, e.g., if stdin is closed unexpectedly.
         logging.error(f"Error in console input handler: {e}", exc_info=False)
 
+
 async def main() -> None:
     """The main asynchronous entry point for initializing and running the bot.
 
@@ -148,7 +149,7 @@ async def main() -> None:
         ValueError: If DB_PATH or TOKEN is not configured.
     """
     logging.info("Sancho is starting...")
-    
+
     # Asynchronously initialize the database manager and attach it to the bot.
     # This ensures the database is ready before the bot logs in.
     if config.DB_PATH is None:
@@ -166,12 +167,12 @@ async def main() -> None:
                 logging.info(f"Successfully loaded extension: {extension}")
             except Exception:
                 logging.error(f'Failed to load extension {extension}.', exc_info=True)
-        
+
         if config.TOKEN is None:
             # This check is technically redundant due to the earlier validation,
             # but it satisfies type checkers that TOKEN is not None.
             raise ValueError("TOKEN cannot be None.")
-        
+
         # Start the bot and connect to Discord.
         await bot.start(config.TOKEN)
 

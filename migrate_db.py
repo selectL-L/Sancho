@@ -13,7 +13,7 @@ import os
 import shutil
 import sqlite3
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 # --- Configuration ---
 # Set up basic logging to see the script's progress.
@@ -175,7 +175,7 @@ def migrate_database() -> None:
         # Delete the old DB file before creating the new one.
         if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
-        
+
         with sqlite3.connect(DB_PATH) as new_conn:
             cursor = new_conn.cursor()
             cursor.execute("PRAGMA foreign_keys = ON;")
@@ -225,18 +225,17 @@ def migrate_database() -> None:
                     # Align columns with new schema
                     cursor.execute(f"PRAGMA table_info({table_name})")
                     new_columns = [col[1] for col in cursor.fetchall()]
-                    insert_columns = [col for col in new_columns if col in old_columns]
                     missing_columns = [col for col in new_columns if col not in old_columns]
                     extra_columns = [col for col in old_columns if col not in new_columns]
-                    
+
                     if missing_columns:
                         logging.warning(f"Table '{table_name}' missing columns in old DB: {missing_columns}. Filling with NULL/defaults.")
                     if extra_columns:
                         logging.warning(f"Table '{table_name}' has extra columns in old DB: {extra_columns}. Data will be dropped.")
-                    
+
                     placeholders = ', '.join('?' for _ in new_columns)
                     query = f"INSERT INTO {table_name} ({', '.join(new_columns)}) VALUES ({placeholders})"
-                    
+
                     for row in rows:
                         values = []
                         for col in new_columns:
