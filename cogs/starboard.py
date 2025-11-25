@@ -157,6 +157,7 @@ class Starboard(BaseCog):
             return True
 
         # Present a modal to the caller for explicit confirmation
+        # TODO: Rewrite the modal interaction logic in utils/views.py to be more robust and reusable.
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         modal = FastConfirmModal(future)
 
@@ -224,6 +225,35 @@ class Starboard(BaseCog):
             await ctx.send("This command must be used in a guild.")
             return
 
+        # Safety Gate: Check for invalid entries
+        all_entries = await self.db_manager.get_all_starboard_entries_for_guild(ctx.guild.id)
+        invalid_count = 0
+        for entry in all_entries:
+            if not (entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')):
+                invalid_count += 1
+        
+        if invalid_count > 0:
+            msg = (
+                f"⚠️ **WARNING**: Found {invalid_count} invalid/incomplete starboard entries.\n"
+                "These entries will be **IGNORED** (effectively deleted) during the remake process.\n"
+                "It is highly recommended to run `/starboard fix` first to attempt recovery.\n\n"
+                "Do you want to proceed anyway?"
+            )
+            
+            # Reuse the confirmation logic but with a custom message if possible, 
+            # or just rely on the standard confirmation flow.
+            # Since _confirm_fast_mode is specific to fast mode, let's do a simple confirmation here.
+            
+            await ctx.send(msg)
+            try:
+                def _check(m: discord.Message) -> bool:
+                    return m.author == ctx.author and m.channel == ctx.channel and m.content.strip().lower() in ('yes', 'y', 'confirm')
+
+                await self.bot.wait_for('message', check=_check, timeout=30.0)
+            except asyncio.TimeoutError:
+                await ctx.send("Remake cancelled.")
+                return
+
         if not await self._confirm_fast_mode(ctx, fast):
             return
 
@@ -274,8 +304,10 @@ class Starboard(BaseCog):
 
         await ctx.send("Starting starboard remake...")
         logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
-        # Only remake entries that have complete stored information
-        # (original_message_id, starboard_message_id, guild_id, original_channel_id)
+        
+        # Strict Filter: Only remake entries that have complete stored information
+        # We require original_message_id, starboard_message_id, guild_id, and original_channel_id.
+        # If any are missing, 'fix' should be run first.
         valid_entries = [
             entry for entry in all_entries
             if entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')
@@ -331,22 +363,33 @@ class Starboard(BaseCog):
         logger.info(f"Attempting to recreate {len(recreation_targets)} posts (ignoring current reaction counts)...")
         recreated_count = 0
         failed_count = 0
+        tombstone_count = 0
 
         for tgt in recreation_targets:
             logger.debug(f"Recreation target: {tgt}")
             original_channel = self.bot.get_channel(tgt['original_channel_id'])
+            
+            # If channel is missing, we can't fetch the message -> Tombstone
             if not isinstance(original_channel, discord.TextChannel):
-                logger.warning(f"Could not find original channel {tgt['original_channel_id']}. Skipping message {tgt['original_message_id']}.")
-                failed_count += 1
+                logger.warning(f"Original channel {tgt['original_channel_id']} not found. Creating tombstone for {tgt['original_message_id']}.")
+                tomb = await self._create_tombstone(starboard_channel, tgt['original_message_id'])
+                if tomb:
+                    await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt['guild_id'], tgt['original_channel_id'])
+                    tombstone_count += 1
+                else:
+                    failed_count += 1
                 continue
+
             try:
                 logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
                 message = await original_channel.fetch_message(tgt['original_message_id'])
                 logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author, 'id', None)})")
+                
                 # Only recreate if the message still meets the starboard threshold
                 star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
                 current_count = star_reaction.count if star_reaction else 0
                 logger.debug(f"Original message {message.id} has {current_count} '{starboard_emoji}' reactions; threshold={starboard_threshold}")
+                
                 # If fast mode requested, recreate regardless of the current reaction count
                 if self._fast_mode or (star_reaction and current_count >= starboard_threshold):
                     logger.info(f"Recreating starboard post for original message {message.id}")
@@ -362,10 +405,13 @@ class Starboard(BaseCog):
                 # Original message deleted -> create a tombstone
                 try:
                     logger.info(f"Original message {tgt['original_message_id']} not found — creating tombstone.")
-                    tomb = await starboard_channel.send("🪦")
-                    await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt.get('guild_id'), None)
-                    logger.debug(f"Tombstone created with id {tomb.id} for original {tgt['original_message_id']}")
-                    recreated_count += 1
+                    tomb = await self._create_tombstone(starboard_channel, tgt['original_message_id'])
+                    if tomb:
+                        await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt['guild_id'], tgt['original_channel_id'])
+                        logger.debug(f"Tombstone created with id {tomb.id} for original {tgt['original_message_id']}")
+                        tombstone_count += 1
+                    else:
+                        failed_count += 1
                 except Exception as e:
                     logger.error(f"Failed to create tombstone for missing original {tgt['original_message_id']}: {e}")
                     failed_count += 1
@@ -373,9 +419,17 @@ class Starboard(BaseCog):
                 logger.error(f"Failed to recreate starboard post for message {tgt['original_message_id']}: {e}")
                 failed_count += 1
 
-        await ctx.send(f"Starboard remake complete. Recreated {recreated_count} posts. Failed to recreate {failed_count} posts.")
+        await ctx.send(f"Starboard remake complete. Recreated: {recreated_count}, Tombstones: {tombstone_count}, Failed: {failed_count}.")
         # Reset fast mode to avoid affecting future operations
         self._fast_mode = False
+
+    async def _create_tombstone(self, starboard_channel: discord.TextChannel, original_message_id: int) -> Optional[discord.Message]:
+        """Creates a tombstone message for a lost original message."""
+        try:
+            return await starboard_channel.send(f"🪦 Original Message {original_message_id} Lost")
+        except Exception as e:
+            logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
+            return None
 
     async def _fix_impl(self, ctx: commands.Context) -> None:
         """Implementation of the fix logic."""
@@ -402,7 +456,7 @@ class Starboard(BaseCog):
         fixed_count = 0
         failed_count = 0
         verified_count = 0
-        missing_reports = []
+        tombstone_count = 0
 
         # Start a periodic status notifier so the caller sees progress for long runs
         stop_event = asyncio.Event()
@@ -413,206 +467,195 @@ class Starboard(BaseCog):
 
         for entry in all_entries:
             try:
-                logger.debug(f"Fix processing DB entry: {entry}")
-                # 1) If we have a starboard_message_id, use that message to recover original metadata
-                missing_sb = False
-                if entry.get('starboard_message_id'):
+                original_id = entry.get('original_message_id')
+                starboard_id = entry.get('starboard_message_id')
+                entry_guild_id = entry.get('guild_id')
+                entry_channel_id = entry.get('original_channel_id')
+
+                # We need at least an original_message_id OR a starboard_message_id to do anything meaningful
+                if not original_id and not starboard_id:
+                    logger.warning(f"Skipping corrupt entry with no IDs: {entry}")
+                    failed_count += 1
+                    progress['done'] += 1
+                    continue
+
+                sb_msg = None
+                missing_sb = True
+
+                # --- Scenario A: Starboard Message ID exists ---
+                if starboard_id:
                     try:
-                        logger.debug(f"Attempting to fetch starboard message id {entry['starboard_message_id']} via rate-limited runner")
-                        sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, entry['starboard_message_id'])
-                        logger.debug(f"Fetched starboard message id {entry['starboard_message_id']} successfully")
+                        sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, starboard_id)
+                        missing_sb = False
                     except discord.NotFound:
-                        # Treat the entry as if it has no starboard message when it cannot be found
-                        sb_msg = None
+                        logger.info(f"Starboard message {starboard_id} not found (404). Treating as missing.")
                         missing_sb = True
-                        logger.info(f"Starboard message {entry.get('starboard_message_id')} not found; will attempt recovery")
                     except Exception as e:
-                        # For other errors, log and mark missing so we can try recovering from original
-                        logger.warning(f"Error fetching starboard message {entry.get('starboard_message_id')}: {e}")
-                        sb_msg = None
+                        logger.warning(f"Error fetching starboard message {starboard_id}: {e}. Treating as missing.")
                         missing_sb = True
 
-                    # If the starboard message was missing, build a report of other missing fields
-                    if missing_sb:
-                        missing_fields = []
-                        # guild_id
-                        if not entry.get('guild_id'):
-                            missing_fields.append('guild_id')
-                        # original_channel_id
-                        if not entry.get('original_channel_id'):
-                            missing_fields.append('original_channel_id')
-
-                        # Check whether the original message can be found
-                        orig_id = entry.get('original_message_id')
-                        original_found = False
-                        if orig_id:
-                            # Try stored channel first
-                            if entry.get('original_channel_id'):
-                                ch = self.bot.get_channel(entry['original_channel_id'])
-                                logger.debug(f"Trying stored original_channel {entry['original_channel_id']} to find original message {orig_id}")
-
-                                if isinstance(ch, discord.abc.Messageable):
-                                    try:
-                                        # Bypass rate-limiting in fast mode
-                                        if self._fast_mode:
-                                            logger.debug(f"Fast mode: fetching original {orig_id} directly from channel {ch.id}")
-                                            await ch.fetch_message(orig_id)
-                                        else:
-                                            logger.debug(f"Rate-limited fetch of original {orig_id} from channel {ch.id}")
-                                            await self._run_rate_limited(ch.fetch_message, orig_id)
-                                        original_found = True
-                                        logger.debug(f"Found original {orig_id} in stored channel {entry['original_channel_id']}")
-                                    except Exception as e:
-                                        original_found = False
-                                        logger.debug(f"Failed to fetch original {orig_id} from stored channel {entry.get('original_channel_id')}: {e}")
-
-                            # If not found yet, try scanning the stored guild's channels (admin operation - acceptable)
-                            if not original_found:
-                                target_guild_for_lookup = None
-                                if entry.get('guild_id'):
-                                    target_guild_for_lookup = self.bot.get_guild(entry['guild_id'])
-                                if not target_guild_for_lookup:
-                                    target_guild_for_lookup = ctx.guild
-
-                                if target_guild_for_lookup:
-                                    logger.debug(f"Scanning guild {getattr(target_guild_for_lookup, 'id', None)} channels to find original {orig_id}")
-                                    for ch in target_guild_for_lookup.channels:
-                                        if not isinstance(ch, discord.abc.Messageable):
-                                            continue
-                                        try:
-                                            if self._fast_mode:
-                                                logger.debug(f"Fast mode: attempting fetch in channel {ch.id} for message {orig_id}")
-                                                await ch.fetch_message(orig_id)
-                                            else:
-                                                logger.debug(f"Rate-limited attempt to fetch message {orig_id} in channel {ch.id}")
-                                                await self._run_rate_limited(ch.fetch_message, orig_id)
-                                            original_found = True
-                                            logger.debug(f"Found original {orig_id} in channel {ch.id}")
-                                            break
-                                        except Exception as e:
-                                            logger.debug(f"Channel {ch.id} did not contain message {orig_id}: {e}")
-                                            continue
-
-                        if not original_found:
-                            missing_fields.append('original_message')
-
-                        missing_reports.append({'original_message_id': orig_id, 'missing': missing_fields})
-
-                    if sb_msg and sb_msg.embeds:
-                        # Parse jump URL from the embed's 'Original Message' field
+                if not missing_sb and sb_msg:
+                    # Validate metadata from Embed
+                    updated = False
+                    if sb_msg.embeds:
                         embed = sb_msg.embeds[0]
-                        original_id = None
-                        original_channel_id = None
-                        guild_id = None
+                        # Parse Jump URL
+                        # Expected format: https://discord.com/channels/{guild_id}/{channel_id}/{message_id}
+                        # We look for the "Original Message" field
+                        jump_url = None
+                        found_channel_id = None
                         for field in embed.fields:
                             if field.name == 'Original Message' and field.value:
-                                m = re.search(r"/channels/(\d+)/(\d+)/(\d+)", field.value)
-                                if m:
-                                    guild_id = int(m.group(1))
-                                    original_channel_id = int(m.group(2))
-                                    original_id = int(m.group(3))
+                                match = re.search(r"/channels/(\d+)/(\d+)/(\d+)", field.value)
+                                if match:
+                                    found_guild_id = int(match.group(1))
+                                    found_channel_id = int(match.group(2))
+                                    found_msg_id = int(match.group(3))
+
+                                    if entry_guild_id != found_guild_id:
+                                        entry['guild_id'] = found_guild_id
+                                        updated = True
+                                    if entry_channel_id != found_channel_id:
+                                        entry['original_channel_id'] = found_channel_id
+                                        updated = True
+                                    
+                                    # Update original_id if we recovered it
+                                    if original_id != found_msg_id:
+                                        entry['original_message_id'] = found_msg_id
+                                        original_id = found_msg_id # Update local var for later use
+                                        updated = True
+                                    
+                                    jump_url = field.value
+                                    # Extract URL from markdown [Jump to Message](url)
+                                    url_match = re.search(r"\((http[^\)]+)\)", jump_url)
+                                    if url_match:
+                                        jump_url = url_match.group(1)
                                 break
 
-                        updated = False
-                        if original_id and entry.get('original_message_id') != original_id:
-                            entry['original_message_id'] = original_id
-                            updated = True
-                        if guild_id and entry.get('guild_id') != guild_id:
-                            entry['guild_id'] = guild_id
-                            updated = True
-                        if original_channel_id and entry.get('original_channel_id') != original_channel_id:
-                            entry['original_channel_id'] = original_channel_id
-                            updated = True
+                        # Check if Jump URL target is valid
+                        target_valid = False
+                        if jump_url:
+                            # We can try to fetch the message to see if it exists
+                            # We have found_channel_id from the regex
+                            if found_channel_id and original_id:
+                                try:
+                                    ch = self.bot.get_channel(found_channel_id)
+                                    if isinstance(ch, discord.abc.Messageable):
+                                        await self._run_rate_limited(ch.fetch_message, original_id)
+                                        target_valid = True
+                                    else:
+                                        # If channel type is wrong/unknown, assume valid to be safe
+                                        target_valid = True
+                                except discord.NotFound:
+                                    target_valid = False
+                                except Exception:
+                                    # If we can't check, assume valid to avoid destructive tombstoning on transient errors
+                                    target_valid = True
+                            else:
+                                # If we couldn't parse channel ID, we can't verify.
+                                target_valid = True
 
-                        # starboard_reply_id: may be present as a message reference on the starboard post
-                        found_reply_id = sb_msg.reference.message_id if sb_msg.reference else None
-                        if entry.get('starboard_reply_id') != found_reply_id:
-                            entry['starboard_reply_id'] = found_reply_id
-                            updated = True
-
-                        if updated:
-                            await self.db_manager.update_starboard_entry(entry)
-                            fixed_count += 1
+                        if not target_valid and original_id:
+                            logger.info(f"Original message {original_id} seems dead (Jump URL invalid). Tombstoning.")
+                            await sb_msg.delete()
+                            tomb = await self._create_tombstone(starboard_channel, original_id)
+                            if tomb:
+                                entry['starboard_message_id'] = tomb.id
+                                await self.db_manager.update_starboard_entry(entry)
+                                tombstone_count += 1
+                                fixed_count += 1
                         else:
-                            verified_count += 1
+                            # Update reply ID if needed
+                            found_reply_id = sb_msg.reference.message_id if sb_msg.reference else None
+                            if entry.get('starboard_reply_id') != found_reply_id:
+                                entry['starboard_reply_id'] = found_reply_id
+                                updated = True
+                            
+                            if updated:
+                                await self.db_manager.update_starboard_entry(entry)
+                                fixed_count += 1
+                            else:
+                                verified_count += 1
+
+                # --- Scenario B: Starboard Message Missing ---
+                else:
+                    # Goal: Find original_message_id
+                    # If we don't have an original_id by now, we can't do anything
+                    if not original_id:
+                        logger.warning(f"Entry {entry} has no original_message_id and no starboard message to recover from.")
+                        failed_count += 1
                         progress['done'] += 1
                         continue
 
-                # 2) If we only have an original_message_id (no starboard_message_id), try to locate it and repost
-                # If the DB lacks a starboard_message_id OR the stored starboard message was not found,
-                # attempt to locate the original message and recreate the starboard post.
-                if entry.get('original_message_id') and (not entry.get('starboard_message_id') or missing_sb):
-                    original_id = entry['original_message_id']
-                    original_channel = None
-                    original_message = None
+                    found_msg = None
+                    found_channel = None
 
-                    # Try stored channel first
-                    if entry.get('original_channel_id'):
-                        ch = self.bot.get_channel(entry['original_channel_id'])
+                    # Step 1: Targeted Channel Lookup
+                    if entry_channel_id:
+                        ch = self.bot.get_channel(entry_channel_id)
                         if isinstance(ch, discord.abc.Messageable):
                             try:
-                                if self._fast_mode:
-                                    original_message = await ch.fetch_message(original_id)
-                                else:
-                                    original_message = await self._run_rate_limited(ch.fetch_message, original_id)
-                                original_channel = ch
+                                found_msg = await self._run_rate_limited(ch.fetch_message, original_id)
+                                found_channel = ch
                             except discord.NotFound:
-                                original_message = None
-                            except discord.Forbidden:
-                                original_message = None
-                            except Exception:
-                                original_message = None
+                                pass
+                            except Exception as e:
+                                logger.warning(f"Error fetching from original channel {entry_channel_id}: {e}")
 
-                    # Fallback: scan the stored guild's channels (prefer entry.guild_id) to find the message
-                    if not original_message:
-                        target_guild_for_lookup = None
-                        if entry.get('guild_id'):
-                            target_guild_for_lookup = self.bot.get_guild(entry['guild_id'])
-                        if not target_guild_for_lookup:
-                            target_guild_for_lookup = ctx.guild
-
-                        if target_guild_for_lookup:
-                            for ch in target_guild_for_lookup.channels:
+                    # Step 2: Guild-Wide Scan (Fallback) - NO ctx.guild fallback
+                    if not found_msg and entry_guild_id:
+                        search_guild = self.bot.get_guild(entry_guild_id)
+                        if search_guild:
+                            for ch in search_guild.channels:
                                 if not isinstance(ch, discord.abc.Messageable):
                                     continue
                                 try:
-                                    if self._fast_mode:
-                                        original_message = await ch.fetch_message(original_id)
-                                    else:
-                                        original_message = await self._run_rate_limited(ch.fetch_message, original_id)
-                                    original_channel = ch
-                                    break
+                                    found_msg = await self._run_rate_limited(ch.fetch_message, original_id)
+                                    found_channel = ch
+                                    break  # Found it
                                 except discord.NotFound:
-                                    continue
-                                except discord.Forbidden:
                                     continue
                                 except Exception:
                                     continue
 
-                    if original_message:
-                        star_reaction = discord.utils.get(original_message.reactions, emoji=starboard_emoji)
-                        star_count = star_reaction.count if star_reaction else 0
-                        if self._fast_mode:
-                            await self.post_to_starboard(original_message, starboard_channel_id, starboard_emoji, star_count)
-                        else:
-                            await self._run_rate_limited(self.post_to_starboard, original_message, starboard_channel_id, starboard_emoji, star_count)
-
-                        # If we found the message in a different channel than what was stored, update the DB
-                        if original_channel and original_channel.id != entry.get('original_channel_id'):
-                            logger.info(f"Updating original_channel_id for message {original_id} from {entry.get('original_channel_id')} to {original_channel.id}")
-                            entry['original_channel_id'] = original_channel.id
+                    # Step 3: Fix via Repost
+                    if found_msg:
+                        # We found it!
+                        # Update DB with correct location if changed
+                        if found_channel and found_channel.id != entry_channel_id:
+                            entry['original_channel_id'] = found_channel.id
+                            if found_msg.guild:
+                                entry['guild_id'] = found_msg.guild.id
                             await self.db_manager.update_starboard_entry(entry)
 
-                        fixed_count += 1
-                    else:
-                        failed_count += 1
+                        # Post to starboard
+                        star_reaction = discord.utils.get(found_msg.reactions, emoji=starboard_emoji)
+                        star_count = star_reaction.count if star_reaction else 0
 
-                    progress['done'] += 1
+                        # We need to ensure post_to_starboard handles the missing starboard_message_id correctly
+                        # It will see the entry, see missing ID (if we fix it), remove entry, and create new.
+                        # Or we can manually remove entry here to force creation.
+                        # To be safe, let's remove the broken entry so post_to_starboard creates a fresh one.
+                        await self.db_manager.remove_starboard_entry(original_id)
+                        
+                        await self.post_to_starboard(found_msg, starboard_channel_id, starboard_emoji, star_count)
+                        fixed_count += 1
+
+                    # Step 4: Tombstone Creation
+                    else:
+                        logger.info(f"Original message {original_id} lost. Creating tombstone.")
+                        tomb = await self._create_tombstone(starboard_channel, original_id)
+                        if tomb:
+                            entry['starboard_message_id'] = tomb.id
+                            await self.db_manager.update_starboard_entry(entry)
+                            tombstone_count += 1
+                            fixed_count += 1
 
             except Exception as e:
-                logger.error(f"Failed to fix/verify starboard entry for row {entry}: {e}")
+                logger.error(f"Failed to fix entry {entry}: {e}")
                 failed_count += 1
-                progress['done'] += 1
+            
+            progress['done'] += 1
 
         # Stop the periodic status task and await it to finish
         stop_event.set()
@@ -622,29 +665,9 @@ class Starboard(BaseCog):
             # If the status task was cancelled or errored, ignore
             pass
 
-        await ctx.send(f"Starboard fix complete. Fixed {fixed_count} entries, verified {verified_count} entries, failed {failed_count} entries.")
+        await ctx.send(f"Starboard fix complete. Fixed: {fixed_count}, Verified: {verified_count}, Tombstones: {tombstone_count}, Failed: {failed_count}.")
         # Reset fast mode to avoid affecting future operations
         self._fast_mode = False
-
-        # If there were missing starboard messages, send a helpful summary of what other data is missing
-        if missing_reports:
-            lines = ["Missing starboard messages detected. Summary per original message ID:"]
-            for rep in missing_reports:
-                orig = rep.get('original_message_id')
-                missing = rep.get('missing') or []
-                if not missing:
-                    lines.append(f"- {orig}: only starboard message missing")
-                else:
-                    lines.append(f"- {orig}: missing {', '.join(missing)}")
-
-            # Send as one message (may be long); trim if necessary
-            report_text = "\n".join(lines)
-            if len(report_text) > 1900:
-                # If too long, send in chunks
-                for i in range(0, len(report_text), 1900):
-                    await ctx.send(report_text[i:i+1900])
-            else:
-                await ctx.send(report_text)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
@@ -706,6 +729,14 @@ class Starboard(BaseCog):
         logger.info(f"Starboard post content: {content}")
 
         if existing_entry:
+            # Safety check: if starboard_message_id is missing, we can't fetch it.
+            # Treat it as missing and recreate.
+            if not existing_entry.get('starboard_message_id'):
+                logger.warning(f"Starboard entry for {message.id} exists but has no starboard_message_id. Recreating.")
+                await self.db_manager.remove_starboard_entry(message.id)
+                await self.create_new_starboard_post(message, starboard_channel, content)
+                return
+
             try:
                 starboard_message = await starboard_channel.fetch_message(existing_entry['starboard_message_id'])
                 await starboard_message.edit(content=content)
@@ -888,6 +919,9 @@ class Starboard(BaseCog):
                     except Exception:
                         pass
                     return result
+                except discord.NotFound:
+                    # Do not retry on 404 Not Found
+                    raise
                 except (discord.HTTPException, aiohttp.ClientError) as e:
                     last_exc = e
                     # exponential backoff
