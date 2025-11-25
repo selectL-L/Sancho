@@ -93,11 +93,7 @@ class Starboard(BaseCog):
     @commands.hybrid_group(name="starboard", hidden=True, usage="<subcommand>")
     @commands.has_guild_permissions(manage_channels=True)
     async def starboard_group(self, ctx: commands.Context) -> None:
-        """Manages starboard settings.
-
-        Args:
-            ctx (commands.Context): The command context.
-        """
+        """Manages starboard settings."""
         if ctx.invoked_subcommand is None:
             help_cog: Any = self.bot.get_cog('Help')
             if help_cog and hasattr(help_cog, 'send_command_help'):
@@ -110,7 +106,6 @@ class Starboard(BaseCog):
         """Sets the channel for the starboard.
 
         Args:
-            ctx (commands.Context): The command context.
             channel (discord.TextChannel): The channel to use for the starboard.
         """
         if ctx.guild:
@@ -122,7 +117,6 @@ class Starboard(BaseCog):
         """Sets the emoji for the starboard.
 
         Args:
-            ctx (commands.Context): The command context.
             emoji (str): The emoji to use.
         """
         if ctx.guild:
@@ -134,7 +128,6 @@ class Starboard(BaseCog):
         """Sets the reaction threshold for the starboard.
 
         Args:
-            ctx (commands.Context): The command context.
             threshold (int): The minimum number of reactions required.
         """
         if ctx.guild and threshold > 0:
@@ -218,7 +211,6 @@ class Starboard(BaseCog):
         Usage: /starboard remake [fast]
 
         Args:
-            ctx (commands.Context): The command context.
             fast (bool): Whether to enable fast mode. Defaults to False.
         """
         if not ctx.guild:
@@ -270,7 +262,6 @@ class Starboard(BaseCog):
         Usage: /starboard fix [fast]
 
         Args:
-            ctx (commands.Context): The command context.
             fast (bool): Whether to enable fast mode. Defaults to False.
         """
         if not ctx.guild:

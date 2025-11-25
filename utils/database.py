@@ -112,6 +112,7 @@ class DatabaseManager:
                         name TEXT NOT NULL,
                         dice_roll TEXT NOT NULL,
                         skill_type TEXT NOT NULL,
+                        description TEXT,
                         UNIQUE(user_id, name COLLATE NOCASE)
                     )''',
                 "skill_aliases": '''CREATE TABLE IF NOT EXISTS skill_aliases (
@@ -188,7 +189,7 @@ class DatabaseManager:
 
             # Check for schema mismatches (Columns)
             expected_schema = {
-                "skills": {"id", "user_id", "name", "dice_roll", "skill_type"},
+                "skills": {"id", "user_id", "name", "dice_roll", "skill_type", "description"},
                 "skill_aliases": {"id", "skill_id", "alias"},
                 "reminders": {"id", "user_id", "channel_id", "reminder_time", "message", "created_at", "is_recurring", "recurrence_rule", "reply_message_id"},
                 "user_timezones": {"user_id", "timezone"},
@@ -218,7 +219,6 @@ class DatabaseManager:
 
             if schema_issues:
                 issue_summary = "; ".join(schema_issues)
-                logger.warning(f"Database schema issues detected: {issue_summary}. Please run migrate_db.py.")
                 await self._warn_and_backup_db(issue_summary)
             else:
                 logger.info("Database schema verified.")
@@ -545,7 +545,7 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
-    async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str) -> None:
+    async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str, description: Optional[str] = None) -> None:
         """Saves a new skill and its aliases to the database.
 
         This is a transactional operation to ensure data integrity.
@@ -556,6 +556,7 @@ class DatabaseManager:
             aliases (List[str]): A list of aliases for the skill.
             dice_roll (str): The dice roll string.
             skill_type (str): The skill type.
+            description (Optional[str]): The skill description.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
@@ -563,8 +564,8 @@ class DatabaseManager:
                 try:
                     # Insert the main skill
                     await cursor.execute(
-                        "INSERT INTO skills (user_id, name, dice_roll, skill_type) VALUES (?, ?, ?, ?)",
-                        (user_id, name, dice_roll, skill_type.lower())
+                        "INSERT INTO skills (user_id, name, dice_roll, skill_type, description) VALUES (?, ?, ?, ?, ?)",
+                        (user_id, name, dice_roll, skill_type.lower(), description)
                     )
                     skill_id = cursor.lastrowid
 
@@ -593,7 +594,7 @@ class DatabaseManager:
             Optional[Dict[str, Any]]: A dictionary containing the skill data.
         """
         query = """
-            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type, s.description,
                    GROUP_CONCAT(sa.alias, '|') as aliases
             FROM skills s
             LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
@@ -619,7 +620,7 @@ class DatabaseManager:
             List[Dict[str, Any]]: A list of dictionaries containing skill data.
         """
         query = """
-            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type, s.description,
                    GROUP_CONCAT(sa.alias, '|') as aliases
             FROM skills s
             LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
@@ -640,7 +641,7 @@ class DatabaseManager:
             List[Dict[str, Any]]: A list of dictionaries containing skill data.
         """
         query = """
-            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type,
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type, s.description,
                    GROUP_CONCAT(sa.alias, '|') as aliases
             FROM skills s
             LEFT JOIN skill_aliases sa ON s.id = sa.skill_id

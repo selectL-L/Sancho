@@ -42,6 +42,7 @@ TABLE_SCHEMAS = {
             name TEXT NOT NULL,
             dice_roll TEXT NOT NULL,
             skill_type TEXT NOT NULL,
+            description TEXT,
             UNIQUE(user_id, name COLLATE NOCASE)
         )
     """,
