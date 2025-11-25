@@ -120,7 +120,7 @@ def safe_eval_math(expr: str) -> float:
 # Regex for standard dice notation, e.g., "2d20", "d6", "3d8kh2" (keep highest 2).
 DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
 # Regex for Limbus Company-style coin flips, e.g., "3c", "c".
-COIN_FLIP_REGEX = re.compile(r'(\d*)c', re.IGNORECASE)
+COIN_FLIP_REGEX = re.compile(r'\b(\d*)c\b', re.IGNORECASE)
 
 
 class Math(BaseCog):
@@ -579,7 +579,7 @@ class Math(BaseCog):
         # --- 2. Extract Relevant Parts of the Expression ---
         # Extract relevant tokens.
         dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
-        coin_pattern = r'(\d*)c'
+        coin_pattern = r'\b(\d*)c\b'
         number_pattern = r'\d+(\.\d+)?'
         operator_pattern = r'\*\*|[+\-*\/()]'
 
