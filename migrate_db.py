@@ -116,7 +116,8 @@ TABLE_SCHEMAS = {
         CREATE TABLE bod_leaderboard (
             user_id INTEGER PRIMARY KEY,
             user_name TEXT NOT NULL,
-            best_chain INTEGER NOT NULL DEFAULT 0
+            best_chain INTEGER NOT NULL DEFAULT 0,
+            achieved_at INTEGER NOT NULL DEFAULT 0
         )
     """
 }
@@ -247,6 +248,8 @@ def migrate_database() -> None:
                                     values.append(0)
                                 elif col == 'created_at':
                                     values.append(int(time.time()))
+                                elif col == 'achieved_at':
+                                    values.append(0)
                                 else:
                                     values.append(None)
                         cursor.execute(query, values)
