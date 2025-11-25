@@ -25,7 +25,7 @@ As an example here are some cases Sancho can currently understand, with how easi
 *Macro management.*
 
 Allows users to save complex dice notations as "skills" to avoid repetitive typing.
-- **Save:** `.sancho save skill Fireball 8d6`
+- **Save:** `.sancho save skill Fireball`
 - **Use:** `.sancho cast Fireball`
 - **Manage:** CRUD operations for user-defined skills.
 - **Limits:** Configurable caps to prevent database bloat.
