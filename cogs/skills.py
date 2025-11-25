@@ -278,8 +278,27 @@ class Skills(BaseCog):
 
                 break
 
-            # --- Step 5: Save to Database ---
-            await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type)
+            # --- Step 5: Get Description ---
+            description = None
+            while True:
+                await ctx.send("Would you like to add a description? (max 200 chars). Reply with your description or `none` to skip.")
+                desc_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                if desc_msg.content.strip().lower() == 'exit':
+                    await ctx.send("Skill creation cancelled.")
+                    return
+
+                raw_desc = desc_msg.content.strip()
+                if raw_desc.lower() == 'none':
+                    description = None
+                else:
+                    if len(raw_desc) > 200:
+                        await ctx.send(f"Description is too long ({len(raw_desc)}/200 chars). Please try again.")
+                        continue
+                    description = raw_desc
+                break
+
+            # --- Step 6: Save to Database ---
+            await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type, description)
 
             confirmation_message = f"✅ Skill saved for you! You can now use `.sancho skill {skill_name}`. Please note your skills are tied to your ID!"
             if aliases:
@@ -430,6 +449,9 @@ class Skills(BaseCog):
         response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
         response_parts.extend(roll_descriptions)
 
+        if found_skill['description']:
+            response_parts.append(f"\n_{found_skill['description']}_")
+
         response = "\n".join(response_parts)
         if len(response) > 3500:
             await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
@@ -477,13 +499,15 @@ class Skills(BaseCog):
             embed.add_field(name="2. Aliases", value=skill_to_edit['aliases'] or "None", inline=False)
             embed.add_field(name="3. Dice Roll", value=skill_to_edit['dice_roll'], inline=False)
             embed.add_field(name="4. Type", value=skill_to_edit['skill_type'], inline=False)
+            embed.add_field(name="5. Description", value=skill_to_edit['description'] or "None", inline=False)
             embed.set_footer(text="Click a button or reply with the number.")
 
             options = {
                 "1️⃣ Name": "1",
                 "2️⃣ Aliases": "2",
                 "3️⃣ Dice Roll": "3",
-                "4️⃣ Type": "4"
+                "4️⃣ Type": "4",
+                "5️⃣ Description": "5"
             }
 
             choice = await get_selection(ctx, embed, options, timeout=30.0)
@@ -576,6 +600,27 @@ class Skills(BaseCog):
                         updates['skill_type'] = new_type
                         break
 
+                case '5':  # Edit Description
+                    while True:
+                        await ctx.send("What should the new description be? (max 200 chars) or say `none` to remove it.")
+                        desc_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+                        raw_desc = desc_msg.content.strip()
+
+                        if raw_desc.lower() in ['exit', 'cancel']:
+                            await ctx.send("Edit cancelled.")
+                            return
+
+                        if raw_desc.lower() == 'none':
+                            updates['description'] = None
+                            break
+
+                        if len(raw_desc) > 200:
+                            await ctx.send(f"Description is too long ({len(raw_desc)}/200 chars). Please try again.")
+                            continue
+
+                        updates['description'] = raw_desc
+                        break
+
                 case _:
                     await ctx.send("Invalid choice. Edit cancelled.")
                     return
@@ -623,6 +668,8 @@ class Skills(BaseCog):
             if skill['aliases']:
                 value.append(f"(aliases: {skill['aliases']})")
             value.append(f"**Roll:** `{skill['dice_roll']}` | **Type:** `{skill['skill_type']}` | **ID:** `{skill['id']}`")
+            if skill['description']:
+                value.append(f"_{skill['description']}_")
             skill_fields.append({"name": name, "value": "\n".join(value), "inline": False})
 
         # Compact display for long lists.
