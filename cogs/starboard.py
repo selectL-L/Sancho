@@ -596,6 +596,13 @@ class Starboard(BaseCog):
                             await self.post_to_starboard(original_message, starboard_channel_id, starboard_emoji, star_count)
                         else:
                             await self._run_rate_limited(self.post_to_starboard, original_message, starboard_channel_id, starboard_emoji, star_count)
+
+                        # If we found the message in a different channel than what was stored, update the DB
+                        if original_channel and original_channel.id != entry.get('original_channel_id'):
+                            logger.info(f"Updating original_channel_id for message {original_id} from {entry.get('original_channel_id')} to {original_channel.id}")
+                            entry['original_channel_id'] = original_channel.id
+                            await self.db_manager.update_starboard_entry(entry)
+
                         fixed_count += 1
                     else:
                         failed_count += 1

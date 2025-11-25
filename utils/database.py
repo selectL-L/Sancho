@@ -288,8 +288,10 @@ class DatabaseManager:
             else:
                 # Ensure we don't overwrite last_channel_id with 0 if it's not passed.
                 await db.execute(
-                    "INSERT INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_usage WHERE user_id = ?))"
-                    "ON CONFLICT(user_id) DO UPDATE SET last_used_timestamp = excluded.last_used_timestamp, current_chain = excluded.current_chain",
+                    "INSERT INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) "
+                    "VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_usage WHERE user_id = ?)) "
+                    "ON CONFLICT(user_id) DO UPDATE SET "
+                    "last_used_timestamp = excluded.last_used_timestamp, current_chain = excluded.current_chain",
                     (user_id, last_used_timestamp, current_chain, user_id)
                 )
             await db.commit()
@@ -416,7 +418,14 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def add_starboard_entry(self, original_message_id: int, starboard_message_id: int, guild_id: int, channel_id: Optional[int], starboard_reply_id: Optional[int] = None) -> None:
+    async def add_starboard_entry(
+        self,
+        original_message_id: int,
+        starboard_message_id: int,
+        guild_id: int,
+        channel_id: Optional[int],
+        starboard_reply_id: Optional[int] = None
+    ) -> None:
         """Saves a new starboard entry to the database.
 
         Args:
