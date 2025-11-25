@@ -105,3 +105,26 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             pass
 
     return result
+
+
+class FastConfirmModal(discord.ui.Modal):
+    def __init__(self, future: asyncio.Future):
+        super().__init__(title="Confirm Fast Mode")
+        # Single short text field where the user must type the exact phrase
+        self.add_item(discord.ui.TextInput(label="Type 'I understand the risks' to confirm", style=discord.TextStyle.short, placeholder="I understand the risks"))
+        self.future = future
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        value = getattr(self.children[0], 'value', '')
+        try:
+            value = value.strip().lower()
+        except Exception:
+            value = ""
+        if value == 'i understand the risks':
+            await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits.', ephemeral=True)
+            if not self.future.done():
+                self.future.set_result(True)
+        else:
+            await interaction.response.send_message('Fast mode cancelled (incorrect confirmation).', ephemeral=True)
+            if not self.future.done():
+                self.future.set_result(False)
