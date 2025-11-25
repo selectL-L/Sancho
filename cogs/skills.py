@@ -421,7 +421,7 @@ class Skills(BaseCog):
                     header = f"{ctx.author.mention} defended against {target_user.mention} with **{found_skill['name']}**"
                 response_parts.append(header)
                 response_parts.append(f"`{display_formula}`")
-        
+
         # Handle untargeted skills.
         if not response_parts:
             response_parts.append(f"**{found_skill['name']}**")

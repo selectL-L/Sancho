@@ -231,7 +231,7 @@ class Starboard(BaseCog):
         for entry in all_entries:
             if not (entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')):
                 invalid_count += 1
-        
+
         if invalid_count > 0:
             msg = (
                 f"⚠️ **WARNING**: Found {invalid_count} invalid/incomplete starboard entries.\n"
@@ -239,11 +239,11 @@ class Starboard(BaseCog):
                 "It is highly recommended to run `/starboard fix` first to attempt recovery.\n\n"
                 "Do you want to proceed anyway?"
             )
-            
-            # Reuse the confirmation logic but with a custom message if possible, 
+
+            # Reuse the confirmation logic but with a custom message if possible,
             # or just rely on the standard confirmation flow.
             # Since _confirm_fast_mode is specific to fast mode, let's do a simple confirmation here.
-            
+
             await ctx.send(msg)
             try:
                 def _check(m: discord.Message) -> bool:
@@ -304,7 +304,7 @@ class Starboard(BaseCog):
 
         await ctx.send("Starting starboard remake...")
         logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
-        
+
         # Strict Filter: Only remake entries that have complete stored information
         # We require original_message_id, starboard_message_id, guild_id, and original_channel_id.
         # If any are missing, 'fix' should be run first.
@@ -368,7 +368,7 @@ class Starboard(BaseCog):
         for tgt in recreation_targets:
             logger.debug(f"Recreation target: {tgt}")
             original_channel = self.bot.get_channel(tgt['original_channel_id'])
-            
+
             # If channel is missing, we can't fetch the message -> Tombstone
             if not isinstance(original_channel, discord.TextChannel):
                 logger.warning(f"Original channel {tgt['original_channel_id']} not found. Creating tombstone for {tgt['original_message_id']}.")
@@ -384,12 +384,12 @@ class Starboard(BaseCog):
                 logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
                 message = await original_channel.fetch_message(tgt['original_message_id'])
                 logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author, 'id', None)})")
-                
+
                 # Only recreate if the message still meets the starboard threshold
                 star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
                 current_count = star_reaction.count if star_reaction else 0
                 logger.debug(f"Original message {message.id} has {current_count} '{starboard_emoji}' reactions; threshold={starboard_threshold}")
-                
+
                 # If fast mode requested, recreate regardless of the current reaction count
                 if self._fast_mode or (star_reaction and current_count >= starboard_threshold):
                     logger.info(f"Recreating starboard post for original message {message.id}")
@@ -518,13 +518,13 @@ class Starboard(BaseCog):
                                     if entry_channel_id != found_channel_id:
                                         entry['original_channel_id'] = found_channel_id
                                         updated = True
-                                    
+
                                     # Update original_id if we recovered it
                                     if original_id != found_msg_id:
                                         entry['original_message_id'] = found_msg_id
-                                        original_id = found_msg_id # Update local var for later use
+                                        original_id = found_msg_id  # Update local var for later use
                                         updated = True
-                                    
+
                                     jump_url = field.value
                                     # Extract URL from markdown [Jump to Message](url)
                                     url_match = re.search(r"\((http[^\)]+)\)", jump_url)
@@ -570,7 +570,7 @@ class Starboard(BaseCog):
                             if entry.get('starboard_reply_id') != found_reply_id:
                                 entry['starboard_reply_id'] = found_reply_id
                                 updated = True
-                            
+
                             if updated:
                                 await self.db_manager.update_starboard_entry(entry)
                                 fixed_count += 1
@@ -637,7 +637,7 @@ class Starboard(BaseCog):
                         # Or we can manually remove entry here to force creation.
                         # To be safe, let's remove the broken entry so post_to_starboard creates a fresh one.
                         await self.db_manager.remove_starboard_entry(original_id)
-                        
+
                         await self.post_to_starboard(found_msg, starboard_channel_id, starboard_emoji, star_count)
                         fixed_count += 1
 
@@ -654,7 +654,7 @@ class Starboard(BaseCog):
             except Exception as e:
                 logger.error(f"Failed to fix entry {entry}: {e}")
                 failed_count += 1
-            
+
             progress['done'] += 1
 
         # Stop the periodic status task and await it to finish
