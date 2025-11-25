@@ -621,7 +621,7 @@ class Math(BaseCog):
                     except (ValueError, TypeError):
                         # Handle pre-summed coin results.
                         result_display = result_str.split(' ')[0]
-                
+
                 return {
                     'total': result_display,
                     'breakdown': roll_descriptions,
