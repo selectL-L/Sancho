@@ -397,8 +397,44 @@ class Skills(BaseCog):
 
         self.logger.info(f"Executing skill '{found_skill['name']}' for {ctx.author.id}. Original query: '{query}', constructed roll: '{final_roll_query}'")
 
-        # Delegate to Math cog.
-        await math_cog.roll(ctx, query=final_roll_query, skill_info=found_skill)
+        # Delegate to Math cog for evaluation, but handle formatting here.
+        try:
+            result_data = await math_cog.evaluate_roll(final_roll_query)
+        except (ValueError, TypeError, SyntaxError) as e:
+            await ctx.send(f"Error executing skill: {e}")
+            return
+
+        result_display = result_data['total']
+        roll_descriptions = result_data['breakdown']
+
+        # Format the response
+        response_parts = []
+        display_formula = final_roll_query.replace('(', '').replace(')', '').strip()
+
+        # Handle reply targets.
+        if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
+            target_user = ctx.message.reference.resolved.author
+            if target_user != ctx.author and not target_user.bot:
+                if found_skill['skill_type'] == 'attack':
+                    header = f"{ctx.author.mention} attacked {target_user.mention} with **{found_skill['name']}**"
+                else:  # defense
+                    header = f"{ctx.author.mention} defended against {target_user.mention} with **{found_skill['name']}**"
+                response_parts.append(header)
+                response_parts.append(f"`{display_formula}`")
+        
+        # Handle untargeted skills.
+        if not response_parts:
+            response_parts.append(f"**{found_skill['name']}**")
+            response_parts.append(f"`{display_formula}`")
+
+        response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
+        response_parts.extend(roll_descriptions)
+
+        response = "\n".join(response_parts)
+        if len(response) > 3500:
+            await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
+            return
+        await ctx.send(response)
 
     async def edit_skill_nlp(self, ctx: commands.Context, *, query: str) -> None:
         """Initiates an interactive conversation to edit an existing skill.

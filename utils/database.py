@@ -168,7 +168,8 @@ class DatabaseManager:
                 "bod_leaderboard": '''CREATE TABLE IF NOT EXISTS bod_leaderboard (
                         user_id INTEGER PRIMARY KEY,
                         user_name TEXT NOT NULL,
-                        best_chain INTEGER NOT NULL DEFAULT 0
+                        best_chain INTEGER NOT NULL DEFAULT 0,
+                        achieved_at INTEGER NOT NULL DEFAULT 0
                     )'''
             }
 
@@ -196,7 +197,7 @@ class DatabaseManager:
                 "guild_config": {"guild_id", "key", "value"},
                 "starboard": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
                 "bod_usage": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id"},
-                "bod_leaderboard": {"user_id", "user_name", "best_chain"}
+                "bod_leaderboard": {"user_id", "user_name", "best_chain", "achieved_at"}
             }
 
             schema_issues = []
@@ -316,9 +317,9 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT user_id, user_name, best_chain FROM bod_leaderboard ORDER BY best_chain DESC")
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            async with db.execute("SELECT user_id, user_name, best_chain, achieved_at FROM bod_leaderboard ORDER BY best_chain DESC, achieved_at ASC") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
 
     async def get_user_bod_best(self, user_id: int) -> int:
         """Retrieves a single user's best chain from the leaderboard.
@@ -334,21 +335,22 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
-    async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int) -> None:
+    async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int, achieved_at: int = 0) -> None:
         """Updates the 'bod' leaderboard with a user's new best score.
 
         Args:
             user_id (int): The user's ID.
             user_name (str): The user's name.
             chain_length (int): The new best chain length.
+            achieved_at (int): The timestamp when the chain was achieved.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO bod_leaderboard (user_id, user_name, best_chain) VALUES (?, ?, ?)",
-                (user_id, user_name, chain_length)
+                "INSERT OR REPLACE INTO bod_leaderboard (user_id, user_name, best_chain, achieved_at) VALUES (?, ?, ?, ?)",
+                (user_id, user_name, chain_length, achieved_at)
             )
             await db.commit()
-            logger.info(f"New BOD leaderboard score for {user_name}: {chain_length}.")
+            logger.info(f"New BOD leaderboard score for {user_name}: {chain_length} at {achieved_at}.")
 
     async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
         """Sets a configuration value for a specific guild.

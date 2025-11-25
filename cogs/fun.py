@@ -163,7 +163,7 @@ class Fun(BaseCog):
             reply_message = f"Your 20-minute `bod` session has ended. Your final chain was {current_chain}."
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
+                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain, int(time.time()))
                 reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -279,7 +279,7 @@ class Fun(BaseCog):
 
                     user_best = await db_manager.get_user_bod_best(user_id)
                     if current_chain > user_best:
-                        await db_manager.update_bod_leaderboard(user_id, ctx.author.display_name, current_chain)
+                        await db_manager.update_bod_leaderboard(user_id, ctx.author.display_name, current_chain, int(time.time()))
                         reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}! Yujin would be proud!**"
                     else:
                         reply_message += f"\nYour personal best is {user_best}. Yujin is now heading to sleep!"
@@ -406,7 +406,7 @@ class Fun(BaseCog):
 
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain)
+                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain, int(time.time()))
                 reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -451,8 +451,15 @@ class Fun(BaseCog):
         board_string = ""
         for i, entry in enumerate(leaderboard_data[:10]):
             rank = i + 1
+            user_id = entry['user_id']
             user_name = entry['user_name']
             chain = entry['best_chain']
+
+            # Dynamic display name logic
+            if ctx.guild:
+                member = ctx.guild.get_member(user_id)
+                if member:
+                    user_name = member.display_name
 
             if rank == 1:
                 board_string += f"🥇 **{user_name}** - Chain of **{chain}**\n"

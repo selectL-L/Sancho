@@ -17,7 +17,7 @@ import math
 import operator as op
 import random
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -541,125 +541,119 @@ class Math(BaseCog):
         roll_sum, _ = await self._roll_and_parse_notation(match)
         return roll_sum
 
-    async def roll(self, ctx: commands.Context, *, query: str, skill_info: Optional[Dict] = None) -> None:
+    async def evaluate_roll(self, query: str) -> Dict[str, Any]:
+        """Evaluates a dice roll query and returns the result and breakdown.
+
+        Args:
+            query (str): The roll query string.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing:
+                - 'total': The final result (str).
+                - 'breakdown': A list of roll description strings (List[str]).
+                - 'processed_query': The query after processing (str).
+
+        Raises:
+            ValueError: If the query is invalid.
+        """
+        # --- 1. Sanitize and Detect Keywords ---
+        # Standardize query.
+        original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+
+        # Check for advantage/disadvantage.
+        adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
+        dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
+
+        if adv and dis:
+            raise ValueError("Cannot roll with both advantage and disadvantage.")
+
+        # Extract SP (default 50).
+        sp = 50  # Default to 50%
+        sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
+        if sp_match:
+            sp = int(sp_match.group(2))
+            if not (0 <= sp <= 100):
+                raise ValueError("SP must be between 0 and 100.")
+            original_query = original_query.replace(sp_match.group(0), '', 1)
+
+        # --- 2. Extract Relevant Parts of the Expression ---
+        # Extract relevant tokens.
+        dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
+        coin_pattern = r'(\d*)c'
+        number_pattern = r'\d+(\.\d+)?'
+        operator_pattern = r'\*\*|[+\-*\/()]'
+
+        full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
+
+        tokens = full_pattern.findall(original_query)
+        # Flatten regex groups.
+        processed_query = "".join([match[0] for match in tokens])
+
+        # --- 3. Pre-process Parentheses ---
+        processed_query = await self._preprocess_parentheses(processed_query)
+
+        # --- 4. Resolve All Rolls (Coins then Dice) ---
+        # Resolve coins then dice.
+        roll_descriptions = []
+        final_query = processed_query
+
+        while match := COIN_FLIP_REGEX.search(final_query):
+            roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
+            roll_descriptions.append(description)
+            final_query = final_query.replace(match.group(0), str(roll_sum), 1)
+
+        while match := DICE_NOTATION_REGEX.search(final_query):
+            roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
+            roll_descriptions.append(description)
+            final_query = final_query.replace(match.group(0), str(roll_sum), 1)
+
+        # --- 5. Final Calculation ---
+        # Handle simple rolls without math.
+        if not final_query.strip():
+            if len(roll_descriptions) == 1:
+                match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `|: `(.*?)`', roll_descriptions[0])
+                result_display = "N/A"
+                if match:
+                    result_str = next((g for g in match.groups() if g is not None), "N/A")
+                    # Sum dice results.
+                    try:
+                        result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
+                    except (ValueError, TypeError):
+                        # Handle pre-summed coin results.
+                        result_display = result_str.split(' ')[0]
+                
+                return {
+                    'total': result_display,
+                    'breakdown': roll_descriptions,
+                    'processed_query': processed_query
+                }
+            else:
+                raise ValueError("Please specify what to roll!")
+
+        # Evaluate remaining expression.
+        result = safe_eval_math(final_query)
+        result_display = str(int(result)) if result == int(result) else f"{result:.2f}"
+
+        return {
+            'total': result_display,
+            'breakdown': roll_descriptions,
+            'processed_query': processed_query
+        }
+
+    async def roll(self, ctx: commands.Context, *, query: str) -> None:
         """The NLP handler for all dice rolling requests.
 
         Args:
             ctx (commands.Context): The command context.
             query (str): The user's input string.
-            skill_info (Optional[Dict]): Information about the skill triggering the roll, if any.
         """
         try:
-            # --- 1. Sanitize and Detect Keywords ---
-            # Standardize query.
-            original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+            result_data = await self.evaluate_roll(query)
+            result_display = result_data['total']
+            roll_descriptions = result_data['breakdown']
 
-            # Check for advantage/disadvantage.
-            adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
-            dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
-
-            # Extract SP (default 50).
-            sp = 50  # Default to 50%
-            sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
-            if sp_match:
-                sp = int(sp_match.group(2))
-                if not (0 <= sp <= 100):
-                    raise ValueError("SP must be between 0 and 100.")
-                original_query = original_query.replace(sp_match.group(0), '', 1)
-
-            # --- 2. Extract Relevant Parts of the Expression ---
-            # Extract relevant tokens.
-            # - Dice notation (e.g., 2d20, d6, 1d10kh1)
-            # - Coin notation (e.g., 3c, c)
-            # - Numbers (including floating point)
-            # - Basic math operators (+, -, *, /, parentheses)
-            # The power operator `**` must be checked for before `*`.
-            dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
-            coin_pattern = r'(\d*)c'
-            number_pattern = r'\d+(\.\d+)?'
-            operator_pattern = r'\*\*|[+\-*\/()]'
-
-            full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
-
-            tokens = full_pattern.findall(original_query)
-            # Flatten regex groups.
-            processed_query = "".join([match[0] for match in tokens])
-
-            if adv and dis:
-                await ctx.send("Cannot roll with both advantage and disadvantage.")
-                return
-
-            # --- 3. Pre-process Parentheses ---
-            processed_query = await self._preprocess_parentheses(processed_query)
-
-            # --- 4. Resolve All Rolls (Coins then Dice) ---
-            # Resolve coins then dice.
-            roll_descriptions = []
-            final_query = processed_query
-
-            while match := COIN_FLIP_REGEX.search(final_query):
-                roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
-                roll_descriptions.append(description)
-                final_query = final_query.replace(match.group(0), str(roll_sum), 1)
-
-            while match := DICE_NOTATION_REGEX.search(final_query):
-                roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
-                roll_descriptions.append(description)
-                final_query = final_query.replace(match.group(0), str(roll_sum), 1)
-
-            # --- 5. Final Calculation ---
-            # Handle simple rolls without math.
-            if not final_query.strip():
-                if len(roll_descriptions) == 1:
-                    match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `|: `(.*?)`', roll_descriptions[0])
-                    result_display = "N/A"
-                    if match:
-                        result_str = next((g for g in match.groups() if g is not None), "N/A")
-                        # Sum dice results.
-                        # Coin flips are already summed.
-                        try:
-                            # The lambda is more explicit for the type checker and strip() handles potential whitespace.
-                            result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
-                        except (ValueError, TypeError):
-                            # Handle pre-summed coin results.
-                            result_display = result_str.split(' ')[0]
-
-                    response = f"{ctx.author.mention}, you rolled: **{result_display}**\n" + "\n".join(roll_descriptions)
-                    if len(response) > 3500:
-                        await ctx.send(f"Sorry {ctx.author.mention}, the result of your roll is too long to display.")
-                        return
-                    await ctx.send(response)
-                    return
-                else:
-                    await ctx.send("Please specify what to roll!")
-                    return
-
-            # Evaluate remaining expression.
-            result = safe_eval_math(final_query)
-            result_display = int(result) if result == int(result) else f"{result:.2f}"
-
-            # --- 6. Format Response ---
+            # Response formatting.
             response_parts = []
-            # Format skill-triggered rolls.
-            if skill_info:
-                display_formula = query.replace('(', '').replace(')', '').strip()
-
-                # Handle reply targets.
-                if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
-                    target_user = ctx.message.reference.resolved.author
-                    if target_user != ctx.author and not target_user.bot:
-                        if skill_info['skill_type'] == 'attack':
-                            header = f"{ctx.author.mention} attacked {target_user.mention} with **{skill_info['name']}**"
-                        else:  # defense
-                            header = f"{ctx.author.mention} defended against {target_user.mention} with **{skill_info['name']}**"
-                        response_parts.append(header)
-                        response_parts.append(f"`{display_formula}`")
-
-                # Handle untargeted skills.
-                else:
-                    response_parts.append(f"**{skill_info['name']}**")
-                    response_parts.append(f"`{display_formula}`")
-
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
             # Add roll breakdown.
             response_parts.extend(roll_descriptions)
