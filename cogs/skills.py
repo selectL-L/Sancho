@@ -428,7 +428,11 @@ class Skills(BaseCog):
 
         # Format the response
         response_parts = []
-        display_formula = final_roll_query.replace('(', '').replace(')', '').strip()
+
+        if rest_of_query:
+            display_formula = f"({found_skill['dice_roll']}) {rest_of_query}"
+        else:
+            display_formula = found_skill['dice_roll']
 
         # Handle reply targets.
         if ctx.message.reference and isinstance(ctx.message.reference.resolved, discord.Message):
@@ -450,7 +454,7 @@ class Skills(BaseCog):
         response_parts.extend(roll_descriptions)
 
         if found_skill['description']:
-            response_parts.append(f"\n_{found_skill['description']}_")
+            response_parts.append(f"-----------\n{found_skill['description']}")
 
         response = "\n".join(response_parts)
         if len(response) > 3500:
