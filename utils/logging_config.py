@@ -8,16 +8,17 @@ log rotation to manage file sizes.
 """
 import logging
 from logging.handlers import RotatingFileHandler
-import os
 import sys
 import asyncio
 from typing import Literal
+
 
 class AsyncFileHandler(logging.Handler):
     """
     A logging handler that writes to a file asynchronously in a separate thread,
     preventing it from blocking the asyncio event loop.
     """
+
     def __init__(self, filename, mode='a', maxBytes=0, backupCount=0, encoding=None, delay=False):
         super().__init__()
         # The underlying handler is the synchronous one that does the actual file I/O.
@@ -44,6 +45,7 @@ class AsyncFileHandler(logging.Handler):
             # This occurs if there's no running event loop.
             self._handler.emit(record)
 
+
 class CustomFormatter(logging.Formatter):
     """
     A custom log formatter that adds color codes to log levels for console output,
@@ -69,6 +71,7 @@ class CustomFormatter(logging.Formatter):
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
 
+
 def setup_logging(
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO",
     log_to_file: bool = True
@@ -85,10 +88,10 @@ def setup_logging(
       threshold to reduce spam.
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
-    
+
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    root_logger.handlers.clear() # Prevent duplicate logs if called multiple times.
+    root_logger.handlers.clear()  # Prevent duplicate logs if called multiple times.
 
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -99,8 +102,8 @@ def setup_logging(
     if log_to_file:
         # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(
-            'sancho.log', 
-            maxBytes=5*1024*1024, # 5 MB per file
+            'sancho.log',
+            maxBytes=5*1024*1024,  # 5 MB per file
             backupCount=2         # Keep 2 backup files
         )
         file_handler.setFormatter(logging.Formatter(

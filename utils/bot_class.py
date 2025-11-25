@@ -57,7 +57,7 @@ class SanchoBot(commands.Bot):
             owner_id=config.OWNER_ID,
             **kwargs
         )
-        
+
         self.db_manager: Optional[DatabaseManager] = None
         self.console_task: Optional[asyncio.Task] = None
         self.start_time: float = time.time()
@@ -295,7 +295,7 @@ class SanchoBot(commands.Bot):
             try:
                 await ctx.send("Sorry, you don't have permission to use this command!", delete_after=8)
             except discord.HTTPException:
-                pass # Ignore if we can't send the message
+                pass  # Ignore if we can't send the message
             return
 
         # For all other errors, log the full traceback for debugging purposes.

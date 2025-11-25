@@ -52,7 +52,7 @@ class ImageCog(BaseCog):
             for attachment in message.reference.resolved.attachments:
                 if attachment.content_type and attachment.content_type.startswith('image/'):
                     return attachment
-        
+
         return None
 
     async def resize(self, ctx: commands.Context, *, query: str) -> None:
@@ -97,7 +97,7 @@ class ImageCog(BaseCog):
             """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
                 img = img.resize(size)
-                
+
                 buffer = io.BytesIO()
                 # Preserve the original format if possible, otherwise default to PNG.
                 original_format = img.format or 'PNG'
@@ -106,15 +106,15 @@ class ImageCog(BaseCog):
                 return buffer
 
         try:
-            async with ctx.typing(): # Show a "typing..." indicator.
+            async with ctx.typing():  # Show a "typing..." indicator.
                 image_bytes = await attachment.read()
-                
+
                 # Run the blocking image processing in a separate thread.
                 buffer = await asyncio.to_thread(_processing_thread, image_bytes, new_size)
-                
+
                 filename = f"resized_{attachment.filename}"
                 await ctx.send(f"Here is the image resized to {new_size[0]}x{new_size[1]}:", file=discord.File(buffer, filename=filename))
-            
+
             self.logger.info(f"Resized image for {ctx.author} to {new_size[0]}x{new_size[1]}.")
         except Exception as e:
             self.logger.error(f"Failed to resize image: {e}", exc_info=True)
@@ -134,7 +134,7 @@ class ImageCog(BaseCog):
         query = re.sub(r'\bjpg\b', 'jpeg', query, flags=re.IGNORECASE)
 
         supported_formats = {"png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "pdf"}
-        
+
         # Find all unique format mentions in the query.
         found_formats = set(re.findall(r'\b(' + '|'.join(supported_formats) + r')\b', query, re.IGNORECASE))
 
@@ -144,10 +144,10 @@ class ImageCog(BaseCog):
         elif not found_formats:
             await ctx.send(f"I couldn't figure out what format to convert to. Supported formats are: `{', '.join(supported_formats)}`.")
             return
-        
+
         # Get the single target format and make it uppercase.
         target_format = found_formats.pop().upper()
-        
+
         attachment = await self._find_image_attachment(ctx.message)
         if not attachment:
             await ctx.send("Please attach an image or reply to a message with an image to convert.")
@@ -182,13 +182,13 @@ class ImageCog(BaseCog):
 
                 # Run the blocking image processing in a separate thread.
                 buffer = await asyncio.to_thread(_processing_thread, image_bytes, target_format)
-                
+
                 # Create a new filename with the correct extension.
                 base_filename = attachment.filename.rsplit('.', 1)[0]
                 new_filename = f"{base_filename}.{target_format.lower()}"
 
                 await ctx.send(f"Here is the image converted to {target_format}:", file=discord.File(buffer, filename=new_filename))
-            
+
             self.logger.info(f"Converted image for {ctx.author} to {target_format}.")
         except Exception as e:
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)

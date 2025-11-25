@@ -12,9 +12,8 @@ from typing import List, Tuple
 
 from dotenv import dotenv_values, load_dotenv
 
-from utils.extensions import discover_cogs
-
 # Pathing
+
 
 def get_application_path() -> str:
     """Determines the base path for the application.
@@ -32,6 +31,7 @@ def get_application_path() -> str:
     # Running as a script from source
     return os.path.dirname(os.path.abspath(__file__))
 
+
 # Core Paths
 # Define all essential paths based on the application's root directory.
 APP_PATH = get_application_path()
@@ -42,6 +42,7 @@ DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
 COGS_PATH = os.path.join(APP_PATH, 'cogs')
 
 # Bot Configuration
+
 
 def check_and_create_env_file() -> None:
     """Checks for the existence of the `info.env` file.
@@ -61,7 +62,7 @@ def check_and_create_env_file() -> None:
         "DEV_MODE": "False",
         "DEV_GUILD": ""
     }
-    
+
     field_comments = {
         "DISCORD_TOKEN": "# Discord Token for bot start up.",
         "BOT_PREFIX": "# Bot Prefixes, ensure they're seperated with commas.",
@@ -88,23 +89,23 @@ def check_and_create_env_file() -> None:
         print("\nPlease open this file and add your bot's DISCORD_TOKEN and BOT_PREFIX.")
         print("The OWNER_ID is optional but recommended.")
         sys.exit("Exiting: Bot token and prefix not configured.")
-    
+
     else:
         # Check for missing fields
         current_values = dotenv_values(ENV_PATH)
         missing_keys = [key for key in required_fields if key not in current_values]
-        
+
         if missing_keys:
             logging.info(f"Updating {os.path.basename(ENV_PATH)} with missing keys: {missing_keys}")
             print(f"Updating {os.path.basename(ENV_PATH)} with new configuration fields...")
-            
+
             # Prepare new content preserving existing values
             new_content = []
             for key in required_fields:
                 value = current_values.get(key, required_fields[key])
                 new_content.append(f"{field_comments[key]}\n")
                 new_content.append(f"{key}={value}\n\n")
-            
+
             try:
                 os.remove(ENV_PATH)
                 with open(ENV_PATH, 'w') as f:
@@ -116,6 +117,7 @@ def check_and_create_env_file() -> None:
                 print(f"Your existing data has been logged to {LOG_PATH}.")
                 print(f"Error: {e}")
                 sys.exit("Exiting: Failed to update configuration file.")
+
 
 # Check for and/or create the .env file before trying to load from it.
 check_and_create_env_file()
@@ -186,7 +188,7 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\b(edit|change|update)\s.*skill(s)?\b',), 'Skills', 'edit_skill_nlp'),
         ((r'\b(list|check|show)\s.*skill(s)?\b', r'^\s*skills\s*$'), 'Skills', 'list_skills_nlp'),
         ((r'\b(save|create|make)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
-        
+
         # Commands for casting or using skills.
         ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
     ],

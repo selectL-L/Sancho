@@ -23,7 +23,7 @@ def discover_cogs(cogs_path: str) -> List[str]:
     cogs = []
     if not os.path.exists(cogs_path):
         return cogs
-        
+
     for filename in os.listdir(cogs_path):
         # Ensure the file is a Python file and not a special file like __init__.py
         if filename.endswith('.py') and not filename.startswith('__'):

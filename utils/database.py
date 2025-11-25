@@ -103,7 +103,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
-            
+
             # Define Table Schemas (Creation SQL)
             table_schemas = {
                 "skills": '''CREATE TABLE IF NOT EXISTS skills (
@@ -175,7 +175,7 @@ class DatabaseManager:
             # Get existing tables
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table';")
             existing_tables = {row[0] async for row in cursor}
-            
+
             # Create missing tables
             for table, sql in table_schemas.items():
                 if table not in existing_tables:
@@ -200,7 +200,7 @@ class DatabaseManager:
             }
 
             schema_issues = []
-            
+
             for table, expected_columns in expected_schema.items():
                 if table in existing_tables:
                     cursor = await db.execute(f"PRAGMA table_info({table});")
@@ -314,7 +314,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT user_name, best_chain FROM bod_leaderboard ORDER BY best_chain DESC")
+            cursor = await db.execute("SELECT user_id, user_name, best_chain FROM bod_leaderboard ORDER BY best_chain DESC")
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -700,7 +700,7 @@ class DatabaseManager:
                         params.extend([skill_id, user_id])
                         query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
                         await cursor.execute(query, params)
-                    
+
                     rows_affected = cursor.rowcount
 
                 except aiosqlite.Error as e:
@@ -709,7 +709,6 @@ class DatabaseManager:
                     raise
             await db.commit()
             return rows_affected
-
 
     async def add_reminder(
         self, user_id: int, channel_id: int, reminder_time: int, message: str,
@@ -761,7 +760,7 @@ class DatabaseManager:
             set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
             params = list(updates.values())
             params.extend([reminder_id, user_id])
-            
+
             query = f"UPDATE reminders SET {set_clause} WHERE id = ? AND user_id = ?"
             cursor = await db.execute(query, params)
             await db.commit()
