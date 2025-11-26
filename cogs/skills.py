@@ -31,7 +31,7 @@ from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
-from .math import COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
+from .math import CLAMP_SUFFIX_REGEX, COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
 
 
 class Skills(BaseCog):
@@ -61,33 +61,80 @@ class Skills(BaseCog):
         Returns:
             int: The maximum possible integer result of the roll. Returns 9999 on failure.
         """
-        def max_coin_value(match: re.Match) -> str:
-            """Replaces coin flip notation (e.g., 4c) with its max value (4*1)."""
-            num_coins = int(match.group(1) or 1)
-            return f"({num_coins * 1})"
-
-        def max_dice_value(match: re.Match) -> str:
-            """Replaces dice notation (e.g., 2d6) with its max value (2*6)."""
-            num_dice = int(match.group(1) or 1)
-            num_sides = int(match.group(2))
-            return f"({num_dice * num_sides})"
-
         try:
-            # Pre-process for 'x' as a multiplier and standardize to lowercase.
-            processed_roll = dice_roll.lower().replace('x', '*')
+            # 1. Normalize
+            # Lowercase and handle 'x' as multiplication (unless it's part of mx)
+            expr_str = dice_roll.lower()
+            expr_str = re.sub(r'(?<!m)x', '*', expr_str)
 
-            # Replace coin and dice notations with their maximum values.
-            expr_str = COIN_FLIP_REGEX.sub(max_coin_value, processed_roll)
-            expr_str = DICE_NOTATION_REGEX.sub(max_dice_value, expr_str)
-            # Remove keep/drop modifiers as they don't affect the max of the base dice.
-            expr_str = re.sub(r'kh\d+|kl\d+', '', expr_str)
+            # 2. Replace Dice and Coins with Max Values
+            def max_dice_replacer(match: re.Match) -> str:
+                n_str = match.group(1)
+                num_dice = int(n_str) if n_str else 1
+                
+                sides_str = match.group(2)
+                num_sides = int(sides_str)
+                
+                keep_mode = match.group(3)
+                keep_count_str = match.group(4)
+                
+                if keep_mode and keep_count_str:
+                    keep_count = int(keep_count_str)
+                    count_to_sum = min(num_dice, keep_count)
+                    return str(count_to_sum * num_sides)
+                else:
+                    return str(num_dice * num_sides)
 
-            # Use the safe evaluation function from the Math cog.
+            def max_coin_replacer(match: re.Match) -> str:
+                n_str = match.group(1)
+                num_coins = int(n_str) if n_str else 1
+                return str(num_coins)
+
+            expr_str = DICE_NOTATION_REGEX.sub(max_dice_replacer, expr_str)
+            expr_str = COIN_FLIP_REGEX.sub(max_coin_replacer, expr_str)
+
+            # 3. Resolve Clamping Suffixes
+            # Pattern: (expression)suffix
+            # We loop until no suffixes are found attached to resolved parentheses.
+            clamp_pattern = re.compile(r'\(([^()]+)\)((?:mn\d+|mx\d+)+)', re.IGNORECASE)
+            
+            while True:
+                match = clamp_pattern.search(expr_str)
+                if not match:
+                    break
+                
+                inner_expr = match.group(1)
+                suffix = match.group(2)
+                full_match = match.group(0)
+                
+                try:
+                    inner_val = float(safe_eval_math(inner_expr))
+                except Exception:
+                    # If inner expression is invalid, we can't resolve this clamp.
+                    self.logger.warning(f"Failed to eval inner clamp expr: {inner_expr}")
+                    return 9999
+
+                mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
+                mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
+                
+                min_val = int(mn_matches[-1]) if mn_matches else None
+                max_val = int(mx_matches[-1]) if mx_matches else None
+                
+                result = inner_val
+                
+                if min_val is not None:
+                    result = max(result, min_val)
+                if max_val is not None:
+                    result = min(result, max_val)
+                
+                expr_str = expr_str.replace(full_match, str(int(result)), 1)
+
+            # 4. Final Evaluation
             return int(safe_eval_math(expr_str))
+
         except Exception as e:
             self.logger.error(f"Could not evaluate max roll for '{dice_roll}': {e}")
-            # Return a high number as a safe fallback if evaluation fails.
-            return 9999
+            return 99999
 
     async def _evaluate_max_roll(self, dice_roll: str) -> int:
         """Asynchronously evaluates the maximum possible result of a dice expression.
@@ -448,10 +495,13 @@ class Skills(BaseCog):
         # Handle untargeted skills.
         if not response_parts:
             response_parts.append(f"**{found_skill['name']}**")
-            response_parts.append(f"`{display_formula}`")
+            response_parts.append(f"-# `{display_formula}`")
 
         response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
-        response_parts.extend(roll_descriptions)
+        
+        # Add small text prefix to each breakdown line
+        formatted_breakdown = [f"-# {line}" for line in roll_descriptions]
+        response_parts.extend(formatted_breakdown)
 
         if found_skill['description']:
             response_parts.append(f"-----------\n{found_skill['description']}")

@@ -121,6 +121,8 @@ def safe_eval_math(expr: str) -> float:
 DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
 # Regex for Limbus Company-style coin flips, e.g., "3c", "c".
 COIN_FLIP_REGEX = re.compile(r'\b(\d*)c\b', re.IGNORECASE)
+# Regex for clamping notation, e.g., "mn10", "mx20", "mn5mx10".
+CLAMP_SUFFIX_REGEX = re.compile(r'((?:mn\d+|mx\d+)+)', re.IGNORECASE)
 
 
 class Math(BaseCog):
@@ -342,7 +344,9 @@ class Math(BaseCog):
         """
         try:
             # Standardize the query: lowercase, collapse whitespace, and handle common operator aliases.
-            original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+            # Replace 'x' with '*' only if it's not preceded by a letter (to preserve 'mx', 'exp', etc.)
+            clean_query = " ".join(query.lower().split())
+            original_query = re.sub(r'(?<![a-z])x', '*', clean_query).replace('^', '**')
 
             if 'help' in original_query:
                 await self.send_calc_help(ctx)
@@ -452,14 +456,107 @@ class Math(BaseCog):
             sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
             kept_rolls = sorted_rolls[:keep_count]
             discarded = sorted_rolls[keep_count:]
-            description += f" -> kept **{', '.join(map(str, kept_rolls))}** (discarded {', '.join(map(str, discarded))})"
+            
+            kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
+            discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
+            
+            description += f" -> Kept {kept_str}{discarded_str}"
+        
+        # Add sum if not clamped later
+        description += f" -> Result **{sum(kept_rolls)}**"
 
         return sum(kept_rolls), description
+
+    def _parse_and_apply_clamping(self, value: float, suffix: str) -> Tuple[float, str]:
+        """Parses the clamping suffix and applies it to the value.
+
+        Args:
+            value (float): The value to clamp.
+            suffix (str): The suffix string (e.g., "mn10mx20").
+
+        Returns:
+            Tuple[float, str]: The clamped value and a description string.
+
+        Raises:
+            ValueError: If mx < mn.
+        """
+        min_val = None
+        max_val = None
+
+        # Find all mn and mx occurrences
+        mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
+        mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
+
+        # Use the last occurrence if multiple
+        if mn_matches:
+            min_val = int(mn_matches[-1])
+        if mx_matches:
+            max_val = int(mx_matches[-1])
+
+        if min_val is not None and max_val is not None and max_val < min_val:
+            raise ValueError(f"Maximum ({max_val}) cannot be less than minimum ({min_val}).")
+
+        original_value = value
+        clamped_value = value
+
+        if min_val is not None:
+            clamped_value = max(min_val, clamped_value)
+        if max_val is not None:
+            clamped_value = min(max_val, clamped_value)
+
+        description = ""
+        limits = []
+        if min_val is not None:
+            limits.append(f"Min {min_val}")
+        if max_val is not None:
+            limits.append(f"Max {max_val}")
+
+        if limits:
+            if clamped_value != original_value:
+                description = f"Clamped **{original_value}** to **{clamped_value}** ({', '.join(limits)})"
+            else:
+                description = f"Result **{original_value}** ({', '.join(limits)})"
+
+        return clamped_value, description
+
+    def _check_and_apply_clamp(self, query: str, match_start: int, match_end: int, value: float, description: str) -> Tuple[float, str, int, int]:
+        """Checks for surrounding parentheses and clamp suffix, applies if found.
+
+        Args:
+            query (str): The full query string.
+            match_start (int): The start index of the dice/coin match.
+            match_end (int): The end index of the dice/coin match.
+            value (float): The calculated value of the roll.
+            description (str): The description of the roll.
+
+        Returns:
+            Tuple[float, str, int, int]: The new value, new description, new start index, and new end index.
+        """
+        # Check for ( ... )
+        if match_start > 0 and match_end < len(query) and query[match_start - 1] == '(' and query[match_end] == ')':
+            # Check for suffix after )
+            suffix_match = re.match(r'^(?:mn\d+|mx\d+)+', query[match_end + 1:], re.IGNORECASE)
+            if suffix_match:
+                suffix = suffix_match.group(0)
+                clamped_val, clamp_desc = self._parse_and_apply_clamping(value, suffix)
+
+                # Remove the default "-> Result X" from the description if it exists
+                # to replace it with the clamped result.
+                base_desc = re.sub(r' -> Result .*?$', '', description)
+                
+                # Combine descriptions
+                full_desc = f"{base_desc} -> {clamp_desc}"
+
+                # Return new value, new desc, start_index, end_index (covering ( and )suffix)
+                return clamped_val, full_desc, match_start - 1, match_end + 1 + len(suffix)
+
+        return value, description, match_start, match_end
 
     async def _preprocess_parentheses(self, query: str) -> str:
         """Recursively evaluates and replaces simple mathematical expressions within parentheses.
 
         This simplifies the final expression before dice are rolled. E.g., "(2+3)d6" becomes "5d6".
+        Also handles clamping notation for pure math expressions, e.g., "(2+2)mx3" -> "3".
 
         Args:
             query (str): The input query string.
@@ -467,10 +564,13 @@ class Math(BaseCog):
         Returns:
             str: The processed query string.
         """
-        PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)')
+        # Matches (expression) optionally followed by mnX/mxY suffix
+        PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)((?:mn\d+|mx\d+)+)?', re.IGNORECASE)
 
         while match := PARENTHESES_REGEX.search(query):
             expression = match.group(1)
+            suffix = match.group(2)
+
             # Skip dice/coin notation.
             if 'd' in expression or 'c' in expression:
                 break
@@ -478,6 +578,11 @@ class Math(BaseCog):
             try:
                 # Evaluate in thread.
                 result = await asyncio.to_thread(safe_eval_math, expression)
+
+                # Apply clamping if suffix exists
+                if suffix:
+                    result, _ = self._parse_and_apply_clamping(result, suffix)
+
                 result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
                 query = query.replace(match.group(0), result_str, 1)
                 self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
@@ -517,7 +622,7 @@ class Math(BaseCog):
 
         flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
 
-        description = f"{match.group(0)}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T)"
+        description = f"{match.group(0)}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T) -> Result **{heads_count}**"
         return heads_count, description
 
     async def get_roll_result(self, dice_notation: str) -> int:
@@ -558,7 +663,9 @@ class Math(BaseCog):
         """
         # --- 1. Sanitize and Detect Keywords ---
         # Standardize query.
-        original_query = " ".join(query.lower().split()).replace('x', '*').replace('^', '**')
+        # Replace 'x' with '*' only if it's not preceded by a letter (to preserve 'mx', 'exp', etc.)
+        clean_query = " ".join(query.lower().split())
+        original_query = re.sub(r'(?<![a-z])x', '*', clean_query).replace('^', '**')
 
         # Check for advantage/disadvantage.
         adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
@@ -580,10 +687,11 @@ class Math(BaseCog):
         # Extract relevant tokens.
         dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
         coin_pattern = r'\b(\d*)c\b'
+        clamp_pattern = r'(?:mn\d+|mx\d+)+'
         number_pattern = r'\d+(\.\d+)?'
         operator_pattern = r'\*\*|[+\-*\/()]'
 
-        full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
+        full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{clamp_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
 
         tokens = full_pattern.findall(original_query)
         # Flatten regex groups.
@@ -599,15 +707,50 @@ class Math(BaseCog):
 
         while match := COIN_FLIP_REGEX.search(final_query):
             roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
+            
+            # Check for wrapping clamp
+            roll_sum, description, start, end = self._check_and_apply_clamp(
+                final_query, match.start(), match.end(), roll_sum, description
+            )
+            
             roll_descriptions.append(description)
-            final_query = final_query.replace(match.group(0), str(roll_sum), 1)
+            # Replace the matched part (including clamp if found) with the result
+            final_query = final_query[:start] + str(roll_sum) + final_query[end:]
 
         while match := DICE_NOTATION_REGEX.search(final_query):
             roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
+            
+            # Check for wrapping clamp
+            roll_sum, description, start, end = self._check_and_apply_clamp(
+                final_query, match.start(), match.end(), roll_sum, description
+            )
+            
             roll_descriptions.append(description)
-            final_query = final_query.replace(match.group(0), str(roll_sum), 1)
+            # Replace the matched part (including clamp if found) with the result
+            final_query = final_query[:start] + str(roll_sum) + final_query[end:]
 
-        # --- 5. Final Calculation ---
+        # --- 4.5 Re-process Parentheses for Math Clamps ---
+        # This handles cases like (6d6 + 5)mx10 where the dice roll resolved to a number,
+        # leaving a pure math expression inside parentheses with a clamp suffix.
+        final_query = await self._preprocess_parentheses(final_query)
+
+        # --- 5. Resolve Clamped Results (Legacy/Fallback) ---
+        # Handles cases like (12)mx10 where 12 is a resolved dice roll but wasn't caught by the wrapping check
+        # (e.g. if parentheses were added later or logic changed).
+        CLAMPED_RESULT_REGEX = re.compile(r'\((\d+(?:\.\d+)?)\)((?:mn\d+|mx\d+)+)', re.IGNORECASE)
+
+        while match := CLAMPED_RESULT_REGEX.search(final_query):
+            value = float(match.group(1))
+            suffix = match.group(2)
+
+            clamped_value, description = self._parse_and_apply_clamping(value, suffix)
+            if description:
+                roll_descriptions.append(description)
+
+            result_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
+            final_query = final_query.replace(match.group(0), result_str, 1)
+
+        # --- 6. Final Calculation ---
         # Handle simple rolls without math.
         if not final_query.strip():
             if len(roll_descriptions) == 1:
@@ -651,9 +794,11 @@ class Math(BaseCog):
             result_data = await self.evaluate_roll(query)
             result_display = result_data['total']
             roll_descriptions = result_data['breakdown']
+            processed_query = result_data['processed_query']
 
             # Response formatting.
             response_parts = []
+            response_parts.append(f"`{processed_query}`")
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
             # Add roll breakdown.
             response_parts.extend(roll_descriptions)
