@@ -456,12 +456,12 @@ class Math(BaseCog):
             sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
             kept_rolls = sorted_rolls[:keep_count]
             discarded = sorted_rolls[keep_count:]
-            
+
             kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
             discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
-            
+
             description += f" -> Kept {kept_str}{discarded_str}"
-        
+
         # Add sum if not clamped later
         description += f" -> Result **{sum(kept_rolls)}**"
 
@@ -543,7 +543,7 @@ class Math(BaseCog):
                 # Remove the default "-> Result X" from the description if it exists
                 # to replace it with the clamped result.
                 base_desc = re.sub(r' -> Result .*?$', '', description)
-                
+
                 # Combine descriptions
                 full_desc = f"{base_desc} -> {clamp_desc}"
 
@@ -707,24 +707,24 @@ class Math(BaseCog):
 
         while match := COIN_FLIP_REGEX.search(final_query):
             roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
-            
+
             # Check for wrapping clamp
             roll_sum, description, start, end = self._check_and_apply_clamp(
                 final_query, match.start(), match.end(), roll_sum, description
             )
-            
+
             roll_descriptions.append(description)
             # Replace the matched part (including clamp if found) with the result
             final_query = final_query[:start] + str(roll_sum) + final_query[end:]
 
         while match := DICE_NOTATION_REGEX.search(final_query):
             roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
-            
+
             # Check for wrapping clamp
             roll_sum, description, start, end = self._check_and_apply_clamp(
                 final_query, match.start(), match.end(), roll_sum, description
             )
-            
+
             roll_descriptions.append(description)
             # Replace the matched part (including clamp if found) with the result
             final_query = final_query[:start] + str(roll_sum) + final_query[end:]
