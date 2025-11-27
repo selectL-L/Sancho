@@ -31,7 +31,7 @@ from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
-from .math import CLAMP_SUFFIX_REGEX, COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
+from .math import COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
 
 
 class Skills(BaseCog):
@@ -71,13 +71,13 @@ class Skills(BaseCog):
             def max_dice_replacer(match: re.Match) -> str:
                 n_str = match.group(1)
                 num_dice = int(n_str) if n_str else 1
-                
+
                 sides_str = match.group(2)
                 num_sides = int(sides_str)
-                
+
                 keep_mode = match.group(3)
                 keep_count_str = match.group(4)
-                
+
                 if keep_mode and keep_count_str:
                     keep_count = int(keep_count_str)
                     count_to_sum = min(num_dice, keep_count)
@@ -97,16 +97,16 @@ class Skills(BaseCog):
             # Pattern: (expression)suffix
             # We loop until no suffixes are found attached to resolved parentheses.
             clamp_pattern = re.compile(r'\(([^()]+)\)((?:mn\d+|mx\d+)+)', re.IGNORECASE)
-            
+
             while True:
                 match = clamp_pattern.search(expr_str)
                 if not match:
                     break
-                
+
                 inner_expr = match.group(1)
                 suffix = match.group(2)
                 full_match = match.group(0)
-                
+
                 try:
                     inner_val = float(safe_eval_math(inner_expr))
                 except Exception:
@@ -116,17 +116,17 @@ class Skills(BaseCog):
 
                 mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
                 mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
-                
+
                 min_val = int(mn_matches[-1]) if mn_matches else None
                 max_val = int(mx_matches[-1]) if mx_matches else None
-                
+
                 result = inner_val
-                
+
                 if min_val is not None:
                     result = max(result, min_val)
                 if max_val is not None:
                     result = min(result, max_val)
-                
+
                 expr_str = expr_str.replace(full_match, str(int(result)), 1)
 
             # 4. Final Evaluation
@@ -498,7 +498,7 @@ class Skills(BaseCog):
             response_parts.append(f"-# `{display_formula}`")
 
         response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
-        
+
         # Add small text prefix to each breakdown line
         formatted_breakdown = [f"-# {line}" for line in roll_descriptions]
         response_parts.extend(formatted_breakdown)
