@@ -185,6 +185,9 @@ class DatabaseManager:
                     logger.info(f"Created missing table: {table}")
                     existing_tables.add(table)
 
+            # Create Indexes
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time)")
+
             await db.commit()
 
             # Check for schema mismatches (Columns)
@@ -889,3 +892,40 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
             await db.commit()
+
+    async def get_next_upcoming_reminder(self, current_time: int) -> Optional[Dict[str, Any]]:
+        """Retrieves the single next reminder that is scheduled for the future.
+
+        Args:
+            current_time (int): The current timestamp.
+
+        Returns:
+            Optional[Dict[str, Any]]: The next reminder, or None if no future reminders exist.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # We want the earliest reminder that is AFTER the current time.
+            cursor = await db.execute(
+                "SELECT * FROM reminders WHERE reminder_time > ? ORDER BY reminder_time ASC LIMIT 1",
+                (current_time,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_missed_reminders(self, current_time: int) -> List[Dict[str, Any]]:
+        """Retrieves all reminders that should have fired but haven't (time <= now).
+
+        Args:
+            current_time (int): The current timestamp.
+
+        Returns:
+            List[Dict[str, Any]]: A list of missed reminders.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM reminders WHERE reminder_time <= ? ORDER BY reminder_time ASC",
+                (current_time,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

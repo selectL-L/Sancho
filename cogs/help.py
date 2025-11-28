@@ -183,7 +183,7 @@ class Help(BaseCog):
         embed = discord.Embed(
             title="Hello, I'm Sancho!",
             description=(
-                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
+                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"  # noqa: E501
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),
             color=discord.Color.purple()

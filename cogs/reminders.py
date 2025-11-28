@@ -23,7 +23,7 @@ import asyncio
 import re
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import dateparser
 import discord
@@ -50,273 +50,293 @@ class Reminders(BaseCog):
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager: DatabaseManager = bot.db_manager
-        # Stores active reminder tasks, mapping reminder ID to the asyncio.Task instance.
-        # This allows us to cancel reminders if they are deleted or the cog is reloaded.
-        self.scheduled_tasks: Dict[int, asyncio.Task[None]] = {}
+
+        # The single background task that handles all reminders.
+        self.scheduler_task: Optional[asyncio.Task[None]] = None
+        # Event to wake up the scheduler when a new reminder is added/edited/deleted.
+        self.scheduler_event = asyncio.Event()
 
     async def cog_load(self) -> None:
-        """Schedules all pending reminders from the database when the cog is loaded."""
-        self.logger.info("Scheduling existing reminders from database...")
-        # Run in background to avoid blocking.
-        self.bot.loop.create_task(self._schedule_existing_reminders())
+        """Starts the reminder scheduler when the cog is loaded."""
+        self.logger.info("Starting reminder system...")
+        # Process missed reminders first (Catch-Up Phase)
+        await self._process_missed_reminders()
+        # Start the main scheduler loop
+        self.scheduler_task = self.bot.loop.create_task(self._scheduler_loop())
 
     async def cog_unload(self) -> None:
-        """Cancels all running reminder tasks when the cog is unloaded."""
-        # Prevent firing during reload/shutdown.
-        for task in self.scheduled_tasks.values():
-            task.cancel()
-        self.scheduled_tasks.clear()
+        """Stops the reminder scheduler when the cog is unloaded."""
+        if self.scheduler_task:
+            self.scheduler_task.cancel()
+            try:
+                await self.scheduler_task
+            except asyncio.CancelledError:
+                pass
+        self.logger.info("Reminder system stopped.")
 
-    async def _schedule_existing_reminders(self) -> None:
-        """Queries the database for all pending reminders and schedules them."""
+    async def _process_missed_reminders(self) -> None:
+        """Identifies and handles reminders that were missed while the bot was offline."""
         try:
-            all_reminders = await self.db_manager.get_all_reminders()
-            count = 0
-            for reminder in all_reminders:
-                self._schedule_reminder_task(reminder)
-                count += 1
-            self.logger.info(f"Scheduled {count} existing reminders.")
+            now = int(time.time())
+            missed = await self.db_manager.get_missed_reminders(now)
+
+            if not missed:
+                self.logger.info("No missed reminders found.")
+                return
+
+            self.logger.info(f"Processing {len(missed)} missed reminders...")
+
+            # We use a semaphore to limit concurrent processing to avoid rate limits
+            sem = asyncio.Semaphore(5)
+
+            async def process_one(reminder: Dict[str, Any]) -> None:
+                async with sem:
+                    await self._handle_missed_reminder(reminder, now)
+
+            # Create tasks for all missed reminders
+            tasks = [process_one(r) for r in missed]
+            await asyncio.gather(*tasks)
+
+            self.logger.info("Finished processing missed reminders.")
+
         except Exception as e:
-            self.logger.error(f"Failed to schedule existing reminders: {e}", exc_info=True)
+            self.logger.error(f"Error during missed reminder processing: {e}", exc_info=True)
 
-    def _schedule_reminder_task(self, reminder: Dict[str, Any]) -> None:
-        """Creates and stores an asyncio.Task for a given reminder.
-
-        Args:
-            reminder (Dict[str, Any]): The reminder data dictionary.
-        """
-        reminder_id = reminder['id']
-
-        # If a task for this reminder already exists, cancel it before creating a new one.
-        # This is important for rescheduling recurring reminders or handling reloads.
-        if reminder_id in self.scheduled_tasks:
-            self.scheduled_tasks[reminder_id].cancel()
-
-        # Calculate the delay until the reminder is due.
-        delay = reminder['reminder_time'] - time.time()
-
-        if delay > 0:
-            # Create a new asyncio task that will fire after the calculated delay.
-            task = self.bot.loop.create_task(self._send_reminder_after_delay(delay, reminder))
-            # Add a callback that will handle cleanup/rescheduling ONLY if the task completes normally.
-            task.add_done_callback(self._create_done_callback(reminder))
-            self.scheduled_tasks[reminder_id] = task
-            self.logger.info(f"Scheduled reminder {reminder_id} to be sent in {delay:.2f} seconds.")
-        else:
-            # If the reminder is already due (e.g., bot was offline), send it immediately.
-            self.logger.info(f"Reminder {reminder_id} is overdue. Sending immediately.")
-            # We still create a task so the done callback handles cleanup consistently.
-            task = self.bot.loop.create_task(self._send_reminder_after_delay(0, reminder))
-            task.add_done_callback(self._create_done_callback(reminder))
-            self.scheduled_tasks[reminder_id] = task
-
-    def _create_done_callback(self, reminder: Dict[str, Any]) -> Callable[[asyncio.Task[None]], None]:
-        """Creates a closure for the task's done callback.
-
-        This captures the reminder data and provides a function that checks the
-        task's state before cleanup.
+    async def _handle_missed_reminder(self, reminder: Dict[str, Any], current_time: int) -> None:
+        """Handles a single missed reminder, sending a summary and rescheduling if needed.
 
         Args:
-            reminder (Dict[str, Any]): The reminder data dictionary.
-
-        Returns:
-            Callable[[asyncio.Task[None]], None]: The callback function.
+            reminder (Dict[str, Any]): The reminder data.
+            current_time (int): The current timestamp.
         """
-        def done_callback(task: asyncio.Task[None]) -> None:
-            # Remove the task from the tracking dictionary to prevent memory leaks.
-            # We check if the task in the dictionary is THIS task before removing it.
-            # This prevents removing a newly scheduled task if this one was cancelled/replaced.
-            if self.scheduled_tasks.get(reminder['id']) == task:
-                self.scheduled_tasks.pop(reminder['id'], None)
+        user_id = reminder['user_id']
+        message = reminder['message']
 
-            # --- This is the core of the fix ---
-            # Only proceed with cleanup if the task was NOT cancelled.
-            # This prevents the database entry from being deleted on cog reloads.
-            if task.cancelled():
-                self.logger.info(f"Reminder {reminder['id']} task was cancelled. Skipping cleanup.")
-                return
-
-            # Also, check for exceptions during task execution.
-            if task.exception():
-                self.logger.error(f"An exception occurred in reminder task {reminder['id']}: {task.exception()}")
-                # Depending on the desired behavior, you might still want to clean up or retry.
-                # For now, we'll log it and let it be. It might be rescheduled on next restart.
-                return
-
-            # If the task completed successfully, proceed with the cleanup/reschedule logic.
-            self.logger.info(f"Reminder task {reminder['id']} finished. Proceeding to cleanup/reschedule.")
-            if not self.bot.is_closed():
-                self.bot.loop.create_task(self._reschedule_or_cleanup(reminder))
-
-        return done_callback
-
-    def _format_overdue_time(self, seconds: float) -> str:
-        """Formats a duration in seconds into a human-readable string.
-
-        Args:
-            seconds (float): The duration in seconds.
-
-        Returns:
-            str: A human-readable string (e.g., "5 minutes ago").
-        """
-        seconds = abs(seconds)
-        if seconds < 60:
-            return "just now"
-        if seconds < 3600:
-            minutes = int(seconds // 60)
-            return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
-        if seconds < 86400:
-            hours = int(seconds // 3600)
-            return f"{hours} hour{'s' if hours > 1 else ''} ago"
-        days = int(seconds // 86400)
-        return f"{days} day{'s' if days > 1 else ''} ago"
-
-    async def _send_reminder_after_delay(self, delay: float, reminder: Dict[str, Any]) -> None:
-        """Waits for a specified delay, then sends the reminder.
-
-        Cleanup and rescheduling are now handled by the task's done callback.
-
-        Args:
-            delay (float): The delay in seconds.
-            reminder (Dict[str, Any]): The reminder data dictionary.
-        """
         try:
-            # Only sleep if the reminder is in the future. Overdue reminders run immediately.
-            if delay > 0:
-                await asyncio.sleep(delay)
+            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
 
-            # Fetch the user and channel to send the reminder to.
-            user = self.bot.get_user(reminder['user_id']) or await self.bot.fetch_user(reminder['user_id'])
-
-            # Check user preference for reminder destination
-            destination_pref = await self.db_manager.get_user_config(reminder['user_id'], 'reminder_destination')
-
+            # Determine destination (same logic as before)
+            destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
             targetable = None
 
             if destination_pref == 'dm':
                 targetable = user
             elif destination_pref and destination_pref.isdigit():
-                # Specific channel preference
                 try:
                     chan_id = int(destination_pref)
                     targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
                 except (discord.NotFound, discord.Forbidden):
-                    self.logger.warning(f"Preferred channel {destination_pref} not found/accessible. Falling back to DM.")
                     targetable = user
             else:
-                # Default to origin channel ('origin', 'channel', or None)
                 try:
                     targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
                 except (discord.NotFound, discord.Forbidden):
-                    self.logger.warning(f"Original channel {reminder['channel_id']} not found/accessible. Falling back to DM.")
                     targetable = user
 
-            if targetable and hasattr(targetable, 'send'):
-                overdue_message = ""
-                # If the reminder was overdue, add a note indicating how long ago it was due.
-                if delay <= 0:
-                    overdue_seconds = time.time() - reminder['reminder_time']
-                    overdue_message = f" (This was due {self._format_overdue_time(overdue_seconds)})"
+            if not targetable:
+                self.logger.warning(f"Could not find destination for missed reminder {reminder['id']}. Deleting.")
+                await self.db_manager.delete_reminders([reminder['id']])
+                return
 
-                # Cast to Messageable to satisfy static analysis
-                targetable_dest = cast(discord.abc.Messageable, targetable)
+            # Cast to Messageable to satisfy static analysis
+            targetable_dest = cast(discord.abc.Messageable, targetable)
 
-                # Check if we should reply to a specific message
-                reply_message_id = reminder.get('reply_message_id')
-                sent_as_reply = False
-
-                if reply_message_id:
-                    try:
-                        # We can only reply if the targetable is a channel (has fetch_message)
-                        if hasattr(targetable, 'fetch_message'):
-                            # Cast to Any to bypass static analysis complaints about specific channel types
-                            targetable_with_fetch = cast(Any, targetable)
-                            original_message = await targetable_with_fetch.fetch_message(reply_message_id)
-                            await original_message.reply(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}")
-                            sent_as_reply = True
-                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        self.logger.warning(f"Could not reply to linked message {reply_message_id}. Sending normally.")
-
-                if not sent_as_reply:
-                    extra_msg = ""
-                    if reply_message_id:
-                        extra_msg = "\n(and sorry to say but I couldn't find the reply you mentioned!)"
-                    await targetable_dest.send(f"{user.mention}, you asked me to remind you: '{reminder['message']}'{overdue_message}{extra_msg}")
-
-                self.logger.info(f"Sent reminder {reminder['id']} to user {user.id} via {destination_pref or 'channel'}.")
+            # Logic for Recurring vs One-off
+            if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
+                await self._handle_missed_recurring(reminder, targetable_dest, user, current_time)
             else:
-                self.logger.error(f"Could not find a valid destination for reminder {reminder['id']}.")
+                # One-off: Just say sorry and delete
+                msg = (f"{user.mention}, sorry I was offline! You had a reminder for: '{message}'\n"
+                       f"It was due at <t:{reminder['reminder_time']}:F> (<t:{reminder['reminder_time']}:R>).")
+                await targetable_dest.send(msg)
+                await self.db_manager.delete_reminders([reminder['id']])
 
-        except asyncio.CancelledError:
-            # This is expected when the cog is unloaded. The done callback will see the
-            # cancelled state and prevent cleanup.
-            self.logger.info(f"Reminder task {reminder['id']} was cancelled, likely due to cog unload.")
-            # Re-raise the error to ensure the task is properly marked as cancelled.
-            raise
-        except (discord.NotFound, discord.Forbidden) as e:
-            self.logger.warning(f"Failed to send reminder {reminder['id']} (user/channel not found or permissions error). Deleting. Error: {e}")
-            # If we can't find the user/channel, the reminder is unserviceable. Delete it directly.
+        except Exception as e:
+            self.logger.error(f"Failed to handle missed reminder {reminder['id']}: {e}")
+            # If we fail hard (e.g. user blocked bot), we might want to delete it to stop loops,
+            # but for now let's just log it.
+
+    async def _handle_missed_recurring(self, reminder: Dict[str, Any], targetable: discord.abc.Messageable, user: discord.User, current_time: int) -> None:
+        """Calculates missed occurrences for a recurring reminder and reschedules it."""
+        try:
+            user_tz_str = await self._get_user_timezone(user.id)
+            user_tz = pytz.timezone(user_tz_str)
+
+            # Anchor to creation time for stability
+            start_date = datetime.fromtimestamp(reminder['created_at'], tz=user_tz)
+            rule = rrulestr(reminder['recurrence_rule'], dtstart=start_date)
+
+            # Find all occurrences between the LAST scheduled time and NOW
+            # We use the stored reminder_time as the start of our search window
+            last_scheduled_dt = datetime.fromtimestamp(reminder['reminder_time'], tz=user_tz)
+            now_dt = datetime.fromtimestamp(current_time, tz=user_tz)
+
+            # Get all missed occurrences
+            # inc=True to include the one that was exactly scheduled if it wasn't processed
+            missed_occurrences = rule.between(last_scheduled_dt, now_dt, inc=True)
+
+            if not missed_occurrences:
+                # This shouldn't happen if reminder_time <= current_time, but just in case
+                return
+
+            # 1. Send Notification
+            count = len(missed_occurrences)
+            timestamps = [f"<t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)" for dt in missed_occurrences]
+
+            msg_header = f"{user.mention}, sorry I was offline! You missed **{count}** occurrences of your reminder: '{reminder['message']}'."
+
+            if count > 5:
+                # Truncate if too many
+                list_str = "\n".join(f"- {ts}" for ts in timestamps[-5:])
+                msg_body = f"\nHere are the last 5 missed times:\n{list_str}"
+            else:
+                list_str = "\n".join(f"- {ts}" for ts in timestamps)
+                msg_body = f"\nMissed times:\n{list_str}"
+
+            await targetable.send(msg_header + msg_body)
+
+            # 2. Reschedule to Next Future Time
+            next_occurrence = rule.after(now_dt)
+            if next_occurrence:
+                next_ts = int(next_occurrence.timestamp())
+                await self.db_manager.update_reminder_time(reminder['id'], next_ts)
+                self.logger.info(f"Rescheduled missed recurring reminder {reminder['id']} to {next_ts}.")
+            else:
+                await targetable.send("This reminder has no further occurrences scheduled.")
+                await self.db_manager.delete_reminders([reminder['id']])
+
+        except Exception as e:
+            self.logger.error(f"Error handling missed recurring reminder {reminder['id']}: {e}")
+
+    async def _scheduler_loop(self) -> None:
+        """The main loop that waits for the next reminder and fires it."""
+        await self.bot.wait_until_ready()
+
+        while not self.bot.is_closed():
+            try:
+                self.scheduler_event.clear()
+
+                now = int(time.time())
+                next_reminder = await self.db_manager.get_next_upcoming_reminder(now)
+
+                if next_reminder:
+                    delay = next_reminder['reminder_time'] - now
+                    self.logger.info(f"Next reminder {next_reminder['id']} due in {delay:.2f}s.")
+
+                    if delay > 0:
+                        # Wait for the delay OR for a new reminder event
+                        try:
+                            await asyncio.wait_for(self.scheduler_event.wait(), timeout=delay)
+                            # If we get here, the event was set (new reminder added/changed)
+                            self.logger.info("Scheduler woke up due to event (new/changed reminder).")
+                            continue  # Loop back to re-query DB
+                        except asyncio.TimeoutError:
+                            # Timeout reached, meaning the reminder is due!
+                            pass
+
+                    # Fire the reminder
+                    await self._fire_reminder(next_reminder)
+
+                else:
+                    self.logger.info("No upcoming reminders. Waiting for new ones...")
+                    await self.scheduler_event.wait()
+                    self.logger.info("Scheduler woke up due to event.")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in scheduler loop: {e}", exc_info=True)
+                await asyncio.sleep(5)  # Prevent tight loop on error
+
+    async def _fire_reminder(self, reminder: Dict[str, Any]) -> None:
+        """Sends the reminder and handles recurrence/deletion."""
+        try:
+            # Double check it still exists (might have been deleted while waiting)
+            current_state = await self.db_manager.get_reminder_by_id(reminder['id'])
+            if not current_state:
+                return
+
+            user_id = reminder['user_id']
+            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+
+            # Destination Logic (Refactored to be cleaner)
+            destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
+            targetable = None
+
+            # Try DM
+            if destination_pref == 'dm':
+                targetable = user
+            # Try Specific Channel
+            elif destination_pref and destination_pref.isdigit():
+                try:
+                    chan_id = int(destination_pref)
+                    targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
+                except (discord.NotFound, discord.Forbidden):
+                    targetable = user  # Fallback
+            # Try Origin Channel
+            else:
+                try:
+                    targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
+                except (discord.NotFound, discord.Forbidden):
+                    targetable = user  # Fallback
+
+            if targetable:
+                # Reply Logic
+                reply_msg_id = reminder.get('reply_message_id')
+                sent = False
+
+                msg_content = f"{user.mention}, you asked me to remind you: '{reminder['message']}'"
+
+                if reply_msg_id and hasattr(targetable, 'fetch_message'):
+                    try:
+                        # Cast to Any to bypass static analysis complaints about specific channel types
+                        targetable_with_fetch = cast(Any, targetable)
+                        original_msg = await targetable_with_fetch.fetch_message(reply_msg_id)
+                        await original_msg.reply(msg_content)
+                        sent = True
+                    except:  # noqa: E722 (REASON: We want to catch all exceptions here since discord may send us something weird as a response)
+                        pass  # Fallback to normal send
+
+                if not sent:
+                    if reply_msg_id:
+                        msg_content += "\n(I couldn't find the message you wanted me to reply to!)"
+                    # Cast to Messageable to satisfy static analysis
+                    targetable_dest = cast(discord.abc.Messageable, targetable)
+                    await targetable_dest.send(msg_content)
+
+            # Handle Recurrence or Deletion
+            if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
+                await self._reschedule_recurring(reminder)
+            else:
+                await self.db_manager.delete_reminders([reminder['id']])
+
+        except (discord.NotFound, discord.Forbidden):
+            # User blocked bot or left server -> Delete reminder
             await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
-            self.logger.error(f"Unexpected error in reminder task {reminder['id']}: {e}", exc_info=True)
-        # The task is now complete, cancelled, or has failed. The done callback will handle
-        # cleanup of the database entry and the scheduled_tasks dictionary.
+            self.logger.error(f"Error firing reminder {reminder['id']}: {e}", exc_info=True)
 
-    async def _reschedule_or_cleanup(self, reminder: Dict[str, Any]) -> None:
-        """Handles the logic for rescheduling a recurring reminder or deleting a one-off.
+    async def _reschedule_recurring(self, reminder: Dict[str, Any]) -> None:
+        """Calculates the next occurrence and updates the DB."""
+        try:
+            user_tz_str = await self._get_user_timezone(reminder['user_id'])
+            user_tz = pytz.timezone(user_tz_str)
 
-        Args:
-            reminder (Dict[str, Any]): The reminder data dictionary.
-        """
-        reminder_id = reminder['id']
+            start_date = datetime.fromtimestamp(reminder['created_at'], tz=user_tz)
+            rule = rrulestr(reminder['recurrence_rule'], dtstart=start_date)
 
-        # First, check if the reminder still exists. It might have been deleted while the task was running.
-        reminder_data = await self.db_manager.get_reminder_by_id(reminder_id)
-        if not reminder_data:
-            self.logger.info(f"Reminder {reminder_id} was deleted. Halting recurrence.")
-            return
+            now_aware = datetime.now(user_tz)
+            next_occurrence = rule.after(now_aware)
 
-        # If it's a recurring reminder, calculate and schedule the next occurrence.
-        if reminder_data.get('is_recurring') and reminder_data.get('recurrence_rule'):
-            self.logger.info(f"Reminder {reminder_id} is recurring. Calculating next occurrence.")
-            try:
-                # Get user's timezone to correctly calculate the next occurrence.
-                user_tz_str = await self._get_user_timezone(reminder_data['user_id'])
-                user_tz = pytz.timezone(user_tz_str)
-
-                # --- FIX for unstable timing ---
-                # Anchor the recurrence rule to the original creation time.
-                # This provides a stable starting point for calculating all future occurrences.
-                start_date = datetime.fromtimestamp(reminder_data['created_at'], tz=user_tz)
-                rule = rrulestr(reminder_data['recurrence_rule'], dtstart=start_date)
-
-                # Find the next occurrence *after* the one that just fired.
-                # Using the stable `start_date` prevents timing drift.
-                now_aware = datetime.now(user_tz)
-                next_occurrence = rule.after(now_aware)
-
-                if next_occurrence:
-                    # Update the database with the new time for the next reminder.
-                    next_timestamp = int(next_occurrence.timestamp())
-                    await self.db_manager.update_reminder_time(reminder_id, next_timestamp)
-
-                    # Create a new asyncio task for the next occurrence.
-                    next_reminder = reminder_data.copy()
-                    next_reminder['reminder_time'] = next_timestamp
-                    self._schedule_reminder_task(next_reminder)
-                    self.logger.info(f"Rescheduled reminder {reminder_id} for {next_occurrence.isoformat()}.")
-                else:
-                    # If there are no more occurrences, delete the reminder.
-                    self.logger.info(f"Recurring reminder {reminder_id} has no more occurrences. Deleting.")
-                    await self.db_manager.delete_reminders([reminder_id])
-            except Exception as e:
-                self.logger.error(f"Failed to reschedule recurring reminder {reminder_id}: {e}", exc_info=True)
-                # If rescheduling fails, delete the reminder to prevent error loops.
-                await self.db_manager.delete_reminders([reminder_id])  # Delete if rescheduling fails
-        else:
-            # If it's not recurring, simply delete it from the database.
-            await self.db_manager.delete_reminders([reminder_id])
-            self.logger.info(f"Cleaned up non-recurring reminder {reminder_id} from database.")
+            if next_occurrence:
+                next_ts = int(next_occurrence.timestamp())
+                await self.db_manager.update_reminder_time(reminder['id'], next_ts)
+                self.logger.info(f"Rescheduled recurring reminder {reminder['id']} to {next_ts}.")
+            else:
+                await self.db_manager.delete_reminders([reminder['id']])
+        except Exception as e:
+            self.logger.error(f"Failed to reschedule {reminder['id']}: {e}")
+            await self.db_manager.delete_reminders([reminder['id']])
 
     async def _get_user_timezone(self, user_id: int) -> str:
         """Fetches a user's timezone string.
@@ -438,7 +458,7 @@ class Reminders(BaseCog):
 
         # Pattern C: Complex phrases like "Every 2 days", "Every other Monday", "Every weekend"
         complex_freq_match = re.search(
-            r'\bevery\s+(?:(?P<other>other)\s+)?(?:(?P<interval>\d+)\s+)?(?P<unit>second|minute|hour|day|week|month|year|weekend|weekday|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b',
+            r'\bevery\s+(?:(?P<other>other)\s+)?(?:(?P<interval>\d+)\s+)?(?P<unit>second|minute|hour|day|week|month|year|weekend|weekday|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b',  # noqa: E501
             text, re.IGNORECASE
         )
 
@@ -808,12 +828,8 @@ class Reminders(BaseCog):
                     is_recurring, recurrence_rule
                 )
 
-                new_reminder_data = {
-                    'id': new_reminder_id, 'user_id': ctx.author.id, 'channel_id': ctx.channel.id,
-                    'reminder_time': timestamp, 'message': reminder_message, 'created_at': int(time.time()),
-                    'is_recurring': is_recurring, 'recurrence_rule': recurrence_rule
-                }
-                self._schedule_reminder_task(new_reminder_data)
+                # Wake up the scheduler to pick up the new reminder
+                self.scheduler_event.set()
 
                 await ctx.send("✅ Reminder saved and scheduled!")
                 self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
@@ -927,12 +943,8 @@ class Reminders(BaseCog):
                         is_recurring, recurrence_rule, reply_message_id
                     )
 
-                    new_reminder_data = {
-                        'id': new_reminder_id, 'user_id': ctx.author.id, 'channel_id': ctx.channel.id,
-                        'reminder_time': timestamp, 'message': reminder_message, 'created_at': int(time.time()),
-                        'is_recurring': is_recurring, 'recurrence_rule': recurrence_rule, 'reply_message_id': reply_message_id
-                    }
-                    self._schedule_reminder_task(new_reminder_data)
+                    # Wake up the scheduler to pick up the new reminder
+                    self.scheduler_event.set()
 
                     await ctx.send("✅ Reminder saved and scheduled!")
                     self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
@@ -1039,15 +1051,11 @@ class Reminders(BaseCog):
                 await ctx.send(f"No valid reminder numbers provided. I couldn't find reminders for: {', '.join(invalid_numbers)}.")
                 return
 
-            # Cancel the asyncio tasks for all reminders being deleted.
-            for db_id in ids_to_delete:
-                if db_id in self.scheduled_tasks:
-                    self.scheduled_tasks[db_id].cancel()
-                    self.scheduled_tasks.pop(db_id, None)
-                    self.logger.info(f"Cancelled and removed scheduled task for deleted reminder {db_id}.")
-
             # This is the crucial step: delete from the database so it doesn't recur on restart.
             await self.db_manager.delete_reminders(list(ids_to_delete))
+
+            # Wake up the scheduler so it knows to stop waiting for a deleted reminder if it was next
+            self.scheduler_event.set()
 
             deleted_count = len(ids_to_delete)
             response_parts = [f"Successfully deleted {deleted_count} reminder(s): `{', '.join(sorted(valid_numbers_deleted))}`"]
@@ -1175,7 +1183,7 @@ class Reminders(BaseCog):
 
         except pytz.UnknownTimeZoneError:
             self.logger.warning(f"Failed to set timezone for user {ctx.author.id}: Unrecognized timezone '{timezone_str}'.")
-            await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")
+            await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")  # noqa: E501
         except Exception as e:
             self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
@@ -1312,10 +1320,8 @@ class Reminders(BaseCog):
                     self.logger.info(f"User {ctx.author.id} updated reminder {reminder_to_edit['id']}.")
 
                     if should_reschedule:
-                        # Fetch the updated reminder data to ensure we have the full state
-                        updated_reminder = await self.db_manager.get_reminder_by_id(reminder_to_edit['id'])
-                        if updated_reminder:
-                            self._schedule_reminder_task(updated_reminder)
+                        # Wake up the scheduler to pick up the changes
+                        self.scheduler_event.set()
                 else:
                     await ctx.send("Something went wrong. I couldn't update that reminder.")
             else:
