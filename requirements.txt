@@ -29,6 +29,6 @@ Pillow
 # For monitoring system resource usage (CPU, RAM) in the ping command.
 psutil
 
-# Testing dependencies (tests are not included with the github repository, so these are not required)
+# Testing dependencies (tests are included but these libraries are not required for normal operation).
 pytest
 pytest-asyncio
