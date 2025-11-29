@@ -78,7 +78,7 @@ class Reminders(BaseCog):
         """Identifies and handles reminders that were missed while the bot was offline."""
         try:
             now = int(time.time())
-            missed = await self.db_manager.get_missed_reminders(now)
+            missed = await self.db_manager.get_due_reminders(now)
 
             if not missed:
                 self.logger.info("No missed reminders found.")
@@ -215,28 +215,36 @@ class Reminders(BaseCog):
         while not self.bot.is_closed():
             try:
                 self.scheduler_event.clear()
-
                 now = int(time.time())
+
+                # 1. Process ALL currently due reminders
+                due_reminders = await self.db_manager.get_due_reminders(now)
+
+                if due_reminders:
+                    self.logger.info(f"Firing {len(due_reminders)} due reminders.")
+                    # Fire all concurrently
+                    tasks = [self._fire_reminder(r) for r in due_reminders]
+                    await asyncio.gather(*tasks)
+                    # Loop immediately to check if more became due or if we need to sleep
+                    continue
+
+                # 2. If nothing is due right now, find the next one
                 next_reminder = await self.db_manager.get_next_upcoming_reminder(now)
 
                 if next_reminder:
                     delay = next_reminder['reminder_time'] - now
+                    # Ensure delay is non-negative
+                    delay = max(0, delay)
+
                     self.logger.info(f"Next reminder {next_reminder['id']} due in {delay:.2f}s.")
 
-                    if delay > 0:
-                        # Wait for the delay OR for a new reminder event
-                        try:
-                            await asyncio.wait_for(self.scheduler_event.wait(), timeout=delay)
-                            # If we get here, the event was set (new reminder added/changed)
-                            self.logger.info("Scheduler woke up due to event (new/changed reminder).")
-                            continue  # Loop back to re-query DB
-                        except asyncio.TimeoutError:
-                            # Timeout reached, meaning the reminder is due!
-                            pass
-
-                    # Fire the reminder
-                    await self._fire_reminder(next_reminder)
-
+                    try:
+                        await asyncio.wait_for(self.scheduler_event.wait(), timeout=delay)
+                        # Event triggered (new reminder added/changed)
+                        self.logger.info("Scheduler woke up due to event.")
+                    except asyncio.TimeoutError:
+                        # Timeout reached, time to check DB again
+                        pass
                 else:
                     self.logger.info("No upcoming reminders. Waiting for new ones...")
                     await self.scheduler_event.wait()
