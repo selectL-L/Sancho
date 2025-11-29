@@ -1,4 +1,4 @@
-# Sancho (v0.58) (The testing update!)
+# Sancho (v0.59) (The testing update!)
 
 Sancho is a local Discord bot built on a simple premise, that interacting with her SHOULD feel natural.
 

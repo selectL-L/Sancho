@@ -23,7 +23,6 @@ Key Features:
 
 import asyncio
 import datetime
-import inspect
 import io
 import logging
 import re
@@ -56,7 +55,7 @@ class Starboard(BaseCog):
         self.db_manager: DatabaseManager = bot.db_manager
         self.starboard_emoji = "⭐"
         self.starboard_threshold = 3
-        self.http_session = aiohttp.ClientSession()
+        self.http_session: Optional[aiohttp.ClientSession] = None
         self._locks: Dict[int, asyncio.Lock] = {}  # For preventing race conditions
         # Rate-limiting controls for slow 'fix' operations
         self._fix_semaphore = asyncio.Semaphore(1)
@@ -65,9 +64,14 @@ class Starboard(BaseCog):
         # Fast-mode override (disabled by default). When True, bypass rate-limits and thresholds.
         self._fast_mode = False
 
+    async def cog_load(self) -> None:
+        """Called when the cog is loaded."""
+        self.http_session = aiohttp.ClientSession()
+
     async def cog_unload(self) -> None:
         """Clean up resources when the cog is unloaded."""
-        await self.http_session.close()
+        if self.http_session:
+            await self.http_session.close()
 
     async def get_starboard_config(self, guild_id: int) -> Tuple[Optional[int], str, int]:
         """Fetches starboard configuration for a guild, with defaults.
@@ -799,6 +803,10 @@ class Starboard(BaseCog):
         async def download_content(url: str, filename: str, spoiler: bool = False) -> None:
             nonlocal current_total_size
             if current_total_size >= MAX_TOTAL_SIZE:
+                return
+
+            if self.http_session is None:
+                logger.error("HTTP session is not initialized.")
                 return
 
             try:

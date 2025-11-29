@@ -911,5 +911,3 @@ class DatabaseManager:
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
-
-
