@@ -806,7 +806,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM reminders WHERE reminder_time <= ?", (current_time,))
+            cursor = await db.execute("SELECT * FROM reminders WHERE reminder_time <= ? ORDER BY reminder_time ASC", (current_time,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -912,20 +912,4 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-    async def get_missed_reminders(self, current_time: int) -> List[Dict[str, Any]]:
-        """Retrieves all reminders that should have fired but haven't (time <= now).
 
-        Args:
-            current_time (int): The current timestamp.
-
-        Returns:
-            List[Dict[str, Any]]: A list of missed reminders.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM reminders WHERE reminder_time <= ? ORDER BY reminder_time ASC",
-                (current_time,)
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
