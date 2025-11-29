@@ -37,7 +37,7 @@ from discord.ext import commands
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
-from utils.views import FastConfirmModal
+from utils.views import FastConfirmModal, launch_modal
 
 logger = logging.getLogger(__name__)
 
@@ -150,55 +150,25 @@ class Starboard(BaseCog):
             return True
 
         # Present a modal to the caller for explicit confirmation
-        # TODO: Rewrite the modal interaction logic in utils/views.py to be more robust and reusable.
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         modal = FastConfirmModal(future)
 
-        # Send the modal and wait for the future to be set by the modal submit handler
-        send_modal = None
-        if getattr(ctx, 'interaction', None):
-            send_modal = getattr(ctx.interaction, 'response', None)
-        # Fallback to Context.send_modal (older shims / wrappers)
-        if not send_modal:
-            send_modal = getattr(ctx, 'send_modal', None)
+        # Use the helper to launch the modal via a button (consistent for both text and slash commands)
+        await launch_modal(ctx, modal)
 
-        if callable(send_modal):
-            try:
-                # If we have an interaction response, use `send_modal` via that interface.
-                res = send_modal(modal)
-                if inspect.isawaitable(res):
-                    await res
-            except Exception:
-                # If something goes wrong with modal sending, fall back to text confirmation
-                send_modal = None
+        try:
+            confirmed = await asyncio.wait_for(future, timeout=45.0)
+        except asyncio.TimeoutError:
+            await ctx.send('Fast mode cancelled (timed out).')
+            return False
 
-        if not callable(send_modal):
-            await ctx.send("WARNING: Modals unavailable — please reply with 'I understand the risks' to confirm fast mode.")
-            try:
-                def _check(m: discord.Message) -> bool:
-                    return m.author == ctx.author and m.channel == ctx.channel and m.content.strip().lower() == 'i understand the risks'
+        if not confirmed:
+            return False
 
-                await self.bot.wait_for('message', check=_check, timeout=30.0)
-                confirmed = True
-            except asyncio.TimeoutError:
-                await ctx.send('Fast mode cancelled (no confirmation).')
-                return False
-            if not confirmed:
-                return False
-            self._fast_mode = True
-            return True
-        else:
-            try:
-                confirmed = await asyncio.wait_for(future, timeout=30.0)
-            except asyncio.TimeoutError:
-                await ctx.send('Fast mode cancelled (no confirmation).')
-                return False
-            if not confirmed:
-                return False
-            # Mark fast mode and write an audit log entry
-            self._fast_mode = True
-            logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {guild.id} at {datetime.datetime.utcnow().isoformat()}")
-            return True
+        # Mark fast mode and write an audit log entry
+        self._fast_mode = True
+        logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {guild.id} at {datetime.datetime.utcnow().isoformat()}")
+        return True
 
     @starboard_group.command(name="remake")
     @commands.is_owner()
@@ -677,29 +647,33 @@ class Starboard(BaseCog):
 
         # Use a lock to prevent race conditions from multiple simultaneous reactions.
         # This ensures we don't post the same message multiple times or desync the count.
-        lock = self._locks.setdefault(payload.message_id, asyncio.Lock())
-        async with lock:
-            channel = self.bot.get_channel(payload.channel_id)
-            if not isinstance(channel, discord.TextChannel) or channel.id == starboard_channel_id:
-                return
+        if payload.message_id not in self._locks:
+            self._locks[payload.message_id] = asyncio.Lock()
+        lock = self._locks[payload.message_id]
 
-            try:
-                message = await channel.fetch_message(payload.message_id)
-            except discord.NotFound:
-                logger.warning(f"Starboard: Message {payload.message_id} not found.")
-                return
+        try:
+            async with lock:
+                channel = self.bot.get_channel(payload.channel_id)
+                if not isinstance(channel, discord.TextChannel) or channel.id == starboard_channel_id:
+                    return
 
-            # Find the reaction count for the correct emoji
-            star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
-            if not star_reaction:
-                return
+                try:
+                    message = await channel.fetch_message(payload.message_id)
+                except discord.NotFound:
+                    logger.warning(f"Starboard: Message {payload.message_id} not found.")
+                    return
 
-            if star_reaction.count >= starboard_threshold:
-                await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
+                # Find the reaction count for the correct emoji
+                star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
+                if not star_reaction:
+                    return
 
-        # Clean up lock if no longer needed
-        if lock.locked() is False:
-            self._locks.pop(payload.message_id, None)
+                if star_reaction.count >= starboard_threshold:
+                    await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, star_reaction.count)
+        finally:
+            # Clean up lock if no longer needed
+            if not lock.locked():
+                self._locks.pop(payload.message_id, None)
 
     async def post_to_starboard(self, message: discord.Message, starboard_channel_id: int, starboard_emoji: str, star_count: int) -> None:
         """Posts or updates a message on the starboard.
@@ -817,19 +791,55 @@ class Starboard(BaseCog):
         description_parts = []
         files = []
 
+        # Limits
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+        MAX_TOTAL_SIZE = 25 * 1024 * 1024  # 25 MB
+        current_total_size = 0
+
+        async def download_content(url: str, filename: str, spoiler: bool = False) -> None:
+            nonlocal current_total_size
+            if current_total_size >= MAX_TOTAL_SIZE:
+                return
+
+            try:
+                async with self.http_session.get(url) as resp:
+                    if resp.status == 200:
+                        # Check Content-Length header first if available
+                        content_length = resp.headers.get('Content-Length')
+                        if content_length and int(content_length) > MAX_FILE_SIZE:
+                            logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit.")
+                            return
+
+                        data = io.BytesIO()
+                        chunk_size = 4096
+                        file_size = 0
+
+                        while True:
+                            chunk = await resp.content.read(chunk_size)
+                            if not chunk:
+                                break
+                            file_size += len(chunk)
+                            if file_size > MAX_FILE_SIZE:
+                                logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit during download.")
+                                return
+                            if current_total_size + file_size > MAX_TOTAL_SIZE:
+                                logger.warning(f"Skipping attachment {filename}: exceeds total 25MB limit.")
+                                return
+                            data.write(chunk)
+
+                        data.seek(0)
+                        current_total_size += file_size
+                        files.append(discord.File(data, filename=filename, spoiler=spoiler))
+            except Exception as e:
+                logger.error(f"Failed to download attachment {filename}: {e}")
+
         # Add message content.
         if message.content:
             description_parts.append(message.content)
 
         # Process attachments.
         for attachment in message.attachments:
-            try:
-                async with self.http_session.get(attachment.url) as resp:
-                    if resp.status == 200:
-                        data = io.BytesIO(await resp.read())
-                        files.append(discord.File(data, filename=attachment.filename, spoiler=attachment.is_spoiler()))
-            except Exception as e:
-                logger.error(f"Failed to download direct attachment for starboard: {e}")
+            await download_content(attachment.url, attachment.filename, attachment.is_spoiler())
 
         # Process forwarded snapshots.
         if hasattr(message, 'message_snapshots') and message.message_snapshots:
@@ -838,13 +848,7 @@ class Starboard(BaseCog):
                     description_parts.append(snapshot.content)
                 # Process attachments within the snapshot.
                 for attachment in snapshot.attachments:
-                    try:
-                        async with self.http_session.get(attachment.url) as resp:
-                            if resp.status == 200:
-                                data = io.BytesIO(await resp.read())
-                                files.append(discord.File(data, filename=attachment.filename, spoiler=attachment.is_spoiler()))
-                    except Exception as e:
-                        logger.error(f"Failed to download snapshot attachment for starboard: {e}")
+                    await download_content(attachment.url, attachment.filename, attachment.is_spoiler())
 
         # Handle embeds.
         elif message.embeds:
@@ -853,14 +857,8 @@ class Starboard(BaseCog):
                 description_parts.append(embed.description)
             # Download image from the embed if it exists.
             if embed.image and embed.image.url:
-                try:
-                    async with self.http_session.get(embed.image.url) as resp:
-                        if resp.status == 200:
-                            data = io.BytesIO(await resp.read())
-                            filename = embed.image.url.split('/')[-1].split('?')[0] or "embedded_image.png"
-                            files.append(discord.File(data, filename=filename))
-                except Exception as e:
-                    logger.error(f"Failed to download embedded image for starboard: {e}")
+                filename = embed.image.url.split('/')[-1].split('?')[0] or "embedded_image.png"
+                await download_content(embed.image.url, filename)
 
         # Join all collected parts into a single description string.
         description = "\n\n".join(description_parts)

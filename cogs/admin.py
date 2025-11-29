@@ -9,6 +9,7 @@ import os
 import tempfile
 import time
 import typing
+import asyncio
 from collections import defaultdict
 from datetime import timedelta
 from typing import List
@@ -135,11 +136,59 @@ class AdminCog(BaseCog):
 
     async def cog_unload(self) -> None:
         """Cancels the usage recording task when the cog is unloaded."""
+        self.take_snapshot(label="Shutdown")
+        self.dump_usage_history()
         self.record_usage.cancel()
 
-    @tasks.loop(minutes=30)
-    async def record_usage(self) -> None:
-        """Records CPU and RAM usage every 30 minutes."""
+    def dump_usage_history(self) -> None:
+        """Dumps the usage history to a file and manages old files."""
+        if not self.usage_history:
+            return
+
+        try:
+            # Calculate runtime
+            uptime_seconds = time.time() - self.bot.start_time
+            uptime_str = str(timedelta(seconds=int(uptime_seconds))).replace(":", "-")
+
+            timestamp_str = discord.utils.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"status_history_{timestamp_str}_runtime-{uptime_str}.txt"
+
+            # Generate content
+            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<10}"]
+            lines.append("-" * 65)
+            for entry in self.usage_history:
+                ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+                label = entry.get('label') or ""
+                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<10}")
+
+            # Write to file
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            # Manage old files
+            self.cleanup_old_history_files()
+        except Exception as e:
+            logging.error(f"Failed to dump usage history: {e}")
+
+    def cleanup_old_history_files(self) -> None:
+        """Keeps only the 5 most recent status history files."""
+        try:
+            files = [f for f in os.listdir('.') if f.startswith("status_history_") and f.endswith(".txt")]
+            # Sort by modification time (oldest first)
+            files.sort(key=lambda x: os.path.getmtime(x))
+
+            while len(files) > 5:
+                file_to_remove = files.pop(0)
+                os.remove(file_to_remove)
+        except Exception as e:
+            logging.error(f"Failed to cleanup old history files: {e}")
+
+    def take_snapshot(self, label: typing.Optional[str] = None) -> None:
+        """Takes a snapshot of the current resource usage.
+
+        Args:
+            label (typing.Optional[str]): An optional label for the snapshot.
+        """
         try:
             memory_info = self.process.memory_info()
             cpu_usage = self.process.cpu_percent(interval=None)
@@ -148,15 +197,25 @@ class AdminCog(BaseCog):
             self.usage_history.append({
                 'timestamp': timestamp,
                 'cpu': cpu_usage,
-                'ram': ram_usage
+                'ram': ram_usage,
+                'label': label
             })
         except Exception as e:
             logging.error(f"Error recording usage stats: {e}")
+
+    @tasks.loop(minutes=30)
+    async def record_usage(self) -> None:
+        """Records CPU and RAM usage every 30 minutes."""
+        self.take_snapshot()
 
     @record_usage.before_loop
     async def before_record_usage(self) -> None:
         """Waits for the bot to be ready before starting the usage recording loop."""
         await self.bot.wait_until_ready()
+        # Take startup snapshot
+        self.take_snapshot(label="Startup")
+        # Wait 5 minutes before starting the regular loop
+        await asyncio.sleep(300)
 
     @commands.hybrid_command(name="global_limit", hidden=True, description="Set the global skill limit for all users.")
     @commands.has_permissions(manage_guild=True)
@@ -334,11 +393,12 @@ class AdminCog(BaseCog):
                 await ctx.send("No historical data recorded yet (updates every 30 mins).")
                 return
 
-            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10}"]
-            lines.append("-" * 50)
+            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<10}"]
+            lines.append("-" * 65)
             for entry in self.usage_history:
                 ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f}")
+                label = entry.get('label') or ""
+                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<10}")
 
             with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_usage_history.txt") as f:
                 f.write("\n".join(lines))
