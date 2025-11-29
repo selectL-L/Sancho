@@ -205,11 +205,11 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Local paths
-/.vscode
+# Local paths that are created/required (currently empty)
 
 # Local files that are created/required
 info.env
 *.db
 *.db.backup
 *.log
+status_history_*.txt

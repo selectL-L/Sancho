@@ -111,7 +111,7 @@ class FastConfirmModal(discord.ui.Modal):
     def __init__(self, future: asyncio.Future):
         super().__init__(title="Confirm Fast Mode")
         # Single short text field where the user must type the exact phrase
-        self.add_item(discord.ui.TextInput(label="Type 'I understand the risks' to confirm", style=discord.TextStyle.short, placeholder="I understand the risks"))
+        self.add_item(discord.ui.TextInput(label="Confirm the use of fast mode.", style=discord.TextStyle.short, placeholder="I understand the risks"))
         self.future = future
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -121,10 +121,51 @@ class FastConfirmModal(discord.ui.Modal):
         except Exception:
             value = ""
         if value == 'i understand the risks':
-            await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits.', ephemeral=True)
+            await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits. This IS dangerous.', ephemeral=True)
             if not self.future.done():
                 self.future.set_result(True)
         else:
             await interaction.response.send_message('Fast mode cancelled (incorrect confirmation).', ephemeral=True)
             if not self.future.done():
                 self.future.set_result(False)
+
+
+class ModalLauncherView(discord.ui.View):
+    """A view that displays a button to launch a modal.
+    Ensures consistent behavior for both text and slash commands.
+    """
+
+    def __init__(self, modal: discord.ui.Modal, author: discord.User | discord.Member, timeout: float = 60.0):
+        super().__init__(timeout=timeout)
+        self.modal = modal
+        self.author = author
+        self.message: Optional[discord.Message] = None
+
+    @discord.ui.button(label="Open form", style=discord.ButtonStyle.danger)
+    async def launch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("This form is not for you.", ephemeral=True)
+            return
+        # We must send the modal in response to THIS interaction (the button click)
+        await interaction.response.send_modal(self.modal)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        setattr(child, 'disabled', True)
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+
+async def launch_modal(ctx, modal: discord.ui.Modal):
+    """
+    Sends a message with a button to launch the modal.
+    This ensures consistent behavior between slash and text commands.
+    """
+    view = ModalLauncherView(modal, ctx.author)
+    message = await ctx.send("This action requires strict confirmation. Click the button below to proceed to a form.", view=view)
+    view.message = message
+    return message
