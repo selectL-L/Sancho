@@ -596,7 +596,7 @@ class Starboard(BaseCog):
                         # We need to ensure post_to_starboard handles the missing starboard_message_id correctly
                         # It will see the entry, see missing ID (if we fix it), remove entry, and create new.
                         # Or we can manually remove entry here to force creation.
-                        # To be safe, let's remove the broken entry so post_to_starboard creates a fresh one.
+                        # To be safe, we remove the broken entry so post_to_starboard creates a fresh one.
                         await self.db_manager.remove_starboard_entry(original_id)
 
                         await self.post_to_starboard(found_msg, starboard_channel_id, starboard_emoji, star_count)

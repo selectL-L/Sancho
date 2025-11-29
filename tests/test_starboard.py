@@ -18,9 +18,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 def mock_bot():
     bot = MagicMock(spec=SanchoBot)
     bot.db_manager = AsyncMock(spec=DatabaseManager)
-    # bot.loop is not used in Starboard cog, and getting it this way is deprecated
-    # if no loop is running. If needed, we can mock it or use asyncio.get_running_loop()
-    # inside an async fixture.
     return bot
 
 
@@ -139,7 +136,16 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
         'starboard_reply_id': None
     }
 
-    all_entries = [entry1, entry2, entry3, entry4, entry5, entry6, entry7]
+    # 8. Valid Entry but Original Deleted (Needs Tombstone)
+    entry8 = {
+        'original_message_id': 4008,
+        'starboard_message_id': 5008,
+        'guild_id': guild.id,
+        'original_channel_id': channels[7].id,
+        'starboard_reply_id': None
+    }
+
+    all_entries = [entry1, entry2, entry3, entry4, entry5, entry6, entry7, entry8]
 
     # Mock DB responses
     mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
@@ -236,6 +242,13 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
     sb_msg6 = create_mock_message(5006, starboard_channel)
     sb_msg6.embeds = [create_sb_embed(orig_msg6)]
 
+    sb_msg8 = create_mock_message(5008, starboard_channel)
+    # Fake original for embed creation only
+    fake_orig_8 = MagicMock()
+    fake_orig_8.jump_url = "http://jump.url/4008"
+    fake_orig_8.content = "Deleted Content"
+    sb_msg8.embeds = [create_sb_embed(fake_orig_8)]
+
     # Mock fetch_message
     async def fetch_message_side_effect(msg_id):
         if msg_id is None:
@@ -249,6 +262,8 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
             4005: orig_msg5,  # No SB msg
             4006: orig_msg6, 5006: sb_msg6,
             # 4007 is missing
+            5008: sb_msg8,
+            # 4008 is missing
         }
         if msg_id in msgs:
             return msgs[msg_id]
@@ -305,8 +320,12 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
     starboard_cog.post_to_starboard.assert_any_call(orig_msg5, starboard_channel.id, "⭐", 5)
 
     # Entry 7 (Lost Original) - Should have triggered Tombstone
-    starboard_cog._create_tombstone.assert_called_with(starboard_channel, 4007)
+    starboard_cog._create_tombstone.assert_any_call(starboard_channel, 4007)
     assert entry7['starboard_message_id'] == 9999, "Entry 7 Tombstone ID not set"
+
+    # Entry 8 (Valid Entry but Original Deleted) - Fix also catches this
+    starboard_cog._create_tombstone.assert_any_call(starboard_channel, 4008)
+    assert entry8['starboard_message_id'] == 9999, "Entry 8 Tombstone ID not set"
 
     # --- Test REMAKE Command ---
     # Reset mocks
@@ -348,7 +367,10 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
     assert starboard_cog.post_to_starboard.call_count >= 6, f"Expected 6 recreations, got {starboard_cog.post_to_starboard.call_count}"
 
     # Check Tombstone for 4007
-    starboard_cog._create_tombstone.assert_called_with(starboard_channel, 4007)
+    starboard_cog._create_tombstone.assert_any_call(starboard_channel, 4007)
+
+    # Check Tombstone for 4008 (Remake should catch the deleted original)
+    starboard_cog._create_tombstone.assert_any_call(starboard_channel, 4008)
 
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
