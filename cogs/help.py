@@ -92,7 +92,7 @@ class Help(BaseCog):
 
         # Create base embed.
         embed = discord.Embed(
-            title=f"Help: `{ctx.prefix}{command.name}`",
+            title=f"Help: `{ctx.prefix}{command.qualified_name}`",
             description=command.help or "No description available.",
             color=discord.Color.purple()
         )
@@ -128,9 +128,9 @@ class Help(BaseCog):
         # Format usage.
         # Use the command's usage if provided, otherwise generate signature
         if command.usage:
-            signature = f"{ctx.prefix}{command.name} {command.usage}"
+            signature = f"{ctx.prefix}{command.qualified_name} {command.usage}"
         else:
-            signature = f"{ctx.prefix}{command.name} {command.signature}"
+            signature = f"{ctx.prefix}{command.qualified_name} {command.signature}"
 
         embed.add_field(name="Usage", value=f"```{signature}```", inline=False)
 
