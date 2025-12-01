@@ -289,7 +289,7 @@ class Skills(BaseCog):
             # --- Step 5: Get Description ---
             description = None
             while True:
-                await ctx.send("Would you like to add a description? (max 200 chars). Reply with your description or `none` to skip.")
+                await ctx.send("Would you like to add a description? (max 400 chars). Reply with your description or `none` to skip.")
                 desc_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
                 if desc_msg.content.strip().lower() == 'exit':
                     await ctx.send("Skill creation cancelled.")
@@ -299,8 +299,8 @@ class Skills(BaseCog):
                 if raw_desc.lower() == 'none':
                     description = None
                 else:
-                    if len(raw_desc) > 200:
-                        await ctx.send(f"Description is too long ({len(raw_desc)}/200 chars). Please try again.")
+                    if len(raw_desc) > 400:
+                        await ctx.send(f"Description is too long ({len(raw_desc)}/400 chars). Please try again.")
                         continue
                     description = raw_desc
                 break
