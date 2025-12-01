@@ -117,12 +117,335 @@ def safe_eval_math(expr: str) -> float:
 
 # --- Math Cog ---
 
-# Regex for standard dice notation, e.g., "2d20", "d6", "3d8kh2" (keep highest 2).
-DICE_NOTATION_REGEX = re.compile(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', re.IGNORECASE)
-# Regex for Limbus Company-style coin flips, e.g., "3c", "c".
-COIN_FLIP_REGEX = re.compile(r'\b(\d*)c\b', re.IGNORECASE)
-# Regex for clamping notation, e.g., "mn10", "mx20", "mn5mx10".
-CLAMP_SUFFIX_REGEX = re.compile(r'((?:mn\d+|mx\d+)+)', re.IGNORECASE)
+class DiceToken:
+    DICE = 'DICE'
+    COIN = 'COIN'
+    CLAMP = 'CLAMP'
+    NUMBER = 'NUMBER'
+    PLUS = 'PLUS'
+    MINUS = 'MINUS'
+    MULTIPLY = 'MULTIPLY'
+    DIVIDE = 'DIVIDE'
+    POWER = 'POWER'
+    MODULO = 'MODULO'
+    LPAREN = 'LPAREN'
+    RPAREN = 'RPAREN'
+    EOF = 'EOF'
+
+    def __init__(self, type_: str, value: Any, raw: str = ""):
+        self.type = type_
+        self.value = value
+        self.raw = raw
+
+    def __repr__(self):
+        return f"Token({self.type}, {self.value})"
+
+
+class DiceLexer:
+    def __init__(self, text: str):
+        self.text = text
+        self.tokens = []
+        self.current = 0
+        self._tokenize()
+
+    def _tokenize(self):
+        # Regex patterns - Order matters!
+        patterns = [
+            (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?'),
+            (DiceToken.COIN, r'(\d*)c'),
+            (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
+            (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
+            (DiceToken.POWER, r'\*\*|\^'),
+            (DiceToken.PLUS, r'\+'),
+            (DiceToken.MINUS, r'-'),
+            (DiceToken.MULTIPLY, r'\*'),
+            (DiceToken.DIVIDE, r'/'),
+            (DiceToken.MODULO, r'%'),
+            (DiceToken.LPAREN, r'\('),
+            (DiceToken.RPAREN, r'\)'),
+        ]
+
+        regex_parts = []
+        for type_, pattern in patterns:
+            regex_parts.append(f'(?P<{type_}>{pattern})')
+
+        full_regex = re.compile('|'.join(regex_parts), re.IGNORECASE)
+
+        for match in full_regex.finditer(self.text):
+            kind = match.lastgroup
+            value = match.group()
+            if kind:
+                if kind == DiceToken.NUMBER:
+                    self.tokens.append(DiceToken(kind, float(value), value))
+                else:
+                    self.tokens.append(DiceToken(kind, value, value))
+
+        self.tokens.append(DiceToken(DiceToken.EOF, None))
+
+    def next(self) -> DiceToken:
+        if self.current < len(self.tokens):
+            token = self.tokens[self.current]
+            self.current += 1
+            return token
+        return self.tokens[-1]
+
+    def peek(self) -> DiceToken:
+        if self.current < len(self.tokens):
+            return self.tokens[self.current]
+        return self.tokens[-1]
+
+
+class DiceParser:
+    def __init__(self, lexer: DiceLexer, advantage: bool = False, disadvantage: bool = False, sp: int = 50):
+        self.lexer = lexer
+        self.advantage = advantage
+        self.disadvantage = disadvantage
+        self.sp = sp
+        self.breakdown = []
+        self.current_token = self.lexer.next()
+
+    def eat(self, token_type: str):
+        if self.current_token.type == token_type:
+            self.current_token = self.lexer.next()
+        else:
+            raise ValueError(f"Unexpected token: {self.current_token.type}, expected {token_type}")
+
+    async def parse(self) -> float:
+        result = await self.expression()
+        return result
+
+    async def expression(self) -> float:
+        node = await self.term()
+
+        while self.current_token.type in (DiceToken.PLUS, DiceToken.MINUS):
+            token = self.current_token
+            if token.type == DiceToken.PLUS:
+                self.eat(DiceToken.PLUS)
+                node += await self.term()
+            elif token.type == DiceToken.MINUS:
+                self.eat(DiceToken.MINUS)
+                node -= await self.term()
+
+        return node
+
+    async def term(self) -> float:
+        node = await self.factor()
+
+        while self.current_token.type in (DiceToken.MULTIPLY, DiceToken.DIVIDE, DiceToken.MODULO):
+            token = self.current_token
+            if token.type == DiceToken.MULTIPLY:
+                self.eat(DiceToken.MULTIPLY)
+                node *= await self.factor()
+            elif token.type == DiceToken.DIVIDE:
+                self.eat(DiceToken.DIVIDE)
+                divisor = await self.factor()
+                if divisor == 0:
+                    raise ValueError("Division by zero")
+                node /= divisor
+            elif token.type == DiceToken.MODULO:
+                self.eat(DiceToken.MODULO)
+                divisor = await self.factor()
+                if divisor == 0:
+                    raise ValueError("Modulo by zero")
+                node %= divisor
+
+        return node
+
+    async def factor(self) -> float:
+        node = await self.atom()
+
+        if self.current_token.type == DiceToken.POWER:
+            self.eat(DiceToken.POWER)
+            exponent = await self.factor()
+            node = node ** exponent
+
+        return node
+
+    async def atom(self) -> float:
+        token = self.current_token
+
+        if token.type == DiceToken.NUMBER:
+            self.eat(DiceToken.NUMBER)
+            return token.value
+
+        elif token.type == DiceToken.DICE:
+            self.eat(DiceToken.DICE)
+            return await self._roll_dice(token.raw)
+
+        elif token.type == DiceToken.COIN:
+            self.eat(DiceToken.COIN)
+            return await self._flip_coin(token.raw)
+
+        elif token.type == DiceToken.LPAREN:
+            self.eat(DiceToken.LPAREN)
+            result = await self.expression()
+            self.eat(DiceToken.RPAREN)
+
+            # Check for Clamp immediately after closing parenthesis
+            if self.current_token.type == DiceToken.CLAMP:
+                clamp_token = self.current_token
+                self.eat(DiceToken.CLAMP)
+                result = self._apply_clamp(result, clamp_token.raw)
+
+            return result
+
+        elif token.type == DiceToken.PLUS:
+            self.eat(DiceToken.PLUS)
+            return await self.atom()
+
+        elif token.type == DiceToken.MINUS:
+            self.eat(DiceToken.MINUS)
+            return -await self.atom()
+
+        else:
+            # If we hit EOF or something else unexpectedly
+            if token.type == DiceToken.EOF:
+                raise ValueError("Unexpected end of expression")
+            raise ValueError(f"Unexpected token: {token.raw or token.type}")
+
+    async def _roll_dice(self, dice_str: str) -> int:
+        # Re-parse the specific dice string to get components
+        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', dice_str, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Invalid dice notation: {dice_str}")
+
+        num_dice_str, num_sides_str = match.group(1), match.group(2)
+        num_dice = int(num_dice_str) if num_dice_str else 1
+        num_sides = int(num_sides_str)
+
+        if num_dice <= 0 or num_sides <= 0:
+            self.breakdown.append(f"{dice_str}: ` 0 ` -> Result **0**")
+            return 0
+
+        keep_mode = (match.group(3) or '').lower()
+        keep_count = int(match.group(4)) if match.group(4) else 0
+
+        if not (num_dice <= 300 and num_sides <= 5000):
+            raise ValueError("Dice or side count is out of range (max 300 dice, max 5000 sides).")
+        if keep_count and keep_count > num_dice:
+            raise ValueError("Cannot keep more dice than are rolled.")
+
+        def _roll_thread() -> Tuple[List[int], Optional[List[int]]]:
+            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
+            if self.advantage or self.disadvantage:
+                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+                return rolls1, rolls2
+            return rolls1, None
+
+        rolls1, rolls2 = await asyncio.to_thread(_roll_thread)
+
+        # Advantage/Disadvantage Logic
+        if (self.advantage or self.disadvantage) and rolls2 is not None:
+            sum1, sum2 = sum(rolls1), sum(rolls2)
+            if self.advantage:
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
+            else:
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
+
+            description = (f"{dice_str} (Adv/Dis): Rolled `{', '.join(map(str, chosen_rolls))}` (Σ={chosen_sum}) "
+                           f"and `{', '.join(map(str, other_rolls))}` (Σ={other_sum}). Kept **{chosen_sum}**.")
+            self.breakdown.append(description)
+            return chosen_sum
+
+        # Standard Roll Logic
+        rolls = rolls1
+        description = f"{dice_str}: ` {', '.join(map(str, rolls))} `"
+
+        kept_rolls = rolls
+        if keep_mode in ('kh', 'kl') and keep_count > 0:
+            sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
+            kept_rolls = sorted_rolls[:keep_count]
+            discarded = sorted_rolls[keep_count:]
+
+            kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
+            discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
+            description += f" -> Kept {kept_str}{discarded_str}"
+
+        result_sum = sum(kept_rolls)
+        description += f" -> Result **{result_sum}**"
+        self.breakdown.append(description)
+        return result_sum
+
+    async def _flip_coin(self, coin_str: str) -> int:
+        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Invalid coin notation: {coin_str}")
+
+        num_coins_str = match.group(1)
+        num_coins = int(num_coins_str) if num_coins_str else 1
+
+        if not (1 <= num_coins <= 200):
+            raise ValueError("Coin count is out of range (1-200 coins).")
+
+        heads_prob = self.sp / 100.0
+
+        def _flip_thread() -> List[int]:
+            return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
+
+        flips = await asyncio.to_thread(_flip_thread)
+        heads_count = sum(flips)
+        flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
+
+        description = f"{coin_str}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T) -> Result **{heads_count}**"
+        self.breakdown.append(description)
+        return heads_count
+
+    def _apply_clamp(self, value: float, suffix: str) -> float:
+        min_val = None
+        max_val = None
+
+        mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
+        mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
+
+        if mn_matches:
+            min_val = int(mn_matches[-1])
+        if mx_matches:
+            max_val = int(mx_matches[-1])
+
+        if min_val is not None and max_val is not None and max_val < min_val:
+            raise ValueError(f"Maximum ({max_val}) cannot be less than minimum ({min_val}).")
+
+        original_value = value
+        clamped_value = value
+
+        if min_val is not None:
+            clamped_value = max(min_val, clamped_value)
+        if max_val is not None:
+            clamped_value = min(max_val, clamped_value)
+
+        limits = []
+        if min_val is not None:
+            limits.append(f"Min {min_val}")
+        if max_val is not None:
+            limits.append(f"Max {max_val}")
+
+        if limits:
+            # Format numbers nicely for display
+            orig_str = str(int(original_value)) if original_value == int(original_value) else f"{original_value:.2f}"
+            clamp_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
+
+            if clamped_value != original_value:
+                description = f"Clamped **{orig_str}** to **{clamp_str}** ({', '.join(limits)})"
+            else:
+                description = f"Result **{orig_str}** ({', '.join(limits)})"
+
+            # Try to merge with previous line if it matches the value being clamped
+            merged = False
+            if self.breakdown:
+                last_line = self.breakdown[-1]
+                expected_suffix = f" -> Result **{orig_str}**"
+
+                if last_line.endswith(expected_suffix):
+                    new_line = last_line[:-len(expected_suffix)] + f" -> {description}"
+                    self.breakdown[-1] = new_line
+                    merged = True
+
+            if not merged:
+                self.breakdown.append(description)
+
+        return clamped_value
 
 
 class Math(BaseCog):
@@ -390,245 +713,8 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
-    async def _roll_and_parse_notation(self, match: re.Match, advantage: bool = False, disadvantage: bool = False) -> Tuple[int, str]:
-        """Parses a regex match for a dice roll, rolls the dice, and returns the sum and a description.
-
-        Handles advantage and disadvantage for the given roll. This is run in a thread to avoid blocking.
-
-        Args:
-            match (re.Match): The regex match object.
-            advantage (bool): Whether to roll with advantage.
-            disadvantage (bool): Whether to roll with disadvantage.
-
-        Returns:
-            Tuple[int, str]: The sum of the roll and a description string.
-
-        Raises:
-            ValueError: If dice or side count is out of range.
-        """
-        num_dice_str, num_sides_str = match.group(1), match.group(2)
-        num_dice = int(num_dice_str) if num_dice_str else 1
-        num_sides = int(num_sides_str)
-
-        keep_mode = (match.group(3) or '').lower()
-        keep_count = int(match.group(4)) if match.group(4) else 0
-
-        if not (1 <= num_dice <= 300 and 1 <= num_sides <= 5000):
-            raise ValueError("Dice or side count is out of range (1-300 dice, 1-5000 sides).")
-        if keep_count and keep_count > num_dice:
-            raise ValueError("Cannot keep more dice than are rolled.")
-
-        def _roll_dice_thread() -> Tuple[List[int], Optional[List[int]]]:
-            """Thread-safe random generation."""
-            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
-            # Generate second set for adv/dis.
-            if advantage or disadvantage:
-                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
-                return rolls1, rolls2
-            return rolls1, None
-
-        rolls1, rolls2 = await asyncio.to_thread(_roll_dice_thread)
-
-        # --- Advantage/Disadvantage Logic ---
-        if (advantage or disadvantage) and rolls2 is not None:
-            sum1, sum2 = sum(rolls1), sum(rolls2)
-
-            # Determine which set of rolls to keep based on the mode.
-            # If advantage, keep the higher sum. If disadvantage, keep the lower.
-            if advantage:
-                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
-                other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
-            else:
-                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
-                other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
-
-            description = (f"{match.group(0)} (Adv/Dis): Rolled `{', '.join(map(str, chosen_rolls))}` (Σ={chosen_sum}) "
-                           f"and `{', '.join(map(str, other_rolls))}` (Σ={other_sum}). Kept **{chosen_sum}**.")
-            return chosen_sum, description
-
-        # --- Standard Roll Logic ---
-        rolls = rolls1
-        description = f"{match.group(0)}: ` {', '.join(map(str, rolls))} `"
-
-        # Apply keep/drop logic.
-        kept_rolls = rolls
-        if keep_mode in ('kh', 'kl') and keep_count > 0:
-            sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
-            kept_rolls = sorted_rolls[:keep_count]
-            discarded = sorted_rolls[keep_count:]
-
-            kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
-            discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
-
-            description += f" -> Kept {kept_str}{discarded_str}"
-
-        # Add sum if not clamped later
-        description += f" -> Result **{sum(kept_rolls)}**"
-
-        return sum(kept_rolls), description
-
-    def _parse_and_apply_clamping(self, value: float, suffix: str) -> Tuple[float, str]:
-        """Parses the clamping suffix and applies it to the value.
-
-        Args:
-            value (float): The value to clamp.
-            suffix (str): The suffix string (e.g., "mn10mx20").
-
-        Returns:
-            Tuple[float, str]: The clamped value and a description string.
-
-        Raises:
-            ValueError: If mx < mn.
-        """
-        min_val = None
-        max_val = None
-
-        # Find all mn and mx occurrences
-        mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
-        mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
-
-        # Use the last occurrence if multiple
-        if mn_matches:
-            min_val = int(mn_matches[-1])
-        if mx_matches:
-            max_val = int(mx_matches[-1])
-
-        if min_val is not None and max_val is not None and max_val < min_val:
-            raise ValueError(f"Maximum ({max_val}) cannot be less than minimum ({min_val}).")
-
-        original_value = value
-        clamped_value = value
-
-        if min_val is not None:
-            clamped_value = max(min_val, clamped_value)
-        if max_val is not None:
-            clamped_value = min(max_val, clamped_value)
-
-        description = ""
-        limits = []
-        if min_val is not None:
-            limits.append(f"Min {min_val}")
-        if max_val is not None:
-            limits.append(f"Max {max_val}")
-
-        if limits:
-            if clamped_value != original_value:
-                description = f"Clamped **{original_value}** to **{clamped_value}** ({', '.join(limits)})"
-            else:
-                description = f"Result **{original_value}** ({', '.join(limits)})"
-
-        return clamped_value, description
-
-    def _check_and_apply_clamp(self, query: str, match_start: int, match_end: int, value: float, description: str) -> Tuple[float, str, int, int]:
-        """Checks for surrounding parentheses and clamp suffix, applies if found.
-
-        Args:
-            query (str): The full query string.
-            match_start (int): The start index of the dice/coin match.
-            match_end (int): The end index of the dice/coin match.
-            value (float): The calculated value of the roll.
-            description (str): The description of the roll.
-
-        Returns:
-            Tuple[float, str, int, int]: The new value, new description, new start index, and new end index.
-        """
-        # Check for ( ... )
-        if match_start > 0 and match_end < len(query) and query[match_start - 1] == '(' and query[match_end] == ')':
-            # Check for suffix after )
-            suffix_match = re.match(r'^(?:mn\d+|mx\d+)+', query[match_end + 1:], re.IGNORECASE)
-            if suffix_match:
-                suffix = suffix_match.group(0)
-                clamped_val, clamp_desc = self._parse_and_apply_clamping(value, suffix)
-
-                # Remove the default "-> Result X" from the description if it exists
-                # to replace it with the clamped result.
-                base_desc = re.sub(r' -> Result .*?$', '', description)
-
-                # Combine descriptions
-                full_desc = f"{base_desc} -> {clamp_desc}"
-
-                # Return new value, new desc, start_index, end_index (covering ( and )suffix)
-                return clamped_val, full_desc, match_start - 1, match_end + 1 + len(suffix)
-
-        return value, description, match_start, match_end
-
-    async def _preprocess_parentheses(self, query: str) -> str:
-        """Recursively evaluates and replaces simple mathematical expressions within parentheses.
-
-        This simplifies the final expression before dice are rolled. E.g., "(2+3)d6" becomes "5d6".
-        Also handles clamping notation for pure math expressions, e.g., "(2+2)mx3" -> "3".
-
-        Args:
-            query (str): The input query string.
-
-        Returns:
-            str: The processed query string.
-        """
-        # Matches (expression) optionally followed by mnX/mxY suffix
-        PARENTHESES_REGEX = re.compile(r'\(([^()]+)\)((?:mn\d+|mx\d+)+)?', re.IGNORECASE)
-
-        while match := PARENTHESES_REGEX.search(query):
-            expression = match.group(1)
-            suffix = match.group(2)
-
-            # Skip dice/coin notation.
-            if 'd' in expression or 'c' in expression:
-                break
-
-            try:
-                # Evaluate in thread.
-                result = await asyncio.to_thread(safe_eval_math, expression)
-
-                # Apply clamping if suffix exists
-                if suffix:
-                    result, _ = self._parse_and_apply_clamping(result, suffix)
-
-                result_str = str(int(result)) if result == int(result) else f"{result:.2f}"
-                query = query.replace(match.group(0), result_str, 1)
-                self.logger.info(f"Pre-processed parentheses: '{match.group(0)}' -> '{result_str}'")
-            except (ValueError, TypeError, SyntaxError):
-                self.logger.warning(f"Could not resolve expression in parentheses '{expression}', moving on.")
-                break
-        return query
-
-    async def _roll_and_parse_coins(self, match: re.Match, sp: int) -> Tuple[int, str]:
-        """Parses a regex match for a coin flip, flips the coins with SP influence, and returns the sum and a description.
-
-        Args:
-            match (re.Match): The regex match object.
-            sp (int): The Sanity Points value.
-
-        Returns:
-            Tuple[int, str]: The number of heads and a description string.
-
-        Raises:
-            ValueError: If coin count is out of range.
-        """
-        num_coins_str = match.group(1)
-        num_coins = int(num_coins_str) if num_coins_str else 1
-
-        if not (1 <= num_coins <= 200):
-            raise ValueError("Coin count is out of range (1-200 coins).")
-
-        # Heads probability based on SP.
-        heads_prob = sp / 100.0
-
-        def _flip_coins_thread() -> List[int]:
-            """Thread-safe coin flips."""
-            return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
-
-        flips = await asyncio.to_thread(_flip_coins_thread)
-        heads_count = sum(flips)
-
-        flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
-
-        description = f"{match.group(0)}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T) -> Result **{heads_count}**"
-        return heads_count, description
-
     async def get_roll_result(self, dice_notation: str) -> int:
         """A simple utility to roll dice and get only the integer result back.
-
-        Simple roll without complex logic.
 
         Args:
             dice_notation (str): The dice notation string (e.g., "2d20").
@@ -639,12 +725,10 @@ class Math(BaseCog):
         Raises:
             ValueError: If the notation is invalid.
         """
-        match = DICE_NOTATION_REGEX.fullmatch(dice_notation.strip())
-        if not match:
-            raise ValueError(f"Invalid simple dice notation provided: '{dice_notation}'")
-
-        roll_sum, _ = await self._roll_and_parse_notation(match)
-        return roll_sum
+        lexer = DiceLexer(dice_notation)
+        parser = DiceParser(lexer)
+        result = await parser.parse()
+        return int(result)
 
     async def evaluate_roll(self, query: str) -> Dict[str, Any]:
         """Evaluates a dice roll query and returns the result and breakdown.
@@ -662,9 +746,8 @@ class Math(BaseCog):
             ValueError: If the query is invalid.
         """
         # --- 1. Sanitize and Detect Keywords ---
-        # Standardize query.
-        # Replace 'x' with '*' only if it's not preceded by a letter (to preserve 'mx', 'exp', etc.)
         clean_query = " ".join(query.lower().split())
+        # Replace 'x' with '*' only if it's not preceded by a letter
         original_query = re.sub(r'(?<![a-z])x', '*', clean_query).replace('^', '**')
 
         # Check for advantage/disadvantage.
@@ -675,7 +758,7 @@ class Math(BaseCog):
             raise ValueError("Cannot roll with both advantage and disadvantage.")
 
         # Extract SP (default 50).
-        sp = 50  # Default to 50%
+        sp = 50
         sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
         if sp_match:
             sp = int(sp_match.group(2))
@@ -683,104 +766,25 @@ class Math(BaseCog):
                 raise ValueError("SP must be between 0 and 100.")
             original_query = original_query.replace(sp_match.group(0), '', 1)
 
-        # --- 2. Extract Relevant Parts of the Expression ---
-        # Extract relevant tokens.
-        dice_pattern = r'(\d+)?d(\d+)(kh|kl)?(\d+)?'
-        coin_pattern = r'\b(\d*)c\b'
-        clamp_pattern = r'(?:mn\d+|mx\d+)+'
-        number_pattern = r'\d+(\.\d+)?'
-        operator_pattern = r'\*\*|[+\-*\/()]'
+        # Remove keywords (advantage/disadvantage/roll/dice) from query before parsing
+        original_query = re.sub(r'\b(advantage|adv|disadvantage|dis|roll|dice)\b', '', original_query)
 
-        full_pattern = re.compile(f'({dice_pattern}|{coin_pattern}|{clamp_pattern}|{number_pattern}|{operator_pattern})', re.IGNORECASE)
+        # --- 2. Parse and Evaluate ---
+        lexer = DiceLexer(original_query)
+        parser = DiceParser(lexer, advantage=adv, disadvantage=dis, sp=sp)
 
-        tokens = full_pattern.findall(original_query)
-        # Flatten regex groups.
-        processed_query = "".join([match[0] for match in tokens])
+        result = await parser.parse()
 
-        # --- 3. Pre-process Parentheses ---
-        processed_query = await self._preprocess_parentheses(processed_query)
-
-        # --- 4. Resolve All Rolls (Coins then Dice) ---
-        # Resolve coins then dice.
-        roll_descriptions = []
-        final_query = processed_query
-
-        while match := COIN_FLIP_REGEX.search(final_query):
-            roll_sum, description = await self._roll_and_parse_coins(match, sp=sp)
-
-            # Check for wrapping clamp
-            roll_sum, description, start, end = self._check_and_apply_clamp(
-                final_query, match.start(), match.end(), roll_sum, description
-            )
-
-            roll_descriptions.append(description)
-            # Replace the matched part (including clamp if found) with the result
-            final_query = final_query[:start] + str(roll_sum) + final_query[end:]
-
-        while match := DICE_NOTATION_REGEX.search(final_query):
-            roll_sum, description = await self._roll_and_parse_notation(match, advantage=adv, disadvantage=dis)
-
-            # Check for wrapping clamp
-            roll_sum, description, start, end = self._check_and_apply_clamp(
-                final_query, match.start(), match.end(), roll_sum, description
-            )
-
-            roll_descriptions.append(description)
-            # Replace the matched part (including clamp if found) with the result
-            final_query = final_query[:start] + str(roll_sum) + final_query[end:]
-
-        # --- 4.5 Re-process Parentheses for Math Clamps ---
-        # This handles cases like (6d6 + 5)mx10 where the dice roll resolved to a number,
-        # leaving a pure math expression inside parentheses with a clamp suffix.
-        final_query = await self._preprocess_parentheses(final_query)
-
-        # --- 5. Resolve Clamped Results (Legacy/Fallback) ---
-        # Handles cases like (12)mx10 where 12 is a resolved dice roll but wasn't caught by the wrapping check
-        # (e.g. if parentheses were added later or logic changed).
-        CLAMPED_RESULT_REGEX = re.compile(r'\((\d+(?:\.\d+)?)\)((?:mn\d+|mx\d+)+)', re.IGNORECASE)
-
-        while match := CLAMPED_RESULT_REGEX.search(final_query):
-            value = float(match.group(1))
-            suffix = match.group(2)
-
-            clamped_value, description = self._parse_and_apply_clamping(value, suffix)
-            if description:
-                roll_descriptions.append(description)
-
-            result_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
-            final_query = final_query.replace(match.group(0), result_str, 1)
-
-        # --- 6. Final Calculation ---
-        # Handle simple rolls without math.
-        if not final_query.strip():
-            if len(roll_descriptions) == 1:
-                match = re.search(r'Kept \*\*(.*?)\*\*|: ` (.*?) `|: `(.*?)`', roll_descriptions[0])
-                result_display = "N/A"
-                if match:
-                    result_str = next((g for g in match.groups() if g is not None), "N/A")
-                    # Sum dice results.
-                    try:
-                        result_display = str(sum(map(lambda s: int(s.strip()), result_str.split(','))))
-                    except (ValueError, TypeError):
-                        # Handle pre-summed coin results.
-                        result_display = result_str.split(' ')[0]
-
-                return {
-                    'total': result_display,
-                    'breakdown': roll_descriptions,
-                    'processed_query': processed_query
-                }
-            else:
-                raise ValueError("Please specify what to roll!")
-
-        # Evaluate remaining expression.
-        result = safe_eval_math(final_query)
-        result_display = str(int(result)) if result == int(result) else f"{result:.2f}"
+        # --- 3. Format Result ---
+        if result == int(result):
+            result_display = str(int(result))
+        else:
+            result_display = f"{result:.2f}"
 
         return {
             'total': result_display,
-            'breakdown': roll_descriptions,
-            'processed_query': processed_query
+            'breakdown': parser.breakdown,
+            'processed_query': original_query.strip()
         }
 
     async def roll(self, ctx: commands.Context, *, query: str) -> None:
@@ -809,7 +813,7 @@ class Math(BaseCog):
                 return
             await ctx.send(response)
 
-        except (ValueError, TypeError, SyntaxError) as e:
+        except (ValueError, TypeError, SyntaxError, ZeroDivisionError) as e:
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
 

@@ -31,7 +31,54 @@ from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
-from .math import COIN_FLIP_REGEX, DICE_NOTATION_REGEX, Math, safe_eval_math
+from .math import Math, DiceLexer, DiceParser, DiceToken
+
+
+class MaxDiceParser(DiceParser):
+    """A specialized parser that calculates the maximum possible result of a dice expression."""
+
+    async def _roll_dice(self, dice_str: str) -> int:
+        # Re-parse to get components
+        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', dice_str, re.IGNORECASE)
+        if not match:
+            return 0
+
+        num_dice_str, num_sides_str = match.group(1), match.group(2)
+        num_dice = int(num_dice_str) if num_dice_str else 1
+        num_sides = int(num_sides_str)
+
+        keep_mode = (match.group(3) or '').lower()
+        keep_count = int(match.group(4)) if match.group(4) else 0
+
+        # Calculate max possible value
+        if keep_mode == 'kh' and keep_count > 0:
+            # Max is keeping the highest N dice, all max value
+            count_to_sum = min(num_dice, keep_count)
+            return count_to_sum * num_sides
+        elif keep_mode == 'kl' and keep_count > 0:
+            # Max is keeping the lowest N dice.
+            # To get the MAX possible result with 'keep lowest', we assume
+            # the dice rolled as high as possible such that the 'lowest' are still high.
+            # e.g. 4d6kl3 -> max is 6,6,6,6 -> keep 6,6,6 -> 18.
+            count_to_sum = min(num_dice, keep_count)
+            return count_to_sum * num_sides
+        else:
+            return num_dice * num_sides
+
+    async def _flip_coin(self, coin_str: str) -> int:
+        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        if not match:
+            return 0
+        num_coins_str = match.group(1)
+        num_coins = int(num_coins_str) if num_coins_str else 1
+        return num_coins
+
+    def _apply_clamp(self, value: float, suffix: str) -> float:
+        # We use the standard clamp logic, but since 'value' is the MAX possible roll,
+        # applying the clamp to it correctly simulates the max possible outcome.
+        # Even if min_val > value (e.g. max roll is 5, but min is 10),
+        # the clamp logic `max(min_val, value)` will return 10, which is correct.
+        return super()._apply_clamp(value, suffix)
 
 
 class Skills(BaseCog):
@@ -47,115 +94,10 @@ class Skills(BaseCog):
         assert bot.db_manager is not None
         self.db_manager: DatabaseManager = bot.db_manager
 
-    def _sync_evaluate_max_roll(self, dice_roll: str) -> int:
-        """Synchronously evaluates the maximum possible result of a dice expression.
-
-        This is a helper function designed to be run in a separate thread to avoid
-        blocking the bot's main event loop. It replaces dice notation (e.g., 2d6)
-        with their maximum possible value (e.g., 2*6) and then safely evaluates
-        the resulting mathematical expression.
-
-        Args:
-            dice_roll (str): The dice roll string to evaluate.
-
-        Returns:
-            int: The maximum possible integer result of the roll. Returns 9999 on failure.
-        """
-        try:
-            # 1. Normalize
-            # Lowercase and handle 'x' as multiplication (unless it's part of mx)
-            expr_str = dice_roll.lower()
-            expr_str = re.sub(r'(?<!m)x', '*', expr_str)
-
-            # 2. Replace Dice and Coins with Max Values
-            def max_dice_replacer(match: re.Match) -> str:
-                n_str = match.group(1)
-                num_dice = int(n_str) if n_str else 1
-
-                sides_str = match.group(2)
-                num_sides = int(sides_str)
-
-                keep_mode = match.group(3)
-                keep_count_str = match.group(4)
-
-                if keep_mode and keep_count_str:
-                    keep_count = int(keep_count_str)
-                    count_to_sum = min(num_dice, keep_count)
-                    return str(count_to_sum * num_sides)
-                else:
-                    return str(num_dice * num_sides)
-
-            def max_coin_replacer(match: re.Match) -> str:
-                n_str = match.group(1)
-                num_coins = int(n_str) if n_str else 1
-                return str(num_coins)
-
-            expr_str = DICE_NOTATION_REGEX.sub(max_dice_replacer, expr_str)
-            expr_str = COIN_FLIP_REGEX.sub(max_coin_replacer, expr_str)
-
-            # 3. Resolve Clamping Suffixes
-            # Pattern: (expression)suffix
-            # We loop until no suffixes are found attached to resolved parentheses.
-            clamp_pattern = re.compile(r'\(([^()]+)\)((?:mn\d+|mx\d+)+)', re.IGNORECASE)
-
-            while True:
-                match = clamp_pattern.search(expr_str)
-                if not match:
-                    break
-
-                inner_expr = match.group(1)
-                suffix = match.group(2)
-                full_match = match.group(0)
-
-                try:
-                    inner_val = float(safe_eval_math(inner_expr))
-                except Exception:
-                    # If inner expression is invalid, we can't resolve this clamp.
-                    self.logger.warning(f"Failed to eval inner clamp expr: {inner_expr}")
-                    return 9999
-
-                mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
-                mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
-
-                min_val = int(mn_matches[-1]) if mn_matches else None
-                max_val = int(mx_matches[-1]) if mx_matches else None
-
-                result = inner_val
-
-                if min_val is not None:
-                    result = max(result, min_val)
-                if max_val is not None:
-                    result = min(result, max_val)
-
-                expr_str = expr_str.replace(full_match, str(int(result)), 1)
-
-            # 4. Final Evaluation
-            return int(safe_eval_math(expr_str))
-
-        except Exception as e:
-            self.logger.error(f"Could not evaluate max roll for '{dice_roll}': {e}")
-            return 99999
-
-    async def _evaluate_max_roll(self, dice_roll: str) -> int:
-        """Asynchronously evaluates the maximum possible result of a dice expression.
-
-        Runs the synchronous evaluation in a separate thread. This prevents
-        potentially complex calculations from blocking the bot's event loop.
-
-        Args:
-            dice_roll (str): The dice roll string.
-
-        Returns:
-            int: The maximum possible result.
-        """
-        return await asyncio.to_thread(self._sync_evaluate_max_roll, dice_roll)
-
     async def _validate_roll_logic(self, dice_roll: str) -> Tuple[bool, str]:
         """Validates a dice roll string against several criteria.
 
-        Checks complexity and max value. It checks all dice and coin notations
-        in the string and provides a comprehensive error message if any limits
-        are exceeded.
+        Checks complexity and max value using the Lexer and MaxDiceParser.
 
         Args:
             dice_roll (str): The dice roll string to validate.
@@ -165,36 +107,45 @@ class Skills(BaseCog):
             - bool: True if the roll is valid, False otherwise.
             - str: A detailed error message if invalid, or an empty string if valid.
         """
-        dice_matches = list(DICE_NOTATION_REGEX.finditer(dice_roll))
-        coin_matches = list(COIN_FLIP_REGEX.finditer(dice_roll))
-
-        if not dice_matches and not coin_matches:
-            return False, "That doesn't look like a valid dice or coin roll. Please include a notation like `d20`, `2d6`, or `4c`."
-
         # Define limits
         max_dice_limit = 40
         max_sides_limit = 100
         max_coins_limit = 80
         max_total_roll_limit = 5000
 
+        try:
+            lexer = DiceLexer(dice_roll)
+        except Exception:
+            return False, "Invalid syntax."
+
+        # 1. Check Limits via Tokens
         error_messages = []
+        has_dice_or_coin = False
 
-        for match in dice_matches:
-            num_dice = int(match.group(1) or 1)
-            num_sides = int(match.group(2))
-            if num_dice > max_dice_limit:
-                error_messages.append(f"exceeds the **{max_dice_limit}** dice limit")
-            if num_sides > max_sides_limit:
-                error_messages.append(f"exceeds the **{max_sides_limit}** sides limit")
+        for token in lexer.tokens:
+            if token.type == DiceToken.DICE:
+                has_dice_or_coin = True
+                match = re.match(r'(\d+)?d(\d+)', token.raw, re.IGNORECASE)
+                if match:
+                    num_dice = int(match.group(1) or 1)
+                    num_sides = int(match.group(2))
+                    if num_dice > max_dice_limit:
+                        error_messages.append(f"exceeds the **{max_dice_limit}** dice limit")
+                    if num_sides > max_sides_limit:
+                        error_messages.append(f"exceeds the **{max_sides_limit}** sides limit")
 
-        for match in coin_matches:
-            num_coins_str = match.group(1)
-            num_coins = int(num_coins_str) if num_coins_str else 1
-            if num_coins > max_coins_limit:
-                error_messages.append(f"exceeds the **{max_coins_limit}** coins limit")
+            elif token.type == DiceToken.COIN:
+                has_dice_or_coin = True
+                match = re.match(r'(\d*)c', token.raw, re.IGNORECASE)
+                if match:
+                    num_coins = int(match.group(1) or 1)
+                    if num_coins > max_coins_limit:
+                        error_messages.append(f"exceeds the **{max_coins_limit}** coins limit")
+
+        if not has_dice_or_coin:
+            return False, "That doesn't look like a valid dice or coin roll. Please include a notation like `d20`, `2d6`, or `4c`."
 
         if error_messages:
-            # Join unique error messages
             unique_errors = sorted(list(set(error_messages)))
             error_summary = ", ".join(unique_errors)
             return False, (
@@ -203,9 +154,19 @@ class Skills(BaseCog):
                 f"and a max total roll value of **{max_total_roll_limit}**."
             )
 
-        max_roll = await self._evaluate_max_roll(dice_roll)
-        if max_roll > max_total_roll_limit:
-            return False, f"The maximum possible result of that roll is **{max_roll}**, which exceeds the limit of **{max_total_roll_limit}**."
+        # 2. Calculate Max Possible Roll
+        try:
+            # Re-initialize lexer for parsing since iteration consumed it
+            lexer = DiceLexer(dice_roll)
+            parser = MaxDiceParser(lexer)
+            max_roll = await parser.parse()
+
+            if max_roll > max_total_roll_limit:
+                return False, f"The maximum possible result of that roll is **{int(max_roll)}**, which exceeds the limit of **{max_total_roll_limit}**."
+
+        except Exception as e:
+            self.logger.warning(f"Validation failed for '{dice_roll}': {e}")
+            return False, "Invalid formula syntax."
 
         return True, ""
 
