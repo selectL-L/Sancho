@@ -24,7 +24,6 @@ Key Features:
 import asyncio
 import datetime
 import io
-import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,8 +36,6 @@ from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.database import DatabaseManager
 from utils.views import FastConfirmModal, launch_modal
-
-logger = logging.getLogger(__name__)
 
 
 class Starboard(BaseCog):
@@ -171,7 +168,7 @@ class Starboard(BaseCog):
 
         # Mark fast mode and write an audit log entry
         self._fast_mode = True
-        logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {guild.id} at {datetime.datetime.utcnow().isoformat()}")
+        self.logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {guild.id} at {datetime.datetime.utcnow().isoformat()}")
         return True
 
     @starboard_group.command(name="remake")
@@ -268,7 +265,7 @@ class Starboard(BaseCog):
             return
 
         await ctx.send("Starting starboard remake...")
-        logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
+        self.logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
 
         # Strict Filter: Only remake entries that have complete stored information
         # We require original_message_id, starboard_message_id, guild_id, and original_channel_id.
@@ -278,12 +275,12 @@ class Starboard(BaseCog):
             if entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')
         ]
 
-        logger.info(f"Deleting {len(valid_entries)} existing starboard messages and their reply contexts...")
+        self.logger.info(f"Deleting {len(valid_entries)} existing starboard messages and their reply contexts...")
         deleted_count = 0
         # We'll collect recreation targets from the valid entries before clearing DB
         recreation_targets = []
         for entry in valid_entries:
-            logger.debug(f"Remake processing DB entry id={entry.get('original_message_id')} starboard_id={entry.get('starboard_message_id')}")
+            self.logger.debug(f"Remake processing DB entry id={entry.get('original_message_id')} starboard_id={entry.get('starboard_message_id')}")
             recreation_targets.append({
                 'original_message_id': entry['original_message_id'],
                 'original_channel_id': entry['original_channel_id'],
@@ -293,50 +290,50 @@ class Starboard(BaseCog):
             # Delete the main starboard message if it exists
             try:
                 if entry.get('starboard_message_id'):
-                    logger.debug(f"Fetching starboard message {entry['starboard_message_id']} for deletion")
+                    self.logger.debug(f"Fetching starboard message {entry['starboard_message_id']} for deletion")
                     msg = await starboard_channel.fetch_message(entry['starboard_message_id'])
-                    logger.debug(f"Deleting starboard message {msg.id}")
+                    self.logger.debug(f"Deleting starboard message {msg.id}")
                     await msg.delete()
-                    logger.info(f"Deleted starboard message {entry['starboard_message_id']}")
+                    self.logger.info(f"Deleted starboard message {entry['starboard_message_id']}")
                     deleted_count += 1
             except (discord.NotFound, KeyError):
-                logger.debug(f"Starboard message {entry.get('starboard_message_id')} not found when attempting deletion")
+                self.logger.debug(f"Starboard message {entry.get('starboard_message_id')} not found when attempting deletion")
                 pass
             except discord.HTTPException as e:
-                logger.error(f"Failed to delete starboard message {entry.get('starboard_message_id')}: {e}")
+                self.logger.error(f"Failed to delete starboard message {entry.get('starboard_message_id')}: {e}")
 
             # Delete the reply context message if present
             reply_id = entry.get('starboard_reply_id')
             if reply_id is not None:
                 try:
-                    logger.debug(f"Fetching starboard reply context {reply_id} for deletion")
+                    self.logger.debug(f"Fetching starboard reply context {reply_id} for deletion")
                     reply_msg = await starboard_channel.fetch_message(reply_id)
                     await reply_msg.delete()
-                    logger.info(f"Deleted starboard reply context {reply_id}")
+                    self.logger.info(f"Deleted starboard reply context {reply_id}")
                 except (discord.NotFound, KeyError):
-                    logger.debug(f"Starboard reply context {reply_id} not found during deletion")
+                    self.logger.debug(f"Starboard reply context {reply_id} not found during deletion")
                     pass
                 except discord.HTTPException as e:
-                    logger.error(f"Failed to delete starboard reply context {reply_id}: {e}")
+                    self.logger.error(f"Failed to delete starboard reply context {reply_id}: {e}")
 
         # Clear DB entries for this guild so we can recreate fresh
         await self.db_manager.clear_starboard_for_guild(guild.id)
         await ctx.send(f"Deleted {deleted_count} starboard messages and cleared database entries.")
-        logger.info(f"Cleared starboard entries for guild {guild.id}; preparing to recreate {len(recreation_targets)} entries.")
+        self.logger.info(f"Cleared starboard entries for guild {guild.id}; preparing to recreate {len(recreation_targets)} entries.")
 
         # --- Recreation Phase ---
-        logger.info(f"Attempting to recreate {len(recreation_targets)} posts (ignoring current reaction counts)...")
+        self.logger.info(f"Attempting to recreate {len(recreation_targets)} posts (ignoring current reaction counts)...")
         recreated_count = 0
         failed_count = 0
         tombstone_count = 0
 
         for tgt in recreation_targets:
-            logger.debug(f"Recreation target: {tgt}")
+            self.logger.debug(f"Recreation target: {tgt}")
             original_channel = self.bot.get_channel(tgt['original_channel_id'])
 
             # If channel is missing, we can't fetch the message -> Tombstone
             if not isinstance(original_channel, discord.TextChannel):
-                logger.warning(f"Original channel {tgt['original_channel_id']} not found. Creating tombstone for {tgt['original_message_id']}.")
+                self.logger.warning(f"Original channel {tgt['original_channel_id']} not found. Creating tombstone for {tgt['original_message_id']}.")
                 tomb = await self._create_tombstone(starboard_channel, tgt['original_message_id'])
                 if tomb:
                     await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt['guild_id'], tgt['original_channel_id'])
@@ -346,42 +343,42 @@ class Starboard(BaseCog):
                 continue
 
             try:
-                logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
+                self.logger.debug(f"Fetching original message {tgt['original_message_id']} from channel {original_channel.id}")
                 message = await original_channel.fetch_message(tgt['original_message_id'])
-                logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author, 'id', None)})")
+                self.logger.debug(f"Fetched original message {message.id} (author_id={getattr(message.author, 'id', None)})")
 
                 # Only recreate if the message still meets the starboard threshold
                 star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
                 current_count = star_reaction.count if star_reaction else 0
-                logger.debug(f"Original message {message.id} has {current_count} '{starboard_emoji}' reactions; threshold={starboard_threshold}")
+                self.logger.debug(f"Original message {message.id} has {current_count} '{starboard_emoji}' reactions; threshold={starboard_threshold}")
 
                 # If fast mode requested, recreate regardless of the current reaction count
                 if self._fast_mode or (star_reaction and current_count >= starboard_threshold):
-                    logger.info(f"Recreating starboard post for original message {message.id}")
+                    self.logger.info(f"Recreating starboard post for original message {message.id}")
                     await self.post_to_starboard(message, starboard_channel_id, starboard_emoji, current_count)
-                    logger.debug(f"Requested creation of starboard post for {message.id}")
+                    self.logger.debug(f"Requested creation of starboard post for {message.id}")
                     recreated_count += 1
                     await asyncio.sleep(0.5)
                 else:
-                    logger.info(f"Message {message.id} no longer meets threshold ({current_count} < {starboard_threshold}). Skipping recreation.")
+                    self.logger.info(f"Message {message.id} no longer meets threshold ({current_count} < {starboard_threshold}). Skipping recreation.")
                     # Do not create a tombstone for messages that are simply under threshold; skip.
                     continue
             except discord.NotFound:
                 # Original message deleted -> create a tombstone
                 try:
-                    logger.info(f"Original message {tgt['original_message_id']} not found — creating tombstone.")
+                    self.logger.info(f"Original message {tgt['original_message_id']} not found — creating tombstone.")
                     tomb = await self._create_tombstone(starboard_channel, tgt['original_message_id'])
                     if tomb:
                         await self.db_manager.add_starboard_entry(tgt['original_message_id'], tomb.id, tgt['guild_id'], tgt['original_channel_id'])
-                        logger.debug(f"Tombstone created with id {tomb.id} for original {tgt['original_message_id']}")
+                        self.logger.debug(f"Tombstone created with id {tomb.id} for original {tgt['original_message_id']}")
                         tombstone_count += 1
                     else:
                         failed_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to create tombstone for missing original {tgt['original_message_id']}: {e}")
+                    self.logger.error(f"Failed to create tombstone for missing original {tgt['original_message_id']}: {e}")
                     failed_count += 1
             except Exception as e:
-                logger.error(f"Failed to recreate starboard post for message {tgt['original_message_id']}: {e}")
+                self.logger.error(f"Failed to recreate starboard post for message {tgt['original_message_id']}: {e}")
                 failed_count += 1
 
         await ctx.send(f"Starboard remake complete. Recreated: {recreated_count}, Tombstones: {tombstone_count}, Failed: {failed_count}.")
@@ -393,7 +390,7 @@ class Starboard(BaseCog):
         try:
             return await starboard_channel.send(f"🪦 Original Message {original_message_id} Lost")
         except Exception as e:
-            logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
+            self.logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
             return None
 
     async def _fix_impl(self, ctx: commands.Context) -> None:
@@ -417,7 +414,7 @@ class Starboard(BaseCog):
             return
 
         await ctx.send("Starting starboard fix and verification...")
-        logger.info(f"Starboard fix for guild {guild.id} triggered by {ctx.author.id}.")
+        self.logger.info(f"Starboard fix for guild {guild.id} triggered by {ctx.author.id}.")
         fixed_count = 0
         failed_count = 0
         verified_count = 0
@@ -428,7 +425,7 @@ class Starboard(BaseCog):
         progress = {'done': 0, 'total': len(all_entries), 'elapsed': 0}
         status_msg = await ctx.send(f"Starboard fix started. Processed 0/{len(all_entries)}. Elapsed: 0s. Please wait.")
         status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=30.0))
-        logger.debug("Status editor task started for fix operation")
+        self.logger.debug("Status editor task started for fix operation")
 
         for entry in all_entries:
             try:
@@ -439,7 +436,7 @@ class Starboard(BaseCog):
 
                 # We need at least an original_message_id OR a starboard_message_id to do anything meaningful
                 if not original_id and not starboard_id:
-                    logger.warning(f"Skipping corrupt entry with no IDs: {entry}")
+                    self.logger.warning(f"Skipping corrupt entry with no IDs: {entry}")
                     failed_count += 1
                     progress['done'] += 1
                     continue
@@ -453,10 +450,10 @@ class Starboard(BaseCog):
                         sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, starboard_id)
                         missing_sb = False
                     except discord.NotFound:
-                        logger.info(f"Starboard message {starboard_id} not found (404). Treating as missing.")
+                        self.logger.info(f"Starboard message {starboard_id} not found (404). Treating as missing.")
                         missing_sb = True
                     except Exception as e:
-                        logger.warning(f"Error fetching starboard message {starboard_id}: {e}. Treating as missing.")
+                        self.logger.warning(f"Error fetching starboard message {starboard_id}: {e}. Treating as missing.")
                         missing_sb = True
 
                 if not missing_sb and sb_msg:
@@ -521,7 +518,7 @@ class Starboard(BaseCog):
                                 target_valid = True
 
                         if not target_valid and original_id:
-                            logger.info(f"Original message {original_id} seems dead (Jump URL invalid). Tombstoning.")
+                            self.logger.info(f"Original message {original_id} seems dead (Jump URL invalid). Tombstoning.")
                             await sb_msg.delete()
                             tomb = await self._create_tombstone(starboard_channel, original_id)
                             if tomb:
@@ -547,7 +544,7 @@ class Starboard(BaseCog):
                     # Goal: Find original_message_id
                     # If we don't have an original_id by now, we can't do anything
                     if not original_id:
-                        logger.warning(f"Entry {entry} has no original_message_id and no starboard message to recover from.")
+                        self.logger.warning(f"Entry {entry} has no original_message_id and no starboard message to recover from.")
                         failed_count += 1
                         progress['done'] += 1
                         continue
@@ -565,7 +562,7 @@ class Starboard(BaseCog):
                             except discord.NotFound:
                                 pass
                             except Exception as e:
-                                logger.warning(f"Error fetching from original channel {entry_channel_id}: {e}")
+                                self.logger.warning(f"Error fetching from original channel {entry_channel_id}: {e}")
 
                     # Step 2: Guild-Wide Scan (Fallback) - NO ctx.guild fallback
                     if not found_msg and entry_guild_id:
@@ -608,7 +605,7 @@ class Starboard(BaseCog):
 
                     # Step 4: Tombstone Creation
                     else:
-                        logger.info(f"Original message {original_id} lost. Creating tombstone.")
+                        self.logger.info(f"Original message {original_id} lost. Creating tombstone.")
                         tomb = await self._create_tombstone(starboard_channel, original_id)
                         if tomb:
                             entry['starboard_message_id'] = tomb.id
@@ -617,7 +614,7 @@ class Starboard(BaseCog):
                             fixed_count += 1
 
             except Exception as e:
-                logger.error(f"Failed to fix entry {entry}: {e}")
+                self.logger.error(f"Failed to fix entry {entry}: {e}")
                 failed_count += 1
 
             progress['done'] += 1
@@ -664,7 +661,7 @@ class Starboard(BaseCog):
                 try:
                     message = await channel.fetch_message(payload.message_id)
                 except discord.NotFound:
-                    logger.warning(f"Starboard: Message {payload.message_id} not found.")
+                    self.logger.warning(f"Starboard: Message {payload.message_id} not found.")
                     return
 
                 # Find the reaction count for the correct emoji
@@ -690,18 +687,18 @@ class Starboard(BaseCog):
         """
         starboard_channel = self.bot.get_channel(starboard_channel_id)
         if not isinstance(starboard_channel, discord.TextChannel):
-            logger.error(f"Starboard channel with ID {starboard_channel_id} not found or is not a text channel.")
+            self.logger.error(f"Starboard channel with ID {starboard_channel_id} not found or is not a text channel.")
             return
 
         existing_entry = await self.db_manager.get_starboard_entry(message.id)
         content = f"{starboard_emoji} **{star_count}** in <#{message.channel.id}>"
-        logger.info(f"Starboard post content: {content}")
+        self.logger.info(f"Starboard post content: {content}")
 
         if existing_entry:
             # Safety check: if starboard_message_id is missing, we can't fetch it.
             # Treat it as missing and recreate.
             if not existing_entry.get('starboard_message_id'):
-                logger.warning(f"Starboard entry for {message.id} exists but has no starboard_message_id. Recreating.")
+                self.logger.warning(f"Starboard entry for {message.id} exists but has no starboard_message_id. Recreating.")
                 await self.db_manager.remove_starboard_entry(message.id)
                 await self.create_new_starboard_post(message, starboard_channel, content)
                 return
@@ -711,7 +708,7 @@ class Starboard(BaseCog):
                 await starboard_message.edit(content=content)
             except discord.NotFound:
                 # The message was deleted from the starboard channel, so we should remove the entry and recreate it.
-                logger.warning(f"Starboard message for {message.id} not found. Removing entry and recreating.")
+                self.logger.warning(f"Starboard message for {message.id} not found. Removing entry and recreating.")
                 await self.db_manager.remove_starboard_entry(message.id)
                 await self.create_new_starboard_post(message, starboard_channel, content)
         else:
@@ -755,7 +752,7 @@ class Starboard(BaseCog):
                 # If the replied-to message is gone, just post the main message as a normal post.
                 await self.create_single_starboard_post(message, starboard_channel, content)
             except discord.HTTPException as e:
-                logger.error(f"Failed to create two-part starboard post: {e}")
+                self.logger.error(f"Failed to create two-part starboard post: {e}")
 
         # If it's not a reply, just post it directly
         else:
@@ -775,7 +772,7 @@ class Starboard(BaseCog):
             if message.guild:
                 await self.db_manager.add_starboard_entry(message.id, starboard_message.id, message.guild.id, message.channel.id)
         except discord.HTTPException as e:
-            logger.error(f"Failed to create single starboard post: {e}")
+            self.logger.error(f"Failed to create single starboard post: {e}")
         finally:
             for file in files:
                 file.close()
@@ -806,7 +803,7 @@ class Starboard(BaseCog):
                 return
 
             if self.http_session is None:
-                logger.error("HTTP session is not initialized.")
+                self.logger.error("HTTP session is not initialized.")
                 return
 
             try:
@@ -815,7 +812,7 @@ class Starboard(BaseCog):
                         # Check Content-Length header first if available
                         content_length = resp.headers.get('Content-Length')
                         if content_length and int(content_length) > MAX_FILE_SIZE:
-                            logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit.")
+                            self.logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit.")
                             return
 
                         data = io.BytesIO()
@@ -828,10 +825,10 @@ class Starboard(BaseCog):
                                 break
                             file_size += len(chunk)
                             if file_size > MAX_FILE_SIZE:
-                                logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit during download.")
+                                self.logger.warning(f"Skipping attachment {filename}: exceeds 10MB limit during download.")
                                 return
                             if current_total_size + file_size > MAX_TOTAL_SIZE:
-                                logger.warning(f"Skipping attachment {filename}: exceeds total 25MB limit.")
+                                self.logger.warning(f"Skipping attachment {filename}: exceeds total 25MB limit.")
                                 return
                             data.write(chunk)
 
@@ -839,7 +836,7 @@ class Starboard(BaseCog):
                         current_total_size += file_size
                         files.append(discord.File(data, filename=filename, spoiler=spoiler))
             except Exception as e:
-                logger.error(f"Failed to download attachment {filename}: {e}")
+                self.logger.error(f"Failed to download attachment {filename}: {e}")
 
         # Add message content.
         if message.content:
@@ -908,7 +905,7 @@ class Starboard(BaseCog):
             last_exc = None
             for attempt in range(retries):
                 try:
-                    logger.debug(f"_run_rate_limited attempt {attempt+1}/{retries} for {getattr(coro_func, '__name__', repr(coro_func))} args={args}")
+                    self.logger.debug(f"_run_rate_limited attempt {attempt+1}/{retries} for {getattr(coro_func, '__name__', repr(coro_func))} args={args}")
                     result = await coro_func(*args)
                     # gentle delay after a successful call
                     try:
@@ -923,7 +920,7 @@ class Starboard(BaseCog):
                     last_exc = e
                     # exponential backoff
                     wait = backoff
-                    logger.debug(f"_run_rate_limited HTTP error on attempt {attempt+1}: {e}; backing off {wait}s")
+                    self.logger.debug(f"_run_rate_limited HTTP error on attempt {attempt+1}: {e}; backing off {wait}s")
                     backoff = min(backoff * 2, 30)
                     await asyncio.sleep(wait)
                     continue
@@ -952,7 +949,7 @@ class Starboard(BaseCog):
                 total = progress.get('total', '?')
                 elapsed = progress.get('elapsed', 0)
                 try:
-                    logger.debug(f"Editing status message: processed {done}/{total}, elapsed {elapsed}s")
+                    self.logger.debug(f"Editing status message: processed {done}/{total}, elapsed {elapsed}s")
                     await status_message.edit(content=f"Starboard fix running... processed {done}/{total}. Elapsed: {elapsed}s. Please wait.")
                 except Exception:
                     # Ignore edit/send errors; keep looping until stop_event is set
@@ -1004,7 +1001,7 @@ class Starboard(BaseCog):
                         reply_context_message = await starboard_channel.fetch_message(existing_entry['starboard_reply_id'])
                         await reply_context_message.delete()
                     except discord.NotFound:
-                        logger.warning(f"Starboard reply context message {existing_entry['starboard_reply_id']} not found for deletion.")
+                        self.logger.warning(f"Starboard reply context message {existing_entry['starboard_reply_id']} not found for deletion.")
 
                 await self.db_manager.remove_starboard_entry(message.id)
             else:
