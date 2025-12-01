@@ -1,6 +1,6 @@
 """cogs/admin.py
 
-This cog contains owner-only commands for administrative tasks, such as
+This cog contains owner/admin-only commands for administrative tasks, such as
 viewing bot status and managing configurations.
 """
 

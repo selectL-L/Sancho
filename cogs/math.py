@@ -413,9 +413,7 @@ class Math(BaseCog):
             ValueError: If the query is invalid.
         """
         # --- 1. Sanitize and Detect Keywords ---
-        clean_query = " ".join(query.lower().split())
-        # Replace 'x' with '*' only if it's not preceded by a letter
-        original_query = re.sub(r'(?<![a-z])x', '*', clean_query).replace('^', '**')
+        original_query = " ".join(query.lower().split())
 
         # Check for advantage/disadvantage.
         adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
@@ -526,7 +524,7 @@ class DiceLexer:
             (DiceToken.POWER, r'\*\*|\^'),
             (DiceToken.PLUS, r'\+'),
             (DiceToken.MINUS, r'-'),
-            (DiceToken.MULTIPLY, r'\*'),
+            (DiceToken.MULTIPLY, r'\*|x'),
             (DiceToken.DIVIDE, r'/'),
             (DiceToken.MODULO, r'%'),
             (DiceToken.LPAREN, r'\('),
@@ -645,6 +643,9 @@ class DiceParser:
             return await self._flip_coin(token.raw)
 
         elif token.type == DiceToken.LPAREN:
+            # Capture start index of the group (token after LPAREN)
+            start_token_index = self.lexer.current
+
             self.eat(DiceToken.LPAREN)
             result = await self.expression()
             self.eat(DiceToken.RPAREN)
@@ -652,8 +653,17 @@ class DiceParser:
             # Check for Clamp immediately after closing parenthesis
             if self.current_token.type == DiceToken.CLAMP:
                 clamp_token = self.current_token
+                
+                # Calculate the range of tokens inside the parentheses to reconstruct the string
+                # The current token is CLAMP, so self.lexer.current points to the token AFTER CLAMP.
+                # We want the tokens between LPAREN (start_token_index) and RPAREN (current - 2).
+                end_token_index = self.lexer.current - 2
+                
+                group_tokens = self.lexer.tokens[start_token_index:end_token_index]
+                group_str = "".join(t.raw for t in group_tokens)
+                
                 self.eat(DiceToken.CLAMP)
-                result = self._apply_clamp(result, clamp_token.raw)
+                result = self._apply_clamp(result, clamp_token.raw, context_str=f"({group_str})")
 
             return result
 
@@ -760,7 +770,7 @@ class DiceParser:
         self.breakdown.append(description)
         return heads_count
 
-    def _apply_clamp(self, value: float, suffix: str) -> float:
+    def _apply_clamp(self, value: float, suffix: str, context_str: str = "") -> float:
         min_val = None
         max_val = None
 
@@ -794,14 +804,16 @@ class DiceParser:
             orig_str = str(int(original_value)) if original_value == int(original_value) else f"{original_value:.2f}"
             clamp_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
 
+            prefix = f"`{context_str}`: " if context_str else ""
+
             if clamped_value != original_value:
-                description = f"Clamped **{orig_str}** to **{clamp_str}** ({', '.join(limits)})"
+                description = f"{prefix}Clamped **{orig_str}** to **{clamp_str}** ({', '.join(limits)})"
             else:
-                description = f"Result **{orig_str}** ({', '.join(limits)})"
+                description = f"{prefix}Result **{orig_str}** ({', '.join(limits)})"
 
             # Try to merge with previous line if it matches the value being clamped
             merged = False
-            if self.breakdown:
+            if self.breakdown and not context_str: # Only merge if we don't have a specific context string
                 last_line = self.breakdown[-1]
                 expected_suffix = f" -> Result **{orig_str}**"
 

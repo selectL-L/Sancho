@@ -73,12 +73,12 @@ class MaxDiceParser(DiceParser):
         num_coins = int(num_coins_str) if num_coins_str else 1
         return num_coins
 
-    def _apply_clamp(self, value: float, suffix: str) -> float:
+    def _apply_clamp(self, value: float, suffix: str, context_str: str = "") -> float:
         # We use the standard clamp logic, but since 'value' is the MAX possible roll,
         # applying the clamp to it correctly simulates the max possible outcome.
         # Even if min_val > value (e.g. max roll is 5, but min is 10),
         # the clamp logic `max(min_val, value)` will return 10, which is correct.
-        return super()._apply_clamp(value, suffix)
+        return super()._apply_clamp(value, suffix, context_str)
 
 
 class Skills(BaseCog):
