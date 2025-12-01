@@ -653,15 +653,15 @@ class DiceParser:
             # Check for Clamp immediately after closing parenthesis
             if self.current_token.type == DiceToken.CLAMP:
                 clamp_token = self.current_token
-                
+
                 # Calculate the range of tokens inside the parentheses to reconstruct the string
                 # The current token is CLAMP, so self.lexer.current points to the token AFTER CLAMP.
                 # We want the tokens between LPAREN (start_token_index) and RPAREN (current - 2).
                 end_token_index = self.lexer.current - 2
-                
+
                 group_tokens = self.lexer.tokens[start_token_index:end_token_index]
                 group_str = "".join(t.raw for t in group_tokens)
-                
+
                 self.eat(DiceToken.CLAMP)
                 result = self._apply_clamp(result, clamp_token.raw, context_str=f"({group_str})")
 
@@ -813,7 +813,7 @@ class DiceParser:
 
             # Try to merge with previous line if it matches the value being clamped
             merged = False
-            if self.breakdown and not context_str: # Only merge if we don't have a specific context string
+            if self.breakdown and not context_str:  # Only merge if we don't have a specific context string
                 last_line = self.breakdown[-1]
                 expected_suffix = f" -> Result **{orig_str}**"
 
