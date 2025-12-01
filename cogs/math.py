@@ -115,339 +115,6 @@ def safe_eval_math(expr: str) -> float:
     return _eval_node(tree)
 
 
-# --- Math Cog ---
-
-class DiceToken:
-    DICE = 'DICE'
-    COIN = 'COIN'
-    CLAMP = 'CLAMP'
-    NUMBER = 'NUMBER'
-    PLUS = 'PLUS'
-    MINUS = 'MINUS'
-    MULTIPLY = 'MULTIPLY'
-    DIVIDE = 'DIVIDE'
-    POWER = 'POWER'
-    MODULO = 'MODULO'
-    LPAREN = 'LPAREN'
-    RPAREN = 'RPAREN'
-    EOF = 'EOF'
-
-    def __init__(self, type_: str, value: Any, raw: str = ""):
-        self.type = type_
-        self.value = value
-        self.raw = raw
-
-    def __repr__(self):
-        return f"Token({self.type}, {self.value})"
-
-
-class DiceLexer:
-    def __init__(self, text: str):
-        self.text = text
-        self.tokens = []
-        self.current = 0
-        self._tokenize()
-
-    def _tokenize(self):
-        # Regex patterns - Order matters!
-        patterns = [
-            (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?'),
-            (DiceToken.COIN, r'(\d*)c'),
-            (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
-            (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
-            (DiceToken.POWER, r'\*\*|\^'),
-            (DiceToken.PLUS, r'\+'),
-            (DiceToken.MINUS, r'-'),
-            (DiceToken.MULTIPLY, r'\*'),
-            (DiceToken.DIVIDE, r'/'),
-            (DiceToken.MODULO, r'%'),
-            (DiceToken.LPAREN, r'\('),
-            (DiceToken.RPAREN, r'\)'),
-        ]
-
-        regex_parts = []
-        for type_, pattern in patterns:
-            regex_parts.append(f'(?P<{type_}>{pattern})')
-
-        full_regex = re.compile('|'.join(regex_parts), re.IGNORECASE)
-
-        for match in full_regex.finditer(self.text):
-            kind = match.lastgroup
-            value = match.group()
-            if kind:
-                if kind == DiceToken.NUMBER:
-                    self.tokens.append(DiceToken(kind, float(value), value))
-                else:
-                    self.tokens.append(DiceToken(kind, value, value))
-
-        self.tokens.append(DiceToken(DiceToken.EOF, None))
-
-    def next(self) -> DiceToken:
-        if self.current < len(self.tokens):
-            token = self.tokens[self.current]
-            self.current += 1
-            return token
-        return self.tokens[-1]
-
-    def peek(self) -> DiceToken:
-        if self.current < len(self.tokens):
-            return self.tokens[self.current]
-        return self.tokens[-1]
-
-
-class DiceParser:
-    def __init__(self, lexer: DiceLexer, advantage: bool = False, disadvantage: bool = False, sp: int = 50):
-        self.lexer = lexer
-        self.advantage = advantage
-        self.disadvantage = disadvantage
-        self.sp = sp
-        self.breakdown = []
-        self.current_token = self.lexer.next()
-
-    def eat(self, token_type: str):
-        if self.current_token.type == token_type:
-            self.current_token = self.lexer.next()
-        else:
-            raise ValueError(f"Unexpected token: {self.current_token.type}, expected {token_type}")
-
-    async def parse(self) -> float:
-        result = await self.expression()
-        return result
-
-    async def expression(self) -> float:
-        node = await self.term()
-
-        while self.current_token.type in (DiceToken.PLUS, DiceToken.MINUS):
-            token = self.current_token
-            if token.type == DiceToken.PLUS:
-                self.eat(DiceToken.PLUS)
-                node += await self.term()
-            elif token.type == DiceToken.MINUS:
-                self.eat(DiceToken.MINUS)
-                node -= await self.term()
-
-        return node
-
-    async def term(self) -> float:
-        node = await self.factor()
-
-        while self.current_token.type in (DiceToken.MULTIPLY, DiceToken.DIVIDE, DiceToken.MODULO):
-            token = self.current_token
-            if token.type == DiceToken.MULTIPLY:
-                self.eat(DiceToken.MULTIPLY)
-                node *= await self.factor()
-            elif token.type == DiceToken.DIVIDE:
-                self.eat(DiceToken.DIVIDE)
-                divisor = await self.factor()
-                if divisor == 0:
-                    raise ValueError("Division by zero")
-                node /= divisor
-            elif token.type == DiceToken.MODULO:
-                self.eat(DiceToken.MODULO)
-                divisor = await self.factor()
-                if divisor == 0:
-                    raise ValueError("Modulo by zero")
-                node %= divisor
-
-        return node
-
-    async def factor(self) -> float:
-        node = await self.atom()
-
-        if self.current_token.type == DiceToken.POWER:
-            self.eat(DiceToken.POWER)
-            exponent = await self.factor()
-            node = node ** exponent
-
-        return node
-
-    async def atom(self) -> float:
-        token = self.current_token
-
-        if token.type == DiceToken.NUMBER:
-            self.eat(DiceToken.NUMBER)
-            return token.value
-
-        elif token.type == DiceToken.DICE:
-            self.eat(DiceToken.DICE)
-            return await self._roll_dice(token.raw)
-
-        elif token.type == DiceToken.COIN:
-            self.eat(DiceToken.COIN)
-            return await self._flip_coin(token.raw)
-
-        elif token.type == DiceToken.LPAREN:
-            self.eat(DiceToken.LPAREN)
-            result = await self.expression()
-            self.eat(DiceToken.RPAREN)
-
-            # Check for Clamp immediately after closing parenthesis
-            if self.current_token.type == DiceToken.CLAMP:
-                clamp_token = self.current_token
-                self.eat(DiceToken.CLAMP)
-                result = self._apply_clamp(result, clamp_token.raw)
-
-            return result
-
-        elif token.type == DiceToken.PLUS:
-            self.eat(DiceToken.PLUS)
-            return await self.atom()
-
-        elif token.type == DiceToken.MINUS:
-            self.eat(DiceToken.MINUS)
-            return -await self.atom()
-
-        else:
-            # If we hit EOF or something else unexpectedly
-            if token.type == DiceToken.EOF:
-                raise ValueError("Unexpected end of expression")
-            raise ValueError(f"Unexpected token: {token.raw or token.type}")
-
-    async def _roll_dice(self, dice_str: str) -> int:
-        # Re-parse the specific dice string to get components
-        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', dice_str, re.IGNORECASE)
-        if not match:
-            raise ValueError(f"Invalid dice notation: {dice_str}")
-
-        num_dice_str, num_sides_str = match.group(1), match.group(2)
-        num_dice = int(num_dice_str) if num_dice_str else 1
-        num_sides = int(num_sides_str)
-
-        if num_dice <= 0 or num_sides <= 0:
-            self.breakdown.append(f"{dice_str}: ` 0 ` -> Result **0**")
-            return 0
-
-        keep_mode = (match.group(3) or '').lower()
-        keep_count = int(match.group(4)) if match.group(4) else 0
-
-        if not (num_dice <= 300 and num_sides <= 5000):
-            raise ValueError("Dice or side count is out of range (max 300 dice, max 5000 sides).")
-        if keep_count and keep_count > num_dice:
-            raise ValueError("Cannot keep more dice than are rolled.")
-
-        def _roll_thread() -> Tuple[List[int], Optional[List[int]]]:
-            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
-            if self.advantage or self.disadvantage:
-                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
-                return rolls1, rolls2
-            return rolls1, None
-
-        rolls1, rolls2 = await asyncio.to_thread(_roll_thread)
-
-        # Advantage/Disadvantage Logic
-        if (self.advantage or self.disadvantage) and rolls2 is not None:
-            sum1, sum2 = sum(rolls1), sum(rolls2)
-            if self.advantage:
-                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
-                other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
-            else:
-                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
-                other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
-
-            description = (f"{dice_str} (Adv/Dis): Rolled `{', '.join(map(str, chosen_rolls))}` (Σ={chosen_sum}) "
-                           f"and `{', '.join(map(str, other_rolls))}` (Σ={other_sum}). Kept **{chosen_sum}**.")
-            self.breakdown.append(description)
-            return chosen_sum
-
-        # Standard Roll Logic
-        rolls = rolls1
-        description = f"{dice_str}: ` {', '.join(map(str, rolls))} `"
-
-        kept_rolls = rolls
-        if keep_mode in ('kh', 'kl') and keep_count > 0:
-            sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
-            kept_rolls = sorted_rolls[:keep_count]
-            discarded = sorted_rolls[keep_count:]
-
-            kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
-            discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
-            description += f" -> Kept {kept_str}{discarded_str}"
-
-        result_sum = sum(kept_rolls)
-        description += f" -> Result **{result_sum}**"
-        self.breakdown.append(description)
-        return result_sum
-
-    async def _flip_coin(self, coin_str: str) -> int:
-        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
-        if not match:
-            raise ValueError(f"Invalid coin notation: {coin_str}")
-
-        num_coins_str = match.group(1)
-        num_coins = int(num_coins_str) if num_coins_str else 1
-
-        if not (1 <= num_coins <= 200):
-            raise ValueError("Coin count is out of range (1-200 coins).")
-
-        heads_prob = self.sp / 100.0
-
-        def _flip_thread() -> List[int]:
-            return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
-
-        flips = await asyncio.to_thread(_flip_thread)
-        heads_count = sum(flips)
-        flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
-
-        description = f"{coin_str}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T) -> Result **{heads_count}**"
-        self.breakdown.append(description)
-        return heads_count
-
-    def _apply_clamp(self, value: float, suffix: str) -> float:
-        min_val = None
-        max_val = None
-
-        mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
-        mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
-
-        if mn_matches:
-            min_val = int(mn_matches[-1])
-        if mx_matches:
-            max_val = int(mx_matches[-1])
-
-        if min_val is not None and max_val is not None and max_val < min_val:
-            raise ValueError(f"Maximum ({max_val}) cannot be less than minimum ({min_val}).")
-
-        original_value = value
-        clamped_value = value
-
-        if min_val is not None:
-            clamped_value = max(min_val, clamped_value)
-        if max_val is not None:
-            clamped_value = min(max_val, clamped_value)
-
-        limits = []
-        if min_val is not None:
-            limits.append(f"Min {min_val}")
-        if max_val is not None:
-            limits.append(f"Max {max_val}")
-
-        if limits:
-            # Format numbers nicely for display
-            orig_str = str(int(original_value)) if original_value == int(original_value) else f"{original_value:.2f}"
-            clamp_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
-
-            if clamped_value != original_value:
-                description = f"Clamped **{orig_str}** to **{clamp_str}** ({', '.join(limits)})"
-            else:
-                description = f"Result **{orig_str}** ({', '.join(limits)})"
-
-            # Try to merge with previous line if it matches the value being clamped
-            merged = False
-            if self.breakdown:
-                last_line = self.breakdown[-1]
-                expected_suffix = f" -> Result **{orig_str}**"
-
-                if last_line.endswith(expected_suffix):
-                    new_line = last_line[:-len(expected_suffix)] + f" -> {description}"
-                    self.breakdown[-1] = new_line
-                    merged = True
-
-            if not merged:
-                self.breakdown.append(description)
-
-        return clamped_value
-
-
 class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
 
@@ -816,6 +483,337 @@ class Math(BaseCog):
         except (ValueError, TypeError, SyntaxError, ZeroDivisionError) as e:
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in dice roller for query '{query}': {e}")
+
+
+class DiceToken:
+    DICE = 'DICE'
+    COIN = 'COIN'
+    CLAMP = 'CLAMP'
+    NUMBER = 'NUMBER'
+    PLUS = 'PLUS'
+    MINUS = 'MINUS'
+    MULTIPLY = 'MULTIPLY'
+    DIVIDE = 'DIVIDE'
+    POWER = 'POWER'
+    MODULO = 'MODULO'
+    LPAREN = 'LPAREN'
+    RPAREN = 'RPAREN'
+    EOF = 'EOF'
+
+    def __init__(self, type_: str, value: Any, raw: str = ""):
+        self.type = type_
+        self.value = value
+        self.raw = raw
+
+    def __repr__(self):
+        return f"Token({self.type}, {self.value})"
+
+
+class DiceLexer:
+    def __init__(self, text: str):
+        self.text = text
+        self.tokens = []
+        self.current = 0
+        self._tokenize()
+
+    def _tokenize(self):
+        # Regex patterns - Order DOES matter here
+        patterns = [
+            (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?'),
+            (DiceToken.COIN, r'(\d*)c'),
+            (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
+            (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
+            (DiceToken.POWER, r'\*\*|\^'),
+            (DiceToken.PLUS, r'\+'),
+            (DiceToken.MINUS, r'-'),
+            (DiceToken.MULTIPLY, r'\*'),
+            (DiceToken.DIVIDE, r'/'),
+            (DiceToken.MODULO, r'%'),
+            (DiceToken.LPAREN, r'\('),
+            (DiceToken.RPAREN, r'\)'),
+        ]
+
+        regex_parts = []
+        for type_, pattern in patterns:
+            regex_parts.append(f'(?P<{type_}>{pattern})')
+
+        full_regex = re.compile('|'.join(regex_parts), re.IGNORECASE)
+
+        for match in full_regex.finditer(self.text):
+            kind = match.lastgroup
+            value = match.group()
+            if kind:
+                if kind == DiceToken.NUMBER:
+                    self.tokens.append(DiceToken(kind, float(value), value))
+                else:
+                    self.tokens.append(DiceToken(kind, value, value))
+
+        self.tokens.append(DiceToken(DiceToken.EOF, None))
+
+    def next(self) -> DiceToken:
+        if self.current < len(self.tokens):
+            token = self.tokens[self.current]
+            self.current += 1
+            return token
+        return self.tokens[-1]
+
+    def peek(self) -> DiceToken:
+        if self.current < len(self.tokens):
+            return self.tokens[self.current]
+        return self.tokens[-1]
+
+
+class DiceParser:
+    def __init__(self, lexer: DiceLexer, advantage: bool = False, disadvantage: bool = False, sp: int = 50):
+        self.lexer = lexer
+        self.advantage = advantage
+        self.disadvantage = disadvantage
+        self.sp = sp
+        self.breakdown = []
+        self.current_token = self.lexer.next()
+
+    def eat(self, token_type: str):
+        if self.current_token.type == token_type:
+            self.current_token = self.lexer.next()
+        else:
+            raise ValueError(f"Unexpected token: {self.current_token.type}, expected {token_type}")
+
+    async def parse(self) -> float:
+        result = await self.expression()
+        return result
+
+    async def expression(self) -> float:
+        node = await self.term()
+
+        while self.current_token.type in (DiceToken.PLUS, DiceToken.MINUS):
+            token = self.current_token
+            if token.type == DiceToken.PLUS:
+                self.eat(DiceToken.PLUS)
+                node += await self.term()
+            elif token.type == DiceToken.MINUS:
+                self.eat(DiceToken.MINUS)
+                node -= await self.term()
+
+        return node
+
+    async def term(self) -> float:
+        node = await self.factor()
+
+        while self.current_token.type in (DiceToken.MULTIPLY, DiceToken.DIVIDE, DiceToken.MODULO):
+            token = self.current_token
+            if token.type == DiceToken.MULTIPLY:
+                self.eat(DiceToken.MULTIPLY)
+                node *= await self.factor()
+            elif token.type == DiceToken.DIVIDE:
+                self.eat(DiceToken.DIVIDE)
+                divisor = await self.factor()
+                if divisor == 0:
+                    raise ValueError("Division by zero")
+                node /= divisor
+            elif token.type == DiceToken.MODULO:
+                self.eat(DiceToken.MODULO)
+                divisor = await self.factor()
+                if divisor == 0:
+                    raise ValueError("Modulo by zero")
+                node %= divisor
+
+        return node
+
+    async def factor(self) -> float:
+        node = await self.atom()
+
+        if self.current_token.type == DiceToken.POWER:
+            self.eat(DiceToken.POWER)
+            exponent = await self.factor()
+            node = node ** exponent
+
+        return node
+
+    async def atom(self) -> float:
+        token = self.current_token
+
+        if token.type == DiceToken.NUMBER:
+            self.eat(DiceToken.NUMBER)
+            return token.value
+
+        elif token.type == DiceToken.DICE:
+            self.eat(DiceToken.DICE)
+            return await self._roll_dice(token.raw)
+
+        elif token.type == DiceToken.COIN:
+            self.eat(DiceToken.COIN)
+            return await self._flip_coin(token.raw)
+
+        elif token.type == DiceToken.LPAREN:
+            self.eat(DiceToken.LPAREN)
+            result = await self.expression()
+            self.eat(DiceToken.RPAREN)
+
+            # Check for Clamp immediately after closing parenthesis
+            if self.current_token.type == DiceToken.CLAMP:
+                clamp_token = self.current_token
+                self.eat(DiceToken.CLAMP)
+                result = self._apply_clamp(result, clamp_token.raw)
+
+            return result
+
+        elif token.type == DiceToken.PLUS:
+            self.eat(DiceToken.PLUS)
+            return await self.atom()
+
+        elif token.type == DiceToken.MINUS:
+            self.eat(DiceToken.MINUS)
+            return -await self.atom()
+
+        else:
+            # If we hit EOF or something else unexpectedly
+            if token.type == DiceToken.EOF:
+                raise ValueError("Unexpected end of expression")
+            raise ValueError(f"Unexpected token: {token.raw or token.type}")
+
+    async def _roll_dice(self, dice_str: str) -> int:
+        # Re-parse the specific dice string to get components
+        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', dice_str, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Invalid dice notation: {dice_str}")
+
+        num_dice_str, num_sides_str = match.group(1), match.group(2)
+        num_dice = int(num_dice_str) if num_dice_str else 1
+        num_sides = int(num_sides_str)
+
+        if num_dice <= 0 or num_sides <= 0:
+            self.breakdown.append(f"{dice_str}: ` 0 ` -> Result **0**")
+            return 0
+
+        keep_mode = (match.group(3) or '').lower()
+        keep_count = int(match.group(4)) if match.group(4) else 0
+
+        if not (num_dice <= 300 and num_sides <= 5000):
+            raise ValueError("Dice or side count is out of range (max 300 dice, max 5000 sides).")
+        if keep_count and keep_count > num_dice:
+            raise ValueError("Cannot keep more dice than are rolled.")
+
+        def _roll_thread() -> Tuple[List[int], Optional[List[int]]]:
+            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
+            if self.advantage or self.disadvantage:
+                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+                return rolls1, rolls2
+            return rolls1, None
+
+        rolls1, rolls2 = await asyncio.to_thread(_roll_thread)
+
+        # Advantage/Disadvantage Logic
+        if (self.advantage or self.disadvantage) and rolls2 is not None:
+            sum1, sum2 = sum(rolls1), sum(rolls2)
+            if self.advantage:
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 >= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 >= sum2 else (rolls1, sum1)
+            else:
+                chosen_rolls, chosen_sum = (rolls1, sum1) if sum1 <= sum2 else (rolls2, sum2)
+                other_rolls, other_sum = (rolls2, sum2) if sum1 <= sum2 else (rolls1, sum1)
+
+            description = (f"{dice_str} (Adv/Dis): Rolled `{', '.join(map(str, chosen_rolls))}` (Σ={chosen_sum}) "
+                           f"and `{', '.join(map(str, other_rolls))}` (Σ={other_sum}). Kept **{chosen_sum}**.")
+            self.breakdown.append(description)
+            return chosen_sum
+
+        # Standard Roll Logic
+        rolls = rolls1
+        description = f"{dice_str}: ` {', '.join(map(str, rolls))} `"
+
+        kept_rolls = rolls
+        if keep_mode in ('kh', 'kl') and keep_count > 0:
+            sorted_rolls = sorted(rolls, reverse=(keep_mode == 'kh'))
+            kept_rolls = sorted_rolls[:keep_count]
+            discarded = sorted_rolls[keep_count:]
+
+            kept_str = ', '.join(f"**{x}**" for x in kept_rolls)
+            discarded_str = f" (Discarded {', '.join(f'**{x}**' for x in discarded)})" if discarded else ""
+            description += f" -> Kept {kept_str}{discarded_str}"
+
+        result_sum = sum(kept_rolls)
+        description += f" -> Result **{result_sum}**"
+        self.breakdown.append(description)
+        return result_sum
+
+    async def _flip_coin(self, coin_str: str) -> int:
+        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Invalid coin notation: {coin_str}")
+
+        num_coins_str = match.group(1)
+        num_coins = int(num_coins_str) if num_coins_str else 1
+
+        if not (1 <= num_coins <= 200):
+            raise ValueError("Coin count is out of range (1-200 coins).")
+
+        heads_prob = self.sp / 100.0
+
+        def _flip_thread() -> List[int]:
+            return [1 if random.random() < heads_prob else 0 for _ in range(num_coins)]
+
+        flips = await asyncio.to_thread(_flip_thread)
+        heads_count = sum(flips)
+        flip_results_display = "".join(['H' if r == 1 else 'T' for r in flips])
+
+        description = f"{coin_str}: `{flip_results_display}` ({heads_count}H, {num_coins - heads_count}T) -> Result **{heads_count}**"
+        self.breakdown.append(description)
+        return heads_count
+
+    def _apply_clamp(self, value: float, suffix: str) -> float:
+        min_val = None
+        max_val = None
+
+        mn_matches = re.findall(r'mn(\d+)', suffix, re.IGNORECASE)
+        mx_matches = re.findall(r'mx(\d+)', suffix, re.IGNORECASE)
+
+        if mn_matches:
+            min_val = int(mn_matches[-1])
+        if mx_matches:
+            max_val = int(mx_matches[-1])
+
+        if min_val is not None and max_val is not None and max_val < min_val:
+            raise ValueError(f"Maximum ({max_val}) cannot be less than minimum ({min_val}).")
+
+        original_value = value
+        clamped_value = value
+
+        if min_val is not None:
+            clamped_value = max(min_val, clamped_value)
+        if max_val is not None:
+            clamped_value = min(max_val, clamped_value)
+
+        limits = []
+        if min_val is not None:
+            limits.append(f"Min {min_val}")
+        if max_val is not None:
+            limits.append(f"Max {max_val}")
+
+        if limits:
+            # Format numbers nicely for display
+            orig_str = str(int(original_value)) if original_value == int(original_value) else f"{original_value:.2f}"
+            clamp_str = str(int(clamped_value)) if clamped_value == int(clamped_value) else f"{clamped_value:.2f}"
+
+            if clamped_value != original_value:
+                description = f"Clamped **{orig_str}** to **{clamp_str}** ({', '.join(limits)})"
+            else:
+                description = f"Result **{orig_str}** ({', '.join(limits)})"
+
+            # Try to merge with previous line if it matches the value being clamped
+            merged = False
+            if self.breakdown:
+                last_line = self.breakdown[-1]
+                expected_suffix = f" -> Result **{orig_str}**"
+
+                if last_line.endswith(expected_suffix):
+                    new_line = last_line[:-len(expected_suffix)] + f" -> {description}"
+                    self.breakdown[-1] = new_line
+                    merged = True
+
+            if not merged:
+                self.breakdown.append(description)
+
+        return clamped_value
 
 
 async def setup(bot: SanchoBot) -> None:
