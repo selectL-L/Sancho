@@ -91,7 +91,12 @@ class Starboard(BaseCog):
 
         return channel_id, emoji, threshold
 
-    @commands.hybrid_group(name="starboard", hidden=True, usage="<subcommand>")
+    @commands.hybrid_group(
+        name="starboard",
+        hidden=True,
+        usage="<subcommand>",
+        help="Manages starboard settings."
+    )
     @commands.has_guild_permissions(manage_channels=True)
     async def starboard_group(self, ctx: commands.Context) -> None:
         """Manages starboard settings."""
@@ -102,7 +107,10 @@ class Starboard(BaseCog):
             else:
                 await ctx.send_help(ctx.command)
 
-    @starboard_group.command(name="channel")
+    @starboard_group.command(
+        name="channel",
+        help="Sets the channel for the starboard."
+    )
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
         """Sets the channel for the starboard.
 
@@ -113,7 +121,10 @@ class Starboard(BaseCog):
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_channel_id", str(channel.id))
             await ctx.send(f"Starboard channel set to {channel.mention}")
 
-    @starboard_group.command(name="emoji")
+    @starboard_group.command(
+        name="emoji",
+        help="Sets the emoji for the starboard."
+    )
     async def set_emoji(self, ctx: commands.Context, emoji: str) -> None:
         """Sets the emoji for the starboard.
 
@@ -124,7 +135,10 @@ class Starboard(BaseCog):
             await self.db_manager.set_guild_config(ctx.guild.id, "starboard_emoji", emoji)
             await ctx.send(f"Starboard emoji set to {emoji}")
 
-    @starboard_group.command(name="threshold")
+    @starboard_group.command(
+        name="threshold",
+        help="Sets the reaction threshold for the starboard."
+    )
     async def set_threshold(self, ctx: commands.Context, threshold: int) -> None:
         """Sets the reaction threshold for the starboard.
 
@@ -171,7 +185,10 @@ class Starboard(BaseCog):
         self.logger.warning(f"FAST MODE ENABLED by {ctx.author} ({ctx.author.id}) in guild {guild.id} at {datetime.datetime.utcnow().isoformat()}")
         return True
 
-    @starboard_group.command(name="remake")
+    @starboard_group.command(
+        name="remake",
+        help="Recreates starboard posts from history. Only callable by the bot owner."
+    )
     @commands.is_owner()
     @app_commands.describe(
         fast="If True, skips rate limits and confirmations (Dangerous!)."
@@ -222,7 +239,10 @@ class Starboard(BaseCog):
 
         await self._remake_impl(ctx)
 
-    @starboard_group.command(name="fix")
+    @starboard_group.command(
+        name="fix",
+        help="Repairs starboard DB entries. Only callable by the bot owner."
+    )
     @commands.is_owner()
     @app_commands.describe(
         fast="If True, skips rate limits and confirmations (Dangerous!)."

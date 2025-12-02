@@ -208,7 +208,12 @@ class AdminCog(BaseCog):
         # Wait 5 minutes before starting the regular loop
         await asyncio.sleep(300)
 
-    @commands.hybrid_command(name="global_limit", hidden=True, description="Set the global skill limit for all users.")
+    @commands.hybrid_command(
+        name="global_limit",
+        hidden=True,
+        description="Set the global skill limit for all users.",
+        help="Set the global skill limit for all users."
+    )
     @commands.has_permissions(manage_guild=True)
     @app_commands.describe(
         limit="The new global skill limit (1-100)."
@@ -226,7 +231,12 @@ class AdminCog(BaseCog):
         await self.db_manager.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
 
-    @commands.hybrid_command(name="user_limit", hidden=True, description="Set the skill limit for a specific user.")
+    @commands.hybrid_command(
+        name="user_limit",
+        hidden=True,
+        description="Set the skill limit for a specific user.",
+        help="Set the skill limit for a specific user."
+    )
     @commands.has_permissions(manage_guild=True)
     @app_commands.describe(
         user="The user to set the limit for. (this can be a mention or an ID)",
@@ -246,7 +256,12 @@ class AdminCog(BaseCog):
         await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
-    @commands.hybrid_command(name="report", hidden=True, description="Open the Admin Dashboard. Use this to find IDs for the edit_entry command.")
+    @commands.hybrid_command(
+        name="report",
+        hidden=True,
+        description="Opens the Admin Dashboard. Use this to find IDs for the edit_entry command.",
+        help="Opens the Admin Dashboard. Use this to find IDs for the edit_entry command."
+    )
     @commands.is_owner()
     async def report(self, ctx: commands.Context) -> None:
         """Opens the Admin Dashboard.
@@ -344,7 +359,12 @@ class AdminCog(BaseCog):
             logging.error("Error generating dashboard:", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
-    @commands.hybrid_command(name="edit_entry", hidden=True, description="Edit a database entry by ID. Use the report command to find IDs.")
+    @commands.hybrid_command(
+        name="edit_entry",
+        hidden=True,
+        description="Edit a database entry by ID. Use the report command to find IDs.",
+        help="Edit a database entry by ID. Use the report command to find IDs."
+    )
     @commands.is_owner()
     @app_commands.describe(
         entry_type="The type of entry ('skill' or 'reminder').",
@@ -476,7 +496,12 @@ class AdminCog(BaseCog):
             logging.error(f"Error editing entry {entry_id}: {e}", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
-    @commands.hybrid_command(name="status", hidden=True, description="Provides a comprehensive health and status check for the bot.")
+    @commands.hybrid_command(
+        name="status",
+        hidden=True,
+        description="Provides a comprehensive health and status check for the bot.",
+        help="Provides a comprehensive health and status check for the bot."
+    )
     @commands.is_owner()
     @app_commands.describe(mode="Optional: 'history' to view historical resource usage.")
     async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
