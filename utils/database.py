@@ -613,6 +613,29 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def get_skill_by_id(self, skill_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieves a skill by its unique ID.
+
+        Args:
+            skill_id (int): The skill's ID.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing the skill data.
+        """
+        query = """
+            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type, s.description,
+                   GROUP_CONCAT(sa.alias, '|') as aliases
+            FROM skills s
+            LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
+            WHERE s.id = ?
+            GROUP BY s.id
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, (skill_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
     async def get_user_skills(self, user_id: int) -> List[Dict[str, Any]]:
         """Retrieves all skills for a specific user, including their aliases.
 

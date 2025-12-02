@@ -169,3 +169,51 @@ async def launch_modal(ctx, modal: discord.ui.Modal):
     message = await ctx.send("This action requires strict confirmation. Click the button below to proceed to a form.", view=view)
     view.message = message
     return message
+
+
+class PaginatorView(discord.ui.View):
+    """A generic view for paginating through a list of embeds."""
+
+    def __init__(self, ctx, pages: list[discord.Embed], timeout: float = 60.0):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.pages = pages
+        self.current_page = 0
+        self.message: Optional[discord.Message] = None
+
+        # Update button states initially
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.previous_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page == len(self.pages) - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This menu is not for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.grey)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.grey)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < len(self.pages) - 1:
+            self.current_page += 1
+            self._update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        setattr(child, 'disabled', True)
+                await self.message.edit(view=self)
+            except Exception:
+                pass
