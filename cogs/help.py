@@ -16,7 +16,6 @@ Key Features:
   command prefixes for the server it's being used in.
 """
 
-import re
 from typing import Optional
 
 import discord
@@ -41,7 +40,11 @@ class Help(BaseCog):
         # This is crucial to replace the default help command with our own.
         self.bot.remove_command('help')
 
-    @commands.hybrid_command(name='help', help="The help message itself!", description="Shows what commands are available and provides examples for them!")
+    @commands.hybrid_command(
+        name='help',
+        help="The help message itself!",
+        description="Shows what commands are available and provides examples for them!"
+    )
     @app_commands.describe(
         command_name="The command to show detailed help for (optional!)"
     )
@@ -91,14 +94,7 @@ class Help(BaseCog):
             self.logger.warning(f"Attempted to get help for disabled command: {command.name}")
             return
 
-        # TODO: Move to writing dedicated help=".." for each command, since the docstrings are for developers, not for users.
         description = command.help or "No description available."
-
-        if description:
-            # Split on "Args:" or "Returns:" or "Raises:" (case insensitive)
-            # We take the first part which is the actual description
-            split_desc = re.split(r'\n\s*(?:Args|Returns|Raises):', description, flags=re.IGNORECASE)
-            description = split_desc[0].strip()
 
         # Create base embed.
         embed = discord.Embed(
