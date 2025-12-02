@@ -16,6 +16,7 @@ Key Features:
   command prefixes for the server it's being used in.
 """
 
+import re
 from typing import Optional
 
 import discord
@@ -90,10 +91,19 @@ class Help(BaseCog):
             self.logger.warning(f"Attempted to get help for disabled command: {command.name}")
             return
 
+        # TODO: Move to writing dedicated help=".." for each command, since the docstrings are for developers, not for users.
+        description = command.help or "No description available."
+
+        if description:
+            # Split on "Args:" or "Returns:" or "Raises:" (case insensitive)
+            # We take the first part which is the actual description
+            split_desc = re.split(r'\n\s*(?:Args|Returns|Raises):', description, flags=re.IGNORECASE)
+            description = split_desc[0].strip()
+
         # Create base embed.
         embed = discord.Embed(
             title=f"Help: `{ctx.prefix}{command.qualified_name}`",
-            description=command.help or "No description available.",
+            description=description,
             color=discord.Color.purple()
         )
         if command.aliases:
