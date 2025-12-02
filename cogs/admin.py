@@ -10,9 +10,8 @@ import tempfile
 import time
 import typing
 import asyncio
-from collections import defaultdict
 from datetime import timedelta
-from typing import List
+from typing import List, Optional
 
 import discord
 import psutil
@@ -23,95 +22,87 @@ import config
 from utils.base_cog import BaseCog
 from utils.bot_class import SanchoBot
 from utils.extensions import discover_cogs
+from utils.views import PaginatorView, get_selection
 
 
-class StatusView(discord.ui.View):
-    """A view for paginating through a status report.
+class DashboardView(discord.ui.View):
+    """The main dashboard view for the admin report."""
 
-    Shows skills and reminders for each user.
-    """
-
-    def __init__(self, bot: SanchoBot, user_pages: List[discord.Embed], author_id: int):
-        """Initializes the StatusView.
-
-        Args:
-            bot (SanchoBot): The bot instance.
-            user_pages (List[discord.Embed]): The list of embeds to paginate.
-            author_id (int): The ID of the user who invoked the command.
-        """
-        super().__init__(timeout=60.0)
-        self.bot = bot
-        self.user_pages = user_pages
-        self.author_id = author_id
-        self.current_page = 0
-        self.message: typing.Optional[discord.Message] = None
+    def __init__(
+        self,
+        ctx: commands.Context,
+        skill_pages: List[discord.Embed],
+        reminder_pages: List[discord.Embed],
+        report_file_callback,
+        dashboard_embed: Optional[discord.Embed] = None
+    ):
+        super().__init__(timeout=120.0)
+        self.ctx = ctx
+        self.skill_pages = skill_pages
+        self.reminder_pages = reminder_pages
+        self.report_file_callback = report_file_callback
+        self.dashboard_embed = dashboard_embed
+        self.message: Optional[discord.Message] = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Ensures only the command author can use the buttons.
-
-        Args:
-            interaction (discord.Interaction): The interaction to check.
-
-        Returns:
-            bool: True if the user is authorized, False otherwise.
-        """
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("You are not authorized to use these buttons.", ephemeral=True)
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This dashboard is not for you.", ephemeral=True)
             return False
         return True
 
-    async def update_view(self, interaction: discord.Interaction) -> None:
-        """Updates the message with the current page's embed.
+    @discord.ui.button(label="📜 View Skills", style=discord.ButtonStyle.primary)
+    async def view_skills(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.skill_pages:
+            await interaction.response.send_message("No skills found in database.", ephemeral=True)
+            return
 
-        Args:
-            interaction (discord.Interaction): The interaction to update.
-        """
-        previous_button = self.children[0]
-        if isinstance(previous_button, discord.ui.Button):
-            previous_button.disabled = self.current_page == 0
+        view = PaginatorView(self.ctx, self.skill_pages)
+        # Add a "Back to Dashboard" button to the paginator
+        back_button = discord.ui.Button(label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
 
-        next_button = self.children[1]
-        if isinstance(next_button, discord.ui.Button):
-            next_button.disabled = self.current_page == len(self.user_pages) - 1
+        async def back_callback(interaction: discord.Interaction):
+            if self.dashboard_embed:
+                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
+            view.stop()
 
-        await interaction.response.edit_message(
-            embed=self.user_pages[self.current_page],
-            view=self
-        )
+        back_button.callback = back_callback
+        view.add_item(back_button)
 
-    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.grey)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        """Handles the previous button click.
+        await interaction.response.edit_message(embed=self.skill_pages[0], view=view)
+        view.message = interaction.message
 
-        Args:
-            interaction (discord.Interaction): The interaction.
-            button (discord.ui.Button): The button that was clicked.
-        """
-        if self.current_page > 0:
-            self.current_page -= 1
-            await self.update_view(interaction)
+    @discord.ui.button(label="⏰ View Reminders", style=discord.ButtonStyle.primary)
+    async def view_reminders(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.reminder_pages:
+            await interaction.response.send_message("No reminders found in database.", ephemeral=True)
+            return
 
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.grey)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        """Handles the next button click.
+        view = PaginatorView(self.ctx, self.reminder_pages)
+        # Add a "Back to Dashboard" button to the paginator
+        back_button = discord.ui.Button(label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
 
-        Args:
-            interaction (discord.Interaction): The interaction.
-            button (discord.ui.Button): The button that was clicked.
-        """
-        if self.current_page < len(self.user_pages) - 1:
-            self.current_page += 1
-            await self.update_view(interaction)
+        async def back_callback(interaction: discord.Interaction):
+            if self.dashboard_embed:
+                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
+            view.stop()
 
-    async def on_timeout(self) -> None:
-        """Handles the view timeout by disabling all buttons."""
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        # Try to edit the message to disable buttons
-        # Note: discord.py 2.x requires storing the message reference
-        if hasattr(self, 'message') and self.message:
+        back_button.callback = back_callback
+        view.add_item(back_button)
+
+        await interaction.response.edit_message(embed=self.reminder_pages[0], view=view)
+        view.message = interaction.message
+
+    @discord.ui.button(label="💾 Export to File", style=discord.ButtonStyle.secondary)
+    async def export_file(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.report_file_callback(self.ctx)
+
+    async def on_timeout(self):
+        if self.message:
             try:
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        setattr(child, 'disabled', True)
                 await self.message.edit(view=self)
             except Exception:
                 pass
@@ -255,125 +246,235 @@ class AdminCog(BaseCog):
         await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
 
-    @commands.hybrid_command(name="report", hidden=True, description="Display a report of all users' skills and reminders.")
+    @commands.hybrid_command(name="report", hidden=True, description="Open the Admin Dashboard. Use this to find IDs for the edit_entry command.")
     @commands.is_owner()
-    @app_commands.describe(mode="Optional: 'full' to post all embeds, or 'print' to attach a text report.")
-    async def report(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
-        """Displays a status report of all users' skills and reminders.
+    async def report(self, ctx: commands.Context) -> None:
+        """Opens the Admin Dashboard.
 
-        Usage: .report [full|print]
-
-        Args:
-            ctx (commands.Context): The command context.
-            mode (typing.Optional[str]): 'full' to post all embeds, or 'print' to attach a text report.
+        Allows viewing skills and reminders in a paginated interface,
+        exporting data to a file, and finding IDs for the `edit_entry` command.
         """
-        await ctx.send("`Generating status report...`")
+        await ctx.send("`Loading dashboard...`")
 
         try:
             all_skills = await self.db_manager.get_all_skills()
             all_reminders = await self.db_manager.get_all_reminders()
 
-            user_data = defaultdict(lambda: {"skills": [], "reminders": []})
+            # --- Helper to generate pages ---
+            def chunk_list(lst, n):
+                for i in range(0, len(lst), n):
+                    yield lst[i:i + n]
 
-            for skill in all_skills:
-                user_data[skill['user_id']]['skills'].append(skill)
-            for reminder in all_reminders:
-                user_data[reminder['user_id']]['reminders'].append(reminder)
+            # 1. Generate Skill Pages
+            skill_pages = []
+            if all_skills:
+                chunks = list(chunk_list(all_skills, 8))  # 8 skills per page
+                for i, chunk in enumerate(chunks):
+                    embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                    embed.set_footer(text=f"Page {i+1}/{len(chunks)} | Total Skills: {len(all_skills)}")
+                    for skill in chunk:
+                        user_id = skill['user_id']
+                        user_display = f"User {user_id}"
+                        # Try to resolve user name if cached
+                        user = self.bot.get_user(user_id)
+                        if user:
+                            user_display = f"{user.name} ({user_id})"
 
-            if not user_data:
-                await ctx.send("No users with skills or reminders found.")
-                return
+                        embed.add_field(
+                            name=f"ID: {skill['id']} | {skill['name']}",
+                            value=f"**User:** {user_display}\n**Roll:** `{skill['dice_roll']}`",
+                            inline=False
+                        )
+                    skill_pages.append(embed)
 
-            user_pages = []
-            user_ids = sorted(user_data.keys())
+            # 2. Generate Reminder Pages
+            reminder_pages = []
+            if all_reminders:
+                chunks = list(chunk_list(all_reminders, 8))
+                for i, chunk in enumerate(chunks):
+                    embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                    embed.set_footer(text=f"Page {i+1}/{len(chunks)} | Total Reminders: {len(all_reminders)}")
+                    for rem in chunk:
+                        user_id = rem['user_id']
+                        user_display = f"User {user_id}"
+                        user = self.bot.get_user(user_id)
+                        if user:
+                            user_display = f"{user.name} ({user_id})"
 
-            for i, user_id in enumerate(user_ids):
-                try:
-                    user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-                    user_name = f"{user.name} ({user.id})"
-                except discord.NotFound:
-                    user_name = f"Unknown User ({user_id})"
+                        embed.add_field(
+                            name=f"ID: {rem['id']} | Due: <t:{rem['reminder_time']}:R>",
+                            value=f"**User:** {user_display}\n**Msg:** {rem['message'][:50]}...",
+                            inline=False
+                        )
+                    reminder_pages.append(embed)
 
-                embed = discord.Embed(
-                    title=f"Status for {user_name}",
-                    color=discord.Color.blue()
-                )
-                embed.set_footer(text=f"User {i + 1}/{len(user_ids)}")
+            # 3. Define Export Callback
+            async def export_callback(interaction_ctx):
+                report_lines = ["--- SANCHO DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
 
-                # Add skills to embed
-                skills_text = ""
-                if user_data[user_id]['skills']:
-                    for skill in user_data[user_id]['skills']:
-                        aliases = skill.get('aliases')
-                        alias_str = f" (aliases: {aliases})" if aliases else ""
-                        skills_text += f"**{skill['name']}**: `{skill['dice_roll']}`{alias_str}\n"
-                else:
-                    skills_text = "No skills found."
-                embed.add_field(name="Skills", value=skills_text, inline=False)
+                report_lines.append(f"\n--- SKILLS ({len(all_skills)}) ---")
+                for s in all_skills:
+                    report_lines.append(f"ID: {s['id']} | User: {s['user_id']} | Name: {s['name']} | Roll: {s['dice_roll']} | Type: {s['skill_type']}")
 
-                # Add reminders to embed
-                reminders_text = ""
-                if user_data[user_id]['reminders']:
-                    for reminder in user_data[user_id]['reminders']:
-                        reminders_text += f"**ID {reminder['id']}**: '{reminder['message']}' @ <t:{reminder['reminder_time']}:f>\n"
-                else:
-                    reminders_text = "No reminders found."
-                embed.add_field(name="Reminders", value=reminders_text, inline=False)
-                user_pages.append(embed)
+                report_lines.append(f"\n--- REMINDERS ({len(all_reminders)}) ---")
+                for r in all_reminders:
+                    report_lines.append(f"ID: {r['id']} | User: {r['user_id']} | Time: {r['reminder_time']} | Msg: {r['message']}")
 
-            if not user_pages:
-                await ctx.send("Failed to generate report pages.")
-                return
-
-            if mode == "full":
-                for embed in user_pages:
-                    await ctx.send(embed=embed)
-                return
-
-            if mode == "print":
-                report_lines = []
-                for i, user_id in enumerate(user_ids):
-                    try:
-                        user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-                        user_name = f"{user.name} ({user.id})"
-                    except discord.NotFound:
-                        user_name = f"Unknown User ({user_id})"
-                    report_lines.append(f"Status for {user_name}\n{'='*40}")
-                    if user_data[user_id]['skills']:
-                        for skill in user_data[user_id]['skills']:
-                            aliases = skill.get('aliases')
-                            alias_str = f" (aliases: {aliases})" if aliases else ""
-                            report_lines.append(f"Skill: {skill['name']} | Dice: {skill['dice_roll']}{alias_str}")
-                    else:
-                        report_lines.append("No skills found.")
-                    if user_data[user_id]['reminders']:
-                        for reminder in user_data[user_id]['reminders']:
-                            report_lines.append(f"Reminder ID {reminder['id']}: '{reminder['message']}' @ {reminder['reminder_time']}")
-                    else:
-                        report_lines.append("No reminders found.")
-                    report_lines.append("\n")
-                with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_status_report.txt") as f:
+                with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_db_report.txt") as f:
                     f.write("\n".join(report_lines))
                     temp_path = f.name
-                await ctx.send("Status report attached:", file=discord.File(temp_path, filename="status_report.txt"))
-                os.remove(temp_path)
-                return
 
-            # Default: interactive view
-            view = StatusView(self.bot, user_pages, ctx.author.id)
-            previous_button = view.children[0]
-            if isinstance(previous_button, discord.ui.Button):
-                previous_button.disabled = True
-            if len(user_pages) == 1:
-                next_button = view.children[1]
-                if isinstance(next_button, discord.ui.Button):
-                    next_button.disabled = True
-            sent_msg = await ctx.send(embed=user_pages[0], view=view)
+                await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
+                os.remove(temp_path)
+
+            # 4. Create Dashboard Embed
+            dashboard_embed = discord.Embed(
+                title="Admin Dashboard",
+                description="Select a category to view database entries.",
+                color=discord.Color.dark_grey()
+            )
+            dashboard_embed.add_field(name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
+
+            # 5. Launch View
+            view = DashboardView(ctx, skill_pages, reminder_pages, export_callback, dashboard_embed)
+            sent_msg = await ctx.send(embed=dashboard_embed, view=view)
             view.message = sent_msg
 
         except Exception as e:
-            logging.error("Error generating status report:", exc_info=True)
-            await ctx.send(f"An error occurred while generating the report: {e}")
+            logging.error("Error generating dashboard:", exc_info=True)
+            await ctx.send(f"An error occurred: {e}")
+
+    @commands.hybrid_command(name="edit_entry", hidden=True, description="Edit a database entry by ID. Use the report command to find IDs.")
+    @commands.is_owner()
+    @app_commands.describe(
+        entry_type="The type of entry ('skill' or 'reminder').",
+        entry_id="The numeric ID of the entry."
+    )
+    async def edit_entry(self, ctx: commands.Context, entry_type: str, entry_id: int) -> None:
+        """Edit a database entry by ID.
+
+        Use the `report` command to find the IDs of skills and reminders.
+
+        Args:
+            ctx (commands.Context): The command context.
+            entry_type (str): 'skill' or 'reminder'.
+            entry_id (int): The ID of the entry.
+        """
+        entry_type = entry_type.lower()
+        if entry_type not in ['skill', 'reminder']:
+            await ctx.send("Invalid type. Please use `skill` or `reminder`.")
+            return
+
+        def check(m: discord.Message) -> bool:
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            if entry_type == 'skill':
+                # --- EDIT SKILL ---
+                skill = await self.db_manager.get_skill_by_id(entry_id)
+                if not skill:
+                    await ctx.send(f"No skill found with ID {entry_id}.")
+                    return
+
+                embed = discord.Embed(title=f"Edit Skill #{entry_id}", color=discord.Color.blue())
+                embed.add_field(name="1. Name", value=skill['name'], inline=False)
+                embed.add_field(name="2. Roll", value=skill['dice_roll'], inline=False)
+                embed.add_field(name="3. Description", value=skill['description'] or "None", inline=False)
+                embed.add_field(name="4. DELETE", value="⚠️ Delete this skill", inline=False)
+                embed.set_footer(text="Select an option to edit.")
+
+                options = {"1️⃣ Name": "1", "2️⃣ Roll": "2", "3️⃣ Desc": "3", "🗑️ Delete": "4"}
+                choice = await get_selection(ctx, embed, options)
+
+                if not choice:
+                    await ctx.send("Edit cancelled.")
+                    return
+
+                updates = {}
+                if choice == '1':
+                    await ctx.send(f"Current Name: `{skill['name']}`. Enter new name:")
+                    msg = await self.bot.wait_for('message', check=check, timeout=30)
+                    updates['name'] = msg.content.strip()
+                elif choice == '2':
+                    await ctx.send(f"Current Roll: `{skill['dice_roll']}`. Enter new roll:")
+                    msg = await self.bot.wait_for('message', check=check, timeout=30)
+                    updates['dice_roll'] = msg.content.strip()
+                elif choice == '3':
+                    await ctx.send(f"Current Desc: `{skill['description']}`. Enter new description (or 'none'):")
+                    msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    content = msg.content.strip()
+                    updates['description'] = None if content.lower() == 'none' else content
+                elif choice == '4':
+                    await ctx.send("Are you sure you want to DELETE this skill? (yes/no)")
+                    msg = await self.bot.wait_for('message', check=check, timeout=30)
+                    if msg.content.lower() in ['yes', 'y']:
+                        await self.db_manager.delete_skill(skill['user_id'], entry_id)
+                        await ctx.send("✅ Skill deleted.")
+                        return
+                    else:
+                        await ctx.send("Deletion cancelled.")
+                        return
+
+                if updates:
+                    await self.db_manager.update_skill(entry_id, skill['user_id'], updates)
+                    await ctx.send("✅ Skill updated.")
+
+            elif entry_type == 'reminder':
+                # --- EDIT REMINDER ---
+                rem = await self.db_manager.get_reminder_by_id(entry_id)
+                if not rem:
+                    await ctx.send(f"No reminder found with ID {entry_id}.")
+                    return
+
+                embed = discord.Embed(title=f"Edit Reminder #{entry_id}", color=discord.Color.orange())
+                embed.add_field(name="1. Message", value=rem['message'], inline=False)
+                embed.add_field(name="2. Time", value=f"<t:{rem['reminder_time']}:F>", inline=False)
+                embed.add_field(name="3. DELETE", value="⚠️ Delete this reminder", inline=False)
+                embed.set_footer(text="Select an option to edit.")
+
+                options = {"1️⃣ Message": "1", "2️⃣ Time": "2", "🗑️ Delete": "3"}
+                choice = await get_selection(ctx, embed, options)
+
+                if not choice:
+                    await ctx.send("Edit cancelled.")
+                    return
+
+                updates = {}
+                if choice == '1':
+                    await ctx.send(f"Current Message: `{rem['message']}`. Enter new message:")
+                    msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    updates['message'] = msg.content.strip()
+                elif choice == '2':
+                    await ctx.send("Enter new time (e.g. 'in 5 mins', 'tomorrow 2pm'):")
+                    msg = await self.bot.wait_for('message', check=check, timeout=60)
+                    # Note: We'd ideally use the Reminders cog's parser here, but for admin override,
+                    # we can just use dateparser directly or ask them to be precise.
+                    # For simplicity in this admin tool, we'll assume they know what they are doing or use a simple parser.
+                    import dateparser
+                    dt = dateparser.parse(msg.content.strip(), settings={'PREFER_DATES_FROM': 'future'})
+                    if dt:
+                        updates['reminder_time'] = int(dt.timestamp())
+                    else:
+                        await ctx.send("Invalid time format. Cancelled.")
+                        return
+                elif choice == '3':
+                    await ctx.send("Are you sure you want to DELETE this reminder? (yes/no)")
+                    msg = await self.bot.wait_for('message', check=check, timeout=30)
+                    if msg.content.lower() in ['yes', 'y']:
+                        await self.db_manager.delete_reminders([entry_id])
+                        await ctx.send("✅ Reminder deleted.")
+                        return
+                    else:
+                        await ctx.send("Deletion cancelled.")
+                        return
+
+                if updates:
+                    await self.db_manager.update_reminder(entry_id, rem['user_id'], updates)
+                    await ctx.send("✅ Reminder updated.")
+
+        except Exception as e:
+            logging.error(f"Error editing entry {entry_id}: {e}", exc_info=True)
+            await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(name="status", hidden=True, description="Provides a comprehensive health and status check for the bot.")
     @commands.is_owner()
