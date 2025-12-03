@@ -48,13 +48,14 @@ class SanchoBot(commands.Bot):
         intents.message_content = True
 
         # Call super().__init__ with all configuration handled internally.
-        # We pass `config.OWNER_ID or 0` to allow for proper testing of
-        # owner-only commands when the OWNER_ID is not set in the .env file.
+        # We pass `owner_ids` to prevent auto-fetching application info.
+        # If OWNER_ID is set, we use it. If not, we pass {0} to ensure no fetch happens.
+        owner_id = {config.OWNER_ID} if config.OWNER_ID else {0}
         super().__init__(
             command_prefix=self._get_case_insensitive_prefix,
             intents=intents,
             case_insensitive=True,
-            owner_id=config.OWNER_ID,
+            owner_ids=owner_id, # The bot is set up as a team, but is functionally only owned by one user.
             **kwargs
         )
 
