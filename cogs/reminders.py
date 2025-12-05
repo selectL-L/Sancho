@@ -59,9 +59,9 @@ class Reminders(BaseCog):
     async def cog_load(self) -> None:
         """Starts the reminder scheduler when the cog is loaded."""
         self.logger.info("Starting reminder system...")
-        # Process missed reminders first (Catch-Up Phase)
+        # Process missed reminders first (Catch-Up Phase).
         await self._process_missed_reminders()
-        # Start the main scheduler loop
+        # Start the main scheduler loop.
         self.scheduler_task = self.bot.loop.create_task(self._scheduler_loop())
 
     async def cog_unload(self) -> None:
@@ -86,14 +86,14 @@ class Reminders(BaseCog):
 
             self.logger.info(f"Processing {len(missed)} missed reminders...")
 
-            # We use a semaphore to limit concurrent processing to avoid rate limits
+            # We use a semaphore to limit concurrent processing to avoid rate limits.
             sem = asyncio.Semaphore(5)
 
             async def process_one(reminder: Dict[str, Any]) -> None:
                 async with sem:
                     await self._handle_missed_reminder(reminder, now)
 
-            # Create tasks for all missed reminders
+            # Create tasks for all missed reminders.
             tasks = [process_one(r) for r in missed]
             await asyncio.gather(*tasks)
 
@@ -115,7 +115,7 @@ class Reminders(BaseCog):
         try:
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
 
-            # Determine destination (same logic as before)
+            # Determine destination (same logic as before).
             destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
             targetable = None
 
@@ -138,14 +138,14 @@ class Reminders(BaseCog):
                 await self.db_manager.delete_reminders([reminder['id']])
                 return
 
-            # Cast to Messageable to satisfy static analysis
+            # Cast to Messageable to satisfy static analysis.
             targetable_dest = cast(discord.abc.Messageable, targetable)
 
-            # Logic for Recurring vs One-off
+            # Logic for Recurring vs One-off.
             if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
                 await self._handle_missed_recurring(reminder, targetable_dest, user, current_time)
             else:
-                # One-off: Just say sorry and delete
+                # One-off: Just say sorry and delete.
                 msg = (f"{user.mention}, sorry I was offline! You had a reminder for: '{message}'\n"
                        f"It was due at <t:{reminder['reminder_time']}:F> (<t:{reminder['reminder_time']}:R>).")
                 await targetable_dest.send(msg)
@@ -162,31 +162,31 @@ class Reminders(BaseCog):
             user_tz_str = await self._get_user_timezone(user.id)
             user_tz = pytz.timezone(user_tz_str)
 
-            # Anchor to creation time for stability
+            # Anchor to creation time for stability.
             start_date = datetime.fromtimestamp(reminder['created_at'], tz=user_tz)
             rule = rrulestr(reminder['recurrence_rule'], dtstart=start_date)
 
-            # Find all occurrences between the LAST scheduled time and NOW
-            # We use the stored reminder_time as the start of our search window
+            # Find all occurrences between the LAST scheduled time and NOW.
+            # We use the stored reminder_time as the start of our search window.
             last_scheduled_dt = datetime.fromtimestamp(reminder['reminder_time'], tz=user_tz)
             now_dt = datetime.fromtimestamp(current_time, tz=user_tz)
 
-            # Get all missed occurrences
-            # inc=True to include the one that was exactly scheduled if it wasn't processed
+            # Get all missed occurrences.
+            # inc=True to include the one that was exactly scheduled if it wasn't processed.
             missed_occurrences = rule.between(last_scheduled_dt, now_dt, inc=True)
 
             if not missed_occurrences:
-                # This shouldn't happen if reminder_time <= current_time, but just in case
+                # This shouldn't happen if reminder_time <= current_time, but just in case.
                 return
 
-            # 1. Send Notification
+            # 1. Send Notification.
             count = len(missed_occurrences)
             timestamps = [f"<t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)" for dt in missed_occurrences]
 
             msg_header = f"{user.mention}, sorry I was offline! You missed **{count}** occurrences of your reminder: '{reminder['message']}'."
 
             if count > 5:
-                # Truncate if too many
+                # Truncate if too many.
                 list_str = "\n".join(f"- {ts}" for ts in timestamps[-5:])
                 msg_body = f"\nHere are the last 5 missed times:\n{list_str}"
             else:
@@ -195,7 +195,7 @@ class Reminders(BaseCog):
 
             await targetable.send(msg_header + msg_body)
 
-            # 2. Reschedule to Next Future Time
+            # 2. Reschedule to Next Future Time.
             next_occurrence = rule.after(now_dt)
             if next_occurrence:
                 next_ts = int(next_occurrence.timestamp())
@@ -217,33 +217,33 @@ class Reminders(BaseCog):
                 self.scheduler_event.clear()
                 now = int(time.time())
 
-                # 1. Process ALL currently due reminders
+                # 1. Process ALL currently due reminders.
                 due_reminders = await self.db_manager.get_due_reminders(now)
 
                 if due_reminders:
                     self.logger.info(f"Firing {len(due_reminders)} due reminders.")
-                    # Fire all concurrently
+                    # Fire all concurrently.
                     tasks = [self._fire_reminder(r) for r in due_reminders]
                     await asyncio.gather(*tasks)
-                    # Loop immediately to check if more became due or if we need to sleep
+                    # Loop immediately to check if more became due or if we need to sleep.
                     continue
 
-                # 2. If nothing is due right now, find the next one
+                # 2. If nothing is due right now, find the next one.
                 next_reminder = await self.db_manager.get_next_upcoming_reminder(now)
 
                 if next_reminder:
                     delay = next_reminder['reminder_time'] - now
-                    # Ensure delay is non-negative
+                    # Ensure delay is non-negative.
                     delay = max(0, delay)
 
                     self.logger.info(f"Next reminder {next_reminder['id']} due in {delay:.2f}s.")
 
                     try:
                         await asyncio.wait_for(self.scheduler_event.wait(), timeout=delay)
-                        # Event triggered (new reminder added/changed)
+                        # Event triggered (new reminder added/changed).
                         self.logger.info("Scheduler woke up due to event.")
                     except asyncio.TimeoutError:
-                        # Timeout reached, time to check DB again
+                        # Timeout reached, time to check DB again.
                         pass
                 else:
                     self.logger.info("No upcoming reminders. Waiting for new ones...")
@@ -254,12 +254,12 @@ class Reminders(BaseCog):
                 break
             except Exception as e:
                 self.logger.error(f"Error in scheduler loop: {e}", exc_info=True)
-                await asyncio.sleep(5)  # Prevent tight loop on error
+                await asyncio.sleep(5)  # Prevent tight loop on error.
 
     async def _fire_reminder(self, reminder: Dict[str, Any]) -> None:
         """Sends the reminder and handles recurrence/deletion."""
         try:
-            # Double check it still exists (might have been deleted while waiting)
+            # Double check it still exists (might have been deleted while waiting).
             current_state = await self.db_manager.get_reminder_by_id(reminder['id'])
             if not current_state:
                 return
@@ -267,29 +267,29 @@ class Reminders(BaseCog):
             user_id = reminder['user_id']
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
 
-            # Destination Logic (Refactored to be cleaner)
+            # Destination Logic (Refactored to be cleaner).
             destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
             targetable = None
 
-            # Try DM
+            # Try DM.
             if destination_pref == 'dm':
                 targetable = user
-            # Try Specific Channel
+            # Try Specific Channel.
             elif destination_pref and destination_pref.isdigit():
                 try:
                     chan_id = int(destination_pref)
                     targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
                 except (discord.NotFound, discord.Forbidden):
-                    targetable = user  # Fallback
-            # Try Origin Channel
+                    targetable = user  # Fallback.
+            # Try Origin Channel.
             else:
                 try:
                     targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
                 except (discord.NotFound, discord.Forbidden):
-                    targetable = user  # Fallback
+                    targetable = user  # Fallback.
 
             if targetable:
-                # Reply Logic
+                # Reply Logic.
                 reply_msg_id = reminder.get('reply_message_id')
                 sent = False
 
@@ -297,29 +297,29 @@ class Reminders(BaseCog):
 
                 if reply_msg_id and hasattr(targetable, 'fetch_message'):
                     try:
-                        # Cast to Any to bypass static analysis complaints about specific channel types
+                        # Cast to Any to bypass static analysis complaints about specific channel types.
                         targetable_with_fetch = cast(Any, targetable)
                         original_msg = await targetable_with_fetch.fetch_message(reply_msg_id)
                         await original_msg.reply(msg_content)
                         sent = True
                     except:  # noqa: E722 (REASON: We want to catch all exceptions here since discord may send us something weird as a response)
-                        pass  # Fallback to normal send
+                        pass  # Fallback to normal send.
 
                 if not sent:
                     if reply_msg_id:
                         msg_content += "\n(I couldn't find the message you wanted me to reply to!)"
-                    # Cast to Messageable to satisfy static analysis
+                    # Cast to Messageable to satisfy static analysis.
                     targetable_dest = cast(discord.abc.Messageable, targetable)
                     await targetable_dest.send(msg_content)
 
-            # Handle Recurrence or Deletion
+            # Handle Recurrence or Deletion.
             if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
                 await self._reschedule_recurring(reminder)
             else:
                 await self.db_manager.delete_reminders([reminder['id']])
 
         except (discord.NotFound, discord.Forbidden):
-            # User blocked bot or left server -> Delete reminder
+            # User blocked bot or left server -> Delete reminder.
             await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Error firing reminder {reminder['id']}: {e}", exc_info=True)
@@ -536,7 +536,7 @@ class Reminders(BaseCog):
 
         # Iteratively remove common filler words from the start of the query.
         # This handles "me to...", "for me...", "to...", etc.
-        # Note: "that" is NOT included here because it can be the object of the reminder (e.g. "remind me of that")
+        # Note: "that" is NOT included here because it can be the object of the reminder (e.g. "remind me of that").
         while words and words[0].lower() in ["me", "us", "him", "her", "them", "to", "for", "about", "of"]:
             words.pop(0)
 
@@ -549,16 +549,16 @@ class Reminders(BaseCog):
         # Stage 2: Recurrence Extraction
         # ==========================================
         # We prioritize extracting recurrence rules (e.g., "every day") because they fundamentally change how the reminder behaves.
-        # Workaround for dateparser recurrence limitations
+        # Workaround for dateparser recurrence limitations.
         recurrence_rule = None
 
-        # Extract recurrence rule using the helper method
+        # Extract recurrence rule using the helper method.
         recurrence_rule, matched_recurrence_text = self._extract_recurrence_rule(sanitized_query)
 
         if recurrence_rule:
             self.logger.info(f"Detected recurrence: {recurrence_rule}")
             sanitized_query = sanitized_query.replace(matched_recurrence_text, '', 1)
-            # Clean up any double spaces left behind by the removal
+            # Clean up any double spaces left behind by the removal.
             sanitized_query = re.sub(r'\s+', ' ', sanitized_query).strip()
 
         # ==========================================
@@ -596,11 +596,11 @@ class Reminders(BaseCog):
                 word_to_check = candidate_words[i-1].lower()
                 if i > 1 and word_to_check in ['to', 'that', 'my', 'the']:
                     # Special handling for "the": allow it if it looks like part of a date phrase
-                    # e.g. "on the 25th", "on the next Friday"
+                    # e.g. "on the 25th", "on the next Friday".
                     should_stop = True
                     if word_to_check == 'the' and i < len(candidate_words):
                         next_word = candidate_words[i].lower()
-                        # Check if next word is a digit (25th) or a relative keyword or day/month
+                        # Check if next word is a digit (25th) or a relative keyword or day/month.
                         if (next_word[0].isdigit() or
                             next_word in ['next', 'last', 'following', 'first', 'second', 'third', 'fourth', 'fifth'] or
                             next_word in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
@@ -621,7 +621,7 @@ class Reminders(BaseCog):
                 clean_phrase = phrase
                 words_in_phrase = phrase.split()
                 if words_in_phrase and words_in_phrase[0].lower() in ['on', 'at', 'in', 'for', 'by', 'from']:
-                    # Remove the first word (the preposition)
+                    # Remove the first word (the preposition).
                     clean_phrase = " ".join(words_in_phrase[1:])
 
                 # If the cleaned phrase is empty or too short (and not a digit), skip it.
@@ -654,12 +654,12 @@ class Reminders(BaseCog):
 
             return valid_segment, valid_count
 
-        # 1. Try consuming time info from the FRONT of the sentence
+        # 1. Try consuming time info from the FRONT of the sentence.
         if config.DEV_MODE:
             self.logger.debug(f"Starting Front Time Extraction with words: {words}")
         front_time_str, front_word_count = await get_longest_valid_date_segment(words, "FRONT")
 
-        # 2. Try consuming time info from the BACK of the sentence
+        # 2. Try consuming time info from the BACK of the sentence.
         # We only look at the back if we haven't already consumed the whole string from the front.
         back_time_str = ""
         back_word_count = 0
@@ -669,12 +669,12 @@ class Reminders(BaseCog):
             if config.DEV_MODE:
                 self.logger.debug(f"Starting Back Time Extraction. Remaining words: {remaining_words_at_back}")
 
-            # Prepare words for back extraction (reverse them)
-            # We take the words that were NOT consumed by the front extraction
+            # Prepare words for back extraction (reverse them).
+            # We take the words that were NOT consumed by the front extraction.
             words_for_back = words[front_word_count:]
             reversed_words = words_for_back[::-1]
 
-            # Use the helper to find the longest valid segment from the back
+            # Use the helper to find the longest valid segment from the back.
             back_segment, back_count = await get_longest_valid_date_segment(reversed_words, "BACK")
 
             if back_segment:
@@ -690,31 +690,31 @@ class Reminders(BaseCog):
         # Now we decide what the final time string and message are based on what we found.
 
         final_time_string = ""
-        message_words = words  # Default to assuming everything is the message if no time found
+        message_words = words  # Default to assuming everything is the message if no time found.
 
-        # Case A: Split Time ("On Monday" ... "at 5pm")
+        # Case A: Split Time ("On Monday" ... "at 5pm").
         # We found valid time parts at BOTH ends. We try to combine them.
         if front_time_str and back_time_str:
             self.logger.info(f"Found split time: '{front_time_str}' AND '{back_time_str}'")
             combined_candidate = f"{front_time_str} {back_time_str}"
 
-            # Validate that the combined string makes sense
+            # Validate that the combined string makes sense.
             if await asyncio.to_thread(dateparser.parse, combined_candidate, settings={'PREFER_DATES_FROM': 'future'}):
                 final_time_string = combined_candidate
-                # The message is whatever is left in the middle
+                # The message is whatever is left in the middle.
                 message_words = words[front_word_count: len(words) - back_word_count]
             else:
                 # If they don't combine validly, we abort to avoid malformed reminders.
                 self.logger.warning(f"Split time found but failed to combine: '{combined_candidate}'. Aborting.")
                 return None
 
-        # Case B: Front only ("Tomorrow go to store")
+        # Case B: Front only ("Tomorrow go to store").
         elif front_time_str:
             self.logger.info(f"Found time at front: '{front_time_str}'")
             final_time_string = front_time_str
             message_words = words[front_word_count:]
 
-        # Case C: Back only ("Go to store tomorrow")
+        # Case C: Back only ("Go to store tomorrow").
         elif back_time_str:
             self.logger.info(f"Found time at back: '{back_time_str}'")
             final_time_string = back_time_str
@@ -726,7 +726,7 @@ class Reminders(BaseCog):
 
         # If we found a recurrence rule but NO specific time (e.g. "Every day"),
         # we set the time to "now" so the recurrence starts immediately.
-        # Default to immediate execution if no time specified
+        # Default to immediate execution if no time specified.
         if not final_time_string and recurrence_rule:
             final_time_string = "now"
 
@@ -749,7 +749,88 @@ class Reminders(BaseCog):
 
         return (final_message, final_time_string, recurrence_rule)
 
-    async def _interactive_reminder_flow(self, ctx: commands.Context, initial_message: str = "", initial_time: str = "", initial_recurrence: Optional[str] = None) -> None:
+    async def _confirm_and_save_reminder(
+        self,
+        ctx: commands.Context,
+        reminder_message: str,
+        time_str: str,
+        dt_object: datetime,
+        recurrence_rule: Optional[str],
+        reply_message_id: Optional[int] = None
+    ) -> None:
+        """Handles the confirmation, saving, and scheduling of a reminder.
+
+        Args:
+            ctx (commands.Context): The command context.
+            reminder_message (str): The reminder message.
+            time_str (str): The original time string (for context in edits).
+            dt_object (datetime): The parsed datetime object.
+            recurrence_rule (Optional[str]): The recurrence rule, if any.
+            reply_message_id (Optional[int]): The ID of the message to reply to, if any.
+        """
+        def check(m: discord.Message) -> bool:
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        timestamp = int(dt_object.timestamp())
+        confirmation_message = f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'."
+        if recurrence_rule:
+            confirmation_message += "\nThis reminder will repeat."
+
+        if reply_message_id:
+            confirmation_message += "\nI'll also reply to the message you linked!"
+
+        confirmation_message += "\nIs this correct? (`yes`, `edit`, `edit time`, `edit message`, `no`)"
+
+        await ctx.send(confirmation_message)
+
+        try:
+            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
+            content = msg.content.lower()
+
+            if content in ['yes', 'y']:
+                is_recurring = recurrence_rule is not None
+                new_reminder_id = await self.db_manager.add_reminder(
+                    ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
+                    is_recurring, recurrence_rule, reply_message_id
+                )
+
+                # Wake up the scheduler to pick up the new reminder
+                self.scheduler_event.set()
+
+                await ctx.send("✅ Reminder saved and scheduled!")
+                self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
+
+            elif content == 'edit':
+                await ctx.send("Let's start over.")
+                await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)
+            elif content == 'edit time':
+                await ctx.send("Okay, let's pick a new time.")
+                await self._interactive_reminder_flow(ctx, initial_message=reminder_message, reply_message_id=reply_message_id)
+            elif content == 'edit message':
+                await ctx.send("Okay, let's change the message.")
+                await self._interactive_reminder_flow(
+                    ctx,
+                    initial_time=time_str,
+                    initial_recurrence=recurrence_rule,
+                    reply_message_id=reply_message_id
+                )
+            else:
+                await ctx.send("Reminder cancelled. You can start over if you wish.")
+
+        except asyncio.TimeoutError:
+            await ctx.send("You took too long to respond. Reminder creation cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error in confirmation flow for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred while saving the reminder.")
+
+    async def _interactive_reminder_flow(
+        self,
+        ctx: commands.Context,
+        initial_message: str = "",
+        initial_time: str = "",
+        initial_recurrence: Optional[str] = None,
+        reply_message_id: Optional[int] = None
+    ) -> None:
         """Guides the user through creating a reminder interactively.
 
         Args:
@@ -757,6 +838,7 @@ class Reminders(BaseCog):
             initial_message (str): The initial message, if any.
             initial_time (str): The initial time string, if any.
             initial_recurrence (Optional[str]): The initial recurrence rule, if any.
+            reply_message_id (Optional[int]): The ID of the message to reply to, if any.
         """
 
         def check(m: discord.Message) -> bool:
@@ -818,32 +900,8 @@ class Reminders(BaseCog):
                     time_str = ""  # Reset to re-ask
                     recurrence_rule = None  # Reset recurrence if time fails
 
-            # 3. Confirmation
-            timestamp = int(dt_object.timestamp())
-            confirmation_message = f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'."
-            if recurrence_rule:
-                confirmation_message += "\nThis reminder will repeat. Is this correct? (`yes`/`no`)"
-            else:
-                confirmation_message += " Is this correct? (`yes`/`no`)"
-
-            await ctx.send(confirmation_message)
-
-            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-            if msg.content.lower() in ['yes', 'y']:
-                is_recurring = recurrence_rule is not None
-                new_reminder_id = await self.db_manager.add_reminder(
-                    ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
-                    is_recurring, recurrence_rule
-                )
-
-                # Wake up the scheduler to pick up the new reminder
-                self.scheduler_event.set()
-
-                await ctx.send("✅ Reminder saved and scheduled!")
-                self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
-
-            else:
-                await ctx.send("Reminder cancelled. You can start over if you wish.")
+            # 3. Confirmation and Saving
+            await self._confirm_and_save_reminder(ctx, reminder_message, time_str, dt_object, recurrence_rule, reply_message_id)
 
         except asyncio.TimeoutError:
             await ctx.send("You took too long to respond. Reminder creation cancelled.")
@@ -859,8 +917,13 @@ class Reminders(BaseCog):
             query (str): The user's input string.
         """
         try:
+            # Check if this is a reply to link context
+            reply_message_id = None
+            if ctx.message.reference and ctx.message.reference.message_id:
+                reply_message_id = ctx.message.reference.message_id
+
             if not query.strip():
-                await self._interactive_reminder_flow(ctx)
+                await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)
                 return
 
             parsed = await self._parse_reminder(query)
@@ -869,7 +932,7 @@ class Reminders(BaseCog):
             if not parsed or not parsed[0] or not parsed[1]:
                 self.logger.info(f"Failed to understand '{query}'. Starting interactive flow.")
                 await ctx.send("I'm sorry, I couldn't understand the reminder. Let's set it up step-by-step.")
-                await self._interactive_reminder_flow(ctx)  # No context retained
+                await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)  # No context retained
                 return
 
             reminder_message, time_str, recurrence_rule = parsed
@@ -910,7 +973,7 @@ class Reminders(BaseCog):
             if not dt_object:
                 self.logger.error(f"Dateparser failed on a validated string: '{time_str}'. Starting interactive flow.")
                 await ctx.send("I'm sorry, I got confused about the time. Let's set it up step-by-step.")
-                await self._interactive_reminder_flow(ctx)  # No context retained
+                await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)  # No context retained
                 return
 
             timestamp = int(dt_object.timestamp())
@@ -918,52 +981,11 @@ class Reminders(BaseCog):
             if timestamp <= int(time.time()):
                 await ctx.send("You can't set a reminder in the past! Please try again.")
                 # We retain context here because the user's intent was clear, just the time was wrong.
-                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_recurrence=recurrence_rule)
+                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_recurrence=recurrence_rule, reply_message_id=reply_message_id)
                 return
 
-            # --- Confirmation Step ---
-            # Ask the user to confirm the parsed details before saving.
-            def check(m: discord.Message) -> bool:
-                return m.author == ctx.author and m.channel == ctx.channel
-
-            confirmation_text = f"Okay, I have a reminder for you to '{reminder_message}' on <t:{timestamp}:F>."
-            if recurrence_rule:
-                confirmation_text += "\nThis reminder will repeat."
-
-            # Check if this is a reply to link context
-            reply_message_id = None
-            if ctx.message.reference and ctx.message.reference.message_id:
-                reply_message_id = ctx.message.reference.message_id
-                confirmation_text += "\nI'll also reply to the message you linked!"
-
-            await ctx.send(
-                f"{confirmation_text}\n"
-                "Is this correct? (`yes` to confirm, `edit` to change, or `no` to cancel)"
-            )
-
-            msg = await self.bot.wait_for('message', check=check, timeout=60.0)
-
-            if msg.content.lower() in ['yes', 'y']:
-                if reminder_message:
-                    is_recurring = recurrence_rule is not None
-                    new_reminder_id = await self.db_manager.add_reminder(
-                        ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
-                        is_recurring, recurrence_rule, reply_message_id
-                    )
-
-                    # Wake up the scheduler to pick up the new reminder
-                    self.scheduler_event.set()
-
-                    await ctx.send("✅ Reminder saved and scheduled!")
-                    self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
-                else:
-                    # This case should ideally not be hit if parsing is correct.
-                    await ctx.send("I seem to have lost the reminder message. Please try again.")
-            elif msg.content.lower() == 'edit':
-                await ctx.send("Let's edit the reminder.")
-                await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_time=time_str, initial_recurrence=recurrence_rule)
-            else:
-                await ctx.send("Reminder cancelled.")
+            # --- Confirmation and Saving ---
+            await self._confirm_and_save_reminder(ctx, reminder_message or "", time_str, dt_object, recurrence_rule, reply_message_id)
 
         except asyncio.TimeoutError:
             await ctx.send("You took too long to respond. Reminder creation cancelled.")
