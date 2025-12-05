@@ -55,7 +55,7 @@ class SanchoBot(commands.Bot):
             command_prefix=self._get_case_insensitive_prefix,
             intents=intents,
             case_insensitive=True,
-            owner_ids=owner_id, # The bot is set up as a team, but is functionally only owned by one user.
+            owner_ids=owner_id,  # The bot is set up as a team, but is functionally only owned by one user.
             **kwargs
         )
 
