@@ -37,6 +37,12 @@ def build():
     cogs = get_hidden_imports()
     print(f"📦 Found {len(cogs)} cogs to bundle: {', '.join(cogs)}")
 
+    # Create a manifest file for the frozen app to read
+    import json
+    manifest_path = os.path.join(HERE, 'cogs_manifest.json')
+    with open(manifest_path, 'w') as f:
+        json.dump(cogs, f)
+
     hidden_import_args = []
     for cog in cogs:
         hidden_import_args.append(f'--hidden-import={cog}')
@@ -52,6 +58,8 @@ def build():
         '--clean',                      # Clean PyInstaller cache
         '--noconfirm',                  # Overwrite output directory without asking
         '--console',                    # Keep the console window (essential for bot logs)
+        # Include the manifest file in the root of the bundle
+        f'--add-data=cogs_manifest.json{os.pathsep}.',
         # '--debug=all',                # Uncomment if you need to debug the bootloader
     ] + hidden_import_args
 
@@ -65,6 +73,10 @@ def build():
         print("               to the same directory as the executable for it to run!")
     except Exception as e:
         print(f"\n❌ Build Failed: {e}")
+    finally:
+        # Cleanup the temporary manifest file
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
 
 
 if __name__ == '__main__':

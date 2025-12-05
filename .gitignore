@@ -213,3 +213,4 @@ info.env
 *.db.backup
 *.log
 status_history_*.txt
+*.spec

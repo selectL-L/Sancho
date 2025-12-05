@@ -32,14 +32,28 @@ def get_application_path() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_internal_path() -> str:
+    """Determines the internal path for bundled resources (like cogs).
+
+    When frozen, this points to the temporary directory where PyInstaller
+    extracts the bundled files. When running from source, it's the same
+    as the application path.
+    """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS  # type: ignore
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 # Core Paths
 # Define all essential paths based on the application's root directory.
 APP_PATH = get_application_path()
+INTERNAL_PATH = get_internal_path()
+
 ASSETS_PATH = os.path.join(APP_PATH, 'assets')
 ENV_PATH = os.path.join(APP_PATH, 'info.env')
 LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
 DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
-COGS_PATH = os.path.join(APP_PATH, 'cogs')
+COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
 
 # Bot Configuration
 

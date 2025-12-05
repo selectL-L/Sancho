@@ -5,7 +5,9 @@ Placing this logic here separates it from the main configuration file, improving
 the separation of concerns.
 """
 
+import json
 import os
+import sys
 from typing import List
 
 
@@ -20,6 +22,18 @@ def discover_cogs(cogs_path: str) -> List[str]:
     Returns:
         List[str]: A list of cog module names (e.g., 'cogs.math').
     """
+    # If frozen (bundled), read from the manifest file instead of scanning the directory.
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # The manifest is expected to be in the root of the internal directory (sys._MEIPASS).
+        # cogs_path is likely .../_MEIPASS/cogs, so we look in the parent.
+        manifest_path = os.path.join(os.path.dirname(cogs_path), 'cogs_manifest.json')
+        try:
+            with open(manifest_path, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Fallback or empty if manifest is missing/corrupt
+            return []
+
     cogs = []
     if not os.path.exists(cogs_path):
         return cogs
