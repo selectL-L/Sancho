@@ -103,7 +103,7 @@ def setup_logging(
     if log_to_file:
         if not log_file:
             raise ValueError("log_file must be provided when log_to_file is True.")
-        
+
         # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(
             log_file,

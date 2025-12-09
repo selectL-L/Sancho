@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from utils.database import DatabaseManager
 
 
-
 class CoreBot(commands.Bot):
     """The main bot class, extending `discord.ext.commands.Bot`.
 

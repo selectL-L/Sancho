@@ -145,20 +145,20 @@ def migrate_database() -> None:
     # 1. Identify Source Database
     # We use the same scan logic as config.py to find what we are migrating FROM.
     found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
-    
+
     source_db_path: str
-    
+
     if len(found_dbs) == 0:
         logging.info("No existing databases found in '%s'. Nothing to migrate.", ASSETS_PATH)
         return
     elif len(found_dbs) == 1:
-        # We found one DB. 
+        # We found one DB.
         # If it's already the target name, we just upgrade in-place (if schema changed) or simply run to verify.
         source_db_path = os.path.join(ASSETS_PATH, found_dbs[0])
         if found_dbs[0] == TARGET_DB_NAME:
-             logging.info("Found '%s'. Migrating/Upgrading in-place.", found_dbs[0])
+            logging.info("Found '%s'. Migrating/Upgrading in-place.", found_dbs[0])
         else:
-             logging.info("Found '%s'. Migrating to '%s'.", found_dbs[0], TARGET_DB_NAME)
+            logging.info("Found '%s'. Migrating to '%s'.", found_dbs[0], TARGET_DB_NAME)
     else:
         logging.error("Multiple databases found: %s. Please ensure only one source database exists.", found_dbs)
         return
@@ -285,15 +285,15 @@ def migrate_database() -> None:
         return
 
     # 6. Cleanup / Finalize
-    # If we migrated from a different filename, we must rename/remove the old one 
+    # If we migrated from a different filename, we must rename/remove the old one
     # so that config.py doesn't freak out about having 2 DB files.
     # Since we already backed it up to .backup, we can safely remove the original source file
     # IF it is different from the target.
-    
+
     if source_db_path != TARGET_DB_PATH:
         logging.info("Removing old source database file '%s' to enforce single-DB rule...", source_db_path)
         try:
-             os.remove(source_db_path)
+            os.remove(source_db_path)
         except Exception as e:
             logging.error("Failed to remove old database file. You may need to remove it manually. Error: %s", e)
 
