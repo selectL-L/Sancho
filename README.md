@@ -55,8 +55,6 @@ Because regex patterns can get complex, the bot centralizes them in `config.py`.
 *   **`config.NLP_COMMANDS`**: The central registry where patterns are mapped to Cog functions.
 *   **Priority System**: The dispatcher intelligently resolves conflicts if a sentence matches multiple commands.
 
-## Getting Started
-
 ## Pre-built Binaries (No Python Required)
 
 If you don't have Python installed or prefer a standalone executable, you can download the latest build from our GitHub Actions:
@@ -69,6 +67,8 @@ If you don't have Python installed or prefer a standalone executable, you can do
 *Note: You will still need to download the `assests` folder and configure `info.env` in the folder where you extract the executable.*
 
 **If you want to be able to modify the code and run it yourself, you can continue reading, otherwise this is all you need to know.**
+
+## Getting Started
 
 ### Prerequisites
 *   Python 3.11+
