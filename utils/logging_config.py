@@ -10,7 +10,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sys
 import asyncio
-from typing import Literal
+from typing import Literal, Optional
 
 
 class AsyncFileHandler(logging.Handler):
@@ -74,14 +74,15 @@ class CustomFormatter(logging.Formatter):
 
 def setup_logging(
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO",
-    log_to_file: bool = True
+    log_to_file: bool = True,
+    log_file: Optional[str] = None
 ):
     """
     Sets up logging for the entire application.
 
     This function configures:
     - A console handler with colored output for immediate feedback.
-    - An asynchronous, rotating file handler to save logs to `sancho.log`
+    - An asynchronous, rotating file handler to save logs to `log_file`
       without blocking the bot's operations.
     - Clears any existing handlers to prevent duplicate log entries.
     - Sets the log levels for noisy libraries like discord.py to a higher
@@ -100,9 +101,12 @@ def setup_logging(
 
     # Asynchronous File Handler
     if log_to_file:
+        if not log_file:
+            raise ValueError("log_file must be provided when log_to_file is True.")
+        
         # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(
-            'sancho.log',
+            log_file,
             maxBytes=5*1024*1024,  # 5 MB per file
             backupCount=2         # Keep 2 backup files
         )
@@ -114,5 +118,6 @@ def setup_logging(
     # Reduce noise from third-party libraries.
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
+    logging.getLogger('aiosqlite').setLevel(logging.WARNING)
 
     root_logger.info("Logging configured with console and rotating file handlers.")

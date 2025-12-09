@@ -2,6 +2,8 @@ import os
 import sys
 import PyInstaller.__main__  # type: ignore
 
+import config
+
 # Force UTF-8 output for Windows consoles to support emojis
 if sys.platform == "win32":
     # Pylance doesn't know sys.stdout is a TextIOWrapper here
@@ -29,7 +31,7 @@ def get_hidden_imports():
 
 
 def build():
-    print("🚀 Starting Sancho Build Process...")
+    print("🚀 Starting Bot Build Process...")
 
     # 1. Gather Hidden Imports
     # PyInstaller cannot see imports that are loaded dynamically (like your cogs).
@@ -53,7 +55,7 @@ def build():
     # easy customization and database persistence without rebuilding.
     args = [
         'main.py',                      # Entry point
-        '--name=Sancho',                # Output executable name
+        f'--name={config.BOT_NAME}',    # Output executable name
         '--onefile',                    # Bundle everything into a single .exe
         '--clean',                      # Clean PyInstaller cache
         '--noconfirm',                  # Overwrite output directory without asking
@@ -68,7 +70,7 @@ def build():
     try:
         PyInstaller.__main__.run(args)
         print("\n✅ Build Complete!")
-        print(f"   Executable is located in: {os.path.join(HERE, 'dist', 'Sancho.exe')}")
+        print(f"   Executable is located in: {os.path.join(HERE, 'dist', f'{config.BOT_NAME}.exe')}")
         print("   IMPORTANT: You must copy your 'info.env' file AND the 'assets' folder")
         print("               to the same directory as the executable for it to run!")
     except Exception as e:

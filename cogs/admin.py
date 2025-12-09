@@ -20,7 +20,7 @@ from discord.ext import commands, tasks
 
 import config
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.extensions import discover_cogs
 from utils.views import PaginatorView, get_selection
 
@@ -111,11 +111,11 @@ class DashboardView(discord.ui.View):
 class AdminCog(BaseCog):
     """Administrative and owner-only commands."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the AdminCog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         assert bot.db_manager is not None
@@ -325,7 +325,7 @@ class AdminCog(BaseCog):
 
             # 3. Define Export Callback
             async def export_callback(interaction_ctx):
-                report_lines = ["--- SANCHO DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
+                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
 
                 report_lines.append(f"\n--- SKILLS ({len(all_skills)}) ---")
                 for s in all_skills:
@@ -565,7 +565,7 @@ class AdminCog(BaseCog):
 
         # Create status embed.
         embed = discord.Embed(
-            title="Sancho Status Report",
+            title=f"{config.BOT_NAME} Status Report",
             color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
         )
         if self.bot.user and self.bot.user.display_avatar:
@@ -612,10 +612,10 @@ class AdminCog(BaseCog):
         logging.info(f"Status command used by {ctx.author}.")
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(AdminCog(bot))

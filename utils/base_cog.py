@@ -7,7 +7,7 @@ from discord.ext import commands
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .bot_class import SanchoBot
+    from .bot_class import CoreBot
 
 
 class BaseCog(commands.Cog):
@@ -16,8 +16,8 @@ class BaseCog(commands.Cog):
     It provides a dedicated logger instance for the cog.
     """
 
-    def __init__(self, bot: "SanchoBot"):
-        self.bot: "SanchoBot" = bot
+    def __init__(self, bot: "CoreBot"):
+        self.bot: "CoreBot" = bot
         # Create a logger that is specific to the cog's class name
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info(f"Cog '{self.__class__.__name__}' initialized.")

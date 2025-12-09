@@ -9,7 +9,7 @@ import pytest
 from discord.ext import commands
 
 from cogs.reminders import Reminders
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 
 # Add project root to sys.path
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 @pytest.fixture
 def mock_bot():
-    bot = MagicMock(spec=SanchoBot)
+    bot = MagicMock(spec=CoreBot)
     bot.db_manager = AsyncMock(spec=DatabaseManager)
     bot.loop = MagicMock()
     bot.wait_for = AsyncMock()

@@ -23,7 +23,7 @@ import discord
 from discord.ext import commands
 
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 
 # --- Secure Expression Evaluator ---
 
@@ -118,11 +118,11 @@ def safe_eval_math(expr: str) -> float:
 class Math(BaseCog):
     """A cog for handling complex dice rolling and mathematical calculations."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Math cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
 
@@ -828,10 +828,10 @@ class DiceParser:
         return clamped_value
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function for the cog.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(Math(bot))

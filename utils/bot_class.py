@@ -1,6 +1,6 @@
 """utils/bot_class.py
 
-Defines the custom bot class, `SanchoBot`, which extends `discord.ext.commands.Bot`.
+Defines the custom bot class, `CoreBot`, which extends `discord.ext.commands.Bot`.
 
 This class is the central hub of the bot's functionality. It is responsible for:
 - Storing shared application state (like the database manager).
@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     from utils.database import DatabaseManager
 
 
-class SanchoBot(commands.Bot):
+
+class CoreBot(commands.Bot):
     """The main bot class, extending `discord.ext.commands.Bot`.
 
     This class integrates custom functionality and centralizes event handling.
@@ -41,7 +42,7 @@ class SanchoBot(commands.Bot):
     """
 
     def __init__(self, **kwargs):
-        """Initializes the SanchoBot instance."""
+        """Initializes the CoreBot instance."""
         # Define intents directly within the class for encapsulation.
         intents = discord.Intents.default()
         intents.messages = True
@@ -71,7 +72,7 @@ class SanchoBot(commands.Bot):
         channel: Any
         async def send(self, *args, **kwargs) -> Any: ...
 
-    async def dispatch_nlp(self, ctx: "SanchoBot.ContextLike", query: str) -> None:
+    async def dispatch_nlp(self, ctx: "CoreBot.ContextLike", query: str) -> None:
         """Dispatch a natural-language `query` using the NLP dispatcher logic.
 
         This allows hybrid/slash commands to forward a query while preserving
@@ -79,7 +80,7 @@ class SanchoBot(commands.Bot):
         command-dispatch portion of the `on_message` pipeline.
 
         Args:
-            ctx (SanchoBot.ContextLike): The context-like object.
+            ctx (CoreBot.ContextLike): The context-like object.
             query (str): The natural language query to dispatch.
         """
         try:
@@ -159,11 +160,11 @@ class SanchoBot(commands.Bot):
         provides those attributes and maps `send` to the interaction response/followup.
         """
 
-        def __init__(self, bot: "SanchoBot", interaction: discord.Interaction):
+        def __init__(self, bot: "CoreBot", interaction: discord.Interaction):
             """Initializes the InteractionContextAdapter.
 
             Args:
-                bot (SanchoBot): The bot instance.
+                bot (CoreBot): The bot instance.
                 interaction (discord.Interaction): The interaction to adapt.
             """
             self.bot = bot
@@ -240,7 +241,7 @@ class SanchoBot(commands.Bot):
                         except Exception:
                             pass
 
-                    ctx_adapter = SanchoBot.InteractionContextAdapter(self, interaction)
+                    ctx_adapter = CoreBot.InteractionContextAdapter(self, interaction)
                     # Run the NLP dispatcher; no need to await in a special way —
                     # the user already received the ephemeral message.
                     await self.dispatch_nlp(ctx_adapter, query)
@@ -370,13 +371,13 @@ class SanchoBot(commands.Bot):
             logging.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
             await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
 
-    def _get_case_insensitive_prefix(self, bot: "SanchoBot", message: discord.Message) -> list[str]:
+    def _get_case_insensitive_prefix(self, bot: "CoreBot", message: discord.Message) -> list[str]:
         """A callable that returns a list of prefixes, making them case-insensitive.
 
         This is a method of the bot class for better encapsulation.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
             message (discord.Message): The message to check.
 
         Returns:

@@ -1,6 +1,6 @@
 """config.py
 
-This module centralizes all configuration settings for the Sancho bot.
+This module centralizes all configuration settings for the bot.
 It handles path definitions, loading environment variables (like the bot token),
 and defining static configurations such as the NLP command registry.
 """
@@ -51,9 +51,7 @@ INTERNAL_PATH = get_internal_path()
 
 ASSETS_PATH = os.path.join(APP_PATH, 'assets')
 ENV_PATH = os.path.join(APP_PATH, 'info.env')
-LOG_PATH = os.path.join(APP_PATH, 'sancho.log')
-DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
-COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
+
 
 # Bot Configuration
 
@@ -74,7 +72,8 @@ def check_and_create_env_file() -> None:
         "OWNER_ID": "",
         "SYSTEM_CHANNEL_ID": "",
         "DEV_MODE": "False",
-        "DEV_GUILD": ""
+        "DEV_GUILD": "",
+        "BOT_NAME": "NoName"
     }
 
     field_comments = {
@@ -83,7 +82,8 @@ def check_and_create_env_file() -> None:
         "OWNER_ID": "# (Optional) Owner ID for owner specific commands.",
         "SYSTEM_CHANNEL_ID": "# (Optional) Channel ID for system messages.",
         "DEV_MODE": "# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.",
-        "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True."
+        "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True.",
+        "BOT_NAME": "# The name the bot calls itself in user-facing strings."
     }
 
     if not os.path.exists(ENV_PATH):
@@ -142,10 +142,38 @@ load_dotenv(dotenv_path=ENV_PATH)
 # Environment Variables
 TOKEN = os.getenv('DISCORD_TOKEN')
 BOT_PREFIX_RAW = os.getenv('BOT_PREFIX')
+BOT_NAME = os.getenv('BOT_NAME')
 
-if not TOKEN or not BOT_PREFIX_RAW:
-    print("DISCORD_TOKEN and BOT_PREFIX must be set in info.env.")
-    sys.exit("Exiting: Missing required configuration.")
+# Dependent Paths
+# These paths depend on the BOT_NAME environment variable.
+LOG_PATH = os.path.join(APP_PATH, f'{BOT_NAME}.log')
+
+# Database Path Discovery
+# We scan for an existing .db file to use, regardless of its name.
+# This strictly enforces a "Single Database" rule.
+found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
+
+if len(found_dbs) == 0:
+    # No DB found (Fresh Install), create one with the bot's name.
+    DB_PATH = os.path.join(ASSETS_PATH, f'{BOT_NAME}.db')
+elif len(found_dbs) == 1:
+    # Single DB found, use it.
+    DB_PATH = os.path.join(ASSETS_PATH, found_dbs[0])
+else:
+    # Multiple DBs found, ambiguous state.
+    print(f"CRITICAL ERROR: Multiple database files found in {ASSETS_PATH}: {found_dbs}")
+    print("Please ensure only ONE .db file exists to prevent data fragmentation.")
+    sys.exit("Exiting: Multiple databases found.")
+
+COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
+
+if not TOKEN or not BOT_PREFIX_RAW or not BOT_NAME:
+    print("DISCORD_TOKEN, BOT_PREFIX, and BOT_NAME must be set in info.env.")
+    sys.exit("Exiting: Missing or invalid required configuration.")
+
+if BOT_NAME == "NoName":
+    print("WARNING: BOT_NAME is set to the default 'NoName'.")
+    print("Please update 'info.env' with your bot's actual name.")
 
 # Sort prefixes by length descending to ensure longer prefixes are matched first
 # (e.g., '.mayors' before '.m') and add a trailing space to act as a delimiter.

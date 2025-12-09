@@ -1,6 +1,6 @@
 """migrate_db.py
 
-This script performs a safe migration of the Sancho database.
+This script performs a safe migration of the bot database.
 It backs up the existing database, creates a new one with the updated schema,
 and migrates the data.
 
@@ -15,6 +15,8 @@ import sqlite3
 import time
 from typing import Any, Dict
 
+import config
+
 # --- Configuration ---
 # Set up basic logging to see the script's progress.
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'migrate_db.log')
@@ -28,8 +30,10 @@ logging.basicConfig(
 # This assumes the script is run from the root of the project.
 APP_PATH = os.path.dirname(os.path.abspath(__file__))
 ASSETS_PATH = os.path.join(APP_PATH, 'assets')
-DB_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db')
-BACKUP_PATH = os.path.join(ASSETS_PATH, 'sanchobase.db.backup')
+# The target database is defined in config.py based on BOT_NAME
+TARGET_DB_NAME = f"{config.BOT_NAME}.db"
+TARGET_DB_PATH = os.path.join(ASSETS_PATH, TARGET_DB_NAME)
+BACKUP_EXTENSION = ".backup"
 
 # --- Schema Definition ---
 # This is the target schema we want for the new database.
@@ -130,22 +134,41 @@ INDEX_SCHEMAS = [
 
 
 def migrate_database() -> None:
-    """Performs a safe migration of the Sancho database.
+    """Performs a safe migration of the bot database.
 
-    1. Backs up the existing database.
-    2. Reads all data from the backup.
-    3. Creates a new database with the updated schema.
-    4. Inserts the old data into the new database.
+    1. Identifies the source database (Legacy or Current).
+    2. Backs up the source database.
+    3. Reads all data from the backup.
+    4. Creates the new target database with the updated schema.
+    5. Inserts the old data into the new database.
     """
-    # 1. Check if the original database exists.
-    if not os.path.exists(DB_PATH):
-        logging.info("No database found at '%s'. Nothing to migrate.", DB_PATH)
+    # 1. Identify Source Database
+    # We use the same scan logic as config.py to find what we are migrating FROM.
+    found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
+    
+    source_db_path: str
+    
+    if len(found_dbs) == 0:
+        logging.info("No existing databases found in '%s'. Nothing to migrate.", ASSETS_PATH)
+        return
+    elif len(found_dbs) == 1:
+        # We found one DB. 
+        # If it's already the target name, we just upgrade in-place (if schema changed) or simply run to verify.
+        source_db_path = os.path.join(ASSETS_PATH, found_dbs[0])
+        if found_dbs[0] == TARGET_DB_NAME:
+             logging.info("Found '%s'. Migrating/Upgrading in-place.", found_dbs[0])
+        else:
+             logging.info("Found '%s'. Migrating to '%s'.", found_dbs[0], TARGET_DB_NAME)
+    else:
+        logging.error("Multiple databases found: %s. Please ensure only one source database exists.", found_dbs)
         return
 
+    backup_path = f"{source_db_path}{BACKUP_EXTENSION}"
+
     # 2. Create a backup.
-    logging.info("Backing up current database to '%s'...", BACKUP_PATH)
+    logging.info("Backing up source database to '%s'...", backup_path)
     try:
-        shutil.copyfile(DB_PATH, BACKUP_PATH)
+        shutil.copyfile(source_db_path, backup_path)
         logging.info("Backup successful.")
     except Exception as e:
         logging.error("Failed to create backup. Migration aborted. Error: %s", e)
@@ -155,7 +178,7 @@ def migrate_database() -> None:
     logging.info("Reading data from backup database...")
     data_store: Dict[str, Dict[str, Any]] = {}
     try:
-        with sqlite3.connect(BACKUP_PATH) as backup_conn:
+        with sqlite3.connect(backup_path) as backup_conn:
             backup_conn.row_factory = sqlite3.Row
             cursor = backup_conn.cursor()
             # Get a list of all tables in the old database.
@@ -172,13 +195,13 @@ def migrate_database() -> None:
         return
 
     # 4. Create a new database with the correct schema.
-    logging.info("Creating new database with updated schema...")
+    logging.info("Creating new database at '%s' with updated schema...", TARGET_DB_PATH)
     try:
-        # Delete the old DB file before creating the new one.
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
+        # Delete the target DB file before creating the new one (if it exists).
+        if os.path.exists(TARGET_DB_PATH):
+            os.remove(TARGET_DB_PATH)
 
-        with sqlite3.connect(DB_PATH) as new_conn:
+        with sqlite3.connect(TARGET_DB_PATH) as new_conn:
             cursor = new_conn.cursor()
             cursor.execute("PRAGMA foreign_keys = ON;")
             for table_name, schema in TABLE_SCHEMAS.items():
@@ -196,7 +219,7 @@ def migrate_database() -> None:
     # 5. Insert the old data into the new database.
     logging.info("Migrating data to new database...")
     try:
-        with sqlite3.connect(DB_PATH) as new_conn:
+        with sqlite3.connect(TARGET_DB_PATH) as new_conn:
             cursor = new_conn.cursor()
             cursor.execute("PRAGMA foreign_keys = OFF;")
             # --- Data Migration Logic ---
@@ -261,7 +284,20 @@ def migrate_database() -> None:
         logging.error("Failed to insert data into new database. Restore from backup. Error: %s", e)
         return
 
-    logging.info("\nMigration complete! Your old database is saved as 'sanchobase.db.backup'.")
+    # 6. Cleanup / Finalize
+    # If we migrated from a different filename, we must rename/remove the old one 
+    # so that config.py doesn't freak out about having 2 DB files.
+    # Since we already backed it up to .backup, we can safely remove the original source file
+    # IF it is different from the target.
+    
+    if source_db_path != TARGET_DB_PATH:
+        logging.info("Removing old source database file '%s' to enforce single-DB rule...", source_db_path)
+        try:
+             os.remove(source_db_path)
+        except Exception as e:
+            logging.error("Failed to remove old database file. You may need to remove it manually. Error: %s", e)
+
+    logging.info("\nMigration complete! Your old database is saved as '%s'.", backup_path)
     logging.info("You can now start the bot.")
 
 

@@ -28,7 +28,7 @@ import discord
 from discord.ext import commands
 
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
 from .math import Math, DiceLexer, DiceParser, DiceToken
@@ -84,11 +84,11 @@ class MaxDiceParser(DiceParser):
 class Skills(BaseCog):
     """The cog for creating, managing, and using custom user-defined skills."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Skills cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         assert bot.db_manager is not None
@@ -308,7 +308,7 @@ class Skills(BaseCog):
             # --- Step 6: Save to Database ---
             await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type, description)
 
-            confirmation_message = f"✅ Skill saved for you! You can now use `.sancho skill {skill_name}`. Please note your skills are tied to your ID!"
+            confirmation_message = f"✅ Skill saved for you! You can now use `.{config.BOT_NAME} skill {skill_name}`. Please note your skills are tied to your ID!"
             if aliases:
                 confirmation_message += f"\nIt can also be called by: `{' | '.join(aliases)}`"
 
@@ -339,7 +339,7 @@ class Skills(BaseCog):
         """
         user_skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not user_skills:
-            await ctx.send("You have no saved skills to use. Use `.sancho save skill` to create one.")
+            await ctx.send(f"You have no saved skills to use. Use `.{config.BOT_NAME} save skill` to create one.")
             return
 
         # Sort names by length for matching.
@@ -484,7 +484,7 @@ class Skills(BaseCog):
         """
         match = re.search(r'\d+', query)
         if not match:
-            await ctx.send("Please specify the number of the skill you want to edit. Use `.sancho list skills` to see the numbers.")
+            await ctx.send(f"Please specify the number of the skill you want to edit. Use `.{config.BOT_NAME} list skills` to see the numbers.")
             return
 
         try:
@@ -668,7 +668,7 @@ class Skills(BaseCog):
         """
         skills = await self.db_manager.get_user_skills(ctx.author.id)
         if not skills:
-            await ctx.send("You have no saved skills. Use `.sancho save skill` to create one!")
+            await ctx.send(f"You have no saved skills. Use `.{config.BOT_NAME} save skill` to create one!")
             return
 
         embed = discord.Embed(
@@ -698,7 +698,7 @@ class Skills(BaseCog):
             embed.description = "\n\n".join(description)
 
         user_skill_limit = await self.db_manager.get_user_skill_limit(ctx.author.id)
-        embed.set_footer(text=f"You are using {len(skills)}/{user_skill_limit} skill slots. Use '.sancho delete skill <id>' to remove one.")
+        embed.set_footer(text=f"You are using {len(skills)}/{user_skill_limit} skill slots. Use '.{config.BOT_NAME} delete skill <id>' to remove one.")
         await ctx.send(embed=embed)
 
     async def delete_skill_nlp(self, ctx: commands.Context, *, query: str) -> None:
@@ -714,7 +714,7 @@ class Skills(BaseCog):
         # Extract skill index.
         match = re.search(r'\d+', query)
         if not match:
-            await ctx.send("Please specify the number of the skill you want to delete. Use `.sancho skill list` to see the numbers.")
+            await ctx.send(f"Please specify the number of the skill you want to delete. Use `.{config.BOT_NAME} skill list` to see the numbers.")
             return
 
         skill_num_to_delete = int(match.group(0))
@@ -735,10 +735,10 @@ class Skills(BaseCog):
             await ctx.send("Something went wrong. I couldn't delete that skill.")
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(Skills(bot))

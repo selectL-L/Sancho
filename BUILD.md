@@ -1,6 +1,6 @@
-# How to Build Sancho
+# How to Build the bot
 
-This document explains how to build the Sancho bot into a standalone executable using PyInstaller.
+This document explains how to build the bot into a standalone executable using PyInstaller.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ This script will:
 
 ### Step 3: Post-Build Setup
 
-Once the build completes, you will find the executable in the `dist/` directory (e.g., `dist/Sancho.exe`).
+Once the build completes, you will find the executable in the `dist/` directory (e.g., `dist/{BOT_NAME}.exe`).
 
 **Crucial Step:** The executable does **not** contain your configuration or assets. You must manually copy the following into the `dist/` folder (next to the executable):
 1.  The `assets/` folder.
@@ -52,7 +52,7 @@ Without these, the bot will crash on startup.
 
 ## Why `build.py`?
 
-We use a Python script instead of a static `.spec` file or command-line arguments because Sancho uses a dynamic plugin system.
+We use a Python script instead of a static `.spec` file or command-line arguments because this bot uses a dynamic plugin system.
 
 -   **Dynamic Cogs**: The bot loads commands from the `cogs/` folder at runtime. PyInstaller cannot detect these automatically. `build.py` scans this folder and ensures every file is included in the build, so you don't have to manually update a config file every time you add a new feature.
 -   **Automation**: It handles the complex arguments required for PyInstaller, ensuring a consistent build every time.
