@@ -37,6 +37,12 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
+    - name: Create Dummy Info Env
+      run: |
+        echo "DISCORD_TOKEN=build_token" > info.env
+        echo "BOT_PREFIX=!" >> info.env
+        echo "BOT_NAME=Sancho" >> info.env
+
     - name: Build with PyInstaller
       run: python build.py
 
