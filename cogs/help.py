@@ -24,17 +24,17 @@ from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 
 
 class Help(BaseCog):
     """A custom, more detailed help command that overrides the default."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Help cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         # This is crucial to replace the default help command with our own.
@@ -187,7 +187,7 @@ class Help(BaseCog):
         example_prefix = prefixes[0] if prefixes else ''
 
         embed = discord.Embed(
-            title="Hello, I'm Sancho!",
+            title=f"Hello, I'm {config.BOT_NAME}!",
             description=(
                 "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"  # noqa: E501
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
@@ -240,14 +240,14 @@ class Help(BaseCog):
         embed.add_field(
             name="**Natural Language Commands: Reminders**",
             value=(
-                "• `Sancho remind me` (starts interactive setup)\n"
-                "• `Sancho remind me to check the oven in 15 minutes`\n"
-                "• `Sancho set a reminder to walk the dog every day at 8am`\n"
-                "• `Sancho show my reminders`\n"
-                "• `Sancho edit reminder 3`\n"
-                "• `Sancho delete reminder 2`\n"
-                "• `Sancho reminder settings`\n"
-                "• `Sancho timezone America/New_York or GMT-5 (prefers IANA timezones)`\n\n"
+                f"• `{config.BOT_NAME} remind me` (starts interactive setup)\n"
+                f"• `{config.BOT_NAME} remind me to check the oven in 15 minutes`\n"
+                f"• `{config.BOT_NAME} set a reminder to walk the dog every day at 8am`\n"
+                f"• `{config.BOT_NAME} show my reminders`\n"
+                f"• `{config.BOT_NAME} edit reminder 3`\n"
+                f"• `{config.BOT_NAME} delete reminder 2`\n"
+                f"• `{config.BOT_NAME} reminder settings`\n"
+                f"• `{config.BOT_NAME} timezone America/New_York or GMT-5 (prefers IANA timezones)`\n\n"
                 "DISCLAIMER: Reminders are a work in progress and may not work perfectly yet."
             ),
             inline=False
@@ -256,8 +256,8 @@ class Help(BaseCog):
         embed.add_field(
             name="**Natural Language Commands: Dice & Math**",
             value=(
-                "• `Sancho roll 2d20+5 with advantage`\n"
-                "• `Sancho calculate (5 * 10) / 2`"
+                f"• `{config.BOT_NAME} roll 2d20+5 with advantage`\n"
+                f"• `{config.BOT_NAME} calculate (5 * 10) / 2`"
             ),
             inline=False
         )
@@ -265,11 +265,11 @@ class Help(BaseCog):
         embed.add_field(
             name="**Natural Language Commands: Skills**",
             value=(
-                "• `Sancho delete|remove skill (index number)`\n"
-                "• `Sancho edit|change|update skill (index number)`\n"
-                "• `Sancho list|check|show my skills (you can also just use .Sancho skills)`\n"
-                "• `Sancho save|create|make skill` (starts interactive setup)\n"
-                "• `Sancho cast|use fireball + 3`"
+                f"• `{config.BOT_NAME} delete|remove skill (index number)`\n"
+                f"• `{config.BOT_NAME} edit|change|update skill (index number)`\n"
+                f"• `{config.BOT_NAME} list|check|show my skills (you can also just use .{config.BOT_NAME} skills)`\n"
+                f"• `{config.BOT_NAME} save|create|make skill` (starts interactive setup)\n"
+                f"• `{config.BOT_NAME} cast|use fireball + 3`"
             ),
             inline=False
         )
@@ -278,8 +278,8 @@ class Help(BaseCog):
             name="**Natural Language Commands: Images**",
             value=(
                 "You can reply to or attach an image!\n"
-                "• `Sancho resize this image to 50%`\n"
-                "• `Sancho convert this image to webp`"
+                f"• `{config.BOT_NAME} resize this image to 50%`\n"
+                f"• `{config.BOT_NAME} convert this image to webp`"
             ),
             inline=False
         )
@@ -287,11 +287,11 @@ class Help(BaseCog):
         embed.add_field(
             name="**Natural Language Commands: Fun**",
             value=(
-                "• `Sancho 8ball should I have another coffee?`\n"
-                "• `Sancho bod` (you get 20 minutes to hit the LOR experience)\n"
-                "• `Sancho bod leaderboard` (shows the top 10 bod scores)\n"
-                "• `Sancho sanitize`\n"
-                "• `Sancho issues` (to helpfully direct people to sancho's issues page)"
+                f"• `{config.BOT_NAME} 8ball should I have another coffee?`\n"
+                f"• `{config.BOT_NAME} bod` (you get 20 minutes to hit the LOR experience)\n"
+                f"• `{config.BOT_NAME} bod leaderboard` (shows the top 10 bod scores)\n"
+                f"• `{config.BOT_NAME} sanitize`\n"
+                f"• `{config.BOT_NAME} issues` (to helpfully direct people to {config.BOT_NAME}'s issues page)"
             ),
             inline=False
         )
@@ -304,10 +304,10 @@ class Help(BaseCog):
         await ctx.send(embed=embed)
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(Help(bot))

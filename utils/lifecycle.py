@@ -18,7 +18,7 @@ import discord
 import config
 
 if TYPE_CHECKING:
-    from .bot_class import SanchoBot
+    from .bot_class import CoreBot
 
 
 def is_system_rebooting() -> bool:
@@ -49,13 +49,13 @@ def is_system_rebooting() -> bool:
     return False
 
 
-async def startup_handler(bot: "SanchoBot") -> None:
+async def startup_handler(bot: "CoreBot") -> None:
     """Handles the bot's startup sequence.
 
     Includes logging and sending a startup message.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     if bot.user:
         logging.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
@@ -70,7 +70,7 @@ async def startup_handler(bot: "SanchoBot") -> None:
         try:
             channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
-                embed = discord.Embed(title="Good morning, Sancho is awake!")
+                embed = discord.Embed(title=f"Good morning, {config.BOT_NAME} is awake!")
 
                 startup_gif_path = os.path.join(config.ASSETS_PATH, "startup.gif")
                 if os.path.exists(startup_gif_path):
@@ -88,12 +88,12 @@ async def startup_handler(bot: "SanchoBot") -> None:
             logging.error(f"Failed to send startup message: {e}")
 
 
-async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot") -> None:
+async def shutdown_handler(sig: signal.Signals, bot: "CoreBot") -> None:
     """Handles the graceful shutdown of the bot when a signal is received.
 
     Args:
         sig (signal.Signals): The signal received.
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     logging.info(f"Received exit signal {sig.name}...")
 
@@ -102,14 +102,14 @@ async def shutdown_handler(sig: signal.Signals, bot: "SanchoBot") -> None:
     if rebooting:
         logging.info("Shutdown initiated by a system reboot. Service should be back shortly...")
         embed = discord.Embed(
-            title="Sancho is taking a small nap, Sancho will be back shortly!",
+            title=f"{config.BOT_NAME} is taking a small nap, {config.BOT_NAME} will be back shortly!",
         )
         gif_path = os.path.join(config.ASSETS_PATH, "reboot.gif")
         attachment_name = "reboot.gif"
     else:
         logging.info("Shutdown initiated by a manual stop or exit.")
         embed = discord.Embed(
-            title="Sancho is heading to bed. Goodnight!",
+            title=f"{config.BOT_NAME} is heading to bed. Goodnight!",
         )
         gif_path = os.path.join(config.ASSETS_PATH, "shutdown.gif")
         attachment_name = "shutdown.gif"

@@ -19,17 +19,17 @@ from discord.ext import commands
 from PIL import Image as PILImage
 
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 
 
 class ImageCog(BaseCog):
     """A cog for handling image manipulation commands."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the ImageCog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
 
@@ -195,10 +195,10 @@ class ImageCog(BaseCog):
             await ctx.send("Sorry, I encountered an error trying to convert that image.")
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(ImageCog(bot))

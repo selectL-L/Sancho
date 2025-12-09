@@ -1,14 +1,14 @@
 """main.py
 
-This is the primary entry point for the Sancho-Bot. Its responsibilities are:
+This is the primary entry point for the Bot. Its responsibilities are:
 - Performing initial setup: logging, configuration validation from `info.env`.
-- Instantiating the custom `SanchoBot` class from `utils.bot_class`.
+- Instantiating the custom `CoreBot` class from `utils.bot_class`.
 - Defining console and signal handlers for graceful startup and shutdown.
 - Orchestrating the bot's asynchronous startup sequence via the `main()` function,
   which initializes the database, loads cogs, and connects to Discord.
 
 This script acts as the "launcher" for the bot; the core logic, event handlers,
-and command processing are defined within the `SanchoBot` class itself.
+and command processing are defined within the `CoreBot` class itself.
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from discord.ext import commands
 # Setup and Configuration
 # Import necessary configurations and utility functions.
 import config
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.extensions import discover_cogs
 from utils.lifecycle import shutdown_handler
@@ -31,7 +31,7 @@ from utils.logging_config import setup_logging
 
 # Set up logging immediately to capture any issues during startup.
 log_level = "DEBUG" if config.DEV_MODE else "INFO"
-setup_logging(level=log_level)
+setup_logging(level=log_level, log_file=config.LOG_PATH)
 
 # Configuration Validation
 # Ensure the bot's token is present, as it's impossible to run without it.
@@ -67,8 +67,8 @@ intents.messages = True
 intents.message_content = True
 
 # Create the custom bot instance.
-# The prefix logic is now handled inside the SanchoBot class.
-bot = SanchoBot()
+# The prefix logic is now handled inside the CoreBot class.
+bot = CoreBot()
 
 logging.info(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
 print(f"Bot initialized with prefixes: {config.BOT_PREFIX}")
@@ -90,13 +90,13 @@ async def ping(ctx: commands.Context) -> None:
 
 # Main Bot Execution
 
-async def console_input_handler(bot: SanchoBot) -> None:
+async def console_input_handler(bot: CoreBot) -> None:
     """Listens for console input and triggers a graceful shutdown if 'exit' is typed.
 
     This implementation uses a platform-specific approach for compatibility.
 
     Args:
-        bot (SanchoBot): The bot instance to control.
+        bot (CoreBot): The bot instance to control.
     """
     loop = asyncio.get_running_loop()
     try:
@@ -148,7 +148,7 @@ async def main() -> None:
     Raises:
         ValueError: If DB_PATH or TOKEN is not configured.
     """
-    logging.info("Sancho is starting...")
+    logging.info(f"{config.BOT_NAME} is starting...")
 
     # Asynchronously initialize the database manager and attach it to the bot.
     # This ensures the database is ready before the bot logs in.
@@ -200,4 +200,4 @@ if __name__ == '__main__':
     finally:
         # This message logs after the asyncio event loop has closed, ensuring
         # it's the final log entry upon termination.
-        logging.info("Sancho has shutdown properly!")
+        logging.info(f"{config.BOT_NAME} has shutdown properly!")

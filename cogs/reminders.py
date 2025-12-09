@@ -33,7 +33,7 @@ from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
 
@@ -41,11 +41,11 @@ from utils.views import get_selection
 class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Reminders cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         assert bot.db_manager is not None
@@ -1230,7 +1230,7 @@ class Reminders(BaseCog):
         # Find the number in the query (e.g., "edit reminder 3").
         match = re.search(r'\d+', query)
         if not match:
-            await ctx.send("Please specify the number of the reminder you want to edit. Use `.sancho check reminders` to see the numbers.")
+            await ctx.send("Please specify the number of the reminder you want to edit. Use `check reminders` to see the numbers.")
             return
 
         try:
@@ -1453,11 +1453,11 @@ class Reminders(BaseCog):
                 await ctx.send("Invalid choice.")
 
 
-async def setup(bot: SanchoBot, **kwargs: Any) -> None:
+async def setup(bot: CoreBot, **kwargs: Any) -> None:
     """Standard setup, receiving the database path via kwargs from main.py.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
         **kwargs: Additional keyword arguments.
     """
     await bot.add_cog(Reminders(bot))

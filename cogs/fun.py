@@ -16,7 +16,7 @@ from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 
 if TYPE_CHECKING:
     from cogs.math import Math
@@ -25,11 +25,11 @@ if TYPE_CHECKING:
 class Fun(BaseCog):
     """A cog for fun, miscellaneous commands."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Fun cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         # Load the 8-ball responses from the assets file upon initialization.
@@ -492,10 +492,10 @@ class Fun(BaseCog):
         self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(Fun(bot))

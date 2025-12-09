@@ -33,7 +33,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.base_cog import BaseCog
-from utils.bot_class import SanchoBot
+from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.views import FastConfirmModal, launch_modal
 
@@ -41,11 +41,11 @@ from utils.views import FastConfirmModal, launch_modal
 class Starboard(BaseCog):
     """The cog for managing the Starboard feature."""
 
-    def __init__(self, bot: SanchoBot):
+    def __init__(self, bot: CoreBot):
         """Initializes the Starboard cog.
 
         Args:
-            bot (SanchoBot): The bot instance.
+            bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
         assert bot.db_manager is not None
@@ -1033,10 +1033,10 @@ class Starboard(BaseCog):
             await self.db_manager.remove_starboard_entry(payload.message_id)
 
 
-async def setup(bot: SanchoBot) -> None:
+async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
 
     Args:
-        bot (SanchoBot): The bot instance.
+        bot (CoreBot): The bot instance.
     """
     await bot.add_cog(Starboard(bot))

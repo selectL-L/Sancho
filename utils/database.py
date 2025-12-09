@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    """Manages all database operations for Sancho.
+    """Manages all database operations for the bot.
 
     Provides an async interface for interacting with the SQLite database.
     """
