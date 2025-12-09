@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional, Tuple, cast
 import discord
 from discord.ext import commands
 
+import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
