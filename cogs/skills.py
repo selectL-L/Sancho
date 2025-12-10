@@ -309,7 +309,7 @@ class Skills(BaseCog):
             # --- Step 6: Save to Database ---
             await self.db_manager.save_skill(ctx.author.id, skill_name, aliases, dice_roll, skill_type, description)
 
-            confirmation_message = f"✅ Skill saved for you! You can now use `.{config.BOT_NAME} skill {skill_name}`. Please note your skills are tied to your ID!"
+            confirmation_message = f"✅ Skill saved for you! You can now use `.{config.BOT_NAME} cast {skill_name}`. Please note your skills are tied to your ID!"
             if aliases:
                 confirmation_message += f"\nIt can also be called by: `{' | '.join(aliases)}`"
 
@@ -485,7 +485,7 @@ class Skills(BaseCog):
         """
         match = re.search(r'\d+', query)
         if not match:
-            await ctx.send(f"Please specify the number of the skill you want to edit. Use `.{config.BOT_NAME} list skills` to see the numbers.")
+            await ctx.send(f"Please specify the number of the skill you want to edit. Use `.{config.BOT_NAME} skills` to see your list.")
             return
 
         try:
@@ -715,7 +715,7 @@ class Skills(BaseCog):
         # Extract skill index.
         match = re.search(r'\d+', query)
         if not match:
-            await ctx.send(f"Please specify the number of the skill you want to delete. Use `.{config.BOT_NAME} skill list` to see the numbers.")
+            await ctx.send(f"Please specify the number of the skill you want to delete. Use `.{config.BOT_NAME} skills` to see your list.")
             return
 
         skill_num_to_delete = int(match.group(0))
