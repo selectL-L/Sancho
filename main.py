@@ -14,7 +14,6 @@ and command processing are defined within the `CoreBot` class itself.
 import asyncio
 import importlib
 import logging
-import os
 import signal
 import sys
 import threading
@@ -67,7 +66,7 @@ async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
                         await bot.unload_extension(ext)
                     except Exception as e:
                         logging.error(f"Error unloading extension {ext}: {e}")
-                
+
                 # Use the lifecycle handler to send the "Goodnight" message and close
                 await shutdown_handler(signal.SIGINT, bot, is_restart=False)
                 break
@@ -79,7 +78,7 @@ async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
                         await bot.unload_extension(ext)
                     except Exception as e:
                         logging.error(f"Error unloading extension {ext}: {e}")
-                
+
                 bot.restart_signal = True
                 # Use the lifecycle handler to send the "Rebooting" message and close
                 await shutdown_handler(signal.SIGINT, bot, is_restart=True)
@@ -95,7 +94,7 @@ async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
 
 async def run_bot_lifecycle() -> None:
     """Orchestrates the bot lifecycle loop, allowing for soft restarts."""
-    
+
     # 1. Start the global console reader thread (ONCE)
     loop = asyncio.get_running_loop()
     reader_thread = threading.Thread(target=console_reader, args=(loop,), daemon=True)
@@ -113,6 +112,12 @@ async def run_bot_lifecycle() -> None:
         # 2. Dynamic Import / Reload
         # We import inside the loop to ensure we get fresh versions of the modules
         # if they were purged from sys.modules by the previous run.
+        mod_bot = None
+        mod_db = None
+        mod_extensions = None
+        mod_lifecycle = None
+        mod_logging = None
+
         try:
             # Always ensure config is fresh first
             import config
@@ -126,11 +131,19 @@ async def run_bot_lifecycle() -> None:
             mod_extensions = importlib.import_module('utils.extensions')
             mod_lifecycle = importlib.import_module('utils.lifecycle')
             mod_logging = importlib.import_module('utils.logging_config')
-            
+
         except Exception as e:
             logging.critical(f"Failed to import modules during startup/restart: {e}", exc_info=True)
             # If we can't import code, we must exit to avoid a broken loop
             sys.exit(1)
+
+        # Assertions to satisfy static analysis (Pylance)
+        # Since we exit on failure above, these will always be true here.
+        assert mod_bot is not None
+        assert mod_db is not None
+        assert mod_extensions is not None
+        assert mod_lifecycle is not None
+        assert mod_logging is not None
 
         # 3. Setup Logging
         # Safe to call repeatedly as it clears existing handlers
@@ -145,10 +158,10 @@ async def run_bot_lifecycle() -> None:
         # 5. Initialize Bot
         # Using the class from the potentially reloaded module
         bot = mod_bot.CoreBot()
-        
+
         # Attach database manager
         if config.DB_PATH is None:
-             raise ValueError("DB_PATH cannot be None.")
+            raise ValueError("DB_PATH cannot be None.")
         db_manager = await mod_db.DatabaseManager.create(config.DB_PATH)
         bot.db_manager = db_manager
 
@@ -162,17 +175,17 @@ async def run_bot_lifecycle() -> None:
                         await bot.load_extension(extension)
                     except Exception:
                         logging.error(f'Failed to load extension {extension}.', exc_info=True)
-                
+
                 # 7. Start Console Consumer
                 # Pass the current bot instance to the consumer AND the shutdown handler
                 consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler))
-                
+
                 # Setup signal handlers for this iteration
                 # Windows doesn't support add_signal_handler fully, but we try for graceful SIGINT
                 if sys.platform != "win32":
                     for s in (signal.SIGINT, signal.SIGTERM):
                         try:
-                            loop.remove_signal_handler(s) # Clear old handlers
+                            loop.remove_signal_handler(s)  # Clear old handlers
                             loop.add_signal_handler(s, lambda s=s: asyncio.create_task(mod_lifecycle.shutdown_handler(s, bot)))
                         except NotImplementedError:
                             pass
