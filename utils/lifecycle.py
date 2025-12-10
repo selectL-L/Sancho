@@ -147,7 +147,7 @@ def purge_modules() -> None:
         module_name for module_name in sys.modules.keys()
         if module_name.startswith(('utils.', 'cogs.')) or module_name == 'config'
     ]
-    
+
     logging.info(f"Purging {len(to_purge)} modules for restart...")
     for module_name in to_purge:
         del sys.modules[module_name]

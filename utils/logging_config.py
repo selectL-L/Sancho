@@ -77,6 +77,7 @@ class NoisyAsyncioFilter(logging.Filter):
     Filters out noisy asyncio errors that occur during shutdown on Windows,
     specifically 'Unclosed connector'. These are harmless side effects.
     """
+
     def filter(self, record):
         # Filter out the specific known noise
         if record.levelno == logging.ERROR and ('Unclosed connector' in record.getMessage() or 'Unclosed client session' in record.getMessage()):
@@ -131,7 +132,7 @@ def setup_logging(
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
     logging.getLogger('aiosqlite').setLevel(logging.WARNING)
-    
+
     # Filter out harmless asyncio noise
     logging.getLogger('asyncio').addFilter(NoisyAsyncioFilter())
 
