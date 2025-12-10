@@ -325,8 +325,7 @@ class AdminCog(BaseCog):
 
             # 3. Define Export Callback
             async def export_callback(interaction_ctx):
-                bot_name = config.BOT_NAME or "NoName"
-                report_lines = [f"--- {bot_name.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
+                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""] # Type:ignore (Pylance is high)
 
                 report_lines.append(f"\n--- SKILLS ({len(all_skills)}) ---")
                 for s in all_skills:
