@@ -61,6 +61,7 @@ class CoreBot(commands.Bot):
 
         self.db_manager: Optional[DatabaseManager] = None
         self.console_task: Optional[asyncio.Task] = None
+        self.restart_signal: bool = False
         self.start_time: float = time.time()
 
     @runtime_checkable
