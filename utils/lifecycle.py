@@ -88,19 +88,20 @@ async def startup_handler(bot: "CoreBot") -> None:
             logging.error(f"Failed to send startup message: {e}")
 
 
-async def shutdown_handler(sig: signal.Signals, bot: "CoreBot") -> None:
+async def shutdown_handler(sig: signal.Signals, bot: "CoreBot", is_restart: bool = False) -> None:
     """Handles the graceful shutdown of the bot when a signal is received.
 
     Args:
         sig (signal.Signals): The signal received.
         bot (CoreBot): The bot instance.
+        is_restart (bool): Whether this is a soft restart (triggers reboot message).
     """
     logging.info(f"Received exit signal {sig.name}...")
 
     # Determine the shutdown reason and prepare the message.
-    rebooting = is_system_rebooting()
+    rebooting = is_system_rebooting() or is_restart
     if rebooting:
-        logging.info("Shutdown initiated by a system reboot. Service should be back shortly...")
+        logging.info("Shutdown initiated by a system reboot or soft restart. Service should be back shortly...")
         embed = discord.Embed(
             title=f"{config.BOT_NAME} is taking a small nap, {config.BOT_NAME} will be back shortly!",
         )
@@ -135,3 +136,19 @@ async def shutdown_handler(sig: signal.Signals, bot: "CoreBot") -> None:
     logging.info("Closing connections...")
     await bot.close()
     logging.info("Discord connection has been shut down gracefully.")
+
+
+def purge_modules() -> None:
+    """Removes all bot-related modules from `sys.modules` to force a reload.
+
+    This targets 'utils', 'cogs', and 'config' modules.
+    """
+    to_purge = [
+        module_name for module_name in sys.modules.keys()
+        if module_name.startswith(('utils.', 'cogs.')) or module_name == 'config'
+    ]
+    
+    logging.info(f"Purging {len(to_purge)} modules for restart...")
+    for module_name in to_purge:
+        del sys.modules[module_name]
+    logging.info("Modules purged.")
