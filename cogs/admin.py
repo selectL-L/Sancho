@@ -325,7 +325,8 @@ class AdminCog(BaseCog):
 
             # 3. Define Export Callback
             async def export_callback(interaction_ctx):
-                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""] # Type:ignore (Pylance is high)
+                assert config.BOT_NAME is not None # If by this point config.BOT_NAME is None, then the cog was either loaded by itself, or I broke config.py
+                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
 
                 report_lines.append(f"\n--- SKILLS ({len(all_skills)}) ---")
                 for s in all_skills:
