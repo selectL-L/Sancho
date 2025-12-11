@@ -212,7 +212,7 @@ class Skills(BaseCog):
             # --- Step 1: Get Skill Name ---
             skill_name = ""
             while True:
-                await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")  # noqa: E501
+                await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel this process.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")  # noqa: E501
                 name_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
 
                 if name_msg.content.strip().lower() == 'exit':
