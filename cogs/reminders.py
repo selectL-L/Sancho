@@ -642,6 +642,7 @@ class Reminders(BaseCog):
                 is_valid = await asyncio.to_thread(
                     dateparser.parse,
                     check_phrase,
+                    languages=['en'],
                     settings={'PREFER_DATES_FROM': 'future', 'STRICT_PARSING': False}
                 )
 
@@ -699,7 +700,7 @@ class Reminders(BaseCog):
             combined_candidate = f"{front_time_str} {back_time_str}"
 
             # Validate that the combined string makes sense.
-            if await asyncio.to_thread(dateparser.parse, combined_candidate, settings={'PREFER_DATES_FROM': 'future'}):
+            if await asyncio.to_thread(dateparser.parse, combined_candidate, languages=['en'], settings={'PREFER_DATES_FROM': 'future'}):
                 final_time_string = combined_candidate
                 # The message is whatever is left in the middle.
                 message_words = words[front_word_count: len(words) - back_word_count]
@@ -884,7 +885,7 @@ class Reminders(BaseCog):
                         # Strip the recurrence part to help dateparser
                         time_str = time_str.replace(matched_text, '', 1).strip()
 
-                dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                dt_object = await asyncio.to_thread(dateparser.parse, time_str, languages=['en'], settings=cast(Any, date_settings))
 
                 # If time_str is empty after stripping recurrence, but we have a rule, calculate the first occurrence.
                 if not time_str and recurrence_rule:
@@ -953,7 +954,7 @@ class Reminders(BaseCog):
                 dt_object = rule.after(now)
             else:
                 # Otherwise, parse the time string as usual.
-                dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                dt_object = await asyncio.to_thread(dateparser.parse, time_str, languages=['en'], settings=cast(Any, date_settings))
 
                 # If we have a recurrence rule, ensure the first occurrence aligns with it.
                 # e.g. "Every Friday at 7am" (parsed as Sunday 7am) -> Should be next Friday 7am.
@@ -1306,7 +1307,7 @@ class Reminders(BaseCog):
                         'RETURN_AS_TIMEZONE_AWARE': True
                     }
 
-                    dt_object = await asyncio.to_thread(dateparser.parse, time_str, settings=cast(Any, date_settings))
+                    dt_object = await asyncio.to_thread(dateparser.parse, time_str, languages=['en'], settings=cast(Any, date_settings))
 
                     if not dt_object or dt_object.timestamp() <= time.time():
                         await ctx.send("I couldn't understand that time or it's in the past. Edit cancelled.")
