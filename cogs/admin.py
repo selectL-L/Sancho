@@ -472,7 +472,7 @@ class AdminCog(BaseCog):
                     # we can just use dateparser directly or ask them to be precise.
                     # For simplicity in this admin tool, we'll assume they know what they are doing or use a simple parser.
                     import dateparser
-                    dt = dateparser.parse(msg.content.strip(), settings={'PREFER_DATES_FROM': 'future'})
+                    dt = dateparser.parse(msg.content.strip(), languages=['en'], settings={'PREFER_DATES_FROM': 'future'})
                     if dt:
                         updates['reminder_time'] = int(dt.timestamp())
                     else:
