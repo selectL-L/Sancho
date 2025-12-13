@@ -450,7 +450,7 @@ class Reminders(BaseCog):
             matched_text = simple_freq_match.group(0)
             freq_map = {
                 'daily': 'DAILY', 'weekly': 'WEEKLY', 'monthly': 'MONTHLY',
-                'yearly': 'YEARLY', 'bi-weekly': 'WEEKLY;INTERVAL=2'
+                'yearly': 'YEARLY', 'biweekly': 'WEEKLY;INTERVAL=2'
             }
             clean_freq = simple_freq_match.group(1).lower().replace('-', '')
             recurrence_rule = f"FREQ={freq_map.get(clean_freq, 'DAILY')}"
@@ -562,7 +562,70 @@ class Reminders(BaseCog):
             sanitized_query = re.sub(r'\s+', ' ', sanitized_query).strip()
 
         # ==========================================
-        # Stage 3 & 4: Split-Head/Tail Time Extraction
+        # Stage 3: Pre-processing for Dateparser
+        # ==========================================
+        # Handle patterns that dateparser cannot understand natively.
+
+        # --- 3a: Detect "last" modifier (past tense = error) ---
+        # Check for "last monday", "last week", etc. - these indicate past dates.
+        last_modifier_match = re.search(
+            r'\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month|year)\b',
+            sanitized_query, re.IGNORECASE
+        )
+        if last_modifier_match:
+            self.logger.warning(f"Detected past date modifier: '{last_modifier_match.group(0)}'")
+            # Return a special error state: empty time string signals failure,
+            # but we include an error hint in the message field for the caller.
+            return (f"ERROR:PAST_DATE:{last_modifier_match.group(0)}", "", None)
+
+        # --- 3b: Strip "next/this/coming" modifiers ---
+        # Dateparser handles bare day names correctly with PREFER_DATES_FROM: future,
+        # but fails on "next monday", "this friday", etc. Strip these modifiers.
+        modifier_stripped = re.sub(
+            r'\b(next|this|coming)\s+(?=monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
+            '', sanitized_query, flags=re.IGNORECASE
+        )
+        if modifier_stripped != sanitized_query:
+            self.logger.info(f"Stripped day modifier: '{sanitized_query}' -> '{modifier_stripped}'")
+            sanitized_query = modifier_stripped.strip()
+            sanitized_query = re.sub(r'\s+', ' ', sanitized_query)  # Clean double spaces
+
+        # --- 3c: Normalize fractional time expressions ---
+        # Dateparser fails on "a half hour", "an hour and a half", etc.
+        # Convert these to numeric equivalents that dateparser understands.
+        fractional_patterns = [
+            # "a half hour" / "half an hour" → "30 minutes"
+            (r'\b(a\s+half\s+hour|half\s+an\s+hour)\b', '30 minutes'),
+            # "an hour and a half" / "one and a half hours" → "90 minutes"
+            (r'\b(an\s+hour\s+and\s+a\s+half|one\s+and\s+a\s+half\s+hours?)\b', '90 minutes'),
+            # "X and a half hours" → "{X*60+30} minutes" (handled specially below)
+            # "half a minute" → "30 seconds"
+            (r'\bhalf\s+a\s+minute\b', '30 seconds'),
+            # "a half day" → "12 hours"
+            (r'\b(a\s+half\s+day|half\s+a\s+day)\b', '12 hours'),
+        ]
+
+        for pattern, replacement in fractional_patterns:
+            if re.search(pattern, sanitized_query, re.IGNORECASE):
+                old_query = sanitized_query
+                sanitized_query = re.sub(pattern, replacement, sanitized_query, flags=re.IGNORECASE)
+                self.logger.info(f"Normalized fractional time: '{old_query}' -> '{sanitized_query}'")
+
+        # Handle "X and a half hours" pattern (e.g., "2 and a half hours" → "150 minutes")
+        x_and_half_match = re.search(r'\b(\d+)\s+and\s+a\s+half\s+hours?\b', sanitized_query, re.IGNORECASE)
+        if x_and_half_match:
+            hours = int(x_and_half_match.group(1))
+            total_minutes = hours * 60 + 30
+            old_query = sanitized_query
+            sanitized_query = re.sub(
+                r'\b\d+\s+and\s+a\s+half\s+hours?\b',
+                f'{total_minutes} minutes',
+                sanitized_query, flags=re.IGNORECASE
+            )
+            self.logger.info(f"Normalized X.5 hours: '{old_query}' -> '{sanitized_query}'")
+
+        # ==========================================
+        # Stage 4 & 5: Split-Head/Tail Time Extraction
         # ==========================================
         # Natural language is messy. The time at the start ("Tomorrow go to the store"
         # or at the end ("Go to the store tomorrow"). Sometimes they split it ("On Friday go to the store at 5pm").
@@ -772,6 +835,27 @@ class Reminders(BaseCog):
         def check(m: discord.Message) -> bool:
             return m.author == ctx.author and m.channel == ctx.channel
 
+        def parse_confirmation(response: str) -> str:
+            """Normalizes confirmation responses into actionable keywords."""
+            normalized = response.strip().lower()
+            edit_variants = {"edit", "edit time", "edit message"}
+
+            if not normalized:
+                return "unknown"
+
+            first_char = normalized[0]
+
+            if first_char == 'e':
+                return normalized if normalized in edit_variants else "unknown"
+
+            if first_char in {'y', 'a', 's', 'o'}:
+                return "yes"
+
+            if first_char == 'n':
+                return "no"
+
+            return "unknown"
+
         timestamp = int(dt_object.timestamp())
         confirmation_message = f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'."
         if recurrence_rule:
@@ -787,36 +871,44 @@ class Reminders(BaseCog):
         try:
             msg = await self.bot.wait_for('message', check=check, timeout=60.0)
             content = msg.content.lower()
+            action = parse_confirmation(content)
 
-            if content in ['yes', 'y']:
-                is_recurring = recurrence_rule is not None
-                new_reminder_id = await self.db_manager.add_reminder(
-                    ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
-                    is_recurring, recurrence_rule, reply_message_id
-                )
+            match action:
+                case 'yes':
+                    is_recurring = recurrence_rule is not None
+                    new_reminder_id = await self.db_manager.add_reminder(
+                        ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
+                        is_recurring, recurrence_rule, reply_message_id
+                    )
 
-                # Wake up the scheduler to pick up the new reminder
-                self.scheduler_event.set()
+                    # Wake up the scheduler to pick up the new reminder
+                    self.scheduler_event.set()
 
-                await ctx.send("✅ Reminder saved and scheduled!")
-                self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
+                    await ctx.send("✅ Reminder saved and scheduled!")
+                    self.logger.info(f"Reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp} (Recurring: {is_recurring}).")
 
-            elif content == 'edit':
-                await ctx.send("Let's start over.")
-                await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)
-            elif content == 'edit time':
-                await ctx.send("Okay, let's pick a new time.")
-                await self._interactive_reminder_flow(ctx, initial_message=reminder_message, reply_message_id=reply_message_id)
-            elif content == 'edit message':
-                await ctx.send("Okay, let's change the message.")
-                await self._interactive_reminder_flow(
-                    ctx,
-                    initial_time=time_str,
-                    initial_recurrence=recurrence_rule,
-                    reply_message_id=reply_message_id
-                )
-            else:
-                await ctx.send("Reminder cancelled. You can start over if you wish.")
+                case 'edit':
+                    await ctx.send("Let's start over.")
+                    await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)
+
+                case 'edit time':
+                    await ctx.send("Okay, let's pick a new time.")
+                    await self._interactive_reminder_flow(ctx, initial_message=reminder_message, reply_message_id=reply_message_id)
+
+                case 'edit message':
+                    await ctx.send("Okay, let's change the message.")
+                    await self._interactive_reminder_flow(
+                        ctx,
+                        initial_time=time_str,
+                        initial_recurrence=recurrence_rule,
+                        reply_message_id=reply_message_id
+                    )
+
+                case 'no':
+                    await ctx.send("Reminder cancelled. You can start over if you wish.")
+
+                case _:
+                    await ctx.send("I didn't catch that. Reminder cancelled. You can start over if you wish.")
 
         except asyncio.TimeoutError:
             await ctx.send("You took too long to respond. Reminder creation cancelled.")
@@ -929,10 +1021,20 @@ class Reminders(BaseCog):
 
             parsed = await self._parse_reminder(query)
 
+            # Handle special error states from parsing
+            if parsed and parsed[0] and parsed[0].startswith("ERROR:"):
+                error_parts = parsed[0].split(":", 2)
+                if len(error_parts) >= 3 and error_parts[1] == "PAST_DATE":
+                    matched_text = error_parts[2]
+                    await ctx.send(f"❌ I can't set a reminder for '{matched_text}' — that's in the past! "
+                                   f"Try using a future date like 'next {matched_text.split()[-1]}' or 'tomorrow'.")
+                    return
+
             # If parsing fails to find a message or a time, start the interactive flow from scratch.
             if not parsed or not parsed[0] or not parsed[1]:
                 self.logger.info(f"Failed to understand '{query}'. Starting interactive flow.")
-                await ctx.send("I'm sorry, I couldn't understand the reminder. Let's set it up step-by-step.")
+                # While we technically only parse "time", we don't want to confuse the user with that detail.
+                await ctx.send("I couldn't understand your reminder! Let's set it up step-by-step.")
                 await self._interactive_reminder_flow(ctx, reply_message_id=reply_message_id)  # No context retained
                 return
 
