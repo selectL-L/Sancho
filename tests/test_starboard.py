@@ -372,5 +372,386 @@ async def test_fix_and_remake_starboard(starboard_cog, mock_bot):
     # Check Tombstone for 4008 (Remake should catch the deleted original)
     starboard_cog._create_tombstone.assert_any_call(starboard_channel, 4008)
 
+
+@pytest.mark.asyncio
+async def test_starboard_channel_migration(starboard_cog, mock_bot):
+    """Test that remake detects a channel change and performs non-destructive migration."""
+
+    # Setup Guild
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = 1001
+    guild.name = "Test Guild"
+
+    # Setup OLD Starboard Channel (where messages currently exist)
+    old_starboard_channel = MagicMock(spec=discord.TextChannel)
+    old_starboard_channel.id = 2000
+    old_starboard_channel.guild = guild
+    old_starboard_channel.mention = "<#2000>"
+
+    # Setup NEW Starboard Channel (configured channel)
+    new_starboard_channel = MagicMock(spec=discord.TextChannel)
+    new_starboard_channel.id = 2001
+    new_starboard_channel.guild = guild
+    new_starboard_channel.mention = "<#2001>"
+
+    # Original Channel
+    original_channel = MagicMock(spec=discord.TextChannel)
+    original_channel.id = 3001
+    original_channel.guild = guild
+    original_channel.mention = "<#3001>"
+
+    # Mock bot.get_channel
+    def get_channel_side_effect(channel_id):
+        if channel_id == old_starboard_channel.id:
+            return old_starboard_channel
+        if channel_id == new_starboard_channel.id:
+            return new_starboard_channel
+        if channel_id == original_channel.id:
+            return original_channel
+        return None
+
+    mock_bot.get_channel.side_effect = get_channel_side_effect
+
+    # Mock guild.text_channels for migration detection
+    guild.text_channels = [old_starboard_channel, new_starboard_channel, original_channel]
+
+    # --- Setup DB Entries (pointing to OLD channel's message IDs) ---
+    entry1 = {
+        'original_message_id': 4001,
+        'starboard_message_id': 5001,  # This is in OLD channel
+        'guild_id': guild.id,
+        'original_channel_id': original_channel.id,
+        'starboard_reply_id': None
+    }
+
+    entry2 = {
+        'original_message_id': 4002,
+        'starboard_message_id': 5002,  # This is in OLD channel
+        'guild_id': guild.id,
+        'original_channel_id': original_channel.id,
+        'starboard_reply_id': 6002  # Has reply context
+    }
+
+    # Entry 3: Message no longer meets threshold (should be skipped/removed)
+    entry3 = {
+        'original_message_id': 4003,
+        'starboard_message_id': 5003,
+        'guild_id': guild.id,
+        'original_channel_id': original_channel.id,
+        'starboard_reply_id': None
+    }
+
+    # Entry 4: Original message deleted (should become tombstone)
+    entry4 = {
+        'original_message_id': 4004,
+        'starboard_message_id': 5004,
+        'guild_id': guild.id,
+        'original_channel_id': original_channel.id,
+        'starboard_reply_id': None
+    }
+
+    all_entries = [entry1, entry2, entry3, entry4]
+
+    # Mock DB: Config points to NEW channel
+    mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
+        "starboard_channel_id": str(new_starboard_channel.id),  # NEW channel!
+        "starboard_emoji": "⭐",
+        "starboard_threshold": "3"
+    }.get(key)
+
+    mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = all_entries
+
+    # Track DB updates
+    updated_entries = []
+
+    async def update_entry_side_effect(entry):
+        updated_entries.append(dict(entry))
+    mock_bot.db_manager.update_starboard_entry.side_effect = update_entry_side_effect
+
+    # Track removed entries
+    removed_entries = []
+
+    async def remove_entry_side_effect(orig_id):
+        removed_entries.append(orig_id)
+    mock_bot.db_manager.remove_starboard_entry.side_effect = remove_entry_side_effect
+
+    # --- Mock Messages ---
+    def create_mock_message(msg_id, channel, content="Test Content"):
+        msg = MagicMock(spec=discord.Message)
+        msg.id = msg_id
+        msg.channel = channel
+        msg.guild = guild
+        msg.content = content
+        msg.author.id = 123
+        msg.author.display_name = "TestUser"
+        msg.author.name = "testuser"
+        msg.author.display_avatar.url = "http://avatar.url"
+        msg.created_at = discord.utils.utcnow()
+        msg.jump_url = f"https://discord.com/channels/{guild.id}/{channel.id}/{msg_id}"
+        msg.embeds = []
+        msg.attachments = []
+        msg.reactions = []
+        msg.reference = None
+        msg.message_snapshots = []
+        return msg
+
+    # Original Messages
+    orig_msg1 = create_mock_message(4001, original_channel)
+    orig_msg2 = create_mock_message(4002, original_channel)
+    orig_msg3 = create_mock_message(4003, original_channel)  # Under threshold
+    # orig_msg4 is DELETED
+
+    # Add reactions
+    star_reaction_high = MagicMock()
+    star_reaction_high.emoji = "⭐"
+    star_reaction_high.count = 5
+
+    star_reaction_low = MagicMock()
+    star_reaction_low.emoji = "⭐"
+    star_reaction_low.count = 2  # Below threshold of 3
+
+    orig_msg1.reactions = [star_reaction_high]
+    orig_msg2.reactions = [star_reaction_high]
+    orig_msg3.reactions = [star_reaction_low]  # Under threshold!
+
+    # Old starboard messages (in OLD channel)
+    old_sb_msg1 = create_mock_message(5001, old_starboard_channel)
+    old_sb_msg2 = create_mock_message(5002, old_starboard_channel)
+    old_sb_msg3 = create_mock_message(5003, old_starboard_channel)
+    old_sb_msg4 = create_mock_message(5004, old_starboard_channel)
+
+    # Mock fetch_message for OLD channel (where messages exist)
+    async def old_channel_fetch(msg_id):
+        msgs = {5001: old_sb_msg1, 5002: old_sb_msg2, 5003: old_sb_msg3, 5004: old_sb_msg4}
+        if msg_id in msgs:
+            return msgs[msg_id]
+        raise discord.NotFound(MagicMock(), "Message not found")
+    old_starboard_channel.fetch_message.side_effect = old_channel_fetch
+
+    # Mock fetch_message for NEW channel (messages DON'T exist here yet)
+    async def new_channel_fetch(msg_id):
+        # Nothing exists in new channel yet - this triggers migration detection
+        raise discord.NotFound(MagicMock(), "Message not found")
+    new_starboard_channel.fetch_message.side_effect = new_channel_fetch
+
+    # Mock fetch_message for original channel
+    async def original_channel_fetch(msg_id):
+        msgs = {4001: orig_msg1, 4002: orig_msg2, 4003: orig_msg3}
+        if msg_id in msgs:
+            return msgs[msg_id]
+        raise discord.NotFound(MagicMock(), "Message not found")
+    original_channel.fetch_message.side_effect = original_channel_fetch
+
+    # Mock send for new channel (returns new message IDs)
+    new_msg_counter = [7000]
+
+    async def new_channel_send(*args, **kwargs):
+        new_msg_counter[0] += 1
+        msg = MagicMock(spec=discord.Message)
+        msg.id = new_msg_counter[0]
+        msg.reply = AsyncMock(side_effect=new_channel_send)
+        return msg
+    new_starboard_channel.send = AsyncMock(side_effect=new_channel_send)
+
+    # --- Setup Context ---
+    ctx = MagicMock(spec=commands.Context)
+    ctx.guild = guild
+    ctx.author.id = 999
+    ctx.send = AsyncMock()
+
+    # Mock _create_tombstone
+    async def create_tombstone_side_effect(channel, orig_id):
+        tomb = MagicMock(spec=discord.Message)
+        tomb.id = 9999
+        return tomb
+    starboard_cog._create_tombstone = AsyncMock(side_effect=create_tombstone_side_effect)
+
+    # Run remake (should detect migration)
+    await starboard_cog._remake_impl(ctx)
+
+    # --- Assertions ---
+
+    # 1. Migration should have been detected (check for migration message)
+    migration_detected = any(
+        "migration detected" in str(call).lower()
+        for call in ctx.send.call_args_list
+    )
+    assert migration_detected, "Migration should have been detected"
+
+    # 2. Old channel messages should NOT have been deleted
+    old_starboard_channel.fetch_message.assert_called()  # Only for detection
+    # Check that delete() was never called on old messages
+    for msg in [old_sb_msg1, old_sb_msg2, old_sb_msg3, old_sb_msg4]:
+        msg.delete.assert_not_called()
+
+    # 3. New messages should have been created in the new channel
+    assert new_starboard_channel.send.call_count >= 2, \
+        f"Expected at least 2 new posts, got {new_starboard_channel.send.call_count}"
+
+    # 4. DB entries should have been UPDATED (not cleared and re-added)
+    # Entry 1 and 2 should be updated with new starboard_message_id
+    mock_bot.db_manager.clear_starboard_for_guild.assert_not_called()
+
+    # Check that entries were updated
+    assert len(updated_entries) >= 2, f"Expected at least 2 updates, got {len(updated_entries)}"
+
+    # Find the updated entry1 and verify it has a new starboard_message_id
+    updated_entry1 = next((e for e in updated_entries if e['original_message_id'] == 4001), None)
+    assert updated_entry1 is not None, "Entry 1 should have been updated"
+    assert updated_entry1['starboard_message_id'] != 5001, \
+        f"Entry 1 starboard_message_id should have changed from 5001, got {updated_entry1['starboard_message_id']}"
+
+    # 5. Entry 3 (under threshold) should have been removed from DB
+    assert 4003 in removed_entries, "Entry 3 should have been removed (under threshold)"
+
+    # 6. Entry 4 (deleted original) should have a tombstone
+    starboard_cog._create_tombstone.assert_any_call(new_starboard_channel, 4004)
+    updated_entry4 = next((e for e in updated_entries if e['original_message_id'] == 4004), None)
+    assert updated_entry4 is not None, "Entry 4 should have been updated with tombstone"
+    assert updated_entry4['starboard_message_id'] == 9999, "Entry 4 should have tombstone ID"
+
+    # 7. Completion message should indicate migration success
+    completion_msg = any(
+        "migration complete" in str(call).lower()
+        for call in ctx.send.call_args_list
+    )
+    assert completion_msg, "Migration completion message should have been sent"
+
+
+@pytest.mark.asyncio
+async def test_same_channel_remake_is_destructive(starboard_cog, mock_bot):
+    """Test that remake on the SAME channel performs destructive remake (deletes old messages)."""
+
+    # Setup Guild
+    guild = MagicMock(spec=discord.Guild)
+    guild.id = 1001
+    guild.name = "Test Guild"
+
+    # Setup Starboard Channel (same channel for both config and existing messages)
+    starboard_channel = MagicMock(spec=discord.TextChannel)
+    starboard_channel.id = 2000
+    starboard_channel.guild = guild
+    starboard_channel.mention = "<#2000>"
+
+    # Original Channel
+    original_channel = MagicMock(spec=discord.TextChannel)
+    original_channel.id = 3001
+    original_channel.guild = guild
+
+    # Mock bot.get_channel
+    def get_channel_side_effect(channel_id):
+        if channel_id == starboard_channel.id:
+            return starboard_channel
+        if channel_id == original_channel.id:
+            return original_channel
+        return None
+
+    mock_bot.get_channel.side_effect = get_channel_side_effect
+
+    # Mock guild.text_channels
+    guild.text_channels = [starboard_channel, original_channel]
+
+    # --- Setup DB Entry ---
+    entry1 = {
+        'original_message_id': 4001,
+        'starboard_message_id': 5001,
+        'guild_id': guild.id,
+        'original_channel_id': original_channel.id,
+        'starboard_reply_id': None
+    }
+
+    all_entries = [entry1]
+
+    # Mock DB: Config points to SAME channel as existing messages
+    mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
+        "starboard_channel_id": str(starboard_channel.id),
+        "starboard_emoji": "⭐",
+        "starboard_threshold": "3"
+    }.get(key)
+
+    mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = all_entries
+
+    # --- Mock Messages ---
+    def create_mock_message(msg_id, channel):
+        msg = MagicMock(spec=discord.Message)
+        msg.id = msg_id
+        msg.channel = channel
+        msg.guild = guild
+        msg.content = "Test"
+        msg.author.id = 123
+        msg.author.display_name = "TestUser"
+        msg.author.name = "testuser"
+        msg.author.display_avatar.url = "http://avatar.url"
+        msg.created_at = discord.utils.utcnow()
+        msg.jump_url = f"https://discord.com/channels/{guild.id}/{channel.id}/{msg_id}"
+        msg.embeds = []
+        msg.attachments = []
+        msg.reactions = []
+        msg.reference = None
+        msg.message_snapshots = []
+        msg.delete = AsyncMock()
+        return msg
+
+    orig_msg1 = create_mock_message(4001, original_channel)
+    star_reaction = MagicMock()
+    star_reaction.emoji = "⭐"
+    star_reaction.count = 5
+    orig_msg1.reactions = [star_reaction]
+
+    sb_msg1 = create_mock_message(5001, starboard_channel)
+
+    # Mock fetch_message - messages exist in SAME channel
+    async def sb_channel_fetch(msg_id):
+        if msg_id == 5001:
+            return sb_msg1
+        raise discord.NotFound(MagicMock(), "Message not found")
+    starboard_channel.fetch_message.side_effect = sb_channel_fetch
+
+    async def orig_channel_fetch(msg_id):
+        if msg_id == 4001:
+            return orig_msg1
+        raise discord.NotFound(MagicMock(), "Message not found")
+    original_channel.fetch_message.side_effect = orig_channel_fetch
+
+    # Mock send for recreation
+    async def channel_send(*args, **kwargs):
+        msg = MagicMock(spec=discord.Message)
+        msg.id = 8888
+        return msg
+    starboard_channel.send = AsyncMock(side_effect=channel_send)
+
+    # --- Setup Context ---
+    ctx = MagicMock(spec=commands.Context)
+    ctx.guild = guild
+    ctx.author.id = 999
+    ctx.send = AsyncMock()
+
+    starboard_cog._fast_mode = True
+
+    # Mock post_to_starboard
+    starboard_cog.post_to_starboard = AsyncMock()
+
+    # Run remake
+    await starboard_cog._remake_impl(ctx)
+
+    # --- Assertions ---
+
+    # 1. Should NOT detect migration
+    migration_detected = any(
+        "migration detected" in str(call).lower()
+        for call in ctx.send.call_args_list
+    )
+    assert not migration_detected, "Should NOT have detected migration for same channel"
+
+    # 2. Old message SHOULD be deleted (destructive remake)
+    sb_msg1.delete.assert_called_once()
+
+    # 3. DB should have been cleared
+    mock_bot.db_manager.clear_starboard_for_guild.assert_called_once_with(guild.id)
+
+    # 4. Post should have been recreated
+    starboard_cog.post_to_starboard.assert_called()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
