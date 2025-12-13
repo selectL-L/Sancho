@@ -187,7 +187,7 @@ class Starboard(BaseCog):
 
     @starboard_group.command(
         name="remake",
-        help="Recreates starboard posts from history. Detects channel migration automatically. Only Callable by the bot owner."
+        help="Recreates starboard posts. Auto-detects channel migration. Owner only."
     )
     @commands.is_owner()
     @app_commands.describe(
