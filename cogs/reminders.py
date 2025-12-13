@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import dateparser
 import discord
 import pytz
+from discord import app_commands
 from dateutil.rrule import (DAILY, HOURLY, MINUTELY, MONTHLY, WEEKLY, YEARLY, rrulestr)
 from discord.ext import commands
 
@@ -1554,6 +1555,109 @@ class Reminders(BaseCog):
                     await ctx.send("Invalid channel.")
             else:
                 await ctx.send("Invalid choice.")
+
+    @commands.hybrid_command(
+        name="reminder",
+        description="Sets reminders quickly, doesn't support recurrence though!",
+        help="Set a reminder using: message / time (e.g., 'Take out trash / in 30 minutes')"
+    )
+    @app_commands.describe(
+        message="What to remind you about",
+        when="When to remind you (e.g., 'in 30 minutes', 'tomorrow at 3pm')"
+    )
+    async def reminder_command(self, ctx: commands.Context, message: str, *, when: str = "") -> None:
+        """Set a reminder with a rigid format, bypassing NLP parsing and confirmation.
+
+        For slash commands: Use the separate message and when fields.
+        For prefix commands: Use 'message / time' format.
+
+        Args:
+            ctx (commands.Context): The command context.
+            message (str): The reminder message (slash) or 'message / time' (prefix).
+            when (str): The time string (slash command only).
+        """
+        reminder_message: str
+        time_str: str
+
+        # Determine if this is a slash command (when provided) or prefix command (needs splitting)
+        if when:
+            # Slash command with separate fields
+            reminder_message = message
+            time_str = when
+        else:
+            # Prefix command: expect 'message / time' format in the message param
+            if '/' not in message:
+                await ctx.send(
+                    "❌ Invalid format. Please use: `message / time`\n"
+                    "Example: `. reminder Take out trash / in 30 minutes`"
+                )
+                return
+
+            parts = message.split('/', 1)
+            reminder_message = parts[0].strip()
+            time_str = parts[1].strip()
+
+        if not reminder_message:
+            await ctx.send("❌ Please provide a reminder message.")
+            return
+
+        if not time_str:
+            await ctx.send("❌ Please provide a time.")
+            return
+
+        # Parse the time string using dateparser
+        user_tz_str = await self._get_user_timezone(ctx.author.id)
+        date_settings = {
+            'PREFER_DATES_FROM': 'future',
+            'TIMEZONE': user_tz_str,
+            'RETURN_AS_TIMEZONE_AWARE': True
+        }
+
+        dt_object = await asyncio.to_thread(
+            dateparser.parse, time_str, languages=['en'], settings=cast(Any, date_settings)
+        )
+
+        if not dt_object:
+            await ctx.send(
+                f"❌ I couldn't understand the time `{time_str}`.\n"
+                "Try formats like: `in 30 minutes`, `tomorrow at 3pm`, `Friday at noon`"
+            )
+            return
+
+        timestamp = int(dt_object.timestamp())
+
+        # Prevent setting reminders in the past
+        if timestamp <= int(time.time()):
+            await ctx.send("❌ You can't set a reminder in the past! Please use a future time.")
+            return
+
+        # Check if this is a reply to link context
+        reply_message_id = None
+        if ctx.message and ctx.message.reference and ctx.message.reference.message_id:
+            reply_message_id = ctx.message.reference.message_id
+
+        # Save the reminder directly (no confirmation needed)
+        try:
+            new_reminder_id = await self.db_manager.add_reminder(
+                ctx.author.id, ctx.channel.id, timestamp, reminder_message, int(time.time()),
+                is_recurring=False, recurrence_rule=None, reply_message_id=reply_message_id
+            )
+
+            # Wake up the scheduler to pick up the new reminder
+            self.scheduler_event.set()
+
+            # Match the NLP confirmation style
+            confirmation = f"Okay, I will remind you on <t:{timestamp}:F> to '{reminder_message}'."
+            if reply_message_id:
+                confirmation += "\nI'll also reply to the message you linked!"
+            confirmation += "\n✅ Reminder saved and scheduled!"
+
+            await ctx.send(confirmation)
+            self.logger.info(f"Rigid reminder {new_reminder_id} set for user {ctx.author.id} at {timestamp}.")
+
+        except Exception as e:
+            self.logger.error(f"Error saving rigid reminder for user {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("❌ An error occurred while saving your reminder.")
 
 
 async def setup(bot: CoreBot, **kwargs: Any) -> None:
