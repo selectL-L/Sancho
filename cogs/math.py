@@ -517,7 +517,7 @@ class DiceLexer:
     def _tokenize(self):
         # Regex patterns - Order DOES matter here
         patterns = [
-            (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?'),
+            (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?!?'),
             (DiceToken.COIN, r'(\d*)c'),
             (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
             (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
@@ -683,7 +683,7 @@ class DiceParser:
 
     async def _roll_dice(self, dice_str: str) -> int:
         # Re-parse the specific dice string to get components
-        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?', dice_str, re.IGNORECASE)
+        match = re.match(r'(\d+)?d(\d+)(kh|kl)?(\d+)?(!)?', dice_str, re.IGNORECASE)
         if not match:
             raise ValueError(f"Invalid dice notation: {dice_str}")
 
@@ -697,20 +697,50 @@ class DiceParser:
 
         keep_mode = (match.group(3) or '').lower()
         keep_count = int(match.group(4)) if match.group(4) else 0
+        exploding = match.group(5) == '!'
 
         if not (num_dice <= 300 and num_sides <= 5000):
             raise ValueError("Dice or side count is out of range (max 300 dice, max 5000 sides).")
         if keep_count and keep_count > num_dice:
             raise ValueError("Cannot keep more dice than are rolled.")
+        if exploding and num_sides < 2:
+            raise ValueError("Exploding dice require at least 2 sides.")
 
-        def _roll_thread() -> Tuple[List[int], Optional[List[int]]]:
-            rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
-            if self.advantage or self.disadvantage:
-                rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
-                return rolls1, rolls2
-            return rolls1, None
+        def _roll_single_exploding(sides: int, max_explosions: int = 100) -> Tuple[int, List[int]]:
+            """Roll a single die that may explode. Returns (total, list of individual rolls)."""
+            rolls = []
+            explosions = 0
+            while True:
+                roll = random.randint(1, sides)
+                rolls.append(roll)
+                if roll != sides or explosions >= max_explosions:
+                    break
+                explosions += 1
+            return sum(rolls), rolls
 
-        rolls1, rolls2 = await asyncio.to_thread(_roll_thread)
+        def _roll_thread() -> Tuple[List[int], Optional[List[int]], List[List[int]]]:
+            if exploding:
+                rolls1 = []
+                explosion_details = []
+                for _ in range(num_dice):
+                    total, details = _roll_single_exploding(num_sides)
+                    rolls1.append(total)
+                    explosion_details.append(details)
+                if self.advantage or self.disadvantage:
+                    rolls2 = []
+                    for _ in range(num_dice):
+                        total, _ = _roll_single_exploding(num_sides)
+                        rolls2.append(total)
+                    return rolls1, rolls2, explosion_details
+                return rolls1, None, explosion_details
+            else:
+                rolls1 = [random.randint(1, num_sides) for _ in range(num_dice)]
+                if self.advantage or self.disadvantage:
+                    rolls2 = [random.randint(1, num_sides) for _ in range(num_dice)]
+                    return rolls1, rolls2, []
+                return rolls1, None, []
+
+        rolls1, rolls2, explosion_details = await asyncio.to_thread(_roll_thread)
 
         # Advantage/Disadvantage Logic
         if (self.advantage or self.disadvantage) and rolls2 is not None:
@@ -729,7 +759,19 @@ class DiceParser:
 
         # Standard Roll Logic
         rolls = rolls1
-        description = f"{dice_str}: ` {', '.join(map(str, rolls))} `"
+
+        # Format roll display - show explosion chains if applicable
+        if exploding and explosion_details:
+            roll_strs = []
+            for detail in explosion_details:
+                if len(detail) > 1:
+                    # Show explosion chain: 6->6->3 = 15
+                    roll_strs.append(f"({'->'.join(map(str, detail))}={sum(detail)})")
+                else:
+                    roll_strs.append(str(detail[0]))
+            description = f"{dice_str}: ` {', '.join(roll_strs)} `"
+        else:
+            description = f"{dice_str}: ` {', '.join(map(str, rolls))} `"
 
         kept_rolls = rolls
         if keep_mode in ('kh', 'kl') and keep_count > 0:
