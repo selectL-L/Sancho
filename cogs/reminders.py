@@ -1579,8 +1579,8 @@ class Reminders(BaseCog):
 
     @commands.hybrid_command(
         name="reminder",
-        description="Sets reminders quickly, doesn't support recurrence though!",
-        help="Set a reminder using: message / time (e.g., 'Take out trash / in 30 minutes')",
+        description="Sets reminders quickly, doesn't support recurrence!",
+        help="Sets reminders quickly, doesn't support recurrence!\nSet a reminder using the format below! (e.g., 'Take out trash / in 30 minutes')",
         usage="<message> / <when>"
     )
     @app_commands.describe(
