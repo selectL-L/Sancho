@@ -23,7 +23,7 @@ import asyncio
 import re
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import dateparser
 import discord
@@ -112,31 +112,49 @@ class Reminders(BaseCog):
         """
         user_id = reminder['user_id']
         message = reminder['message']
+        reminder_id = reminder['id']
 
         try:
-            user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+            # Fetch user with proper error handling.
+            user = self.bot.get_user(user_id)
+            if not user:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except (discord.NotFound, discord.HTTPException) as e:
+                    self.logger.warning(f"Could not fetch user {user_id} for missed reminder {reminder_id}: {e}. Deleting.")
+                    await self.db_manager.delete_reminders([reminder_id])
+                    return
 
             # Determine destination (same logic as before).
             destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
-            targetable = None
+            targetable: Optional[Union[discord.User, discord.abc.GuildChannel, discord.Thread, discord.abc.PrivateChannel]] = None
 
             if destination_pref == 'dm':
                 targetable = user
             elif destination_pref and destination_pref.isdigit():
                 try:
                     chan_id = int(destination_pref)
-                    targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
-                except (discord.NotFound, discord.Forbidden):
-                    targetable = user
+                    targetable = self.bot.get_channel(chan_id)
+                    if not targetable:
+                        targetable = await self.bot.fetch_channel(chan_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    targetable = user  # Fallback to DM.
             else:
-                try:
-                    targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
-                except (discord.NotFound, discord.Forbidden):
-                    targetable = user
+                # Try origin channel.
+                channel_id = reminder.get('channel_id')
+                if channel_id:
+                    try:
+                        targetable = self.bot.get_channel(channel_id)
+                        if not targetable:
+                            targetable = await self.bot.fetch_channel(channel_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        targetable = user  # Fallback to DM.
+                else:
+                    targetable = user  # No channel stored, fallback to DM.
 
             if not targetable:
-                self.logger.warning(f"Could not find destination for missed reminder {reminder['id']}. Deleting.")
-                await self.db_manager.delete_reminders([reminder['id']])
+                self.logger.warning(f"Could not find destination for missed reminder {reminder_id}. Deleting.")
+                await self.db_manager.delete_reminders([reminder_id])
                 return
 
             # Cast to Messageable to satisfy static analysis.
@@ -150,12 +168,15 @@ class Reminders(BaseCog):
                 msg = (f"{user.mention}, sorry I was offline! You had a reminder for: '{message}'\n"
                        f"It was due at <t:{reminder['reminder_time']}:F> (<t:{reminder['reminder_time']}:R>).")
                 await targetable_dest.send(msg)
-                await self.db_manager.delete_reminders([reminder['id']])
+                await self.db_manager.delete_reminders([reminder_id])
 
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            self.logger.error(f"Discord error handling missed reminder {reminder_id}: {e}. Deleting to prevent loops.")
+            await self.db_manager.delete_reminders([reminder_id])
         except Exception as e:
-            self.logger.error(f"Failed to handle missed reminder {reminder['id']}: {e}")
-            # If we fail hard (e.g. user blocked bot), we might want to delete it to stop loops,
-            # but for now let's just log it.
+            self.logger.error(f"Failed to handle missed reminder {reminder_id}: {e}", exc_info=True)
+            # Delete to prevent infinite retry loops.
+            await self.db_manager.delete_reminders([reminder_id])
 
     async def _handle_missed_recurring(self, reminder: Dict[str, Any], targetable: discord.abc.Messageable, user: discord.User, current_time: int) -> None:
         """Calculates missed occurrences for a recurring reminder and reschedules it."""
@@ -1559,7 +1580,8 @@ class Reminders(BaseCog):
     @commands.hybrid_command(
         name="reminder",
         description="Sets reminders quickly, doesn't support recurrence though!",
-        help="Set a reminder using: message / time (e.g., 'Take out trash / in 30 minutes')"
+        help="Set a reminder using: message / time (e.g., 'Take out trash / in 30 minutes')",
+        usage="<message> / <when>"
     )
     @app_commands.describe(
         message="What to remind you about",
