@@ -187,7 +187,7 @@ class Starboard(BaseCog):
 
     @starboard_group.command(
         name="remake",
-        help="Recreates starboard posts from history. Only callable by the bot owner."
+        help="Recreates starboard posts from history. Detects channel migration automatically. Only Callable by the bot owner."
     )
     @commands.is_owner()
     @app_commands.describe(
@@ -195,6 +195,13 @@ class Starboard(BaseCog):
     )
     async def remake_starboard(self, ctx: commands.Context, fast: bool = False) -> None:
         """Recreates starboard posts from history. Only callable by the bot owner.
+
+        This command supports two modes:
+        - **Same-channel remake** (destructive): If the configured starboard channel
+          is the same as where existing posts are, deletes them and recreates fresh.
+        - **Channel migration** (non-destructive): If the starboard channel has been
+          changed to a new channel, creates new posts there WITHOUT deleting the old
+          messages, and updates the database to point to the new message IDs.
 
         Usage: /starboard remake [fast]
 
@@ -265,7 +272,14 @@ class Starboard(BaseCog):
         await self._fix_impl(ctx)
 
     async def _remake_impl(self, ctx: commands.Context) -> None:
-        """Implementation of the remake logic."""
+        """Implementation of the remake logic.
+
+        Supports two modes:
+        1. Same-channel remake (destructive): Deletes existing starboard messages and recreates them.
+        2. Channel migration (non-destructive): When the configured starboard channel differs from
+           where existing entries live, creates new posts in the new channel without deleting
+           the old messages, then updates the database entries.
+        """
         if not ctx.guild:
             return
         guild = ctx.guild
@@ -284,9 +298,6 @@ class Starboard(BaseCog):
             await ctx.send("No starboard entries found.")
             return
 
-        await ctx.send("Starting starboard remake...")
-        self.logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
-
         # Strict Filter: Only remake entries that have complete stored information
         # We require original_message_id, starboard_message_id, guild_id, and original_channel_id.
         # If any are missing, 'fix' should be run first.
@@ -294,6 +305,75 @@ class Starboard(BaseCog):
             entry for entry in all_entries
             if entry.get('original_message_id') and entry.get('starboard_message_id') and entry.get('guild_id') and entry.get('original_channel_id')
         ]
+
+        if not valid_entries:
+            await ctx.send("No valid starboard entries found. Run `/starboard fix` first if entries exist but are incomplete.")
+            return
+
+        # --- Migration Detection ---
+        # Check if any existing starboard messages are in a DIFFERENT channel than the configured one.
+        # We sample multiple entries in case some messages were deleted.
+        is_channel_migration = False
+        old_starboard_channel: Optional[discord.TextChannel] = None
+        detection_complete = False
+
+        # Sample up to 5 entries for more reliable detection
+        sample_entries = valid_entries[:5]
+        for entry in sample_entries:
+            if detection_complete:
+                break
+            sb_msg_id = entry.get('starboard_message_id')
+            if not sb_msg_id:
+                continue
+
+            # Try to fetch from the NEW (configured) channel first
+            try:
+                await starboard_channel.fetch_message(sb_msg_id)
+                # Found in current channel - definitively NOT a migration
+                detection_complete = True
+                is_channel_migration = False
+                break
+            except discord.NotFound:
+                # Not found in new channel - check if it exists elsewhere
+                # Limit search to avoid rate limits in large guilds
+                channels_to_check = [ch for ch in guild.text_channels if ch.id != starboard_channel_id][:20]
+                for channel in channels_to_check:
+                    try:
+                        await channel.fetch_message(sb_msg_id)
+                        # Found in a different channel! This is a migration.
+                        is_channel_migration = True
+                        old_starboard_channel = channel
+                        detection_complete = True
+                        self.logger.info(f"Detected channel migration: old channel={channel.id}, new channel={starboard_channel_id}")
+                        break
+                    except (discord.NotFound, discord.Forbidden):
+                        continue
+                    except discord.HTTPException as e:
+                        self.logger.warning(f"HTTP error during migration detection: {e}")
+                        continue
+                # If we checked all channels and didn't find it, try next sample entry
+                continue
+            except discord.Forbidden:
+                self.logger.warning(f"No permission to read configured starboard channel {starboard_channel_id}")
+                await ctx.send("⚠️ I don't have permission to read the configured starboard channel.")
+                return
+            except discord.HTTPException as e:
+                self.logger.warning(f"HTTP error during migration detection: {e}")
+                continue
+
+        if is_channel_migration:
+            await ctx.send(
+                f"🔄 **Channel migration detected!** Old starboard messages found in {old_starboard_channel.mention if old_starboard_channel else 'another channel'}.\n"
+                f"Posts will be **recreated** in {starboard_channel.mention} without deleting the old ones.\n"
+                "Starting migration..."
+            )
+            self.logger.info(f"Starboard channel migration for guild {guild.id} triggered by {ctx.author.id}.")
+            await self._migrate_starboard_channel(ctx, valid_entries, starboard_channel, starboard_emoji, starboard_threshold)
+            return
+
+        # --- Standard (same-channel) Remake ---
+        await ctx.send("Starting starboard remake...")
+        self.logger.info(f"Starboard remake for guild {guild.id} triggered by {ctx.author.id}.")
 
         self.logger.info(f"Deleting {len(valid_entries)} existing starboard messages and their reply contexts...")
         deleted_count = 0
@@ -412,6 +492,189 @@ class Starboard(BaseCog):
         except Exception as e:
             self.logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
             return None
+
+    async def _migrate_starboard_channel(
+        self,
+        ctx: commands.Context,
+        valid_entries: List[Dict[str, Any]],
+        new_starboard_channel: discord.TextChannel,
+        starboard_emoji: str,
+        starboard_threshold: int
+    ) -> None:
+        """Migrates starboard posts to a new channel without deleting old messages.
+
+        Creates new posts in the target channel and updates the database entries
+        with the new message IDs.
+
+        Args:
+            ctx (commands.Context): The command context.
+            valid_entries (List[Dict[str, Any]]): Valid starboard entries to migrate.
+            new_starboard_channel (discord.TextChannel): The new starboard channel.
+            starboard_emoji (str): The emoji used for the starboard.
+            starboard_threshold (int): The reaction threshold.
+        """
+        if not ctx.guild:
+            return
+
+        migrated_count = 0
+        failed_count = 0
+        skipped_count = 0
+        tombstone_count = 0
+        total_entries = len(valid_entries)
+
+        # Start a periodic status notifier so the caller sees progress for long runs
+        stop_event = asyncio.Event()
+        progress = {'done': 0, 'total': total_entries, 'elapsed': 0}
+        status_msg = await ctx.send(f"Starboard migration started. Processed 0/{total_entries}. Elapsed: 0s. Please wait.")
+        status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=30.0, operation="migration"))
+        self.logger.debug("Status editor task started for migration operation")
+
+        for entry in valid_entries:
+            original_channel = self.bot.get_channel(entry['original_channel_id'])
+
+            # If original channel is missing, create a tombstone
+            if not isinstance(original_channel, discord.TextChannel):
+                self.logger.warning(f"Original channel {entry['original_channel_id']} not found. Creating tombstone.")
+                tomb = await self._create_tombstone(new_starboard_channel, entry['original_message_id'])
+                if tomb:
+                    # Update the existing entry with the new starboard message ID
+                    entry['starboard_message_id'] = tomb.id
+                    entry['starboard_reply_id'] = None  # Tombstones don't have reply context
+                    await self.db_manager.update_starboard_entry(entry)
+                    tombstone_count += 1
+                else:
+                    failed_count += 1
+                continue
+
+            try:
+                message = await original_channel.fetch_message(entry['original_message_id'])
+
+                # Check if message still meets threshold
+                star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
+                current_count = star_reaction.count if star_reaction else 0
+
+                if not self._fast_mode and current_count < starboard_threshold:
+                    self.logger.info(f"Message {message.id} no longer meets threshold ({current_count} < {starboard_threshold}). Removing stale entry.")
+                    # Remove the stale DB entry since it no longer qualifies
+                    await self.db_manager.remove_starboard_entry(entry['original_message_id'])
+                    skipped_count += 1
+                    continue
+
+                # Create the new post in the new channel
+                content = f"{starboard_emoji} **{current_count}** in <#{message.channel.id}>"
+                new_starboard_msg_id, new_reply_id = await self._create_starboard_post_for_migration(
+                    message, new_starboard_channel, content
+                )
+
+                if new_starboard_msg_id:
+                    # Update the database entry with new IDs
+                    entry['starboard_message_id'] = new_starboard_msg_id
+                    entry['starboard_reply_id'] = new_reply_id
+                    await self.db_manager.update_starboard_entry(entry)
+                    migrated_count += 1
+                    self.logger.info(f"Migrated starboard entry for message {message.id} -> new starboard msg {new_starboard_msg_id}")
+                else:
+                    failed_count += 1
+
+                await asyncio.sleep(0.5)  # Rate limiting
+
+            except discord.NotFound:
+                # Original message deleted -> create tombstone
+                self.logger.info(f"Original message {entry['original_message_id']} not found — creating tombstone.")
+                tomb = await self._create_tombstone(new_starboard_channel, entry['original_message_id'])
+                if tomb:
+                    entry['starboard_message_id'] = tomb.id
+                    entry['starboard_reply_id'] = None
+                    await self.db_manager.update_starboard_entry(entry)
+                    tombstone_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                self.logger.error(f"Failed to migrate starboard entry for {entry['original_message_id']}: {e}")
+                failed_count += 1
+
+            progress['done'] += 1
+
+        # Stop the periodic status task and await it to finish
+        stop_event.set()
+        try:
+            await status_task
+        except Exception:
+            # If the status task was cancelled or errored, ignore
+            pass
+
+        await ctx.send(
+            f"✅ Starboard migration complete!\n"
+            f"Migrated: {migrated_count}, Tombstones: {tombstone_count}, Skipped (under threshold): {skipped_count}, Failed: {failed_count}"
+        )
+        self._fast_mode = False
+
+    async def _create_starboard_post_for_migration(
+        self,
+        message: discord.Message,
+        starboard_channel: discord.TextChannel,
+        content: str
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Creates a new starboard post for migration purposes.
+
+        Unlike create_new_starboard_post, this returns the IDs instead of saving to DB,
+        allowing the caller to update an existing entry.
+
+        Args:
+            message (discord.Message): The original message.
+            starboard_channel (discord.TextChannel): The new starboard channel.
+            content (str): The content string.
+
+        Returns:
+            Tuple[Optional[int], Optional[int]]: (starboard_message_id, reply_context_id) or (None, None) on failure.
+        """
+        # If it's a reply, handle the two-message system
+        if message.reference and message.reference.message_id and isinstance(message.channel, discord.TextChannel):
+            reply_files: List[discord.File] = []
+            main_files: List[discord.File] = []
+            reply_context_message: Optional[discord.Message] = None
+            try:
+                replied_to_message = await message.channel.fetch_message(message.reference.message_id)
+
+                # 1. Post the context of the replied-to message.
+                reply_embed, reply_files = await self.create_starboard_embed_and_files(replied_to_message)
+                reply_context_message = await starboard_channel.send(embed=reply_embed, files=reply_files)
+
+                # 2. Post the main starred message as a reply to the context message.
+                main_embed, main_files = await self.create_starboard_embed_and_files(message)
+                starboard_message = await reply_context_message.reply(content=content, embed=main_embed, files=main_files)
+
+                return starboard_message.id, reply_context_message.id
+
+            except discord.NotFound:
+                # If the replied-to message is gone, fall through to single message post
+                self.logger.debug(f"Replied-to message not found for {message.id}, falling back to single post.")
+            except discord.HTTPException as e:
+                self.logger.error(f"Failed to create two-part starboard post for migration: {e}")
+                # Clean up partially created reply context if it exists
+                if reply_context_message:
+                    try:
+                        await reply_context_message.delete()
+                    except discord.HTTPException:
+                        pass
+                return None, None
+            finally:
+                for file in reply_files:
+                    file.close()
+                for file in main_files:
+                    file.close()
+
+        # Single message post (non-reply or fallback)
+        embed, files = await self.create_starboard_embed_and_files(message)
+        try:
+            starboard_message = await starboard_channel.send(content=content, embed=embed, files=files)
+            return starboard_message.id, None
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to create single starboard post for migration: {e}")
+            return None, None
+        finally:
+            for file in files:
+                file.close()
 
     async def _fix_impl(self, ctx: commands.Context) -> None:
         """Implementation of the fix logic."""
@@ -952,7 +1215,7 @@ class Starboard(BaseCog):
                 raise last_exc
             return None
 
-    async def _status_editor(self, status_message: discord.Message, progress: Dict[str, Any], stop_event: asyncio.Event, interval: float = 30.0) -> None:
+    async def _status_editor(self, status_message: discord.Message, progress: Dict[str, Any], stop_event: asyncio.Event, interval: float = 30.0, operation: str = "fix") -> None:
         """Edit a single status message every `interval` seconds until `stop_event` is set.
 
         Args:
@@ -960,6 +1223,7 @@ class Starboard(BaseCog):
             progress (Dict[str, Any]): A mutable dict with keys 'done', 'total', and 'elapsed'.
             stop_event (asyncio.Event): Event to signal stopping.
             interval (float): Update interval in seconds.
+            operation (str): The operation name to display (e.g., 'fix', 'migration').
         """
         try:
             while not stop_event.is_set():
@@ -970,7 +1234,7 @@ class Starboard(BaseCog):
                 elapsed = progress.get('elapsed', 0)
                 try:
                     self.logger.debug(f"Editing status message: processed {done}/{total}, elapsed {elapsed}s")
-                    await status_message.edit(content=f"Starboard fix running... processed {done}/{total}. Elapsed: {elapsed}s. Please wait.")
+                    await status_message.edit(content=f"Starboard {operation} running... processed {done}/{total}. Elapsed: {elapsed}s. Please wait.")
                 except Exception:
                     # Ignore edit/send errors; keep looping until stop_event is set
                     pass
