@@ -9,6 +9,10 @@ This is the primary entry point for the Bot. Its responsibilities are:
 
 This script acts as the "launcher" for the bot; the core logic, event handlers,
 and command processing are defined within the `CoreBot` class itself.
+
+Lifecycle Phases handled here:
+    INIT: Logging, config validation, database setup
+    LOAD: Cog module loading
 """
 
 import asyncio
@@ -60,28 +64,14 @@ async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> No
 
             command = line.lower()
             if command == 'exit':
-                logging.info("'exit' command received from console. Initiating shutdown.")
-                # Unload extensions to cleanup resources (like aiohttp sessions in Starboard)
-                for ext in list(bot.extensions.keys()):
-                    try:
-                        await bot.unload_extension(ext)
-                    except Exception as e:
-                        logging.error(f"Error unloading extension {ext}: {e}")
-
-                # Use the lifecycle handler to send the "Goodnight" message and close
+                logging.info("'exit' command received from console.")
+                # Lifecycle handler handles cog unloading, shutdown message, and cleanup
                 await shutdown_handler(signal.SIGINT, bot, is_restart=False, log_path=log_path)
                 break
             elif command == 'restart':
-                logging.info("'restart' command received from console. Initiating soft restart.")
-                # Unload extensions ensuring clean reload state
-                for ext in list(bot.extensions.keys()):
-                    try:
-                        await bot.unload_extension(ext)
-                    except Exception as e:
-                        logging.error(f"Error unloading extension {ext}: {e}")
-
+                logging.info("'restart' command received from console.")
                 bot.restart_signal = True
-                # Use the lifecycle handler to send the "Rebooting" message and close
+                # Lifecycle handler handles cog unloading, restart message, and cleanup
                 await shutdown_handler(signal.SIGINT, bot, is_restart=True, log_path=log_path)
                 break
             elif command == 'reload':
@@ -146,8 +136,8 @@ async def run_bot_lifecycle() -> None:
         assert mod_lifecycle is not None
         assert mod_logging is not None
 
-        # 3. Setup Logging
-        # Safe to call repeatedly as it clears existing handlers
+        # ─── INIT ───
+        # Setup Logging (safe to call repeatedly as it clears existing handlers)
         log_level = "DEBUG" if config.DEV_MODE else "INFO"
         log_path = mod_logging.setup_logging(
             level=log_level,
@@ -156,13 +146,15 @@ async def run_bot_lifecycle() -> None:
             retention_count=config.LOG_RETENTION_COUNT
         )
 
-        # 4. Configuration Validation
+        # ─── INIT ───
+        mod_lifecycle.log_phase("INIT")
+
+        # Configuration Validation
         if not config.TOKEN:
             logging.critical("DISCORD_TOKEN missing.")
             sys.exit("Critical error: DISCORD_TOKEN not configured.")
 
-        # 5. Initialize Bot
-        # Using the class from the potentially reloaded module
+        # Initialize Bot (using the class from the potentially reloaded module)
         bot = mod_bot.CoreBot()
 
         # Initialize and attach resource tracker
@@ -174,23 +166,26 @@ async def run_bot_lifecycle() -> None:
             raise ValueError("DB_PATH cannot be None.")
         db_manager = await mod_db.DatabaseManager.create(config.DB_PATH)
         bot.db_manager = db_manager
+        logging.info("Database connection established")
 
-        # 6. Load Cogs
+        # ─── LOAD ───
+        mod_lifecycle.log_phase("LOAD")
+
         try:
             async with bot:
                 cogs_to_load = mod_extensions.discover_cogs(config.COGS_PATH)
-                logging.info(f"Found {len(cogs_to_load)} cogs.")
+                logging.info(f"Found {len(cogs_to_load)} cogs to load")
                 for extension in cogs_to_load:
                     try:
                         await bot.load_extension(extension)
+                        # Extract cog name from extension path (e.g., "cogs.admin" -> "Admin")
+                        cog_name = extension.split('.')[-1].title()
+                        logging.info(f"  ✓ {cog_name}")
                     except Exception:
-                        logging.error(f'Failed to load extension {extension}.', exc_info=True)
+                        cog_name = extension.split('.')[-1].title()
+                        logging.error(f"  ✗ {cog_name} - Failed to load", exc_info=True)
 
-                # Start resource tracking after cogs are loaded
-                await bot.resource_tracker.start()
-
-                # 7. Start Console Consumer
-                # Pass the current bot instance to the consumer AND the shutdown handler
+                # Start Console Consumer
                 consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler, log_path))
 
                 # Setup signal handlers for this iteration
@@ -208,8 +203,9 @@ async def run_bot_lifecycle() -> None:
                         except NotImplementedError:
                             pass
 
+                # Connect to Discord (CONNECT/READY/POST-READY phases handled in lifecycle.startup_handler)
                 try:
-                    logging.info(f"{config.BOT_NAME} starting...")
+                    logging.info(f"Connecting to Discord as {config.BOT_NAME}...")
                     await bot.start(config.TOKEN)
                 except KeyboardInterrupt:
                     # Handle Ctrl+C directly if signal handler didn't catch it
@@ -226,7 +222,7 @@ async def run_bot_lifecycle() -> None:
         except Exception as e:
             logging.error(f"Bot encountered an error: {e}", exc_info=True)
 
-        # 8. Check for Restart Signal
+        # Check for Restart Signal
         if bot.restart_signal:
             logging.info("Restart signal received. Purging modules...")
             mod_lifecycle.purge_modules()

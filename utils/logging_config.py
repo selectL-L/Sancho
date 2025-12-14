@@ -118,7 +118,7 @@ class ResourceTracker:
         self.interval_minutes = interval_minutes
         self._task: Optional[asyncio.Task] = None
         self.start_time: float = time.time()
-        self._logger = logging.getLogger(__name__)
+        self._logger = logging.getLogger("logging")
 
     def get_current_usage(self) -> Dict[str, float]:
         """Returns LIVE CPU and RAM usage (not cached).
@@ -202,26 +202,27 @@ class ResourceTracker:
         self._logger.info("ResourceTracker stopped")
 
     def _log_history_summary(self) -> None:
-        """Logs the full usage history as an INFO message."""
+        """Logs a compact session summary."""
         if not self.usage_history:
             return
 
-        lines = [
-            "",
-            "=" * 70,
-            "RESOURCE USAGE HISTORY (SESSION SUMMARY)",
-            "=" * 70,
-            f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<15}",
-            "-" * 70
-        ]
+        # Extract key metrics
+        startup = self.usage_history[0] if self.usage_history else None
+        shutdown = self.usage_history[-1] if len(self.usage_history) > 1 else None
 
-        for entry in self.usage_history:
-            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            label = entry.get('label') or ""
-            lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<15}")
+        # Calculate peak values across all snapshots
+        peak_cpu = max(e['cpu'] for e in self.usage_history)
+        peak_ram = max(e['ram'] for e in self.usage_history)
 
-        lines.append("=" * 70)
-        self._logger.info("\n".join(lines))
+        # Build compact summary
+        parts = [f"Snapshots: {len(self.usage_history)}"]
+        if startup:
+            parts.append(f"Start: {startup['cpu']:.1f}% CPU, {startup['ram']:.1f}MB RAM")
+        if shutdown and shutdown != startup:
+            parts.append(f"End: {shutdown['cpu']:.1f}% CPU, {shutdown['ram']:.1f}MB RAM")
+        parts.append(f"Peak: {peak_cpu:.1f}% CPU, {peak_ram:.1f}MB RAM")
+
+        self._logger.info(f"Session summary: {' | '.join(parts)}")
 
     def format_history_for_export(self) -> str:
         """Formats history as a string for file export.
@@ -276,6 +277,30 @@ def cleanup_old_logs(logs_dir: str, retention_count: int) -> None:
         logging.error(f"Error cleaning up old logs: {e}")
 
 
+def _close_file_handlers() -> None:
+    """Closes and removes all file handlers from the root logger.
+
+    This must be called before renaming the log file to release the file lock.
+    Handles both standard FileHandlers and AsyncFileHandler (which wraps a
+    RotatingFileHandler internally).
+    """
+    root_logger = logging.getLogger()
+    handlers_to_remove = []
+
+    for handler in root_logger.handlers[:]:
+        # Check for our custom AsyncFileHandler
+        if isinstance(handler, AsyncFileHandler):
+            # Close the internal RotatingFileHandler
+            handler._handler.close()
+            handlers_to_remove.append(handler)
+        elif isinstance(handler, logging.FileHandler):
+            handler.close()
+            handlers_to_remove.append(handler)
+
+    for handler in handlers_to_remove:
+        root_logger.removeHandler(handler)
+
+
 def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
     """Renames the log file to include runtime in the filename.
 
@@ -289,6 +314,9 @@ def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
     if not os.path.exists(log_path):
         logging.warning(f"Log file not found for finalization: {log_path}")
         return None
+
+    # Close file handlers to release the file lock before renaming
+    _close_file_handlers()
 
     try:
         # Format runtime as Xh-Ym-Zs

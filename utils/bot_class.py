@@ -462,3 +462,17 @@ class CoreBot(commands.Bot):
                 logging.error(f'Failed to reload extension {extension}.', exc_info=True)
 
         logging.info("Finished reloading cogs.")
+
+    async def ready_all_cogs(self) -> None:
+        """Calls cog_ready() on all loaded cogs.
+
+        This should be called after the bot is fully connected and ready,
+        allowing cogs to start their background tasks and recovery operations.
+        """
+        for cog in self.cogs.values():
+            cog_ready_method = getattr(cog, 'cog_ready', None)
+            if cog_ready_method is not None:
+                try:
+                    await cog_ready_method()
+                except Exception as e:
+                    logging.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)

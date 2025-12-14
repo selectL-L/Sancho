@@ -57,8 +57,12 @@ class Reminders(BaseCog):
         # Event to wake up the scheduler when a new reminder is added/edited/deleted.
         self.scheduler_event = asyncio.Event()
 
-    async def cog_load(self) -> None:
-        """Starts the reminder scheduler when the cog is loaded."""
+    async def cog_ready(self) -> None:
+        """Starts the reminder scheduler after the bot is fully ready.
+
+        This runs in POST-READY phase to ensure Discord connection is established
+        before attempting to send any missed reminder notifications.
+        """
         self.logger.info("Starting reminder system...")
         # Process missed reminders first (Catch-Up Phase).
         await self._process_missed_reminders()

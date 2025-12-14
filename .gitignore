@@ -207,11 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 # Local paths that are created/required (currently empty)
+/logs
 
 # Local files that are created/required
-info.env
+*.env
 *.db
 *.db.backup
-*.log
-status_history_*.txt
-*.spec
