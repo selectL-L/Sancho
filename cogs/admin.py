@@ -9,14 +9,12 @@ import os
 import tempfile
 import time
 import typing
-import asyncio
 from datetime import timedelta
 from typing import List, Optional
 
 import discord
-import psutil
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
@@ -120,93 +118,6 @@ class AdminCog(BaseCog):
         super().__init__(bot)
         assert bot.db_manager is not None
         self.db_manager = bot.db_manager
-        self.process = psutil.Process()
-        self.process.cpu_percent()  # Initialize for accurate subsequent readings
-        self.usage_history = []
-        self.record_usage.start()
-
-    async def cog_unload(self) -> None:
-        """Cancels the usage recording task when the cog is unloaded."""
-        self.take_snapshot(label="Shutdown")
-        self.dump_usage_history()
-        self.record_usage.cancel()
-
-    def dump_usage_history(self) -> None:
-        """Dumps the usage history to a file and manages old files."""
-        if not self.usage_history:
-            return
-
-        try:
-            # Calculate runtime
-            uptime_seconds = time.time() - self.bot.start_time
-            uptime_str = str(timedelta(seconds=int(uptime_seconds))).replace(":", "-")
-
-            timestamp_str = discord.utils.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"status_history_{timestamp_str}_runtime-{uptime_str}.txt"
-
-            # Generate content
-            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<10}"]
-            lines.append("-" * 65)
-            for entry in self.usage_history:
-                ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-                label = entry.get('label') or ""
-                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<10}")
-
-            # Write to file
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-
-            # Manage old files
-            self.cleanup_old_history_files()
-        except Exception as e:
-            logging.error(f"Failed to dump usage history: {e}")
-
-    def cleanup_old_history_files(self) -> None:
-        """Keeps only the 5 most recent status history files."""
-        try:
-            files = [f for f in os.listdir('.') if f.startswith("status_history_") and f.endswith(".txt")]
-            # Sort by modification time (oldest first)
-            files.sort(key=lambda x: os.path.getmtime(x))
-
-            while len(files) > 5:
-                file_to_remove = files.pop(0)
-                os.remove(file_to_remove)
-        except Exception as e:
-            logging.error(f"Failed to cleanup old history files: {e}")
-
-    def take_snapshot(self, label: typing.Optional[str] = None) -> None:
-        """Takes a snapshot of the current resource usage.
-
-        Args:
-            label (typing.Optional[str]): An optional label for the snapshot.
-        """
-        try:
-            memory_info = self.process.memory_info()
-            cpu_usage = self.process.cpu_percent(interval=None)
-            ram_usage = memory_info.rss / (1024 * 1024)
-            timestamp = discord.utils.utcnow()
-            self.usage_history.append({
-                'timestamp': timestamp,
-                'cpu': cpu_usage,
-                'ram': ram_usage,
-                'label': label
-            })
-        except Exception as e:
-            logging.error(f"Error recording usage stats: {e}")
-
-    @tasks.loop(minutes=30)
-    async def record_usage(self) -> None:
-        """Records CPU and RAM usage every 30 minutes."""
-        self.take_snapshot()
-
-    @record_usage.before_loop
-    async def before_record_usage(self) -> None:
-        """Waits for the bot to be ready before starting the usage recording loop."""
-        await self.bot.wait_until_ready()
-        # Take startup snapshot
-        self.take_snapshot(label="Startup")
-        # Wait 5 minutes before starting the regular loop
-        await asyncio.sleep(300)
 
     @commands.hybrid_command(
         name="global_limit",
@@ -516,20 +427,24 @@ class AdminCog(BaseCog):
             ctx (commands.Context): The command context.
             mode (typing.Optional[str]): 'history' to view historical resource usage.
         """
+        # Get resource tracker from bot
+        resource_tracker = getattr(self.bot, 'resource_tracker', None)
+
         if mode and mode.lower() == "history":
-            if not self.usage_history:
-                await ctx.send("No historical data recorded yet (updates every 30 mins).")
+            if not resource_tracker:
+                await ctx.send("Resource tracker is not available.")
                 return
 
-            lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<10}"]
-            lines.append("-" * 65)
-            for entry in self.usage_history:
-                ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-                label = entry.get('label') or ""
-                lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<10}")
+            history = resource_tracker.get_history()
+            if not history:
+                await ctx.send("No historical data recorded yet (updates every 15 mins).")
+                return
+
+            # Format history for export
+            history_text = resource_tracker.format_history_for_export()
 
             with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_usage_history.txt") as f:
-                f.write("\n".join(lines))
+                f.write(history_text)
                 temp_path = f.name
 
             await ctx.send("Historical resource usage attached:", file=discord.File(temp_path, filename="usage_history.txt"))
@@ -560,10 +475,15 @@ class AdminCog(BaseCog):
         total_cogs = len(discover_cogs(config.COGS_PATH))
         cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
 
-        # Resource Usage
-        memory_info = self.process.memory_info()
-        cpu_usage = self.process.cpu_percent(interval=None)  # Use interval=None for non-blocking call
-        ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
+        # Resource Usage - Get LIVE values from resource tracker
+        if resource_tracker:
+            usage = resource_tracker.get_current_usage()
+            cpu_str = f"{usage['cpu']:.1f}%"
+            ram_str = f"{usage['ram']:.2f} MB"
+        else:
+            # Fallback if resource tracker is not available
+            cpu_str = "N/A"
+            ram_str = "N/A"
 
         # Create status embed.
         embed = discord.Embed(
@@ -591,8 +511,8 @@ class AdminCog(BaseCog):
 
         embed.add_field(
             name="Resource Usage",
-            value=f"**CPU:** `{cpu_usage:.1f}%`\n"
-            f"**RAM:** `{ram_usage:.2f} MB`",
+            value=f"**CPU:** `{cpu_str}`\n"
+            f"**RAM:** `{ram_str}`",
             inline=True
         )
 

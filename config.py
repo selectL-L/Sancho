@@ -128,7 +128,7 @@ def check_and_create_env_file() -> None:
             except Exception as e:
                 logging.critical(f"Failed to update {ENV_PATH}. Data preserved: {current_values}")
                 print(f"CRITICAL ERROR: Failed to update {ENV_PATH}.")
-                print(f"Your existing data has been logged to {LOG_PATH}.")
+                print("Your existing data has been logged. Please check the logs directory.")
                 print(f"Error: {e}")
                 sys.exit("Exiting: Failed to update configuration file.")
 
@@ -146,7 +146,9 @@ BOT_NAME = os.getenv('BOT_NAME')
 
 # Dependent Paths
 # These paths depend on the BOT_NAME environment variable.
-LOG_PATH = os.path.join(APP_PATH, f'{BOT_NAME}.log')
+LOGS_DIR = os.path.join(APP_PATH, 'logs')
+LOG_RETENTION_COUNT = 10  # Keep 10 completed logs + current
+RESOURCE_TRACK_INTERVAL = 15  # Minutes between resource usage snapshots
 
 # Database Path Discovery
 # We scan for an existing .db file to use, regardless of its name.

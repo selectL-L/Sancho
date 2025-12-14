@@ -30,6 +30,7 @@ from utils.lifecycle import startup_handler
 # to avoid circular imports at runtime.
 if TYPE_CHECKING:
     from utils.database import DatabaseManager
+    from utils.logging_config import ResourceTracker
 
 
 class CoreBot(commands.Bot):
@@ -60,6 +61,7 @@ class CoreBot(commands.Bot):
         )
 
         self.db_manager: Optional[DatabaseManager] = None
+        self.resource_tracker: Optional[ResourceTracker] = None
         self.console_task: Optional[asyncio.Task] = None
         self.restart_signal: bool = False
         self.start_time: float = time.time()

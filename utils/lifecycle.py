@@ -2,8 +2,8 @@
 
 Handles the bot's startup and shutdown sequences.
 
-This includes sending startup/shutdown messages to a configured channel and
-detecting system reboots on Linux systems.
+This includes sending startup/shutdown messages to a configured channel,
+detecting system reboots on Linux systems, and finalizing log files.
 """
 
 import logging
@@ -11,11 +11,13 @@ import os
 import signal
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+import time
+from typing import Optional, TYPE_CHECKING
 
 import discord
 
 import config
+from utils.logging_config import finalize_log
 
 if TYPE_CHECKING:
     from .bot_class import CoreBot
@@ -88,15 +90,25 @@ async def startup_handler(bot: "CoreBot") -> None:
             logging.error(f"Failed to send startup message: {e}")
 
 
-async def shutdown_handler(sig: signal.Signals, bot: "CoreBot", is_restart: bool = False) -> None:
+async def shutdown_handler(
+    sig: signal.Signals,
+    bot: "CoreBot",
+    is_restart: bool = False,
+    log_path: Optional[str] = None
+) -> None:
     """Handles the graceful shutdown of the bot when a signal is received.
 
     Args:
         sig (signal.Signals): The signal received.
         bot (CoreBot): The bot instance.
         is_restart (bool): Whether this is a soft restart (triggers reboot message).
+        log_path (Optional[str]): Path to the current log file for finalization.
     """
     logging.info(f"Received exit signal {sig.name}...")
+
+    # Stop resource tracker and log history (if available)
+    if hasattr(bot, 'resource_tracker') and bot.resource_tracker:
+        await bot.resource_tracker.stop()
 
     # Determine the shutdown reason and prepare the message.
     rebooting = is_system_rebooting() or is_restart
@@ -136,6 +148,11 @@ async def shutdown_handler(sig: signal.Signals, bot: "CoreBot", is_restart: bool
     logging.info("Closing connections...")
     await bot.close()
     logging.info("Discord connection has been shut down gracefully.")
+
+    # Finalize the log file with runtime (must be done after all logging)
+    if log_path:
+        runtime_seconds = time.time() - bot.start_time
+        finalize_log(log_path, runtime_seconds)
 
 
 def purge_modules() -> None:

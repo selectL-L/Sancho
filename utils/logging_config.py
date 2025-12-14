@@ -5,12 +5,20 @@ This module configures the logging for the entire application.
 It sets up a structured logging format that includes a timestamp, log level,
 logger name, and the message. It also configures file-based logging with
 log rotation to manage file sizes.
+
+Additionally, this module provides the ResourceTracker class for monitoring
+CPU and RAM usage over time, integrated with the logging system.
 """
-import logging
-from logging.handlers import RotatingFileHandler
-import sys
 import asyncio
-from typing import Literal, Optional
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from typing import Any, Dict, List, Literal, Optional
+
+import psutil
 
 
 class AsyncFileHandler(logging.Handler):
@@ -85,21 +93,249 @@ class NoisyAsyncioFilter(logging.Filter):
         return True
 
 
+class ResourceTracker:
+    """Tracks CPU and RAM usage over time, integrated with the logging system.
+
+    This class monitors system resources at regular intervals and maintains
+    an in-memory history for the current session. On shutdown, the history
+    is appended to the log file.
+
+    Attributes:
+        interval_minutes: Minutes between automatic snapshots.
+        usage_history: List of recorded usage snapshots.
+        start_time: Timestamp when tracking began.
+    """
+
+    def __init__(self, interval_minutes: int = 15):
+        """Initializes the ResourceTracker.
+
+        Args:
+            interval_minutes: Minutes between automatic snapshots.
+        """
+        self.process = psutil.Process()
+        self.process.cpu_percent()  # Prime the first reading for accuracy
+        self.usage_history: List[Dict[str, Any]] = []
+        self.interval_minutes = interval_minutes
+        self._task: Optional[asyncio.Task] = None
+        self.start_time: float = time.time()
+        self._logger = logging.getLogger(__name__)
+
+    def get_current_usage(self) -> Dict[str, float]:
+        """Returns LIVE CPU and RAM usage (not cached).
+
+        This method always fetches fresh values from the system.
+
+        Returns:
+            Dict containing 'cpu' (percentage) and 'ram' (MB) keys.
+        """
+        try:
+            memory_info = self.process.memory_info()
+            cpu_usage = self.process.cpu_percent(interval=None)
+            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
+            return {'cpu': cpu_usage, 'ram': ram_usage}
+        except Exception as e:
+            self._logger.error(f"Error getting current usage: {e}")
+            return {'cpu': 0.0, 'ram': 0.0}
+
+    def take_snapshot(self, label: Optional[str] = None) -> None:
+        """Records a snapshot of current resource usage to history.
+
+        Args:
+            label: Optional label for the snapshot (e.g., 'Startup', 'Shutdown').
+        """
+        try:
+            usage = self.get_current_usage()
+            timestamp = datetime.utcnow()
+            self.usage_history.append({
+                'timestamp': timestamp,
+                'cpu': usage['cpu'],
+                'ram': usage['ram'],
+                'label': label
+            })
+            self._logger.debug(f"Resource snapshot: CPU={usage['cpu']:.1f}%, RAM={usage['ram']:.2f}MB, Label={label}")
+        except Exception as e:
+            self._logger.error(f"Error recording usage snapshot: {e}")
+
+    def get_history(self) -> List[Dict[str, Any]]:
+        """Returns the usage history list.
+
+        Returns:
+            List of snapshot dictionaries with timestamp, cpu, ram, and label.
+        """
+        return self.usage_history.copy()
+
+    async def _tracking_loop(self) -> None:
+        """Background task that takes snapshots at regular intervals."""
+        try:
+            # Wait 5 minutes before starting regular tracking
+            await asyncio.sleep(300)
+            while True:
+                self.take_snapshot()
+                await asyncio.sleep(self.interval_minutes * 60)
+        except asyncio.CancelledError:
+            pass
+
+    async def start(self) -> None:
+        """Starts the background tracking task.
+
+        Should be called after the bot is ready. Takes an initial 'Startup' snapshot.
+        """
+        self.take_snapshot(label="Startup")
+        self._task = asyncio.create_task(self._tracking_loop())
+        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} minutes)")
+
+    async def stop(self) -> None:
+        """Stops tracking and takes a final 'Shutdown' snapshot.
+
+        Also logs the full session history to the log file.
+        """
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+        self.take_snapshot(label="Shutdown")
+        self._log_history_summary()
+        self._logger.info("ResourceTracker stopped")
+
+    def _log_history_summary(self) -> None:
+        """Logs the full usage history as an INFO message."""
+        if not self.usage_history:
+            return
+
+        lines = [
+            "",
+            "=" * 70,
+            "RESOURCE USAGE HISTORY (SESSION SUMMARY)",
+            "=" * 70,
+            f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<15}",
+            "-" * 70
+        ]
+
+        for entry in self.usage_history:
+            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+            label = entry.get('label') or ""
+            lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<15}")
+
+        lines.append("=" * 70)
+        self._logger.info("\n".join(lines))
+
+    def format_history_for_export(self) -> str:
+        """Formats history as a string for file export.
+
+        Returns:
+            Formatted string representation of the usage history.
+        """
+        if not self.usage_history:
+            return "No historical data recorded."
+
+        lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<15}"]
+        lines.append("-" * 70)
+
+        for entry in self.usage_history:
+            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+            label = entry.get('label') or ""
+            lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<15}")
+
+        return "\n".join(lines)
+
+
+def cleanup_old_logs(logs_dir: str, retention_count: int) -> None:
+    """Removes oldest log files beyond the retention count.
+
+    Only removes completed logs (those with 'runtime' in filename).
+    The current active log (without runtime) is preserved.
+
+    Args:
+        logs_dir: Path to the logs directory.
+        retention_count: Number of completed logs to keep.
+    """
+    if not os.path.exists(logs_dir):
+        return
+
+    try:
+        # Find completed logs (those with runtime in filename)
+        completed_logs = [
+            f for f in os.listdir(logs_dir)
+            if f.endswith('.log') and 'runtime' in f
+        ]
+
+        # Sort by modification time (oldest first)
+        completed_logs.sort(key=lambda x: os.path.getmtime(os.path.join(logs_dir, x)))
+
+        # Remove oldest logs beyond retention count
+        while len(completed_logs) > retention_count:
+            file_to_remove = completed_logs.pop(0)
+            os.remove(os.path.join(logs_dir, file_to_remove))
+            logging.info(f"Removed old log file: {file_to_remove}")
+
+    except Exception as e:
+        logging.error(f"Error cleaning up old logs: {e}")
+
+
+def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
+    """Renames the log file to include runtime in the filename.
+
+    Args:
+        log_path: Current path to the log file.
+        runtime_seconds: Total runtime in seconds.
+
+    Returns:
+        The new log file path, or None if renaming failed.
+    """
+    if not os.path.exists(log_path):
+        logging.warning(f"Log file not found for finalization: {log_path}")
+        return None
+
+    try:
+        # Format runtime as Xh-Ym-Zs
+        hours, remainder = divmod(int(runtime_seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        runtime_str = f"{hours}h-{minutes}m-{seconds}s"
+
+        # Build new filename by inserting runtime before .log extension
+        base, ext = os.path.splitext(log_path)
+        new_path = f"{base}_runtime-{runtime_str}{ext}"
+
+        os.rename(log_path, new_path)
+        logging.info(f"Log file finalized: {os.path.basename(new_path)}")
+        return new_path
+
+    except Exception as e:
+        logging.error(f"Error finalizing log file: {e}")
+        return None
+
+
 def setup_logging(
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO",
     log_to_file: bool = True,
-    log_file: Optional[str] = None
-):
-    """
-    Sets up logging for the entire application.
+    logs_dir: Optional[str] = None,
+    bot_name: Optional[str] = None,
+    retention_count: int = 10
+) -> Optional[str]:
+    """Sets up logging for the entire application.
 
     This function configures:
     - A console handler with colored output for immediate feedback.
-    - An asynchronous, rotating file handler to save logs to `log_file`
+    - An asynchronous, rotating file handler to save logs to a timestamped file
       without blocking the bot's operations.
     - Clears any existing handlers to prevent duplicate log entries.
     - Sets the log levels for noisy libraries like discord.py to a higher
       threshold to reduce spam.
+    - Cleans up old log files beyond the retention count.
+
+    Args:
+        level: The logging level.
+        log_to_file: Whether to log to a file.
+        logs_dir: Directory to store log files.
+        bot_name: Bot name for log filename prefix.
+        retention_count: Number of completed logs to retain.
+
+    Returns:
+        The path to the created log file, or None if file logging is disabled.
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
 
@@ -112,14 +348,29 @@ def setup_logging(
     console_handler.setFormatter(CustomFormatter())
     root_logger.addHandler(console_handler)
 
+    log_file_path: Optional[str] = None
+
     # Asynchronous File Handler
     if log_to_file:
-        if not log_file:
-            raise ValueError("log_file must be provided when log_to_file is True.")
+        if not logs_dir:
+            raise ValueError("logs_dir must be provided when log_to_file is True.")
+        if not bot_name:
+            raise ValueError("bot_name must be provided when log_to_file is True.")
+
+        # Create logs directory if it doesn't exist
+        os.makedirs(logs_dir, exist_ok=True)
+
+        # Clean up old logs before creating new one
+        cleanup_old_logs(logs_dir, retention_count)
+
+        # Create timestamped log filename
+        timestamp_str = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        log_filename = f"{bot_name}_{timestamp_str}.log"
+        log_file_path = os.path.join(logs_dir, log_filename)
 
         # Use the async file handler to prevent I/O from blocking the event loop.
         file_handler = AsyncFileHandler(
-            log_file,
+            log_file_path,
             maxBytes=5*1024*1024,  # 5 MB per file
             backupCount=2         # Keep 2 backup files
         )
@@ -137,3 +388,5 @@ def setup_logging(
     logging.getLogger('asyncio').addFilter(NoisyAsyncioFilter())
 
     root_logger.info("Logging configured with console and rotating file handlers.")
+
+    return log_file_path
