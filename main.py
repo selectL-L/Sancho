@@ -44,12 +44,13 @@ def console_reader(loop: asyncio.AbstractEventLoop) -> None:
             break
 
 
-async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
+async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> None:
     """Consumes commands from the global console queue.
 
     Args:
         bot (CoreBot): The current bot instance.
         shutdown_handler (Callable): The function to call for graceful shutdown.
+        log_path (str): Path to the current log file for finalization.
     """
     try:
         while True:
@@ -68,7 +69,7 @@ async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
                         logging.error(f"Error unloading extension {ext}: {e}")
 
                 # Use the lifecycle handler to send the "Goodnight" message and close
-                await shutdown_handler(signal.SIGINT, bot, is_restart=False)
+                await shutdown_handler(signal.SIGINT, bot, is_restart=False, log_path=log_path)
                 break
             elif command == 'restart':
                 logging.info("'restart' command received from console. Initiating soft restart.")
@@ -81,7 +82,7 @@ async def console_consumer(bot: Any, shutdown_handler: Any) -> None:
 
                 bot.restart_signal = True
                 # Use the lifecycle handler to send the "Rebooting" message and close
-                await shutdown_handler(signal.SIGINT, bot, is_restart=True)
+                await shutdown_handler(signal.SIGINT, bot, is_restart=True, log_path=log_path)
                 break
             elif command == 'reload':
                 logging.info("'reload' command received. Reloading cogs...")
@@ -148,7 +149,12 @@ async def run_bot_lifecycle() -> None:
         # 3. Setup Logging
         # Safe to call repeatedly as it clears existing handlers
         log_level = "DEBUG" if config.DEV_MODE else "INFO"
-        mod_logging.setup_logging(level=log_level, log_file=config.LOG_PATH)
+        log_path = mod_logging.setup_logging(
+            level=log_level,
+            logs_dir=config.LOGS_DIR,
+            bot_name=config.BOT_NAME,
+            retention_count=config.LOG_RETENTION_COUNT
+        )
 
         # 4. Configuration Validation
         if not config.TOKEN:
@@ -158,6 +164,10 @@ async def run_bot_lifecycle() -> None:
         # 5. Initialize Bot
         # Using the class from the potentially reloaded module
         bot = mod_bot.CoreBot()
+
+        # Initialize and attach resource tracker
+        resource_tracker = mod_logging.ResourceTracker(interval_minutes=config.RESOURCE_TRACK_INTERVAL)
+        bot.resource_tracker = resource_tracker
 
         # Attach database manager
         if config.DB_PATH is None:
@@ -176,9 +186,12 @@ async def run_bot_lifecycle() -> None:
                     except Exception:
                         logging.error(f'Failed to load extension {extension}.', exc_info=True)
 
+                # Start resource tracking after cogs are loaded
+                await bot.resource_tracker.start()
+
                 # 7. Start Console Consumer
                 # Pass the current bot instance to the consumer AND the shutdown handler
-                consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler))
+                consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler, log_path))
 
                 # Setup signal handlers for this iteration
                 # Windows doesn't support add_signal_handler fully, but we try for graceful SIGINT
@@ -186,7 +199,12 @@ async def run_bot_lifecycle() -> None:
                     for s in (signal.SIGINT, signal.SIGTERM):
                         try:
                             loop.remove_signal_handler(s)  # Clear old handlers
-                            loop.add_signal_handler(s, lambda s=s: asyncio.create_task(mod_lifecycle.shutdown_handler(s, bot)))
+                            loop.add_signal_handler(
+                                s,
+                                lambda s=s: asyncio.create_task(
+                                    mod_lifecycle.shutdown_handler(s, bot, is_restart=False, log_path=log_path)
+                                )
+                            )
                         except NotImplementedError:
                             pass
 
