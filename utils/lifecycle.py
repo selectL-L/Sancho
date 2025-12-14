@@ -1,11 +1,19 @@
 """utils/lifecycle.py
 
-Handles the bot's startup and shutdown sequences.
+Handles the bot's startup and shutdown sequences with structured phases.
 
-This includes sending startup/shutdown messages to a configured channel,
-detecting system reboots on Linux systems, and finalizing log files.
+Startup Phases:
+    INIT: Logging, config validation, database setup
+    LOAD: Cog module loading
+    CONNECT: Discord gateway connection, app command sync, startup message
+    READY: "Bot is ready!", cog background tasks, resource tracker start
+
+Shutdown Phases:
+    SHUTDOWN: Signal received, cog cleanup, resource tracker stop
+    GOODBYE: Shutdown message, log finalization, connection close
 """
 
+import asyncio
 import logging
 import os
 import signal
@@ -21,6 +29,16 @@ from utils.logging_config import finalize_log
 
 if TYPE_CHECKING:
     from .bot_class import CoreBot
+
+
+def log_phase(phase: str) -> None:
+    """Logs a phase separator for visual clarity in logs.
+
+    Args:
+        phase: The name of the phase to log.
+    """
+    separator = f"─── {phase} " + "─" * (40 - len(phase))
+    logging.info(separator)
 
 
 def is_system_rebooting() -> bool:
@@ -52,22 +70,37 @@ def is_system_rebooting() -> bool:
 
 
 async def startup_handler(bot: "CoreBot") -> None:
-    """Handles the bot's startup sequence.
+    """Handles the CONNECT and READY phases of bot startup.
 
-    Includes logging and sending a startup message.
+    Called from on_ready event. Logs connection info, syncs commands,
+    sends startup message, then starts background tasks.
 
     Args:
-        bot (CoreBot): The bot instance.
+        bot: The CoreBot instance.
     """
+    # ─── CONNECT ───
+    log_phase("CONNECT")
+
     if bot.user:
-        logging.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+        logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     else:
         logging.error("Bot user information not available on ready.")
 
-    logging.info("Connected to the following guilds:")
+    guild_count = len(bot.guilds)
+    logging.info(f"Connected to {guild_count} guild{'s' if guild_count != 1 else ''}:")
     for guild in bot.guilds:
-        logging.info(f"- {guild.name} (ID: {guild.id})")
+        logging.info(f"  - {guild.name} (ID: {guild.id})")
 
+    # Sync app commands (with timeout to prevent hanging on rate limits)
+    try:
+        await asyncio.wait_for(bot.tree.sync(), timeout=30.0)
+        logging.info("App commands synced globally")
+    except asyncio.TimeoutError:
+        logging.warning("App command sync timed out after 30s (possible rate limit)")
+    except Exception as e:
+        logging.error(f"Failed to sync app commands: {e}")
+
+    # Send startup message
     if config.SYSTEM_CHANNEL_ID:
         try:
             channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
@@ -81,13 +114,24 @@ async def startup_handler(bot: "CoreBot") -> None:
                     await channel.send(embed=embed, file=file)
                 else:
                     await channel.send(embed=embed)
-                logging.info(f"Startup message sent to channel ID: {config.SYSTEM_CHANNEL_ID}")
+                logging.info(f"Startup message sent to channel {config.SYSTEM_CHANNEL_ID}")
             else:
-                logging.warning(
-                    f"System channel ID {config.SYSTEM_CHANNEL_ID} is not a valid text channel or could not be found."
-                )
+                logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} is not a valid text channel.")
         except discord.HTTPException as e:
             logging.error(f"Failed to send startup message: {e}")
+
+    # ─── READY ───
+    log_phase("READY")
+
+    logging.info(f"{config.BOT_NAME} is ready!")
+
+    # Call cog_ready() on all cogs to start their background tasks
+    await bot.ready_all_cogs()
+
+    # Start resource tracker
+    if hasattr(bot, 'resource_tracker') and bot.resource_tracker:
+        await bot.resource_tracker.start()
+        logging.info(f"[ResourceTracker] Started ({config.RESOURCE_TRACK_INTERVAL} min interval)")
 
 
 async def shutdown_handler(
@@ -96,19 +140,33 @@ async def shutdown_handler(
     is_restart: bool = False,
     log_path: Optional[str] = None
 ) -> None:
-    """Handles the graceful shutdown of the bot when a signal is received.
+    """Handles the graceful shutdown of the bot with structured phases.
 
     Args:
-        sig (signal.Signals): The signal received.
-        bot (CoreBot): The bot instance.
-        is_restart (bool): Whether this is a soft restart (triggers reboot message).
-        log_path (Optional[str]): Path to the current log file for finalization.
+        sig: The signal that triggered the shutdown.
+        bot: The CoreBot instance.
+        is_restart: Whether this is a soft restart.
+        log_path: Path to the current log file for finalization.
     """
-    logging.info(f"Received exit signal {sig.name}...")
+    # ─── SHUTDOWN ───
+    log_phase("SHUTDOWN")
+    logging.info(f"Received exit signal {sig.name}")
 
-    # Stop resource tracker and log history (if available)
+    # Unload all cogs gracefully (this calls cog_unload on each)
+    cog_names = list(bot.extensions.keys())
+    for ext in cog_names:
+        try:
+            await bot.unload_extension(ext)
+        except Exception as e:
+            logging.error(f"Error unloading {ext}: {e}")
+
+    # Stop resource tracker
     if hasattr(bot, 'resource_tracker') and bot.resource_tracker:
         await bot.resource_tracker.stop()
+        logging.info("[ResourceTracker] Stopped, history logged")
+
+    # ─── GOODBYE ───
+    log_phase("GOODBYE")
 
     # Determine the shutdown reason and prepare the message.
     rebooting = is_system_rebooting() or is_restart
@@ -138,25 +196,24 @@ async def shutdown_handler(
                     await channel.send(embed=embed, file=file)
                 else:
                     await channel.send(embed=embed)
-                logging.info(f"Shutdown message sent to channel ID: {config.SYSTEM_CHANNEL_ID}")
+                logging.info(f"Shutdown message sent to channel {config.SYSTEM_CHANNEL_ID}")
             except discord.HTTPException as e:
                 logging.error(f"Failed to send shutdown message to channel {config.SYSTEM_CHANNEL_ID}: {e}")
         else:
-            logging.warning(f"System channel ID {config.SYSTEM_CHANNEL_ID} configured but not found or not a text channel.")
+            logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} was configuered but not found or not a text channel.")
 
-    # Perform the graceful shutdown of the bot.
-    logging.info("Closing connections...")
-    await bot.close()
-    logging.info("Discord connection has been shut down gracefully.")
-
-    # Finalize the log file with runtime (must be done after all logging)
+    # Finalize log before closing connection (bot.close() doesn't return)
     if log_path:
         runtime_seconds = time.time() - bot.start_time
         finalize_log(log_path, runtime_seconds)
 
+    logging.info("Closing Discord connection...")
+    await bot.close()
+    # Note: Code after bot.close() won't execute - control returns to main.py
+
 
 def purge_modules() -> None:
-    """Removes all bot-related modules from `sys.modules` to force a reload.
+    """Removes all bot-related modules from sys.modules to force a reload.
 
     This targets 'utils', 'cogs', and 'config' modules.
     """

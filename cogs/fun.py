@@ -348,28 +348,24 @@ class Fun(BaseCog):
         """
         await self.fun_command_handler(ctx, 'issues')
 
-    async def cog_load(self) -> None:
-        """Schedules a one-time task to clean up active BOD chains after a restart/reload.
+    async def cog_ready(self) -> None:
+        """Cleans up any active BOD chains that were interrupted by a restart.
 
-        This is non-blocking to avoid deadlocking the bot's startup process.
+        This runs in POST-READY phase after the bot is fully connected,
+        ensuring the cache is populated before we check for active chains.
         """
-        asyncio.create_task(self._cleanup_chains_task())
-
-    async def _cleanup_chains_task(self) -> None:
-        """Waits for the bot to be ready, then checks for any chains that were active.
-
-        This runs only once per startup.
-        """
-        # Wait for the bot to be fully ready before proceeding,
-        # ensuring that the cache is populated.
-        await self.bot.wait_until_ready()
-
-        if self.has_cleaned_up_chains:
-            return
-
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
         await asyncio.sleep(2)
+        await self._cleanup_bod_chains()
+
+    async def _cleanup_bod_chains(self) -> None:
+        """Checks for any BOD chains that were active and notifies participants.
+
+        This runs only once per startup to avoid duplicate notifications.
+        """
+        if self.has_cleaned_up_chains:
+            return
 
         self.logger.info("Performing one-time check for active BOD chains after restart/reload.")
         db_manager = self.bot.db_manager
