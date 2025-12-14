@@ -1,4 +1,4 @@
-# Sancho (V0.72 - The Name Update)
+# Sancho (V0.81 - The Logging Update)
 
 **A Discord bot designed to be understood by humans.**
 
@@ -70,6 +70,8 @@ If you don't have Python installed or prefer a standalone executable, you can do
 
 ## Getting Started
 
+*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md).*
+
 ### Prerequisites
 *   Python 3.11+
 *   A Discord Bot Token
@@ -111,14 +113,14 @@ If you don't have Python installed or prefer a standalone executable, you can do
 
 ## Developer Guide
 
-We welcome contributions! Please follow these guidelines to keep Sancho healthy.
-*If you're here for information on creating standalone executables, please refer to [BUILD.md](BUILD.md).*
+We welcome contributions! Please follow these guidelines to keep the project healthy.
 
 ### Helpful Console Commands
 Sancho has a console listener and can accept commands from the console while running, this is not a very expansive list, but they're useful to know.
 
-*   **Hot Reload**: Type `reload` in the running bot's console to reload all cogs without restarting the process.
-*   **Graceful Exit**: Type `exit` in the console to shut down cleanly (saves state, closes DB).
+*   **Hot Reload**: Type `reload` in the console to reload all cogs without restarting the process at all!
+*   **Cold Restart**: Type `restart` in the console to restart the bot fully without having to go through the exit > python main.py loop
+*   **Graceful Exit**: Type `exit` in the console to shut down cleanly (saves state, closes DB). (Ctrl+C works too, but this is safer)
 
 ### Critical Differences
 
