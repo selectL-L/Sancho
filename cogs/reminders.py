@@ -372,30 +372,140 @@ class Reminders(BaseCog):
             self.logger.error(f"Failed to reschedule {reminder['id']}: {e}")
             await self.db_manager.delete_reminders([reminder['id']])
 
-    async def _get_user_timezone(self, user_id: int) -> str:
-        """Fetches a user's timezone string.
+    @staticmethod
+    def _to_pytz_format(tz_str: str) -> str:
+        """Converts a timezone string to pytz-compatible format.
 
-        Converts it to a pytz-compatible format if it's a GMT/UTC offset.
-        Defaults to UTC.
+        Handles GMT/UTC offset notation (e.g., 'GMT+5', 'UTC-8') by converting
+        to Etc/GMT format with inverted sign (POSIX convention).
+        IANA names and 'UTC' are returned unchanged.
 
         Args:
-            user_id (int): The user's ID.
+            tz_str: The timezone string to convert.
 
         Returns:
-            str: The timezone string.
+            A pytz-compatible timezone string.
         """
-        tz_str = await self.db_manager.get_user_timezone(user_id) or "UTC"
-
-        # Check if it's a GMT/UTC offset that needs conversion for pytz
         match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_str.lower())
         if match:
             sign = match.group(2)
             hour = int(match.group(3))
-            # Invert the sign for the Etc/GMT format required by pytz
+            # Invert sign: ISO 'GMT+5' means 5 hours ahead, but POSIX 'Etc/GMT-5' means the same
             return f"Etc/GMT{-hour if sign == '+' else +hour}"
-
-        # For standard IANA names (e.g., 'US/Eastern') or 'UTC', return as is.
         return tz_str
+
+    @staticmethod
+    def _to_display_format(tz_str: str) -> str:
+        """Converts a pytz timezone string to a user-friendly display format.
+
+        Converts Etc/GMT format back to familiar GMT notation.
+        IANA names are returned unchanged.
+
+        Args:
+            tz_str: The pytz-compatible timezone string.
+
+        Returns:
+            A user-friendly timezone string for display.
+        """
+        match = re.match(r'^Etc/GMT([+-]?)(\d+)$', tz_str)
+        if match:
+            sign_part = match.group(1)
+            hour = int(match.group(2))
+            if hour == 0:
+                return "GMT"
+            # Invert back: Etc/GMT-5 -> GMT+5
+            if sign_part == '-' or (not sign_part and hour > 0):
+                return f"GMT+{hour}"
+            else:
+                return f"GMT-{hour}"
+        return tz_str
+
+    async def _get_user_timezone(self, user_id: int) -> str:
+        """Fetches a user's pytz-compatible timezone string.
+
+        The database stores timezones in pytz-compatible format, so this
+        method simply retrieves and returns the stored value.
+
+        Args:
+            user_id: The user's Discord ID.
+
+        Returns:
+            The pytz-compatible timezone string, defaulting to 'UTC'.
+        """
+        return await self.db_manager.get_user_timezone(user_id) or "UTC"
+
+    def _score_time_candidate(self, time_str: str) -> int:
+        """Scores a time string candidate based on how "time-like" it appears.
+
+        Used as a tiebreaker when split time detection finds a false positive.
+        Higher scores indicate stronger time-like characteristics.
+
+        Args:
+            time_str: The time string to score.
+
+        Returns:
+            An integer score representing how time-like the string is.
+        """
+        score = 0
+        text_lower = time_str.lower()
+
+        # Time units (+3 each) - definitively time
+        time_units = ['hour', 'minute', 'second', 'day', 'week', 'month', 'year']
+        for unit in time_units:
+            if re.search(rf'\b{unit}s?\b', text_lower):
+                score += 3
+
+        # Core time references (+3 each) - explicit time concepts
+        core_refs = ['tomorrow', 'today', 'tonight', 'yesterday', 'noon', 'midnight']
+        for ref in core_refs:
+            if re.search(rf'\b{ref}\b', text_lower):
+                score += 3
+
+        # AM/PM indicators (+3 each) - unmistakable
+        if re.search(r'\b(am|pm|a\.m\.|p\.m\.)\b', text_lower):
+            score += 3
+
+        # Day names (+2 each) - strong signal
+        days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        for day in days:
+            if re.search(rf'\b{day}\b', text_lower):
+                score += 2
+
+        # Period words (+2 each) - time-related
+        periods = ['morning', 'afternoon', 'evening', 'night']
+        for period in periods:
+            if re.search(rf'\b{period}\b', text_lower):
+                score += 2
+
+        # Month names (+1 each) - ambiguous alone (May, March, June as names/verbs)
+        months = ['january', 'february', 'march', 'april', 'may', 'june',
+                  'july', 'august', 'september', 'october', 'november', 'december']
+        for month in months:
+            if re.search(rf'\b{month}\b', text_lower):
+                score += 1
+
+        # Prepositions (+1 each) - support only
+        prepositions = ['in', 'at', 'on', 'by', 'until', 'before', 'after']
+        for prep in prepositions:
+            if re.search(rf'\b{prep}\b', text_lower):
+                score += 1
+
+        # Relative words (+1 each) - support only
+        relatives = ['next', 'this', 'coming']
+        for rel in relatives:
+            if re.search(rf'\b{rel}\b', text_lower):
+                score += 1
+
+        # Pattern bonus: "at/by" followed by a number (+2)
+        if re.search(r'\b(at|by)\s+\d', text_lower):
+            score += 2
+
+        # Pattern bonus: month followed by a number (+2)
+        months_pattern = '|'.join(months)
+        if re.search(rf'\b({months_pattern})\s+\d', text_lower):
+            score += 2
+
+        return score
 
     def _format_recurrence_rule(self, rule_str: str) -> str:
         """Formats an rrule string into a human-readable format.
@@ -788,15 +898,60 @@ class Reminders(BaseCog):
             self.logger.info(f"Found split time: '{front_time_str}' AND '{back_time_str}'")
             combined_candidate = f"{front_time_str} {back_time_str}"
 
-            # Validate that the combined string makes sense.
-            if await asyncio.to_thread(dateparser.parse, combined_candidate, languages=['en'], settings={'PREFER_DATES_FROM': 'future'}):
+            # Parse all three candidates to compare them.
+            dp_settings: Dict[str, str] = {'PREFER_DATES_FROM': 'future'}
+            front_only_dt = await asyncio.to_thread(
+                dateparser.parse, front_time_str, languages=['en'], settings=cast(Any, dp_settings)
+            )
+            back_only_dt = await asyncio.to_thread(
+                dateparser.parse, back_time_str, languages=['en'], settings=cast(Any, dp_settings)
+            )
+            combined_dt = await asyncio.to_thread(
+                dateparser.parse, combined_candidate, languages=['en'], settings=cast(Any, dp_settings)
+            )
+
+            # Determine if combined is valid AND meaningfully different from both individuals.
+            # "Meaningfully different" = more than 60 seconds difference.
+            use_combined = False
+            if combined_dt:
+                front_diff = abs((combined_dt - front_only_dt).total_seconds()) if front_only_dt else float('inf')
+                back_diff = abs((combined_dt - back_only_dt).total_seconds()) if back_only_dt else float('inf')
+
+                # Combined is valid only if it differs meaningfully from BOTH individual times.
+                if front_diff >= 60 and back_diff >= 60:
+                    use_combined = True
+                    self.logger.info(
+                        f"Combined time '{combined_candidate}' differs from both "
+                        f"(front_diff: {front_diff}s, back_diff: {back_diff}s). Using combined."
+                    )
+
+            if use_combined:
                 final_time_string = combined_candidate
-                # The message is whatever is left in the middle.
                 message_words = words[front_word_count: len(words) - back_word_count]
             else:
-                # If they don't combine validly, we abort to avoid malformed reminders.
-                self.logger.warning(f"Split time found but failed to combine: '{combined_candidate}'. Aborting.")
-                return None
+                # Combined is None or doesn't add meaningful info → use scoring to pick winner.
+                self.logger.info(
+                    f"Combined time invalid or redundant. Invoking scoring for "
+                    f"'{front_time_str}' vs '{back_time_str}'."
+                )
+                front_score = self._score_time_candidate(front_time_str)
+                back_score = self._score_time_candidate(back_time_str)
+                self.logger.info(f"Scores: front='{front_time_str}'({front_score}) vs back='{back_time_str}'({back_score})")
+
+                if front_score > back_score:
+                    self.logger.info(f"Front wins. Using '{front_time_str}'.")
+                    final_time_string = front_time_str
+                    message_words = words[front_word_count:]
+                elif back_score > front_score:
+                    self.logger.info(f"Back wins. Using '{back_time_str}'.")
+                    final_time_string = back_time_str
+                    message_words = words[:len(words) - back_word_count]
+                else:
+                    # Tied scores → fall back to interactive flow.
+                    self.logger.warning(
+                        f"Tied scores ({front_score}). Cannot determine time. Falling back to interactive."
+                    )
+                    return None
 
         # Case B: Front only ("Tomorrow go to store").
         elif front_time_str:
@@ -1138,12 +1293,13 @@ class Reminders(BaseCog):
                 return
 
             user_tz_str = await self._get_user_timezone(ctx.author.id)
+            display_tz = self._to_display_format(user_tz_str)
 
             embed = discord.Embed(
                 title=f"{ctx.author.display_name}'s Reminders",
                 color=discord.Color.blue()
             )
-            embed.set_footer(text=f"Your timezone is set to {user_tz_str}. Use 'delete reminder <#>' to remove one.")
+            embed.set_footer(text=f"Your timezone is set to {display_tz}. Use 'delete reminder <#>' to remove one.")
 
             description_lines = []
             for i, reminder in enumerate(reminders, 1):
@@ -1284,45 +1440,33 @@ class Reminders(BaseCog):
 
         tz_to_check = timezone_str.lower()
         final_tz_str = None
-        display_tz_str = ""
 
         if tz_to_check in TIMEZONE_ABBREVIATIONS:
             final_tz_str = TIMEZONE_ABBREVIATIONS[tz_to_check]
-            display_tz_str = final_tz_str  # Use the full name for display
-
-        if not final_tz_str:
-            match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check)
-            if match:
-                sign = match.group(2)
-                hour = int(match.group(3))
-                # pytz uses Etc/GMT where the sign is inverted for calculations
-                final_tz_str = f"Etc/GMT{-hour if sign == '+' else +hour}"
-                # But we want to store and display the user-friendly version
-                display_tz_str = f"GMT{sign}{hour}"
-
-        if not final_tz_str:
+        elif re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check):
+            # Convert user-friendly offset to pytz format for storage
+            final_tz_str = self._to_pytz_format(tz_to_check)
+        else:
+            # Assume it's an IANA name or something pytz can handle directly
             final_tz_str = timezone_str
-            display_tz_str = timezone_str
 
         try:
-            # Use the calculation-friendly string for validation
+            # Validate the timezone
             tz = pytz.timezone(final_tz_str)
 
-            # Use the display-friendly string for storage
-            zone_to_store = display_tz_str or tz.zone
-
-            if not zone_to_store:
-                self.logger.error(f"Could not resolve a storable timezone name from '{final_tz_str}'.")
-                await ctx.send("I couldn't resolve that to a valid timezone name. Please try a different format.")
-                return
+            # Store the pytz-compatible format
+            zone_to_store = final_tz_str
 
             await self.db_manager.set_user_timezone(ctx.author.id, zone_to_store)
 
             now = datetime.now(tz)
 
+            # Use display format for user-facing messages
+            display_tz = self._to_display_format(zone_to_store)
+
             # Prepare the main confirmation message
             confirmation_message = (
-                f"Your timezone has been set to `{zone_to_store}`.\n"
+                f"Your timezone has been set to `{display_tz}`.\n"
                 f"The current time in your timezone is `{now.strftime('%Y-%m-%d %H:%M:%S')}`."
             )
 
