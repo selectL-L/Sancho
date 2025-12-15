@@ -1,29 +1,30 @@
 # Sancho (V0.83 - The Logging Update)
 
-**A Discord bot designed to be understood by humans.**
+**A Discord bot designed to be more reasonable.**
 
-Sancho is built on a simple premise: interacting with a bot should feel natural. Rather than forcing you to memorize rigid command structures like a terminal operator, Sancho attempts to interpret your *intent*.
+Sancho is built on the simple premise interacting with her should feel natural. Rather than forcing you to memorize rigid command structures like most other bots, or using slash commands, Sancho attempts to interpret your *intent*.
 
-If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too.
+If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too, hopefully.
 
 ## Features
 
 ### 🎲 Math & Dice
-Sancho supports a robust dice engine capable of handling complex notations.
+There's a robust dice engine capable of handling complex notations and complex arithemtic questions.
 *   **Standard Rolling**: `roll 2d20kh1 + 5` (Roll two d20s, keep the highest, add 5).
 *   **Limbus Coin Flips**: A dedicated binary outcome generator for Limbus Company rolls.
 *   **Calculator**: Evaluate mathematical expressions directly in chat.
 
 ### ⚔️ Skills Database
-The Skills system acts as a macro manager, allowing you to save complex dice notations or text as named "Skills".
+The Skills system acts as a macro manager, allowing you to save complex dice notations (with descriptions!) as named "Skills".
 *   **Save**: Simply type `save skill` to enter an interactive setup wizard.
 *   **Cast**: Use `cast Fireball` to execute the saved macro instantly.
 *   **Manage**: List, edit, or delete your skills with natural language commands like `show my skills` or `delete Fireball`.
 
 ### ⏰ Reminders
 Set reminders using natural language without worrying about strict syntax.
-*   **Natural Phrasing**: `remind me in 2 hours to check the laundry` or `remind me next tuesday to deploy`.
+*   **Natural Phrasing**: `remind me in 2 hours to check the laundry` or `remind me next tuesday to visit my nan`.
 *   **Timezone Aware**: Use `set timezone` to ensure Sancho knows *your* "8 PM", not the server's.
+*(Though it is very important to understand that reminders changes very often, it's the most complex function)*
 
 ### 🖼️ Image Tools
 Useful utilities for modifying images without opening Photoshop.
@@ -31,7 +32,7 @@ Useful utilities for modifying images without opening Photoshop.
 *   **Convert**: Reply with `convert` to change formats (e.g., PNG to JPG).
 
 ### ⭐ Starboard
-Sancho automatically aggregates the best content in your server.
+She can even automatically aggregates the best content in your server.
 *   **Thresholds**: Messages with enough specific reactions (e.g., 5 ⭐) are reposted to a designated starboard channel.
 *   **Smart Context**: The repost includes a link to the original message and preserves the context of the conversation.
 
@@ -70,7 +71,7 @@ If you don't have Python installed or prefer a standalone executable, you can do
 
 ## Getting Started
 
-*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md).*
+*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md) instead.*
 
 ### Prerequisites
 *   Python 3.11+
