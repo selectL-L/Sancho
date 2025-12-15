@@ -83,12 +83,6 @@ def safe_eval_math(expr: str) -> Optional[float]:
             if not isinstance(node.value, (int, float)):
                 raise ValueError("Only numeric values are allowed.")
             return node.value
-        # Legacy support for Python < 3.8.
-        elif isinstance(node, ast.Num):
-            value = node.n
-            if not isinstance(value, (int, float)):
-                raise ValueError("Only numeric values are allowed.")
-            return float(value)
         # Handles binary operators (+, -, *, /) and unary operators (-).
         elif isinstance(node, (ast.BinOp, ast.UnaryOp)):
             op_type = type(node.op)
