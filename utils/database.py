@@ -65,6 +65,24 @@ class DatabaseManager:
             )
             await db.commit()
 
+    async def db_fetchall(self, query: str, params: tuple = ()) -> List[aiosqlite.Row]:
+        """Executes a raw SQL query and returns all results.
+
+        This method is intended for administrative/export purposes only.
+        Prefer using specific methods for normal operations.
+
+        Args:
+            query: The SQL query to execute.
+            params: Optional parameters for the query.
+
+        Returns:
+            List of Row objects that can be converted to dicts.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cursor:
+                return list(await cursor.fetchall())
+
     async def ping(self) -> float:
         """Performs a quick, simple query to the database to measure latency.
 

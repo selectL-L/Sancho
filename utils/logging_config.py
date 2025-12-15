@@ -100,11 +100,18 @@ class ResourceTracker:
     an in-memory history for the current session. On shutdown, the history
     is appended to the log file.
 
+    For snapshot history, CPU usage is averaged over each interval period
+    (sampled every 30 seconds) to provide a representative view of resource
+    consumption, rather than a single point-in-time measurement.
+
     Attributes:
         interval_minutes: Minutes between automatic snapshots.
         usage_history: List of recorded usage snapshots.
         start_time: Timestamp when tracking began.
     """
+
+    # How often to sample CPU for averaging (in seconds)
+    CPU_SAMPLE_INTERVAL = 30
 
     def __init__(self, interval_minutes: int = 15):
         """Initializes the ResourceTracker.
@@ -116,43 +123,125 @@ class ResourceTracker:
         self.process.cpu_percent()  # Prime the first reading for accuracy
         self.usage_history: List[Dict[str, Any]] = []
         self.interval_minutes = interval_minutes
-        self._task: Optional[asyncio.Task] = None
+        self._tracking_task: Optional[asyncio.Task] = None
+        self._sampling_task: Optional[asyncio.Task] = None
+        self._cpu_samples: List[float] = []  # Accumulated CPU samples for averaging
+        self._cpu_samples_lock = asyncio.Lock()
         self.start_time: float = time.time()
         self._logger = logging.getLogger("logging")
 
-    def get_current_usage(self) -> Dict[str, float]:
-        """Returns LIVE CPU and RAM usage (not cached).
+    def _get_instantaneous_cpu(self) -> float:
+        """Gets an instantaneous CPU reading (blocking, ~0.1s).
 
-        This method always fetches fresh values from the system.
+        This method blocks for a short interval to measure actual CPU usage.
+        Should be called via asyncio.to_thread() from async contexts.
 
         Returns:
-            Dict containing 'cpu' (percentage) and 'ram' (MB) keys.
+            CPU usage percentage.
+        """
+        return self.process.cpu_percent(interval=0.1)
+
+    def _get_non_blocking_cpu(self) -> float:
+        """Gets CPU usage since last call (non-blocking).
+
+        Returns the CPU percentage since the previous call to any cpu_percent method.
+        Used for sampling/averaging purposes.
+
+        Returns:
+            CPU usage percentage since last measurement.
+        """
+        return self.process.cpu_percent(interval=None)
+
+    def get_current_usage(self) -> Dict[str, float]:
+        """Returns current RAM usage and a non-blocking CPU sample.
+
+        Note: For accurate instantaneous CPU readings, use get_current_usage_async().
+        This method is intended for internal sampling where blocking is not acceptable.
+
+        Returns:
+            Dict containing 'cpu' (percentage since last call) and 'ram' (MB) keys.
         """
         try:
             memory_info = self.process.memory_info()
-            cpu_usage = self.process.cpu_percent(interval=None)
+            cpu_usage = self._get_non_blocking_cpu()
             ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
             return {'cpu': cpu_usage, 'ram': ram_usage}
         except Exception as e:
             self._logger.error(f"Error getting current usage: {e}")
             return {'cpu': 0.0, 'ram': 0.0}
 
-    def take_snapshot(self, label: Optional[str] = None) -> None:
-        """Records a snapshot of current resource usage to history.
+    async def get_current_usage_async(self) -> Dict[str, float]:
+        """Returns LIVE, accurate CPU and RAM usage (async-safe).
+
+        This method measures CPU usage over a 0.1 second interval in a thread pool
+        to avoid blocking the event loop while providing accurate readings.
+
+        Returns:
+            Dict containing 'cpu' (percentage) and 'ram' (MB) keys.
+        """
+        try:
+            memory_info = self.process.memory_info()
+            # Run blocking CPU measurement in thread pool
+            cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
+            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
+            return {'cpu': cpu_usage, 'ram': ram_usage}
+        except Exception as e:
+            self._logger.error(f"Error getting current usage (async): {e}")
+            return {'cpu': 0.0, 'ram': 0.0}
+
+    async def _sample_cpu(self) -> None:
+        """Takes a single CPU sample and adds it to the accumulator."""
+        try:
+            cpu = await asyncio.to_thread(self._get_instantaneous_cpu)
+            async with self._cpu_samples_lock:
+                self._cpu_samples.append(cpu)
+        except Exception as e:
+            self._logger.debug(f"Error sampling CPU: {e}")
+
+    async def _get_averaged_cpu(self) -> float:
+        """Returns the average of accumulated CPU samples and clears them.
+
+        If no samples are available, takes an instantaneous reading.
+
+        Returns:
+            Average CPU usage percentage.
+        """
+        async with self._cpu_samples_lock:
+            if self._cpu_samples:
+                avg = sum(self._cpu_samples) / len(self._cpu_samples)
+                self._cpu_samples.clear()
+                return avg
+        # Fallback to instantaneous if no samples
+        return await asyncio.to_thread(self._get_instantaneous_cpu)
+
+    async def take_snapshot_async(self, label: Optional[str] = None) -> None:
+        """Records a snapshot of current resource usage to history (async).
+
+        For regular snapshots, uses averaged CPU from accumulated samples.
+        For labeled snapshots (Startup/Shutdown), uses instantaneous readings.
 
         Args:
             label: Optional label for the snapshot (e.g., 'Startup', 'Shutdown').
         """
         try:
-            usage = self.get_current_usage()
+            memory_info = self.process.memory_info()
+            ram_usage = memory_info.rss / (1024 * 1024)
+
+            # For labeled snapshots (startup/shutdown), use instantaneous reading
+            # For regular interval snapshots, use averaged CPU
+            if label:
+                cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
+            else:
+                cpu_usage = await self._get_averaged_cpu()
+
             timestamp = datetime.utcnow()
             self.usage_history.append({
                 'timestamp': timestamp,
-                'cpu': usage['cpu'],
-                'ram': usage['ram'],
+                'cpu': cpu_usage,
+                'ram': ram_usage,
                 'label': label
             })
-            self._logger.debug(f"Resource snapshot: CPU={usage['cpu']:.1f}%, RAM={usage['ram']:.2f}MB, Label={label}")
+            self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_usage:.2f}MB, Label={label}")
         except Exception as e:
             self._logger.error(f"Error recording usage snapshot: {e}")
 
@@ -164,40 +253,63 @@ class ResourceTracker:
         """
         return self.usage_history.copy()
 
+    async def _sampling_loop(self) -> None:
+        """Background task that samples CPU at regular intervals for averaging."""
+        try:
+            while True:
+                await self._sample_cpu()
+                await asyncio.sleep(self.CPU_SAMPLE_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
     async def _tracking_loop(self) -> None:
         """Background task that takes snapshots at regular intervals."""
         try:
             # Wait 5 minutes before starting regular tracking
             await asyncio.sleep(300)
             while True:
-                self.take_snapshot()
+                await self.take_snapshot_async()
                 await asyncio.sleep(self.interval_minutes * 60)
         except asyncio.CancelledError:
             pass
 
     async def start(self) -> None:
-        """Starts the background tracking task.
+        """Starts the background tracking and sampling tasks.
 
         Should be called after the bot is ready. Takes an initial 'Startup' snapshot.
+        Starts two background tasks:
+        - Sampling task: collects CPU samples every CPU_SAMPLE_INTERVAL seconds
+        - Tracking task: takes averaged snapshots every interval_minutes
         """
-        self.take_snapshot(label="Startup")
-        self._task = asyncio.create_task(self._tracking_loop())
-        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} minutes)")
+        await self.take_snapshot_async(label="Startup")
+        self._sampling_task = asyncio.create_task(self._sampling_loop())
+        self._tracking_task = asyncio.create_task(self._tracking_loop())
+        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} min, sampling: {self.CPU_SAMPLE_INTERVAL}s)")
 
     async def stop(self) -> None:
         """Stops tracking and takes a final 'Shutdown' snapshot.
 
         Also logs the full session history to the log file.
         """
-        if self._task:
-            self._task.cancel()
+        # Stop sampling task
+        if self._sampling_task:
+            self._sampling_task.cancel()
             try:
-                await self._task
+                await self._sampling_task
             except asyncio.CancelledError:
                 pass
-            self._task = None
+            self._sampling_task = None
 
-        self.take_snapshot(label="Shutdown")
+        # Stop tracking task
+        if self._tracking_task:
+            self._tracking_task.cancel()
+            try:
+                await self._tracking_task
+            except asyncio.CancelledError:
+                pass
+            self._tracking_task = None
+
+        await self.take_snapshot_async(label="Shutdown")
         self._log_history_summary()
         self._logger.info("ResourceTracker stopped")
 
