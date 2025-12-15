@@ -116,12 +116,52 @@ If you don't have Python installed or prefer a standalone executable, you can do
 
 We welcome contributions! Please follow these guidelines to keep the project healthy.
 
-### Helpful Console Commands
-Sancho has a console listener and can accept commands from the console while running, this is not a very expansive list, but they're useful to know.
+### Runtime Control
 
-*   **Hot Reload**: Type `reload` in the console to reload all cogs without restarting the process at all!
-*   **Cold Restart**: Type `restart` in the console to restart the bot fully without having to go through the exit > python main.py loop
-*   **Graceful Exit**: Type `exit` in the console to shut down cleanly (saves state, closes DB). (Ctrl+C works too, but this is safer)
+Sancho can be controlled at runtime without using Discord commands. This is **by design** and can be used for server administration, automated scripts, or when you simply prefer managing the bot externally.
+
+#### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `reload` | Hot-reload all cogs without restarting the process |
+| `restart` | Full restart without manually re-running `python main.py` |
+| `exit` | Graceful shutdown (saves state, closes DB connections) |
+| `status` | Returns the bot's current running state (TCP only) |
+
+#### Method 1: Console (Local Development)
+
+When running `python main.py` directly in a terminal, you can type commands into the console:
+
+```
+reload
+```
+
+This is ideal for local development where you have direct terminal access.
+
+#### Method 2: TCP Socket (Remote / Headless)
+
+For production deployments (e.g., systemd services, Docker containers), the console isn't accessible. Instead, enable the TCP control socket by setting `CONTROL_PORT` in your `info.env`:
+
+```ini
+CONTROL_PORT=9999
+```
+
+The server binds to `127.0.0.1` only—it cannot be accessed from outside the machine.
+
+**Sending commands:**
+
+```bash
+# Linux (using netcat)
+echo "reload" | nc localhost 9999
+echo "restart" | nc localhost 9999
+echo "status" | nc localhost 9999
+
+# Windows (PowerShell)
+"reload" | ncat localhost 9999
+```
+
+**Response format:** Commands return `OK: <message>` on success or `ERROR: <message>` on failure, making it easy to script around.
 
 ### Critical Differences
 

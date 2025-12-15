@@ -73,7 +73,8 @@ def check_and_create_env_file() -> None:
         "SYSTEM_CHANNEL_ID": "",
         "DEV_MODE": "False",
         "DEV_GUILD": "",
-        "BOT_NAME": "NoName"
+        "BOT_NAME": "NoName",
+        "CONTROL_PORT": ""
     }
 
     field_comments = {
@@ -83,7 +84,8 @@ def check_and_create_env_file() -> None:
         "SYSTEM_CHANNEL_ID": "# (Optional) Channel ID for system messages.",
         "DEV_MODE": "# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.",
         "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True.",
-        "BOT_NAME": "# The name the bot calls itself in user-facing strings."
+        "BOT_NAME": "# The name the bot calls itself in user-facing strings.",
+        "CONTROL_PORT": "# (Optional) TCP port for remote control commands (e.g., 9999). Binds to localhost only."
     }
 
     if not os.path.exists(ENV_PATH):
@@ -191,6 +193,9 @@ DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
 
 raw_dev_guild = os.getenv('DEV_GUILD')
 DEV_GUILD = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
+
+raw_control_port = os.getenv('CONTROL_PORT')
+CONTROL_PORT = int(raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
 
 # Logging Configuration
 # These are default values that can be used by the logging setup function.
