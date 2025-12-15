@@ -26,6 +26,12 @@ jobs:
         pip install flake8
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+    - name: Create dummy info.env
+      run: |
+        echo "DISCORD_TOKEN=test_token" > info.env
+        echo "BOT_PREFIX=!" >> info.env
+        echo "BOT_NAME=Sancho" >> info.env
+
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
