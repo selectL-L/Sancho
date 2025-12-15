@@ -21,9 +21,6 @@ from cogs.reminders import Reminders
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 
-# Add project root to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 
 # =============================================================================
 # FIXTURES
