@@ -10,6 +10,7 @@ Usage:
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -246,6 +247,73 @@ def migrate_database() -> None:
                                     "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
                                     [(skill_id, alias) for alias in aliases]
                                 )
+
+                # ==================================================================================
+                # MIGRATION: user_timezones - Normalize to pytz-compatible IANA format
+                # ==================================================================================
+                # Date Added: 15-12-2025
+                #
+                # WHY THIS EXISTS:
+                # Previously, user timezones could be stored in various inconsistent formats:
+                #   - User-friendly offsets: "GMT+5", "UTC-8"
+                #   - Bare abbreviations: "GMT", "UTC"
+                #   - Mixed formats due to bugs in older code
+                #
+                # pytz requires specific formats, and GMT/UTC offsets use *inverted* signs
+                # due to the POSIX standard vs ISO 8601:
+                #   - User says "GMT+5" (5 hours AHEAD of UTC)
+                #   - pytz needs "Etc/GMT-5" (POSIX convention: negative = east of UTC)
+                #
+                # The refactored code in cogs/reminders.py now:
+                #   1. Stores timezones in pytz-compatible format (Etc/GMT-5 or IANA names)
+                #   2. Converts to display format only when showing to users
+                #
+                # WHAT THIS MIGRATION DOES:
+                # 1. Converts GMT/UTC offset strings to pytz format:
+                #      "GMT+5"  -> "Etc/GMT-5"
+                #      "UTC-8"  -> "Etc/GMT+8"
+                # 2. Converts bare "GMT" to "Etc/GMT" (pytz-compatible)
+                # 3. Leaves IANA names (e.g., "America/New_York", "CET") unchanged
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, after running migration once. Harmless to keep
+                # since it only transforms non-standard formats which won't exist post-migration.
+                # ==================================================================================
+                elif table_name == 'user_timezones':
+                    logging.info("...migrating %d user timezone(s) (normalizing to pytz format)", len(rows))
+                    converted_count = 0
+                    for tz_row in rows:
+                        user_id = tz_row['user_id']
+                        old_tz = tz_row['timezone']
+                        new_tz = old_tz  # Default: keep as-is
+                        old_tz_lower = old_tz.lower().strip()
+
+                        # Case 1: GMT/UTC offset with sign (e.g., "GMT+5", "UTC-8", "+5", "-3")
+                        match = re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', old_tz_lower)
+                        if match:
+                            sign = match.group(2)
+                            hour = int(match.group(3))
+                            # Invert sign for POSIX/pytz convention:
+                            # ISO "GMT+5" (ahead of UTC) = POSIX "Etc/GMT-5"
+                            new_tz = f"Etc/GMT{-hour if sign == '+' else +hour}"
+                            converted_count += 1
+                            logging.info(f"    User {user_id}: '{old_tz}' -> '{new_tz}' (offset conversion)")
+
+                        # Case 2: Bare "GMT" without offset -> normalize to "Etc/GMT"
+                        elif old_tz_lower == 'gmt':
+                            new_tz = "Etc/GMT"
+                            converted_count += 1
+                            logging.info(f"    User {user_id}: '{old_tz}' -> '{new_tz}' (bare GMT)")
+
+                        # Case 3: Everything else (IANA names like "America/New_York", "CET", "UTC")
+                        # These are already pytz-compatible, keep as-is
+
+                        cursor.execute(
+                            "INSERT INTO user_timezones (user_id, timezone) VALUES (?, ?)",
+                            (user_id, new_tz)
+                        )
+                    if converted_count > 0:
+                        logging.info(f"    Converted {converted_count} timezone(s) to normalized pytz format.")
+
                 elif table_name in TABLE_SCHEMAS:
                     # Align columns with new schema
                     cursor.execute(f"PRAGMA table_info({table_name})")
