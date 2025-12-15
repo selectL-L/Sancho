@@ -37,6 +37,9 @@ from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.views import FastConfirmModal, launch_modal
 
+# Type alias for channels that can contain starrable messages (text, voice text chat, threads)
+MessageableGuildChannel = (discord.TextChannel, discord.VoiceChannel, discord.Thread)
+
 
 class Starboard(BaseCog):
     """The cog for managing the Starboard feature."""
@@ -432,7 +435,7 @@ class Starboard(BaseCog):
             original_channel = self.bot.get_channel(tgt['original_channel_id'])
 
             # If channel is missing, we can't fetch the message -> Tombstone
-            if not isinstance(original_channel, discord.TextChannel):
+            if not isinstance(original_channel, MessageableGuildChannel):
                 self.logger.warning(f"Original channel {tgt['original_channel_id']} not found. Creating tombstone for {tgt['original_message_id']}.")
                 tomb = await self._create_tombstone(starboard_channel, tgt['original_message_id'])
                 if tomb:
@@ -533,7 +536,7 @@ class Starboard(BaseCog):
             original_channel = self.bot.get_channel(entry['original_channel_id'])
 
             # If original channel is missing, create a tombstone
-            if not isinstance(original_channel, discord.TextChannel):
+            if not isinstance(original_channel, MessageableGuildChannel):
                 self.logger.warning(f"Original channel {entry['original_channel_id']} not found. Creating tombstone.")
                 tomb = await self._create_tombstone(new_starboard_channel, entry['original_message_id'])
                 if tomb:
@@ -629,7 +632,7 @@ class Starboard(BaseCog):
             Tuple[Optional[int], Optional[int]]: (starboard_message_id, reply_context_id) or (None, None) on failure.
         """
         # If it's a reply, handle the two-message system
-        if message.reference and message.reference.message_id and isinstance(message.channel, discord.TextChannel):
+        if message.reference and message.reference.message_id and isinstance(message.channel, MessageableGuildChannel):
             reply_files: List[discord.File] = []
             main_files: List[discord.File] = []
             reply_context_message: Optional[discord.Message] = None
@@ -938,7 +941,7 @@ class Starboard(BaseCog):
         try:
             async with lock:
                 channel = self.bot.get_channel(payload.channel_id)
-                if not isinstance(channel, discord.TextChannel) or channel.id == starboard_channel_id:
+                if not isinstance(channel, MessageableGuildChannel) or channel.id == starboard_channel_id:
                     return
 
                 try:
@@ -1009,7 +1012,7 @@ class Starboard(BaseCog):
             content (str): The content string (e.g., "⭐ 5 in #general").
         """
         # If it's a reply, handle the two-message system
-        if message.reference and message.reference.message_id and isinstance(message.channel, discord.TextChannel):
+        if message.reference and message.reference.message_id and isinstance(message.channel, MessageableGuildChannel):
             try:
                 replied_to_message = await message.channel.fetch_message(message.reference.message_id)
 
@@ -1265,7 +1268,7 @@ class Starboard(BaseCog):
             return
 
         channel = self.bot.get_channel(payload.channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, MessageableGuildChannel):
             return
 
         try:

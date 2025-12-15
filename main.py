@@ -48,6 +48,39 @@ def console_reader(loop: asyncio.AbstractEventLoop) -> None:
             break
 
 
+async def process_control_command(command: str, bot: Any, shutdown_handler: Any, log_path: Any) -> str:
+    """Processes a control command and returns a response.
+
+    Args:
+        command: The command string to process.
+        bot: The current bot instance.
+        shutdown_handler: The function to call for graceful shutdown.
+        log_path: Path to the current log file for finalization.
+
+    Returns:
+        A response string indicating the result.
+    """
+    command = command.lower().strip()
+
+    if command == 'exit':
+        logging.info("'exit' command received.")
+        await shutdown_handler(signal.SIGINT, bot, is_restart=False, log_path=log_path)
+        return "OK: Shutting down"
+    elif command == 'restart':
+        logging.info("'restart' command received.")
+        bot.restart_signal = True
+        await shutdown_handler(signal.SIGINT, bot, is_restart=True, log_path=log_path)
+        return "OK: Restarting"
+    elif command == 'reload':
+        logging.info("'reload' command received. Reloading cogs...")
+        await bot.reload_all_cogs()
+        return "OK: Cogs reloaded"
+    elif command == 'status':
+        return f"OK: {bot.user.name if bot.user else 'Bot'} is running"
+    else:
+        return f"ERROR: Unknown command '{command}'"
+
+
 async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> None:
     """Consumes commands from the global console queue.
 
@@ -62,25 +95,59 @@ async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> No
             if not line:
                 continue
 
-            command = line.lower()
-            if command == 'exit':
-                logging.info("'exit' command received from console.")
-                # Lifecycle handler handles cog unloading, shutdown message, and cleanup
-                await shutdown_handler(signal.SIGINT, bot, is_restart=False, log_path=log_path)
+            response = await process_control_command(line, bot, shutdown_handler, log_path)
+            # For console, just print error responses (success is logged already)
+            if response.startswith("ERROR"):
+                print(response)
+            # Exit the consumer if we're shutting down or restarting
+            if "Shutting down" in response or "Restarting" in response:
                 break
-            elif command == 'restart':
-                logging.info("'restart' command received from console.")
-                bot.restart_signal = True
-                # Lifecycle handler handles cog unloading, restart message, and cleanup
-                await shutdown_handler(signal.SIGINT, bot, is_restart=True, log_path=log_path)
-                break
-            elif command == 'reload':
-                logging.info("'reload' command received. Reloading cogs...")
-                await bot.reload_all_cogs()
-            else:
-                print(f"Unknown command: {command}")
     except asyncio.CancelledError:
         pass
+
+
+async def tcp_control_server(bot: Any, shutdown_handler: Any, log_path: Any, port: int) -> None:
+    """Runs a TCP server on localhost for remote control commands.
+
+    Accepts connections on 127.0.0.1 only. Each connection receives one command,
+    gets a response, and is closed. Valid commands: exit, restart, reload, status.
+
+    Args:
+        bot: The current bot instance.
+        shutdown_handler: The function to call for graceful shutdown.
+        log_path: Path to the current log file for finalization.
+        port: The TCP port to listen on.
+    """
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Handles a single client connection."""
+        addr = writer.get_extra_info('peername')
+        try:
+            data = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            if data:
+                command = data.decode('utf-8').strip()
+                logging.info(f"TCP control command from {addr}: {command}")
+                response = await process_control_command(command, bot, shutdown_handler, log_path)
+                writer.write((response + "\n").encode('utf-8'))
+                await writer.drain()
+        except asyncio.TimeoutError:
+            writer.write(b"ERROR: Timeout\n")
+            await writer.drain()
+        except Exception as e:
+            logging.warning(f"TCP control error from {addr}: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, '127.0.0.1', port)
+    logging.info(f"TCP control server listening on 127.0.0.1:{port}")
+
+    try:
+        async with server:
+            await server.serve_forever()
+    except asyncio.CancelledError:
+        logging.info("TCP control server shutting down.")
+        server.close()
+        await server.wait_closed()
 
 
 async def run_bot_lifecycle() -> None:
@@ -188,6 +255,11 @@ async def run_bot_lifecycle() -> None:
                 # Start Console Consumer
                 consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler, log_path))
 
+                # Start TCP Control Server (if configured)
+                tcp_task = None
+                if config.CONTROL_PORT:
+                    tcp_task = loop.create_task(tcp_control_server(bot, mod_lifecycle.shutdown_handler, log_path, config.CONTROL_PORT))
+
                 # Setup signal handlers for this iteration
                 # Windows doesn't support add_signal_handler fully, but we try for graceful SIGINT
                 if sys.platform != "win32":
@@ -211,12 +283,19 @@ async def run_bot_lifecycle() -> None:
                     # Handle Ctrl+C directly if signal handler didn't catch it
                     pass
                 finally:
-                    # Cancel consumer so it stops looking at the queue for THIS bot instance
+                    # Cancel control tasks so they stop for THIS bot instance
                     consumer_task.cancel()
+                    if tcp_task:
+                        tcp_task.cancel()
                     try:
                         await consumer_task
                     except asyncio.CancelledError:
                         pass
+                    if tcp_task:
+                        try:
+                            await tcp_task
+                        except asyncio.CancelledError:
+                            pass
         except asyncio.CancelledError:
             logging.info("Bot task cancelled.")
         except Exception as e:
