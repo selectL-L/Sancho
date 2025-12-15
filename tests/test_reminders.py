@@ -7,8 +7,6 @@ This module contains comprehensive tests for the reminder system, including:
 - Modifier stripping and fractional time normalization tests
 - Error handling tests
 """
-import os
-import sys
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch

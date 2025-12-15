@@ -526,7 +526,7 @@ class Starboard(BaseCog):
         stop_event = asyncio.Event()
         progress = {'done': 0, 'total': total_entries, 'elapsed': 0}
         status_msg = await ctx.send(f"Starboard migration started. Processed 0/{total_entries}. Elapsed: 0s. Please wait.")
-        status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=30.0, operation="migration"))
+        status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=15.0, operation="migration"))
         self.logger.debug("Status editor task started for migration operation")
 
         for entry in valid_entries:
@@ -707,7 +707,7 @@ class Starboard(BaseCog):
         stop_event = asyncio.Event()
         progress = {'done': 0, 'total': len(all_entries), 'elapsed': 0}
         status_msg = await ctx.send(f"Starboard fix started. Processed 0/{len(all_entries)}. Elapsed: 0s. Please wait.")
-        status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=30.0))
+        status_task = asyncio.create_task(self._status_editor(status_msg, progress, stop_event, interval=15.0))
         self.logger.debug("Status editor task started for fix operation")
 
         for entry in all_entries:
@@ -1184,7 +1184,7 @@ class Starboard(BaseCog):
             retries = self._fix_retries
 
         async with self._fix_semaphore:
-            backoff = 1.0
+            backoff = 2.0
             last_exc = None
             for attempt in range(retries):
                 try:

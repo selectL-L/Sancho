@@ -51,7 +51,7 @@ ALLOWED_NAMES = {
 }
 
 
-def safe_eval_math(expr: str) -> float:
+def safe_eval_math(expr: str) -> Optional[float]:
     """Safely evaluates a mathematical string expression using an AST walker.
 
     This method is secure because it only processes a predefined set of
@@ -62,13 +62,20 @@ def safe_eval_math(expr: str) -> float:
         expr (str): The mathematical expression to evaluate.
 
     Returns:
-        float: The result of the evaluation.
+        Optional[float]: The result of the evaluation, or None for empty input.
 
     Raises:
-        ValueError: If the expression contains disallowed values or operators.
-        TypeError: If the expression contains unsupported node types.
+        ValueError: If the expression is invalid, contains disallowed values,
+            operators, or results in a math error (e.g., division by zero).
     """
-    tree = ast.parse(expr, mode='eval').body
+    # Handle empty/whitespace expressions gracefully
+    if not expr or not expr.strip():
+        return None
+
+    try:
+        tree = ast.parse(expr, mode='eval').body
+    except SyntaxError:
+        raise ValueError("Invalid expression: could not parse.")
 
     def _eval_node(node: ast.AST) -> float:
         # Handles numeric constants (e.g., 5, 3.14).
@@ -92,7 +99,10 @@ def safe_eval_math(expr: str) -> float:
             if isinstance(node, ast.BinOp):
                 left = _eval_node(node.left)
                 right = _eval_node(node.right)
-                return ALLOWED_OPERATORS[op_type](left, right)
+                try:
+                    return ALLOWED_OPERATORS[op_type](left, right)
+                except ZeroDivisionError:
+                    raise ValueError("Math error: division by zero.")
             else:  # UnaryOp (e.g., -5)
                 operand = _eval_node(node.operand)
                 return ALLOWED_OPERATORS[op_type](operand)
@@ -103,14 +113,17 @@ def safe_eval_math(expr: str) -> float:
                 raise ValueError(f"Function not allowed: {func_name}")
 
             args = [_eval_node(arg) for arg in node.args]
-            return ALLOWED_FUNCTIONS[node.func.id](*args)
+            try:
+                return ALLOWED_FUNCTIONS[node.func.id](*args)
+            except (ValueError, ZeroDivisionError) as e:
+                raise ValueError(f"Math error: {e}")
         # Handles named constants (e.g., pi, e).
         elif isinstance(node, ast.Name):
             if node.id not in ALLOWED_NAMES:
                 raise ValueError(f"Name not allowed: {node.id}")
             return ALLOWED_NAMES[node.id]
 
-        raise TypeError(f"Unsupported node type: {type(node).__name__}")
+        raise ValueError(f"Expression type not allowed: {type(node).__name__}")
 
     return _eval_node(tree)
 
@@ -367,6 +380,10 @@ class Math(BaseCog):
 
             # Run evaluation in thread.
             result = await asyncio.to_thread(safe_eval_math, processed_query)
+
+            if result is None:
+                await ctx.send("Please provide a mathematical expression to calculate.")
+                return
 
             # Format result, removing trailing zeros.
             if result == int(result):
