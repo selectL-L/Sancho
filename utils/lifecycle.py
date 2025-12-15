@@ -91,10 +91,23 @@ async def startup_handler(bot: "CoreBot") -> None:
     for guild in bot.guilds:
         logging.info(f"  - {guild.name} (ID: {guild.id})")
 
-    # Sync app commands (with timeout to prevent hanging on rate limits)
+    # Register the /nlp command before syncing
     try:
-        await asyncio.wait_for(bot.tree.sync(), timeout=30.0)
-        logging.info("App commands synced globally")
+        bot.register_nlp_command()
+    except Exception as e:
+        logging.error(f"Failed to register /nlp command: {e}")
+
+    # Sync app commands (with timeout to prevent hanging on rate limits)
+    # Note: global sync can take up to an hour to propagate to all guilds.
+    try:
+        if config.DEV_MODE and config.DEV_GUILD:
+            guild = discord.Object(id=config.DEV_GUILD)
+            bot.tree.copy_global_to(guild=guild)
+            await asyncio.wait_for(bot.tree.sync(guild=guild), timeout=30.0)
+            logging.info(f"App commands synced to dev guild {config.DEV_GUILD}")
+        else:
+            await asyncio.wait_for(bot.tree.sync(), timeout=30.0)
+            logging.info("App commands synced globally")
     except asyncio.TimeoutError:
         logging.warning("App command sync timed out after 30s (possible rate limit)")
     except Exception as e:

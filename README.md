@@ -1,4 +1,4 @@
-# Sancho (V0.81 - The Logging Update)
+# Sancho (V0.83 - The Logging Update)
 
 **A Discord bot designed to be understood by humans.**
 
