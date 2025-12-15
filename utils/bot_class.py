@@ -154,6 +154,37 @@ class CoreBot(commands.Bot):
 
         return cog, method, method_name
 
+    def register_nlp_command(self) -> None:
+        """Registers the /nlp slash command if not already registered.
+
+        This command forwards natural-language queries to the NLP dispatcher,
+        allowing slash command users to access the same NLP functionality.
+        """
+        if self.tree.get_command('nlp'):
+            return  # Already registered
+
+        async def _nlp_app(interaction: discord.Interaction, query: str):
+            # Log command usage similar to how prefix-based NLP does it.
+            logging.info(f"slash NLP query from '{interaction.user}': '{query}'")
+            try:
+                # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
+                await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
+            except Exception:
+                # If sending the ephemeral message fails, try to defer as a fallback.
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+
+            ctx_adapter = CoreBot.InteractionContextAdapter(self, interaction)
+            # Run the NLP dispatcher; no need to await in a special way —
+            # the user already received the ephemeral message.
+            await self.dispatch_nlp(ctx_adapter, query)
+
+        cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
+        self.tree.add_command(cmd)
+        logging.info("Registered /nlp application command")
+
     class InteractionContextAdapter:
         """A thin adapter that exposes the subset of `commands.Context` used by NLP handlers.
 
@@ -225,46 +256,6 @@ class CoreBot(commands.Bot):
     async def on_ready(self):
         """Called when the bot is ready; triggers the startup handler."""
         await startup_handler(self)
-
-        # Register an application command for forwarding NLP queries if it isn't already registered.
-        # The command lives in the bots core just like NLP does.
-        try:
-            if not self.tree.get_command('nlp'):
-                async def _nlp_app(interaction: discord.Interaction, query: str):
-                    # Log command usage similar to how prefix-based NLP does it.
-                    logging.info(f"slash NLP query from '{interaction.user}': '{query}'")
-                    try:
-                        # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
-                        await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
-                    except Exception:
-                        # If sending the ephemeral message fails, try to defer as a fallback.
-                        try:
-                            await interaction.response.defer()
-                        except Exception:
-                            pass
-
-                    ctx_adapter = CoreBot.InteractionContextAdapter(self, interaction)
-                    # Run the NLP dispatcher; no need to await in a special way —
-                    # the user already received the ephemeral message.
-                    await self.dispatch_nlp(ctx_adapter, query)
-
-                cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
-                self.tree.add_command(cmd)
-
-                # Note: global sync can takeup to an hour to propagate to all guilds.
-                try:
-                    if config.DEV_MODE and config.DEV_GUILD:
-                        guild = discord.Object(id=config.DEV_GUILD)
-                        self.tree.copy_global_to(guild=guild)
-                        await self.tree.sync(guild=guild)
-                        logging.info(f"Synced app commands to dev guild {config.DEV_GUILD}")
-                    else:
-                        await self.tree.sync()
-                        logging.info("Synced app commands globally")
-                except Exception:
-                    logging.exception("Failed to sync app commands")
-        except Exception:
-            logging.exception('Failed to register NLP application command')
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
         """Global error handler for all standard `discord.ext.commands`.
