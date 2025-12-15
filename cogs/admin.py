@@ -32,6 +32,7 @@ class DashboardView(discord.ui.View):
         skill_pages: List[discord.Embed],
         reminder_pages: List[discord.Embed],
         report_file_callback,
+        dump_db_callback,
         dashboard_embed: Optional[discord.Embed] = None
     ):
         super().__init__(timeout=120.0)
@@ -39,6 +40,7 @@ class DashboardView(discord.ui.View):
         self.skill_pages = skill_pages
         self.reminder_pages = reminder_pages
         self.report_file_callback = report_file_callback
+        self.dump_db_callback = dump_db_callback
         self.dashboard_embed = dashboard_embed
         self.message: Optional[discord.Message] = None
 
@@ -94,6 +96,11 @@ class DashboardView(discord.ui.View):
     async def export_file(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.report_file_callback(self.ctx)
+
+    @discord.ui.button(label="🗄️ Dump Database", style=discord.ButtonStyle.danger)
+    async def dump_database(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.dump_db_callback(self.ctx)
 
     async def on_timeout(self):
         if self.message:
@@ -186,57 +193,183 @@ class AdminCog(BaseCog):
             all_skills = await self.db_manager.get_all_skills()
             all_reminders = await self.db_manager.get_all_reminders()
 
-            # --- Helper to generate pages ---
+            # --- Helper Functions ---
             def chunk_list(lst, n):
                 for i in range(0, len(lst), n):
                     yield lst[i:i + n]
 
-            # 1. Generate Skill Pages
+            def get_user_display(user_id: int) -> str:
+                """Get display name for a user, falling back to ID if not cached."""
+                user = self.bot.get_user(user_id)
+                if user:
+                    return f"{user.name} ({user_id})"
+                return f"User {user_id}"
+
+            def wrap_text(text: str, max_width: int = 60) -> str:
+                """Wrap text to specified width, preserving word boundaries."""
+                if len(text) <= max_width:
+                    return text
+                words = text.split()
+                lines = []
+                current_line = []
+                current_length = 0
+                for word in words:
+                    if current_length + len(word) + 1 <= max_width:
+                        current_line.append(word)
+                        current_length += len(word) + 1
+                    else:
+                        if current_line:
+                            lines.append(' '.join(current_line))
+                        current_line = [word]
+                        current_length = len(word)
+                if current_line:
+                    lines.append(' '.join(current_line))
+                return '\n'.join(lines)
+
+            # 1. Generate Skill Pages (grouped by user)
             skill_pages = []
             if all_skills:
-                chunks = list(chunk_list(all_skills, 8))  # 8 skills per page
-                for i, chunk in enumerate(chunks):
-                    embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
-                    embed.set_footer(text=f"Page {i+1}/{len(chunks)} | Total Skills: {len(all_skills)}")
-                    for skill in chunk:
-                        user_id = skill['user_id']
-                        user_display = f"User {user_id}"
-                        # Try to resolve user name if cached
-                        user = self.bot.get_user(user_id)
-                        if user:
-                            user_display = f"{user.name} ({user_id})"
+                # Group skills by user
+                skills_by_user: dict[int, list] = {}
+                for skill in all_skills:
+                    uid = skill['user_id']
+                    if uid not in skills_by_user:
+                        skills_by_user[uid] = []
+                    skills_by_user[uid].append(skill)
 
-                        embed.add_field(
-                            name=f"ID: {skill['id']} | {skill['name']}",
-                            value=f"**User:** {user_display}\n**Roll:** `{skill['dice_roll']}`",
+                # Build pages with clear user sections
+                current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                field_count = 0
+                page_num = 1
+
+                for user_id, user_skills in skills_by_user.items():
+                    user_display = get_user_display(user_id)
+
+                    # Add user header
+                    if field_count >= 6:  # Start new page if near limit
+                        current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                        skill_pages.append(current_embed)
+                        current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                        field_count = 0
+                        page_num += 1
+
+                    # User header separator
+                    current_embed.add_field(
+                        name=f"━━━ {user_display} ━━━",
+                        value=f"*{len(user_skills)} skill(s)*",
+                        inline=False
+                    )
+                    field_count += 1
+
+                    for skill in user_skills:
+                        if field_count >= 8:  # Max fields before new page
+                            current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                            skill_pages.append(current_embed)
+                            current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                            field_count = 0
+                            page_num += 1
+                            # Re-add user header on continued page
+                            current_embed.add_field(
+                                name=f"━━━ {user_display} (cont.) ━━━",
+                                value="",
+                                inline=False
+                            )
+                            field_count += 1
+
+                        desc = skill.get('description') or 'No description'
+                        desc_wrapped = wrap_text(desc, 50)
+                        current_embed.add_field(
+                            name=f"`ID:{skill['id']}` {skill['name']}",
+                            value=f"**Roll:** `{skill['dice_roll']}`\n**Type:** {skill['skill_type']}\n{desc_wrapped}",
                             inline=False
                         )
-                    skill_pages.append(embed)
+                        field_count += 1
 
-            # 2. Generate Reminder Pages
+                # Add final page
+                if field_count > 0:
+                    current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                    skill_pages.append(current_embed)
+
+                # Update page numbers in footers
+                for i, embed in enumerate(skill_pages):
+                    embed.set_footer(text=f"Page {i+1}/{len(skill_pages)} | Total Skills: {len(all_skills)}")
+
+            # 2. Generate Reminder Pages (grouped by user with better formatting)
             reminder_pages = []
             if all_reminders:
-                chunks = list(chunk_list(all_reminders, 8))
-                for i, chunk in enumerate(chunks):
-                    embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
-                    embed.set_footer(text=f"Page {i+1}/{len(chunks)} | Total Reminders: {len(all_reminders)}")
-                    for rem in chunk:
-                        user_id = rem['user_id']
-                        user_display = f"User {user_id}"
-                        user = self.bot.get_user(user_id)
-                        if user:
-                            user_display = f"{user.name} ({user_id})"
+                # Group reminders by user
+                reminders_by_user: dict[int, list] = {}
+                for rem in all_reminders:
+                    uid = rem['user_id']
+                    if uid not in reminders_by_user:
+                        reminders_by_user[uid] = []
+                    reminders_by_user[uid].append(rem)
 
-                        embed.add_field(
-                            name=f"ID: {rem['id']} | Due: <t:{rem['reminder_time']}:R>",
-                            value=f"**User:** {user_display}\n**Msg:** {rem['message'][:50]}...",
+                # Build pages with clear user sections
+                current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                field_count = 0
+                page_num = 1
+
+                for user_id, user_reminders in reminders_by_user.items():
+                    user_display = get_user_display(user_id)
+
+                    # Add user header
+                    if field_count >= 5:  # Start new page if near limit (fewer per page for reminders)
+                        current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                        reminder_pages.append(current_embed)
+                        current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                        field_count = 0
+                        page_num += 1
+
+                    # User header separator
+                    current_embed.add_field(
+                        name=f"━━━ {user_display} ━━━",
+                        value=f"*{len(user_reminders)} reminder(s)*",
+                        inline=False
+                    )
+                    field_count += 1
+
+                    for rem in user_reminders:
+                        if field_count >= 6:  # Fewer fields per page for readability
+                            current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                            reminder_pages.append(current_embed)
+                            current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                            field_count = 0
+                            page_num += 1
+                            # Re-add user header on continued page
+                            current_embed.add_field(
+                                name=f"━━━ {user_display} (cont.) ━━━",
+                                value="",
+                                inline=False
+                            )
+                            field_count += 1
+
+                        # Format message with word wrap
+                        message_wrapped = wrap_text(rem['message'], 70)
+
+                        # Build timing info
+                        recurring_str = ""
+                        if rem.get('is_recurring') and rem.get('recurrence_rule'):
+                            recurring_str = f"\n🔁 **Recurring:** `{rem['recurrence_rule']}`"
+
+                        current_embed.add_field(
+                            name=f"`ID:{rem['id']}` Due: <t:{rem['reminder_time']}:f> (<t:{rem['reminder_time']}:R>)",
+                            value=f"**Message:**\n{message_wrapped}{recurring_str}",
                             inline=False
                         )
-                    reminder_pages.append(embed)
+                        field_count += 1
 
-            # 3. Define Export Callback
+                # Add final page
+                if field_count > 0:
+                    current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                    reminder_pages.append(current_embed)
+
+                # Update page numbers in footers
+                for i, embed in enumerate(reminder_pages):
+                    embed.set_footer(text=f"Page {i+1}/{len(reminder_pages)} | Total Reminders: {len(all_reminders)}")
+
+            # 3. Define Export Callback (human-readable report)
             async def export_callback(interaction_ctx):
-                # If by this point config.BOT_NAME is None, then the cog was either loaded by itself, or I broke config.py
                 assert config.BOT_NAME is not None
                 report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
 
@@ -255,16 +388,121 @@ class AdminCog(BaseCog):
                 await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
                 os.remove(temp_path)
 
-            # 4. Create Dashboard Embed
+            # 4. Define Database Dump Callback (full SQLite export for migrations)
+            async def dump_db_callback(interaction_ctx):
+                assert config.BOT_NAME is not None
+                import json
+                import shutil
+
+                # Create a temp directory for the dump
+                dump_dir = tempfile.mkdtemp(prefix="db_dump_")
+                try:
+                    # Copy the actual SQLite database file
+                    db_path = self.db_manager.db_path
+                    db_copy_path = os.path.join(dump_dir, f"{config.BOT_NAME}_database.db")
+                    shutil.copy2(db_path, db_copy_path)
+
+                    # Also create a JSON export of all data for easy inspection
+                    json_data = {
+                        "exported_at": str(discord.utils.utcnow()),
+                        "bot_name": config.BOT_NAME,
+                        "tables": {}
+                    }
+
+                    # Export all tables as JSON
+                    tables_to_export = [
+                        ("skills", all_skills),
+                        ("reminders", all_reminders),
+                    ]
+
+                    # Get additional tables
+                    try:
+                        skill_aliases = await self.db_manager.db_fetchall("SELECT * FROM skill_aliases")
+                        tables_to_export.append(("skill_aliases", [dict(row) for row in skill_aliases]))
+                    except Exception:
+                        pass
+
+                    try:
+                        user_timezones = await self.db_manager.db_fetchall("SELECT * FROM user_timezones")
+                        tables_to_export.append(("user_timezones", [dict(row) for row in user_timezones]))
+                    except Exception:
+                        pass
+
+                    try:
+                        user_config = await self.db_manager.db_fetchall("SELECT * FROM user_config")
+                        tables_to_export.append(("user_config", [dict(row) for row in user_config]))
+                    except Exception:
+                        pass
+
+                    try:
+                        db_config = await self.db_manager.db_fetchall("SELECT * FROM config")
+                        tables_to_export.append(("config", [dict(row) for row in db_config]))
+                    except Exception:
+                        pass
+
+                    try:
+                        guild_config = await self.db_manager.db_fetchall("SELECT * FROM guild_config")
+                        tables_to_export.append(("guild_config", [dict(row) for row in guild_config]))
+                    except Exception:
+                        pass
+
+                    try:
+                        starboard = await self.db_manager.db_fetchall("SELECT * FROM starboard")
+                        tables_to_export.append(("starboard", [dict(row) for row in starboard]))
+                    except Exception:
+                        pass
+
+                    try:
+                        bod_usage = await self.db_manager.db_fetchall("SELECT * FROM bod_usage")
+                        tables_to_export.append(("bod_usage", [dict(row) for row in bod_usage]))
+                    except Exception:
+                        pass
+
+                    try:
+                        bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
+                        tables_to_export.append(("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
+                    except Exception:
+                        pass
+
+                    for table_name, data in tables_to_export:
+                        json_data["tables"][table_name] = {
+                            "count": len(data),
+                            "rows": data
+                        }
+
+                    json_path = os.path.join(dump_dir, f"{config.BOT_NAME}_database.json")
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump(json_data, f, indent=2, default=str)
+
+                    # Create a zip archive containing both files
+                    import zipfile
+                    zip_path = os.path.join(dump_dir, f"{config.BOT_NAME}_db_dump.zip")
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.write(db_copy_path, os.path.basename(db_copy_path))
+                        zipf.write(json_path, os.path.basename(json_path))
+
+                    await interaction_ctx.send(
+                        "**Full database dump attached.**\nContains:\n"
+                        "• `.db` - SQLite database file (for migrations)\n"
+                        "• `.json` - Human-readable JSON export",
+                        file=discord.File(zip_path, filename=f"{config.BOT_NAME}_db_dump.zip")
+                    )
+                finally:
+                    # Cleanup temp directory
+                    shutil.rmtree(dump_dir, ignore_errors=True)
+
+            # 5. Create Dashboard Embed
             dashboard_embed = discord.Embed(
                 title="Admin Dashboard",
-                description="Select a category to view database entries.",
+                description="Select a category to view database entries.\n\n"
+                            "**💾 Export to File** - Human-readable text report\n"
+                            "**🗄️ Dump Database** - Full SQLite + JSON export for migrations",
                 color=discord.Color.dark_grey()
             )
             dashboard_embed.add_field(name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
-            # 5. Launch View
-            view = DashboardView(ctx, skill_pages, reminder_pages, export_callback, dashboard_embed)
+            # 6. Launch View
+            view = DashboardView(ctx, skill_pages, reminder_pages, export_callback, dump_db_callback, dashboard_embed)
             sent_msg = await ctx.send(embed=dashboard_embed, view=view)
             view.message = sent_msg
 
@@ -475,9 +713,9 @@ class AdminCog(BaseCog):
         total_cogs = len(discover_cogs(config.COGS_PATH))
         cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
 
-        # Resource Usage - Get LIVE values from resource tracker
+        # Resource Usage - Get LIVE values from resource tracker (async for accurate reading)
         if resource_tracker:
-            usage = resource_tracker.get_current_usage()
+            usage = await resource_tracker.get_current_usage_async()
             cpu_str = f"{usage['cpu']:.1f}%"
             ram_str = f"{usage['ram']:.2f} MB"
         else:
