@@ -27,9 +27,11 @@ import random
 import shutil
 import time
 from dataclasses import dataclass, field
-from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING
+from enum import Enum
+from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING, Union
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -69,6 +71,47 @@ YTDLP_OPTIONS = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
+
+
+class LoopMode(Enum):
+    """Loop mode options for the music player."""
+    OFF = 0
+    ONE = 1
+    ALL = 2
+
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> 'LoopMode':
+        """Case-insensitive converter for discord.py commands."""
+        try:
+            return cls[argument.upper()]
+        except KeyError:
+            raise commands.BadArgument(f"'{argument}' is not a valid loop mode. Use: off, one, or all")
+
+    @property
+    def display(self) -> str:
+        """Human-readable display name."""
+        return {
+            LoopMode.OFF: "Off",
+            LoopMode.ONE: "One",
+            LoopMode.ALL: "All"
+        }[self]
+
+    @property
+    def emoji(self) -> str:
+        """Emoji representation for the mode."""
+        return {
+            LoopMode.OFF: "➡️",
+            LoopMode.ONE: "🔂",
+            LoopMode.ALL: "🔁"
+        }[self]
+
+    def next(self) -> 'LoopMode':
+        """Returns the next loop mode in the cycle."""
+        return {
+            LoopMode.OFF: LoopMode.ONE,
+            LoopMode.ONE: LoopMode.ALL,
+            LoopMode.ALL: LoopMode.OFF
+        }[self]
 
 
 @dataclass
@@ -112,6 +155,28 @@ class ActiveSession:
     waiting_for_users: bool = False
 
 
+# Type alias for contexts that support send()
+Respondable = Union[commands.Context, discord.Interaction]
+
+
+async def respond(target: Respondable, *args: Any, **kwargs: Any) -> None:
+    """Send a message to either a Context or Interaction.
+
+    Args:
+        target: Either a commands.Context or discord.Interaction.
+        *args: Positional arguments for send/response.
+        **kwargs: Keyword arguments for send/response.
+    """
+    if isinstance(target, commands.Context):
+        await target.send(*args, **kwargs)
+    else:
+        # Interaction
+        if target.response.is_done():
+            await target.followup.send(*args, **kwargs)
+        else:
+            await target.response.send_message(*args, **kwargs)
+
+
 class Music(BaseCog):
     """A cog for ambient music presence and voice playback."""
 
@@ -130,7 +195,7 @@ class Music(BaseCog):
         self.original_playlist: List[Track] = []  # Unshuffled copy
         self.current_index: int = 0
         self.shuffle_enabled: bool = True
-        self.loop_enabled: bool = True
+        self.loop_mode: LoopMode = LoopMode.ALL
 
         # Presence cycling state (idle mode)
         self.track_started_at: float = time.time()
@@ -322,14 +387,30 @@ class Music(BaseCog):
         except Exception as e:
             self.logger.error(f"Failed to save playlist cache: {e}")
 
-    def _apply_shuffle(self) -> None:
-        """Applies or removes shuffle from playlist."""
+    def _apply_shuffle(self, preserve_current: bool = False) -> None:
+        """Applies or removes shuffle from playlist.
+
+        Args:
+            preserve_current: If True, attempts to keep the current track at
+                the same position after reshuffling. Useful when toggling
+                shuffle during idle mode.
+        """
+        current = self._get_current_track() if preserve_current else None
+
         if self.shuffle_enabled:
             self.playlist = self.original_playlist.copy()
             random.shuffle(self.playlist)
         else:
             self.playlist = self.original_playlist.copy()
-        self.current_index = 0
+
+        # Restore current track position if requested
+        if current and preserve_current:
+            try:
+                self.current_index = self.playlist.index(current)
+            except ValueError:
+                self.current_index = 0
+        else:
+            self.current_index = 0
 
     def _get_current_track(self) -> Optional[Track]:
         """Gets the current track."""
@@ -338,20 +419,32 @@ class Music(BaseCog):
         return self.playlist[self.current_index % len(self.playlist)]
 
     def _advance_track(self) -> Optional[Track]:
-        """Advances to the next track, handling loop/reshuffle."""
+        """Advances to the next track, handling loop modes.
+
+        Loop modes:
+        - OFF: Stop at end of playlist
+        - ONE: Repeat current track
+        - ALL: Loop entire playlist (reshuffle if shuffle enabled)
+        """
         if not self.playlist:
             return None
+
+        # Loop ONE: stay on same track
+        if self.loop_mode == LoopMode.ONE:
+            self.track_started_at = time.time()
+            return self._get_current_track()
 
         self.current_index += 1
 
         # Check if we've reached the end
         if self.current_index >= len(self.playlist):
-            if self.loop_enabled:
+            if self.loop_mode == LoopMode.ALL:
                 # Reshuffle if shuffle is enabled
                 if self.shuffle_enabled:
                     random.shuffle(self.playlist)
                 self.current_index = 0
             else:
+                # Loop OFF: stop playback
                 return None
 
         self.track_started_at = time.time()
@@ -432,7 +525,8 @@ class Music(BaseCog):
             if not info:
                 return None
 
-            # Get the best audio format URL
+            # Find an audio-only format (has audio codec, no video codec)
+            # This gives us the smallest stream that Discord can play
             formats = info.get('formats', [])
             for fmt in formats:
                 if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
@@ -488,9 +582,13 @@ class Music(BaseCog):
             )
 
             def after_playing(error: Optional[Exception]) -> None:
+                """Callback invoked by discord.py when the audio source finishes or errors.
+
+                Runs in a separate thread, so we use run_coroutine_threadsafe to
+                schedule the async _on_track_end on the bot's event loop.
+                """
                 if error:
                     self.logger.error(f"Playback error: {error}")
-                # Schedule next track
                 if self.active_session:
                     asyncio.run_coroutine_threadsafe(
                         self._on_track_end(),
@@ -629,96 +727,98 @@ class Music(BaseCog):
                 await self._end_session("Everyone left the voice channel.")
 
     # ==========================================================================
-    # COMMANDS
+    # COMMANDS (Internal implementations)
     # ==========================================================================
+    # These `_do_*` methods contain the actual command logic. Both slash commands
+    # and NLP handlers call these, allowing a single implementation to serve both
+    # interaction types. They accept `Respondable` (Context or Interaction) and
+    # use the `respond()` helper to send messages.
 
-    @commands.hybrid_command(
-        name='listen-along',
-        aliases=['listen', 'play-music', 'join'],
-        help='Have me join your voice channel and play music!'
-    )
-    async def listen_along(self, ctx: commands.Context) -> None:
-        """Joins the user's voice channel and starts playing music."""
+    async def _do_listen_along(
+        self,
+        target: Respondable,
+        user: Union[discord.User, discord.Member],
+        guild: Optional[discord.Guild]
+    ) -> None:
+        """Internal implementation for listen-along."""
         if not YTDLP_AVAILABLE:
-            await ctx.send("Music playback isn't available - yt-dlp is not installed.")
+            await respond(target, "Music playback isn't available - yt-dlp is not installed.")
             return
 
         if not self.playlist:
-            await ctx.send("I don't have any music loaded! Make sure `YOUTUBE_PLAYLIST_URL` is configured.")
+            await respond(target, "I don't have any music loaded! Make sure `YOUTUBE_PLAYLIST_URL` is configured.")
             return
 
         # Check if already in a session
         if self.active_session:
-            # Same guild?
-            if ctx.guild and self.active_session.guild_id == ctx.guild.id:
-                await ctx.send(f"I'm already playing music in <#{self.active_session.channel_id}>!")
+            if guild and self.active_session.guild_id == guild.id:
+                await respond(target, f"I'm already playing music in <#{self.active_session.channel_id}>!")
             else:
-                # Different guild
                 other_guild = self.bot.get_guild(self.active_session.guild_id)
                 guild_name = other_guild.name if other_guild else "another server"
-                await ctx.send(f"I'm currently playing music in **{guild_name}**. I can only be in one place at a time!")
+                await respond(target, f"I'm currently playing music in **{guild_name}**. I can only be in one place at a time!")
             return
 
         # Check if user is in a voice channel
-        if not ctx.author.voice or not ctx.author.voice.channel:  # type: ignore
-            # Try to use designated channel
-            if ctx.guild:
-                designated_channel_id = await self.db_manager.get_guild_config(ctx.guild.id, 'music_channel_id')
+        # Note: `user` may be a User (from DMs) or Member (from guild). Only Members have voice state.
+        member = user if isinstance(user, discord.Member) else None
+        if not member or not member.voice or not member.voice.channel:
+            # User isn't in a VC - try the guild's designated music channel as fallback
+            if guild:
+                designated_channel_id = await self.db_manager.get_guild_config(guild.id, 'music_channel_id')
                 if designated_channel_id:
-                    channel = ctx.guild.get_channel(int(designated_channel_id))
+                    channel = guild.get_channel(int(designated_channel_id))
                     if channel and isinstance(channel, discord.VoiceChannel):
-                        await ctx.send(f"I'll be in {channel.mention}! Join me there within 5 minutes.")
-                        await self._start_session(channel, ctx)
+                        await respond(target, f"I'll be in {channel.mention}! Join me there within 5 minutes.")
+                        # For _start_session we need a context-like object for the text channel
+                        if isinstance(target, commands.Context):
+                            await self._start_session(channel, target)
+                        else:
+                            # Create a minimal context adapter for the interaction
+                            await self._start_session(channel, target)  # type: ignore
 
-                        # Start idle timeout
+                        # Mark session as waiting and start 5-minute timeout
+                        # If no one joins, _idle_timeout_loop will disconnect
                         self.active_session.waiting_for_users = True  # type: ignore
+                        text_channel = target.channel if isinstance(target, commands.Context) else target.channel
                         self.idle_timeout_task = self.bot.loop.create_task(
-                            self._idle_timeout_loop(ctx.channel)  # type: ignore
+                            self._idle_timeout_loop(text_channel)  # type: ignore
                         )
                         return
 
-            await ctx.send("Join a voice channel first, or ask an admin to set a music channel with `/set-music-channel`!")
+            await respond(target, "Join a voice channel first, or ask an admin to set a music channel with `/set-music-channel`!")
             return
 
         # Join user's channel
-        channel = ctx.author.voice.channel  # type: ignore
+        channel = member.voice.channel
         if not isinstance(channel, discord.VoiceChannel):
-            await ctx.send("I can only join regular voice channels, not stage channels.")
+            await respond(target, "I can only join regular voice channels, not stage channels.")
             return
 
-        await self._start_session(channel, ctx)
+        await self._start_session(channel, target)  # type: ignore
 
-    @commands.hybrid_command(
-        name='skip',
-        help='Skip the current song.'
-    )
-    async def skip(self, ctx: commands.Context) -> None:
-        """Skips the current track."""
+    async def _do_skip(self, target: Respondable, guild: Optional[discord.Guild]) -> None:
+        """Internal implementation for skip."""
         if not self.active_session:
-            await ctx.send("I'm not playing anything right now!")
+            await respond(target, "I'm not playing anything right now!")
             return
 
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
+        if guild and self.active_session.guild_id != guild.id:
+            await respond(target, "I'm not playing music in this server!")
             return
 
         vc = self.active_session.voice_client
         if vc.is_playing():
-            vc.stop()  # This triggers the after callback which plays next
-            await ctx.send("⏭️ Skipped!")
+            vc.stop()
+            await respond(target, "⏭️ Skipped!")
         else:
-            await ctx.send("Nothing is playing right now.")
+            await respond(target, "Nothing is playing right now.")
 
-    @commands.hybrid_command(
-        name='nowplaying',
-        aliases=['np', 'current'],
-        help='Shows the currently playing song.'
-    )
-    async def now_playing(self, ctx: commands.Context) -> None:
-        """Shows information about the current track."""
+    async def _do_now_playing(self, target: Respondable) -> None:
+        """Internal implementation for now playing."""
         track = self._get_current_track()
         if not track:
-            await ctx.send("No track is loaded.")
+            await respond(target, "No track is loaded.")
             return
 
         elapsed = int(time.time() - self.track_started_at)
@@ -741,21 +841,16 @@ class Music(BaseCog):
         else:
             embed.set_footer(text="Idle mode | Use /listen-along to play in voice")
 
-        await ctx.send(embed=embed)
+        await respond(target, embed=embed)
 
-    @commands.hybrid_command(
-        name='queue',
-        aliases=['q', 'playlist'],
-        help='Shows the upcoming songs in the queue.'
-    )
-    async def queue(self, ctx: commands.Context) -> None:
-        """Shows the upcoming tracks."""
+    async def _do_queue(self, target: Respondable) -> None:
+        """Internal implementation for queue."""
         if not self.playlist:
-            await ctx.send("No playlist loaded.")
+            await respond(target, "No playlist loaded.")
             return
 
-        # Show current and next 9 tracks
         current = self._get_current_track()
+        # Calculate starting index for "up next" - wraps around if near end
         upcoming_start = (self.current_index + 1) % len(self.playlist)
 
         lines = []
@@ -767,7 +862,7 @@ class Music(BaseCog):
         for i in range(9):
             idx = (upcoming_start + i) % len(self.playlist)
             if idx == self.current_index:
-                break  # We've looped around
+                break
             track = self.playlist[idx]
             lines.append(f"{i + 1}. {track.title} - {track.artist}")
 
@@ -776,61 +871,114 @@ class Music(BaseCog):
             description="\n".join(lines),
             color=discord.Color.blue()
         )
-        embed.set_footer(text=f"{len(self.playlist)} tracks total | Shuffle: {'On' if self.shuffle_enabled else 'Off'} | Loop: {'On' if self.loop_enabled else 'Off'}")
+        embed.set_footer(text=f"{len(self.playlist)} tracks total | Shuffle: {'On' if self.shuffle_enabled else 'Off'} | Loop: {self.loop_mode.display}")
 
-        await ctx.send(embed=embed)
+        await respond(target, embed=embed)
 
-    @commands.hybrid_command(
-        name='shuffle',
-        help='Toggle shuffle mode for the playlist.'
-    )
-    async def shuffle(self, ctx: commands.Context) -> None:
-        """Toggles shuffle mode."""
+    async def _do_shuffle(self, target: Respondable) -> None:
+        """Internal implementation for shuffle."""
         self.shuffle_enabled = not self.shuffle_enabled
-
-        # Re-apply shuffle (keeps current track if possible)
-        current = self._get_current_track()
-        self._apply_shuffle()
-
-        # Try to restore position to current track
-        if current and self.shuffle_enabled:
-            try:
-                self.current_index = self.playlist.index(current)
-            except ValueError:
-                pass
-
+        self._apply_shuffle(preserve_current=True)
         status = "enabled" if self.shuffle_enabled else "disabled"
-        await ctx.send(f"🔀 Shuffle {status}!")
+        await respond(target, f"🔀 Shuffle {status}!")
 
-    @commands.hybrid_command(
-        name='leave',
-        aliases=['disconnect', 'dc', 'stop'],
-        help='Disconnect from voice channel.'
-    )
-    async def leave(self, ctx: commands.Context) -> None:
-        """Disconnects from voice."""
-        if not self.active_session:
-            await ctx.send("I'm not in a voice channel!")
+    async def _do_jump(self, target: Respondable, position: int) -> None:
+        """Internal implementation for jump."""
+        if not self.playlist:
+            await respond(target, "No playlist loaded.")
             return
 
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
+        index = position - 1
+
+        if index < 0 or index >= len(self.playlist):
+            await respond(target, f"❌ Invalid position. Please choose a number between 1 and {len(self.playlist)}.")
+            return
+
+        self.current_index = index
+        self.track_started_at = time.time()
+        track = self._get_current_track()
+
+        if track:
+            await respond(target, f"⏭️ Jumped to **#{position}**: {track.title} - {track.artist}")
+
+            # If playing, stop current track - the `after` callback will trigger _on_track_end
+            # which calls _play_current_track with our new index
+            if self.active_session and self.active_session.voice_client.is_playing():
+                self.active_session.voice_client.stop()
+
+    async def _do_leave(self, target: Respondable, guild: Optional[discord.Guild]) -> None:
+        """Internal implementation for leave."""
+        if not self.active_session:
+            await respond(target, "I'm not in a voice channel!")
+            return
+
+        if guild and self.active_session.guild_id != guild.id:
+            await respond(target, "I'm not playing music in this server!")
             return
 
         await self._end_session("Disconnected by user request.")
-        await ctx.send("👋 Disconnected!")
+        await respond(target, "👋 Disconnected!")
 
-    @commands.hybrid_command(
-        name='loop',
-        aliases=['repeat'],
-        help='Toggle loop mode for the playlist.'
-    )
-    async def loop(self, ctx: commands.Context) -> None:
-        """Toggles loop mode (currently locked on)."""
-        await ctx.send(
-            "🔁 Loop is currently **always enabled** - the playlist will repeat forever.\n"
-            "Customizing loop behavior will be available in a future update when the full music player is complete!"
-        )
+    async def _do_loop(self, target: Respondable, mode: LoopMode) -> None:
+        """Internal implementation for loop."""
+        if mode == LoopMode.OFF:
+            await respond(
+                target,
+                "➡️ Loop **Off** mode isn't available yet - the music player isn't fully implemented!\n"
+                "For now, use **One** (repeat current track) or **All** (repeat playlist)."
+            )
+            return
+
+        self.loop_mode = mode
+        await respond(target, f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
+
+    # ==========================================================================
+    # SLASH COMMANDS
+    # ==========================================================================
+    # These are registered as Discord slash commands (app_commands). They're thin
+    # wrappers that extract the needed info from the Interaction and delegate to
+    # the corresponding `_do_*` method. No prefix command registration here -
+    # prefix input is handled by NLP handlers below.
+
+    @app_commands.command(name='listen-along', description='Have me join your voice channel and play music!')
+    async def listen_along_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for listen-along."""
+        await self._do_listen_along(interaction, interaction.user, interaction.guild)
+
+    @app_commands.command(name='skip', description='Skip the current song.')
+    async def skip_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for skip."""
+        await self._do_skip(interaction, interaction.guild)
+
+    @app_commands.command(name='nowplaying', description='Shows the currently playing song.')
+    async def now_playing_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for now playing."""
+        await self._do_now_playing(interaction)
+
+    @app_commands.command(name='queue', description='Shows the upcoming songs in the queue.')
+    async def queue_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for queue."""
+        await self._do_queue(interaction)
+
+    @app_commands.command(name='shuffle', description='Toggle shuffle mode for the playlist.')
+    async def shuffle_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for shuffle."""
+        await self._do_shuffle(interaction)
+
+    @app_commands.command(name='jump', description='Jump to a specific track in the playlist by number.')
+    async def jump_slash(self, interaction: discord.Interaction, position: int) -> None:
+        """Slash command for jump."""
+        await self._do_jump(interaction, position)
+
+    @app_commands.command(name='leave', description='Disconnect from voice channel.')
+    async def leave_slash(self, interaction: discord.Interaction) -> None:
+        """Slash command for leave."""
+        await self._do_leave(interaction, interaction.guild)
+
+    @app_commands.command(name='loop', description='Set loop mode for the playlist.')
+    async def loop_slash(self, interaction: discord.Interaction, mode: LoopMode) -> None:
+        """Slash command for loop."""
+        await self._do_loop(interaction, mode)
 
     @commands.hybrid_command(
         name='set-music-channel',
@@ -853,34 +1001,69 @@ class Music(BaseCog):
     # ==========================================================================
     # NLP HANDLERS
     # ==========================================================================
+    # These handle natural language queries via the prefix system (e.g., ".s play music").
+    # They're registered in config.NLP_COMMANDS and called by the bot's NLP dispatcher.
+    # Each handler receives the full query string, parses any needed arguments,
+    # and delegates to the corresponding `_do_*` method.
 
     async def listen_along_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for listen along requests."""
-        await self.listen_along(ctx)
+        await self._do_listen_along(ctx, ctx.author, ctx.guild)
 
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
-        await self.skip(ctx)
+        await self._do_skip(ctx, ctx.guild)
 
     async def now_playing_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for now playing requests."""
-        await self.now_playing(ctx)
+        await self._do_now_playing(ctx)
 
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
-        await self.queue(ctx)
+        await self._do_queue(ctx)
 
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
-        await self.shuffle(ctx)
+        await self._do_shuffle(ctx)
+
+    async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for jump requests.
+
+        Parses the query for a number to jump to.
+        """
+        import re
+        match = re.search(r'\b(\d+)\b', query)
+        if match:
+            position = int(match.group(1))
+            await self._do_jump(ctx, position)
+        else:
+            await ctx.send(
+                f"🎵 Currently on track **#{self.current_index + 1}** of {len(self.playlist)}.\n"
+                "Usage: `jump 5` to jump to track #5"
+            )
 
     async def loop_nlp(self, ctx: commands.Context, query: str) -> None:
-        """NLP handler for loop toggle requests."""
-        await self.loop(ctx)
+        """NLP handler for loop mode requests.
+
+        Parses the query for 'one', 'all', or 'off' to set loop mode.
+        """
+        query_lower = query.lower()
+
+        if 'one' in query_lower or 'single' in query_lower or 'track' in query_lower:
+            await self._do_loop(ctx, LoopMode.ONE)
+        elif 'all' in query_lower or 'playlist' in query_lower:
+            await self._do_loop(ctx, LoopMode.ALL)
+        elif 'off' in query_lower or 'disable' in query_lower or 'none' in query_lower:
+            await self._do_loop(ctx, LoopMode.OFF)
+        else:
+            await ctx.send(
+                f"{self.loop_mode.emoji} Current loop mode: **{self.loop_mode.display}**\n"
+                "Usage: `loop one` (repeat track) or `loop all` (repeat playlist)"
+            )
 
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests."""
-        await self.leave(ctx)
+        await self._do_leave(ctx, ctx.guild)
 
 
 async def setup(bot: 'CoreBot') -> None:
