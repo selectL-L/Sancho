@@ -12,46 +12,30 @@ CPU and RAM usage over time, integrated with the logging system.
 import asyncio
 import logging
 import os
+import queue
 import sys
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from typing import Any, Dict, List, Literal, Optional
 
 import psutil
 
 
-class AsyncFileHandler(logging.Handler):
+# Module-level listener reference for proper cleanup
+_queue_listener: Optional[QueueListener] = None
+
+
+def stop_queue_listener() -> None:
+    """Stops the queue listener thread without closing file handlers.
+
+    Call this before module purge on soft restart to prevent orphaned threads.
+    The listener will be recreated when setup_logging() is called again.
     """
-    A logging handler that writes to a file asynchronously in a separate thread,
-    preventing it from blocking the asyncio event loop.
-    """
-
-    def __init__(self, filename, mode='a', maxBytes=0, backupCount=0, encoding=None, delay=False):
-        super().__init__()
-        # The underlying handler is the synchronous one that does the actual file I/O.
-        self._handler = RotatingFileHandler(filename, mode, maxBytes, backupCount, encoding='utf-8', delay=delay)
-
-    def setFormatter(self, fmt):
-        """Set the formatter for this handler."""
-        super().setFormatter(fmt)
-        self._handler.setFormatter(fmt)
-
-    def emit(self, record):
-        """
-        Emit a record by scheduling the write operation in a separate thread
-        to avoid blocking the main asyncio event loop.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                loop.create_task(asyncio.to_thread(self._handler.emit, record))
-            else:
-                # Fallback to synchronous logging if no event loop is running.
-                self._handler.emit(record)
-        except RuntimeError:
-            # This occurs if there's no running event loop.
-            self._handler.emit(record)
+    global _queue_listener
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
 
 
 class CustomFormatter(logging.Formatter):
@@ -393,17 +377,20 @@ def _close_file_handlers() -> None:
     """Closes and removes all file handlers from the root logger.
 
     This must be called before renaming the log file to release the file lock.
-    Handles both standard FileHandlers and AsyncFileHandler (which wraps a
-    RotatingFileHandler internally).
+    Also stops the QueueListener to ensure all queued log records are flushed.
     """
+    global _queue_listener
+
+    # Stop the queue listener first to flush any pending records
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
+
     root_logger = logging.getLogger()
     handlers_to_remove = []
 
     for handler in root_logger.handlers[:]:
-        # Check for our custom AsyncFileHandler
-        if isinstance(handler, AsyncFileHandler):
-            # Close the internal RotatingFileHandler
-            handler._handler.close()
+        if isinstance(handler, QueueHandler):
             handlers_to_remove.append(handler)
         elif isinstance(handler, logging.FileHandler):
             handler.close()
@@ -454,7 +441,8 @@ def setup_logging(
     log_to_file: bool = True,
     logs_dir: Optional[str] = None,
     bot_name: Optional[str] = None,
-    retention_count: int = 10
+    retention_count: int = 10,
+    existing_log_path: Optional[str] = None
 ) -> Optional[str]:
     """Sets up logging for the entire application.
 
@@ -473,6 +461,8 @@ def setup_logging(
         logs_dir: Directory to store log files.
         bot_name: Bot name for log filename prefix.
         retention_count: Number of completed logs to retain.
+        existing_log_path: Path to an existing log file to continue writing to
+            (used on soft restarts to keep logs in a single file).
 
     Returns:
         The path to the created log file, or None if file logging is disabled.
@@ -483,6 +473,12 @@ def setup_logging(
     root_logger.setLevel(log_level)
     root_logger.handlers.clear()  # Prevent duplicate logs if called multiple times.
 
+    # Stop any existing queue listener from a previous setup call
+    global _queue_listener
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
+
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(CustomFormatter())
@@ -490,7 +486,7 @@ def setup_logging(
 
     log_file_path: Optional[str] = None
 
-    # Asynchronous File Handler
+    # Queue-based File Handler (preserves log ordering while being non-blocking)
     if log_to_file:
         if not logs_dir:
             raise ValueError("logs_dir must be provided when log_to_file is True.")
@@ -500,24 +496,40 @@ def setup_logging(
         # Create logs directory if it doesn't exist
         os.makedirs(logs_dir, exist_ok=True)
 
-        # Clean up old logs before creating new one
-        cleanup_old_logs(logs_dir, retention_count)
+        # Reuse existing log file on restart, or create a new one
+        if existing_log_path and os.path.exists(existing_log_path):
+            log_file_path = existing_log_path
+        else:
+            # Clean up old logs before creating new one (only on fresh start)
+            cleanup_old_logs(logs_dir, retention_count)
 
-        # Create timestamped log filename
-        timestamp_str = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-        log_filename = f"{bot_name}_{timestamp_str}.log"
-        log_file_path = os.path.join(logs_dir, log_filename)
+            # Create timestamped log filename
+            timestamp_str = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            log_filename = f"{bot_name}_{timestamp_str}.log"
+            log_file_path = os.path.join(logs_dir, log_filename)
 
-        # Use the async file handler to prevent I/O from blocking the event loop.
-        file_handler = AsyncFileHandler(
+        # Create the actual file handler (runs in background thread via QueueListener)
+        file_handler = RotatingFileHandler(
             log_file_path,
             maxBytes=5*1024*1024,  # 5 MB per file
-            backupCount=2         # Keep 2 backup files
+            backupCount=2,        # Keep 2 backup files
+            encoding='utf-8'
         )
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s'
         ))
-        root_logger.addHandler(file_handler)
+
+        # Use QueueHandler + QueueListener pattern:
+        # - QueueHandler puts records into a queue (fast, non-blocking)
+        # - QueueListener runs in a background thread, consuming records in order
+        # This preserves log ordering while not blocking the asyncio event loop.
+        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)  # Unbounded queue
+        queue_handler = QueueHandler(log_queue)
+        root_logger.addHandler(queue_handler)
+
+        # Start the listener thread that processes the queue
+        _queue_listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+        _queue_listener.start()
 
     # Reduce noise from third-party libraries.
     logging.getLogger('discord').setLevel(logging.WARNING)

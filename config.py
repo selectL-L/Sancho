@@ -74,7 +74,8 @@ def check_and_create_env_file() -> None:
         "DEV_MODE": "False",
         "DEV_GUILD": "",
         "BOT_NAME": "NoName",
-        "CONTROL_PORT": ""
+        "CONTROL_PORT": "",
+        "YOUTUBE_PLAYLIST_URL": ""
     }
 
     field_comments = {
@@ -85,7 +86,8 @@ def check_and_create_env_file() -> None:
         "DEV_MODE": "# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.",
         "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True.",
         "BOT_NAME": "# The name the bot calls itself in user-facing strings.",
-        "CONTROL_PORT": "# (Optional) TCP port for remote control commands (e.g., 9999). Binds to localhost only."
+        "CONTROL_PORT": "# (Optional) TCP port for remote control commands (e.g., 9999). Binds to localhost only.",
+        "YOUTUBE_PLAYLIST_URL": "# (Optional) YouTube playlist URL for music cog ambient presence and playback."
     }
 
     if not os.path.exists(ENV_PATH):
@@ -197,6 +199,10 @@ DEV_GUILD = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else
 raw_control_port = os.getenv('CONTROL_PORT')
 CONTROL_PORT = int(raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
 
+# Music Cog Configuration
+YOUTUBE_PLAYLIST_URL = os.getenv('YOUTUBE_PLAYLIST_URL') or None
+MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
+
 # Logging Configuration
 # These are default values that can be used by the logging setup function.
 LOG_LEVEL = logging.INFO
@@ -278,5 +284,22 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bpear\s?wiggler\b',), 'Fun', 'pear_wiggler'),
         # Issues
         ((r'\bissues\b', r'\bissue\b'), 'Fun', 'issues'),
+    ],
+    # Music Group
+    [
+        # Listen along / play music (most common entry point)
+        ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
+        # Skip current track
+        ((r'\bskip\b',), 'Music', 'skip_nlp'),
+        # Now playing / current song
+        ((r'\bnow\s*playing\b', r'\bcurrent\s*(song|track)\b', r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
+        # Queue / playlist
+        ((r'\bqueue\b', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
+        # Shuffle toggle
+        ((r'\bshuffle\b',), 'Music', 'shuffle_nlp'),
+        # Loop toggle
+        ((r'\bloop\b', r'\brepeat\b'), 'Music', 'loop_nlp'),
+        # Leave / disconnect
+        ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
     ]
 ]

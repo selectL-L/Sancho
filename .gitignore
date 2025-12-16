@@ -208,6 +208,7 @@ __marimo__/
 
 # Local paths that are created/required (currently empty)
 /logs
+/cache
 
 # Local files that are created/required
 *.env

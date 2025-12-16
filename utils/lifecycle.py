@@ -19,13 +19,11 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from typing import Optional, TYPE_CHECKING
 
 import discord
 
 import config
-from utils.logging_config import finalize_log
 
 if TYPE_CHECKING:
     from .bot_class import CoreBot
@@ -214,11 +212,6 @@ async def shutdown_handler(
                 logging.error(f"Failed to send shutdown message to channel {config.SYSTEM_CHANNEL_ID}: {e}")
         else:
             logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} was configuered but not found or not a text channel.")
-
-    # Finalize log before closing connection (bot.close() doesn't return)
-    if log_path:
-        runtime_seconds = time.time() - bot.start_time
-        finalize_log(log_path, runtime_seconds)
 
     logging.info("Closing Discord connection...")
     await bot.close()
