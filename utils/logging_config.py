@@ -105,6 +105,7 @@ class ResourceTracker:
         """
         self.process = psutil.Process()
         self.process.cpu_percent()  # Prime the first reading for accuracy
+        self._cpu_count = psutil.cpu_count() or 1  # For normalizing CPU % to 0-100 scale
         self.usage_history: List[Dict[str, Any]] = []
         self.interval_minutes = interval_minutes
         self._tracking_task: Optional[asyncio.Task] = None
@@ -115,15 +116,17 @@ class ResourceTracker:
         self._logger = logging.getLogger("logging")
 
     def _get_instantaneous_cpu(self) -> float:
-        """Gets an instantaneous CPU reading (blocking, ~0.1s).
+        """Gets an instantaneous CPU reading (blocking, ~0.5s).
 
         This method blocks for a short interval to measure actual CPU usage.
         Should be called via asyncio.to_thread() from async contexts.
+        Uses 0.5s interval for reliable cross-platform readings (0.1s seems too short on Windows).
 
         Returns:
-            CPU usage percentage.
+            CPU usage percentage (normalized to 0-100% scale).
         """
-        return self.process.cpu_percent(interval=0.1)
+        # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
+        return self.process.cpu_percent(interval=0.5) / self._cpu_count
 
     def _get_non_blocking_cpu(self) -> float:
         """Gets CPU usage since last call (non-blocking).
@@ -132,9 +135,10 @@ class ResourceTracker:
         Used for sampling/averaging purposes.
 
         Returns:
-            CPU usage percentage since last measurement.
+            CPU usage percentage since last measurement (normalized to 0-100% scale).
         """
-        return self.process.cpu_percent(interval=None)
+        # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
+        return self.process.cpu_percent(interval=None) / self._cpu_count
 
     def get_current_usage(self) -> Dict[str, float]:
         """Returns current RAM usage and a non-blocking CPU sample.
