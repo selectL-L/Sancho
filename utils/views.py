@@ -42,42 +42,55 @@ class SelectionButton(discord.ui.Button):
         view.stop()
 
 
-async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], timeout: float = 30.0) -> Optional[str]:
+async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], timeout: float = 30.0, buttons_only: bool = False) -> Optional[str]:
     """
     Sends an embed with buttons corresponding to the options.
     Waits for either a button click or a message from the user.
     Returns the value of the selected option (or the message content), or None on timeout.
+
+    Args:
+        ctx: The context object (or pseudo-context with author, channel, bot, send()).
+        embed: The embed to display with the selection buttons.
+        options: Dictionary mapping button labels to return values.
+        timeout: How long to wait for a selection (default 30s).
+        buttons_only: If True, only respond to button clicks, ignore text messages.
     """
     view = SelectionView(ctx, options, timeout)
     message = await ctx.send(embed=embed, view=view)
     view.message = message
 
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
-
-    view_task = asyncio.create_task(view.wait())
-    msg_task = asyncio.create_task(ctx.bot.wait_for('message', check=check, timeout=timeout))
-
-    done, pending = await asyncio.wait([view_task, msg_task], return_when=asyncio.FIRST_COMPLETED)
-
-    result = None
-
-    if view_task in done:
-        # View finished (button clicked or timeout)
-        if view.value:
-            result = view.value
-        # If timeout (view.value is None), result remains None
+    if buttons_only:
+        # Only wait for button interaction
+        await view.wait()
+        result = view.value
     else:
-        # Message received
-        try:
-            msg = msg_task.result()
-            result = msg.content.strip()
-            view.stop()
-        except Exception:
-            pass
+        # Wait for either button click or text message
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
 
-    for task in pending:
-        task.cancel()
+        view_task = asyncio.create_task(view.wait())
+        msg_task = asyncio.create_task(ctx.bot.wait_for('message', check=check, timeout=timeout))
+
+        done, pending = await asyncio.wait([view_task, msg_task], return_when=asyncio.FIRST_COMPLETED)
+
+        result = None
+
+        if view_task in done:
+            # View finished (button clicked or timeout)
+            if view.value:
+                result = view.value
+            # If timeout (view.value is None), result remains None
+        else:
+            # Message received
+            try:
+                msg = msg_task.result()
+                result = msg.content.strip()
+                view.stop()
+            except Exception:
+                pass
+
+        for task in pending:
+            task.cancel()
 
     # Cleanup / UI Update
     if result and result in options.values():
@@ -174,11 +187,11 @@ async def launch_modal(ctx, modal: discord.ui.Modal):
 class PaginatorView(discord.ui.View):
     """A generic view for paginating through a list of embeds."""
 
-    def __init__(self, ctx, pages: list[discord.Embed], timeout: float = 60.0):
+    def __init__(self, ctx, pages: list[discord.Embed], timeout: float = 60.0, start_index: int = 0):
         super().__init__(timeout=timeout)
         self.ctx = ctx
         self.pages = pages
-        self.current_page = 0
+        self.current_page = max(0, min(start_index, len(pages) - 1))  # Clamp to valid range
         self.message: Optional[discord.Message] = None
 
         # Update button states initially
