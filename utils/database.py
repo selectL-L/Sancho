@@ -92,6 +92,7 @@ class DatabaseManager:
             await db.execute("PRAGMA foreign_keys = ON;")
 
             # Define Table Schemas (Creation SQL)
+            # Note: Table name descriptions are in migrate_db.py for easier reference.
             table_schemas = {
                 "skills": '''CREATE TABLE IF NOT EXISTS skills (
                         id INTEGER PRIMARY KEY,
@@ -120,32 +121,28 @@ class DatabaseManager:
                         recurrence_rule TEXT,
                         reply_message_id INTEGER
                     )''',
-                "user_timezones": '''CREATE TABLE IF NOT EXISTS user_timezones (
-                        user_id INTEGER PRIMARY KEY,
-                        timezone TEXT NOT NULL
-                    )''',
-                "user_config": '''CREATE TABLE IF NOT EXISTS user_config (
+                "user_settings": '''CREATE TABLE IF NOT EXISTS user_settings (
                         user_id INTEGER NOT NULL,
                         key TEXT NOT NULL,
                         value TEXT NOT NULL,
                         PRIMARY KEY(user_id, key)
                     )''',
-                "config": '''CREATE TABLE IF NOT EXISTS config (
+                "bot_settings": '''CREATE TABLE IF NOT EXISTS bot_settings (
                         key TEXT PRIMARY KEY,
-                        value INTEGER NOT NULL
+                        value TEXT NOT NULL
                     )''',
-                "guild_config": '''CREATE TABLE IF NOT EXISTS guild_config (
+                "guild_settings": '''CREATE TABLE IF NOT EXISTS guild_settings (
                         guild_id INTEGER NOT NULL,
                         key TEXT NOT NULL,
                         value TEXT NOT NULL,
                         PRIMARY KEY(guild_id, key)
                     )''',
-                "starboard": '''CREATE TABLE IF NOT EXISTS starboard (
+                "starboard_entries": '''CREATE TABLE IF NOT EXISTS starboard_entries (
                         original_message_id INTEGER PRIMARY KEY,
                         starboard_message_id INTEGER NOT NULL,
                         guild_id INTEGER NOT NULL,
                         starboard_reply_id INTEGER,
-                        original_channel_id INTEGER
+                        original_channel_id INTEGER NOT NULL
                     )''',
                 "bod_usage": '''CREATE TABLE IF NOT EXISTS bod_usage (
                         user_id INTEGER PRIMARY KEY,
@@ -155,7 +152,6 @@ class DatabaseManager:
                     )''',
                 "bod_leaderboard": '''CREATE TABLE IF NOT EXISTS bod_leaderboard (
                         user_id INTEGER PRIMARY KEY,
-                        user_name TEXT NOT NULL,
                         best_chain INTEGER NOT NULL DEFAULT 0,
                         achieved_at INTEGER NOT NULL DEFAULT 0
                     )'''
@@ -174,6 +170,9 @@ class DatabaseManager:
 
             # Create Indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries(guild_id)")
 
             await db.commit()
 
@@ -182,13 +181,12 @@ class DatabaseManager:
                 "skills": {"id", "user_id", "name", "dice_roll", "skill_type", "description"},
                 "skill_aliases": {"id", "skill_id", "alias"},
                 "reminders": {"id", "user_id", "channel_id", "reminder_time", "message", "created_at", "is_recurring", "recurrence_rule", "reply_message_id"},
-                "user_timezones": {"user_id", "timezone"},
-                "user_config": {"user_id", "key", "value"},
-                "config": {"key", "value"},
-                "guild_config": {"guild_id", "key", "value"},
-                "starboard": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
+                "user_settings": {"user_id", "key", "value"},
+                "bot_settings": {"key", "value"},
+                "guild_settings": {"guild_id", "key", "value"},
+                "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
                 "bod_usage": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id"},
-                "bod_leaderboard": {"user_id", "user_name", "best_chain", "achieved_at"}
+                "bod_leaderboard": {"user_id", "best_chain", "achieved_at"}
             }
 
             schema_issues = []
@@ -231,10 +229,10 @@ class DatabaseManager:
         Used By: DatabaseManager.create (internal, startup)
         """
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")
+            cursor = await db.execute("SELECT value FROM bot_settings WHERE key = 'skill_limit'")
             row = await cursor.fetchone()
             if row:
-                self.skill_limit = row[0]
+                self.skill_limit = int(row[0])
                 logger.info(f"Loaded skill limit from database: {self.skill_limit}")
 
     async def set_skill_limit(self, limit: int) -> None:
@@ -246,7 +244,7 @@ class DatabaseManager:
             limit (int): The new skill limit.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('skill_limit', ?)", (limit,))
+            await db.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('skill_limit', ?)", (str(limit),))
             await db.commit()
         self.skill_limit = limit
         logger.info(f"Global skill limit set to {limit}.")
@@ -288,7 +286,7 @@ class DatabaseManager:
     async def set_user_config(self, user_id: int, key: str, value: str) -> None:
         """Sets a generic configuration value for a specific user.
 
-        Used By: cogs/reminders.py (reminder_destination preference),
+        Used By: cogs/reminders.py (reminder_destination, timezone),
                  cogs/skills.py (via set_user_skill_limit)
 
         Args:
@@ -298,16 +296,16 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?, ?, ?)",
                 (user_id, key, value)
             )
             await db.commit()
-        logger.info(f"User config for {user_id} set: {key} = {value}")
+        logger.info(f"User setting for {user_id} set: {key} = {value}")
 
     async def get_user_config(self, user_id: int, key: str) -> Optional[str]:
         """Gets a generic configuration value for a specific user.
 
-        Used By: cogs/reminders.py (reminder_destination preference),
+        Used By: cogs/reminders.py (reminder_destination, timezone),
                  cogs/skills.py (via get_user_skill_limit)
 
         Args:
@@ -319,7 +317,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "SELECT value FROM user_config WHERE user_id = ? AND key = ?",
+                "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
                 (user_id, key)
             )
             row = await cursor.fetchone()
@@ -327,7 +325,7 @@ class DatabaseManager:
 
     # ==========================================================================
     # FUN COG METHODS
-    # Methods for the 'bod' (Ball of Death) game mechanics.
+    # Methods for the 'bod' (Boundary of Death) game mechanics.
     # ==========================================================================
 
     async def get_bod_usage(self, user_id: int) -> Dict[str, Any]:
@@ -403,10 +401,11 @@ class DatabaseManager:
 
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing leaderboard data.
+                Keys: user_id, best_chain, achieved_at
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT user_id, user_name, best_chain, achieved_at FROM bod_leaderboard ORDER BY best_chain DESC, achieved_at ASC") as cursor:
+            async with db.execute("SELECT user_id, best_chain, achieved_at FROM bod_leaderboard ORDER BY best_chain DESC, achieved_at ASC") as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
@@ -426,24 +425,23 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
-    async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int, achieved_at: int = 0) -> None:
+    async def update_bod_leaderboard(self, user_id: int, chain_length: int, achieved_at: int = 0) -> None:
         """Updates the 'bod' leaderboard with a user's new best score.
 
         Used By: cogs/fun.py (bod command, _handle_bod_session_timeout, _cleanup_bod_chains)
 
         Args:
             user_id (int): The user's ID.
-            user_name (str): The user's name.
             chain_length (int): The new best chain length.
             achieved_at (int): The timestamp when the chain was achieved.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO bod_leaderboard (user_id, user_name, best_chain, achieved_at) VALUES (?, ?, ?, ?)",
-                (user_id, user_name, chain_length, achieved_at)
+                "INSERT OR REPLACE INTO bod_leaderboard (user_id, best_chain, achieved_at) VALUES (?, ?, ?)",
+                (user_id, chain_length, achieved_at)
             )
             await db.commit()
-            logger.info(f"New BOD leaderboard score for {user_name}: {chain_length} at {achieved_at}.")
+            logger.info(f"New BOD leaderboard score for user {user_id}: {chain_length} at {achieved_at}.")
 
     # ==========================================================================
     # HELP COG METHODS
@@ -632,6 +630,8 @@ class DatabaseManager:
     async def get_user_timezone(self, user_id: int) -> Optional[str]:
         """Fetches a user's saved timezone string (e.g., 'America/New_York').
 
+        This is a convenience wrapper around get_user_config for the 'timezone' key.
+
         Used By: cogs/reminders.py (_get_user_timezone helper)
 
         Args:
@@ -640,13 +640,12 @@ class DatabaseManager:
         Returns:
             Optional[str]: The timezone string, or None if not found.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT timezone FROM user_timezones WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
-            return row[0] if row else None
+        return await self.get_user_config(user_id, 'timezone')
 
     async def set_user_timezone(self, user_id: int, timezone: str) -> None:
         """Saves or updates a user's timezone.
+
+        This is a convenience wrapper around set_user_config for the 'timezone' key.
 
         Used By: cogs/reminders.py (set_timezone command)
 
@@ -654,9 +653,7 @@ class DatabaseManager:
             user_id (int): The user's ID.
             timezone (str): The timezone string (pytz-compatible format).
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
-            await db.commit()
+        await self.set_user_config(user_id, 'timezone', timezone)
 
     async def get_next_upcoming_reminder(self, current_time: int) -> Optional[Dict[str, Any]]:
         """Retrieves the single next reminder that is scheduled for the future.
@@ -695,13 +692,7 @@ class DatabaseManager:
             user_id (int): The user's ID.
             limit (int): The new skill limit.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, 'skill_limit', ?)",
-                (user_id, str(limit))
-            )
-            await db.commit()
-        logger.info(f"Skill limit for user {user_id} set to {limit}.")
+        await self.set_user_config(user_id, 'skill_limit', str(limit))
 
     async def get_user_skill_limit(self, user_id: int) -> int:
         """Gets a user's skill limit.
@@ -717,14 +708,9 @@ class DatabaseManager:
         Returns:
             int: The user's skill limit.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT value FROM user_config WHERE user_id = ? AND key = 'skill_limit'",
-                (user_id,)
-            )
-            row = await cursor.fetchone()
-            if row and row[0].isdigit():
-                return int(row[0])
+        value = await self.get_user_config(user_id, 'skill_limit')
+        if value and value.isdigit():
+            return int(value)
         return self.skill_limit
 
     async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str, description: Optional[str] = None) -> None:
@@ -928,11 +914,11 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?)",
                 (guild_id, key, value)
             )
             await db.commit()
-        logger.info(f"Guild config for {guild_id} set: {key} = {value}")
+        logger.info(f"Guild setting for {guild_id} set: {key} = {value}")
 
     async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
         """Gets a configuration value for a specific guild.
@@ -948,7 +934,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
+                "SELECT value FROM guild_settings WHERE guild_id = ? AND key = ?",
                 (guild_id, key)
             )
             row = await cursor.fetchone()
@@ -959,7 +945,7 @@ class DatabaseManager:
         original_message_id: int,
         starboard_message_id: int,
         guild_id: int,
-        channel_id: Optional[int],
+        channel_id: int,
         starboard_reply_id: Optional[int] = None
     ) -> None:
         """Saves a new starboard entry to the database.
@@ -970,12 +956,12 @@ class DatabaseManager:
             original_message_id (int): The ID of the original message.
             starboard_message_id (int): The ID of the message in the starboard channel.
             guild_id (int): The guild's ID.
-            channel_id (Optional[int]): The ID of the original channel.
+            channel_id (int): The ID of the original channel.
             starboard_reply_id (Optional[int]): The ID of the reply message in the starboard channel.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO starboard_entries (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
                 (original_message_id, starboard_message_id, guild_id, channel_id, starboard_reply_id)
             )
             await db.commit()
@@ -993,7 +979,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            cursor = await db.execute("SELECT * FROM starboard_entries WHERE original_message_id = ?", (original_message_id,))
             row = await cursor.fetchone()
             return dict(row) if row else None
 
@@ -1010,7 +996,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM starboard WHERE guild_id = ?", (guild_id,))
+            cursor = await db.execute("SELECT * FROM starboard_entries WHERE guild_id = ?", (guild_id,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -1023,7 +1009,7 @@ class DatabaseManager:
             guild_id (int): The guild's ID.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM starboard WHERE guild_id = ?", (guild_id,))
+            await db.execute("DELETE FROM starboard_entries WHERE guild_id = ?", (guild_id,))
             await db.commit()
             logger.info(f"Cleared all starboard entries for guild {guild_id}.")
 
@@ -1036,7 +1022,7 @@ class DatabaseManager:
             original_message_id (int): The ID of the original message.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            await db.execute("DELETE FROM starboard_entries WHERE original_message_id = ?", (original_message_id,))
             await db.commit()
 
     async def update_starboard_entry(self, entry: dict) -> None:
@@ -1052,7 +1038,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                UPDATE starboard SET
+                UPDATE starboard_entries SET
                     starboard_message_id = ?,
                     guild_id = ?,
                     original_channel_id = ?,

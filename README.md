@@ -41,6 +41,13 @@ She can even automatically aggregates the best content in your server.
 *   **BOD (Boundary of Death)**: A probability game for the risk-takers.
 *   **Sanitize**: A utility to post the YouTube sanitization guide (don't ask).
 
+### 🎵 Music (Ambient Presence)
+The bot appears to "listen" to music via its Discord status, cycling through a configured YouTube playlist.
+*   **Listen Along**: Ask the bot to join your voice channel and it will play the music it's "listening to".
+*   **Player Controls**: Skip tracks, view the queue, toggle shuffle, see what's playing.
+*   **Global Session**: The bot can only be in one voice channel at a time across all servers.
+*   **Idle Timeout**: If no one joins within 5 minutes, the bot returns to idle mode.
+
 ## The Architecture: A "Hybrid" System
 
 Sancho is distinct from standard `discord.py` bots because of her **Hybrid Command Dispatcher**.
@@ -77,6 +84,17 @@ If you don't have Python installed or prefer a standalone executable, you can do
 *   Python 3.11+
 *   A Discord Bot Token
 *   A Name (Not a requirement, but highly recommended)
+*   **FFmpeg** (required for music playback - see below)
+
+#### FFmpeg Installation
+
+The music cog requires FFmpeg to be installed and available in your system PATH:
+
+*   **Windows**: `winget install ffmpeg` or download from [ffmpeg.org](https://ffmpeg.org/download.html)
+*   **Linux**: `sudo apt install ffmpeg` (Debian/Ubuntu) or `sudo dnf install ffmpeg` (Fedora)
+*   **macOS**: `brew install ffmpeg`
+
+*Note: Pre-built executables may include FFmpeg bundled, so end-users don't need to install it separately.*
 
 ### Installation
 

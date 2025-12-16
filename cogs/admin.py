@@ -423,32 +423,26 @@ class AdminCog(BaseCog):
                         pass
 
                     try:
-                        user_timezones = await self.db_manager.db_fetchall("SELECT * FROM user_timezones")
-                        tables_to_export.append(("user_timezones", [dict(row) for row in user_timezones]))
+                        user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
+                        tables_to_export.append(("user_settings", [dict(row) for row in user_settings]))
                     except Exception:
                         pass
 
                     try:
-                        user_config = await self.db_manager.db_fetchall("SELECT * FROM user_config")
-                        tables_to_export.append(("user_config", [dict(row) for row in user_config]))
+                        bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
+                        tables_to_export.append(("bot_settings", [dict(row) for row in bot_settings]))
                     except Exception:
                         pass
 
                     try:
-                        db_config = await self.db_manager.db_fetchall("SELECT * FROM config")
-                        tables_to_export.append(("config", [dict(row) for row in db_config]))
+                        guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
+                        tables_to_export.append(("guild_settings", [dict(row) for row in guild_settings]))
                     except Exception:
                         pass
 
                     try:
-                        guild_config = await self.db_manager.db_fetchall("SELECT * FROM guild_config")
-                        tables_to_export.append(("guild_config", [dict(row) for row in guild_config]))
-                    except Exception:
-                        pass
-
-                    try:
-                        starboard = await self.db_manager.db_fetchall("SELECT * FROM starboard")
-                        tables_to_export.append(("starboard", [dict(row) for row in starboard]))
+                        starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
+                        tables_to_export.append(("starboard_entries", [dict(row) for row in starboard_entries]))
                     except Exception:
                         pass
 

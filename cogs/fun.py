@@ -9,8 +9,9 @@ import os
 import random
 import re
 import time
-from typing import TYPE_CHECKING, Dict, List, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -114,6 +115,56 @@ class Fun(BaseCog):
             self.logger.error("8ball.txt not found. 8ball command will not work.")
             return ["I seem to have lost my magic 8-ball..."]
 
+    async def _resolve_user_display_name(self, user_id: int, guild: Optional[discord.Guild] = None) -> str:
+        """Resolve a user ID to a display name with exponential backoff for API calls.
+
+        Resolution order:
+        1. Guild member (if guild provided) - returns server nickname
+        2. Bot's user cache - returns global display name
+        3. API fetch with exponential backoff - guarantees resolution
+        4. Fallback to "User {id}" if all else fails
+
+        Args:
+            user_id (int): The Discord user ID to resolve.
+            guild (Optional[discord.Guild]): The guild context, if any.
+
+        Returns:
+            str: The resolved display name.
+        """
+        # 1. Try guild member first (fastest, gets server nickname)
+        if guild:
+            member = guild.get_member(user_id)
+            if member:
+                return member.display_name
+
+        # 2. Try bot's user cache (no API call)
+        cached_user = self.bot.get_user(user_id)
+        if cached_user:
+            return cached_user.display_name
+
+        # 3. API fetch with exponential backoff
+        backoff = 1.0
+        max_retries = 4
+        for attempt in range(max_retries):
+            try:
+                user = await self.bot.fetch_user(user_id)
+                return user.display_name
+            except discord.NotFound:
+                # User doesn't exist - no point retrying
+                break
+            except (discord.HTTPException, aiohttp.ClientError) as e:
+                self.logger.debug(f"fetch_user({user_id}) attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+                continue
+            except Exception as e:
+                self.logger.warning(f"Unexpected error fetching user {user_id}: {e}")
+                break
+
+        # 4. Fallback
+        return f"User {user_id}"
+
     async def cog_unload(self) -> None:
         """Clean up tasks when the cog is unloaded."""
         self.logger.info(f"Unloading Fun cog. Cancelling {len(self.bod_timeout_tasks)} BOD timeout tasks.")
@@ -157,13 +208,11 @@ class Fun(BaseCog):
 
             # If they are still in a chain, the session has timed out.
             channel = self.bot.get_channel(channel_id)
-            user = self.bot.get_user(user_id)
-            user_name = user.display_name if user else "A user"
 
             reply_message = f"Your 20-minute `bod` session has ended. Your final chain was {current_chain}."
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain, int(time.time()))
+                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                 reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -279,7 +328,7 @@ class Fun(BaseCog):
 
                     user_best = await db_manager.get_user_bod_best(user_id)
                     if current_chain > user_best:
-                        await db_manager.update_bod_leaderboard(user_id, ctx.author.display_name, current_chain, int(time.time()))
+                        await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                         reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}! Yujin would be proud!**"
                     else:
                         reply_message += f"\nYour personal best is {user_best}. Yujin is now heading to sleep!"
@@ -395,14 +444,11 @@ class Fun(BaseCog):
                 self.logger.error(f"Could not find channel {channel_id} to notify user {user_id} about their broken chain.")
                 continue
 
-            user = self.bot.get_user(user_id)
-            user_name = user.display_name if user else "User"
-
             reply_message = f"It looks like I had to restart or reload, which has unfortunately broken your chain of {current_chain}."
 
             user_best = await db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, user_name, current_chain, int(time.time()))
+                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                 reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -447,24 +493,20 @@ class Fun(BaseCog):
         board_string = ""
         for i, entry in enumerate(leaderboard_data[:10]):
             rank = i + 1
-            user_id = entry['user_id']
-            user_name = entry['user_name']
+            entry_user_id = entry['user_id']
             chain = entry['best_chain']
 
-            # Dynamic display name logic
-            if ctx.guild:
-                member = ctx.guild.get_member(user_id)
-                if member:
-                    user_name = member.display_name
+            # Fetch display name dynamically (guild member > cached user > API fetch)
+            display_name = await self._resolve_user_display_name(entry_user_id, ctx.guild)
 
             if rank == 1:
-                board_string += f"🥇 **{user_name}** - Chain of **{chain}**\n"
+                board_string += f"🥇 **{display_name}** - Chain of **{chain}**\n"
             elif rank == 2:
-                board_string += f"🥈 **{user_name}** - Chain of **{chain}**\n"
+                board_string += f"🥈 **{display_name}** - Chain of **{chain}**\n"
             elif rank == 3:
-                board_string += f"🥉 **{user_name}** - Chain of **{chain}**\n"
+                board_string += f"🥉 **{display_name}** - Chain of **{chain}**\n"
             else:
-                board_string += f"**{rank}.** {user_name} - Chain of {chain}\n"
+                board_string += f"**{rank}.** {display_name} - Chain of {chain}\n"
 
         embed.add_field(name="Top 10", value=board_string, inline=False)
 

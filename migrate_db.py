@@ -38,7 +38,67 @@ BACKUP_EXTENSION = ".backup"
 
 # --- Schema Definition ---
 # This is the target schema we want for the new database.
-# It matches the schema in `utils/database.py`, including the `COLLATE NOCASE` fix.
+# It matches the schema in `utils/database.py`.
+#
+# ==================================================================================
+# TABLE DESCRIPTIONS (in order of appearance)
+# ==================================================================================
+#
+# skills
+#   Purpose: Stores user-created dice roll macros ("skills") for tabletop RPGs.
+#   Used by: cogs/skills.py
+#   Keys: user_id (owner), name (unique per user, case-insensitive)
+#
+# skill_aliases
+#   Purpose: Alternative names for skills, allowing users to invoke skills by alias.
+#   Used by: cogs/skills.py
+#   Keys: skill_id (FK to skills), alias (unique per skill, case-insensitive)
+#   Note: CASCADE delete - aliases are removed when parent skill is deleted.
+#
+# reminders
+#   Purpose: Scheduled reminders that fire at a specific time.
+#   Used by: cogs/reminders.py
+#   Keys: user_id (owner), reminder_time (Unix timestamp for scheduling)
+#   Note: Supports recurring reminders via is_recurring flag and recurrence_rule (iCal RRULE).
+#
+# user_settings
+#   Purpose: Per-user key-value configuration store.
+#   Used by: cogs/reminders.py (timezone, reminder_destination), cogs/skills.py (skill_limit)
+#   Keys: Composite (user_id, key) - allows multiple settings per user.
+#   Known keys: 'timezone', 'skill_limit', 'reminder_destination'
+#
+# bot_settings
+#   Purpose: Global bot-wide configuration store.
+#   Used by: cogs/admin.py (global_limit), utils/database.py (skill_limit default)
+#   Keys: Single key column - one row per setting.
+#   Known keys: 'skill_limit'
+#
+# guild_settings
+#   Purpose: Per-guild key-value configuration store.
+#   Used by: cogs/starboard.py (starboard_channel, starboard_emoji, starboard_threshold),
+#            cogs/music.py (music_channel_id)
+#   Keys: Composite (guild_id, key) - allows multiple settings per guild.
+#   Known keys: 'starboard_channel', 'starboard_emoji', 'starboard_threshold', 'music_channel_id'
+#
+# starboard_entries
+#   Purpose: Tracks messages that have been posted to a guild's starboard channel.
+#   Used by: cogs/starboard.py
+#   Keys: original_message_id (the source message being starred)
+#   Note: Links original message to its starboard copy for updates/removal.
+#
+# bod_usage
+#   Purpose: Tracks active "Boundary of Death" game sessions per user.
+#   Used by: cogs/fun.py (bod command)
+#   Keys: user_id (one active session per user)
+#   Note: Stores current chain progress and timeout tracking.
+#
+# bod_leaderboard
+#   Purpose: Persistent high scores for the "Boundary of Death" game.
+#   Used by: cogs/fun.py (bod_leaderboard command)
+#   Keys: user_id (one entry per user)
+#   Note: Display names are fetched dynamically at render time, not stored.
+#
+# ==================================================================================
 TABLE_SCHEMAS = {
     "skills": """
         CREATE TABLE skills (
@@ -73,41 +133,35 @@ TABLE_SCHEMAS = {
             reply_message_id INTEGER
         )
     """,
-    "user_timezones": """
-        CREATE TABLE user_timezones (
-            user_id INTEGER PRIMARY KEY,
-            timezone TEXT NOT NULL
-        )
-    """,
-    "user_config": """
-        CREATE TABLE user_config (
+    "user_settings": """
+        CREATE TABLE user_settings (
             user_id INTEGER NOT NULL,
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY(user_id, key)
         )
     """,
-    "config": """
-        CREATE TABLE config (
+    "bot_settings": """
+        CREATE TABLE bot_settings (
             key TEXT PRIMARY KEY,
-            value INTEGER NOT NULL
+            value TEXT NOT NULL
         )
     """,
-    "guild_config": """
-        CREATE TABLE guild_config (
+    "guild_settings": """
+        CREATE TABLE guild_settings (
             guild_id INTEGER NOT NULL,
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY(guild_id, key)
         )
     """,
-    "starboard": """
-        CREATE TABLE starboard (
+    "starboard_entries": """
+        CREATE TABLE starboard_entries (
             original_message_id INTEGER PRIMARY KEY,
             starboard_message_id INTEGER NOT NULL,
             guild_id INTEGER NOT NULL,
             starboard_reply_id INTEGER,
-            original_channel_id INTEGER
+            original_channel_id INTEGER NOT NULL
         )
     """,
     "bod_usage": """
@@ -121,7 +175,6 @@ TABLE_SCHEMAS = {
     "bod_leaderboard": """
         CREATE TABLE bod_leaderboard (
             user_id INTEGER PRIMARY KEY,
-            user_name TEXT NOT NULL,
             best_chain INTEGER NOT NULL DEFAULT 0,
             achieved_at INTEGER NOT NULL DEFAULT 0
         )
@@ -130,8 +183,48 @@ TABLE_SCHEMAS = {
 
 INDEX_SCHEMAS = [
     "CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders (reminder_time);",
-    "CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);"
+    "CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries (guild_id);"
 ]
+
+# ==================================================================================
+# TABLE_RENAMES: Mapping from old table names to new table names
+# ==================================================================================
+# Date Added: 16-12-2025
+#
+# WHY THESE RENAMES EXIST:
+# The original table names were inconsistent and not descriptive enough:
+#   - "config" is ambiguous (config for what? the bot? users? guilds?)
+#   - "*_config" suffix was inconsistent with the actual purpose (these store settings)
+#   - "starboard" didn't indicate it stores entries/records
+#
+# NAMING CONVENTION:
+#   - bot_settings: Global bot-wide configuration (e.g., default skill_limit)
+#   - user_settings: Per-user settings (timezone, skill_limit override, reminder_destination)
+#   - guild_settings: Per-guild settings (starboard_channel, starboard_emoji, etc.)
+#   - starboard_entries: Individual records of messages posted to starboard
+#
+# HOW THIS IS USED:
+# The migration logic checks if a table name exists in TABLE_RENAMES. If so, it
+# migrates data from the old table name to the new table name. Tables not in this
+# mapping are migrated with their original name (if they exist in TABLE_SCHEMAS).
+#
+# IS THIS SAFE TO REMOVE?: No. This mapping is used by the migration logic to
+# determine how to handle renamed tables. Removing it would break migration from
+# databases using the old schema.
+# AKA, this is a structural change that would entirely break old databases if removed.
+# this is not nearly as dangerous as the other migration changes as the script will
+# mention what tables broke, but without this, it can't do that correctly.
+# ==================================================================================
+TABLE_RENAMES = {
+    # Old Name         New Name            Reason for Rename
+    # --------         --------            -----------------
+    "config":         "bot_settings",     # Clarify this is bot-wide, not user/guild config
+    "user_config":    "user_settings",    # Consistent naming with other *_settings tables
+    "guild_config":   "guild_settings",   # Consistent naming with other *_settings tables
+    "starboard":      "starboard_entries",  # Indicate this stores entry records, not config
+}
 
 
 def migrate_database() -> None:
@@ -229,6 +322,22 @@ def migrate_database() -> None:
                 old_columns = table_data['columns']
                 if not rows:
                     continue
+
+                # ==================================================================================
+                # MIGRATION: skills - Handle aliases column if present (legacy format)
+                # ==================================================================================
+                # Date Added: 16-11-2025
+                #
+                # WHY THIS EXISTS:
+                # Very old database versions stored aliases directly in the skills table as a
+                # pipe-separated string. The current schema uses a separate skill_aliases table.
+                #
+                # WHAT THIS MIGRATION DOES:
+                # If the old skills table has an 'aliases' column, extract those aliases and
+                # insert them into the skill_aliases table.
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated at least once.
+                # ==================================================================================
                 if table_name == 'skills':
                     logging.info("...migrating %d skills and their aliases", len(rows))
                     for skill_row in rows:
@@ -252,6 +361,8 @@ def migrate_database() -> None:
                 # MIGRATION: user_timezones - Normalize to pytz-compatible IANA format
                 # ==================================================================================
                 # Date Added: 15-12-2025
+                # Date Modified: 16-12-2025 - Now inserts into user_settings instead of
+                #                             user_timezones (table consolidation)
                 #
                 # WHY THIS EXISTS:
                 # Previously, user timezones could be stored in various inconsistent formats:
@@ -274,9 +385,15 @@ def migrate_database() -> None:
                 #      "UTC-8"  -> "Etc/GMT+8"
                 # 2. Converts bare "GMT" to "Etc/GMT" (pytz-compatible)
                 # 3. Leaves IANA names (e.g., "America/New_York", "CET") unchanged
+                # 4. Inserts into user_settings with key='timezone' (table consolidation)
                 #
                 # IS THIS SAFE TO REMOVE?: Yes, after running migration once. Harmless to keep
                 # since it only transforms non-standard formats which won't exist post-migration.
+                # The user_timezones table no longer exists in the new schema.
+                #
+                # NOTE: This migration is now redundant for databases created after 16-12-2025,
+                # as the new schema stores timezones directly in user_settings. This block only
+                # executes if the old user_timezones table exists in the source database.
                 # ==================================================================================
                 elif table_name == 'user_timezones':
                     logging.info("...migrating %d user timezone(s) (normalizing to pytz format)", len(rows))
@@ -307,13 +424,168 @@ def migrate_database() -> None:
                         # Case 3: Everything else (IANA names like "America/New_York", "CET", "UTC")
                         # These are already pytz-compatible, keep as-is
 
+                        # Insert into user_settings (consolidated table) instead of user_timezones (16-12-2025)
                         cursor.execute(
-                            "INSERT INTO user_timezones (user_id, timezone) VALUES (?, ?)",
+                            "INSERT INTO user_settings (user_id, key, value) VALUES (?, 'timezone', ?)",
                             (user_id, new_tz)
                         )
                     if converted_count > 0:
                         logging.info(f"    Converted {converted_count} timezone(s) to normalized pytz format.")
 
+                # ==================================================================================
+                # MIGRATION: config -> bot_settings (table rename + type change)
+                # ==================================================================================
+                # Date Added: 16-12-2025
+                #
+                # WHY THIS EXISTS:
+                # 1. Table renamed: "config" -> "bot_settings" for clarity (see TABLE_RENAMES)
+                # 2. Type changed: `value INTEGER NOT NULL` -> `value TEXT NOT NULL`
+                #    This makes bot_settings consistent with user_settings and guild_settings,
+                #    which already used TEXT. Storing as TEXT allows future flexibility
+                #    (e.g., storing JSON or non-numeric config values).
+                #
+                # WHAT THIS MIGRATION DOES:
+                # 1. Reads from old `config` table
+                # 2. Converts INTEGER values to TEXT strings via str()
+                # 3. Inserts into `bot_settings`
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated. The
+                # `config` table no longer exists in the new schema. Running on a new DB
+                # is a no-op since `config` table won't exist.
+                # ==================================================================================
+                elif table_name == 'config':
+                    logging.info("...migrating %d config entries from config -> bot_settings", len(rows))
+                    for row in rows:
+                        cursor.execute(
+                            "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+                            (row['key'], str(row['value']))  # Convert INTEGER to TEXT
+                        )
+
+                # ==================================================================================
+                # MIGRATION: user_config -> user_settings (table rename)
+                # ==================================================================================
+                # Date Added: 16-12-2025
+                #
+                # WHY THIS EXISTS:
+                # Table renamed: "user_config" -> "user_settings" (see TABLE_RENAMES)
+                # The schema is unchanged: (user_id INTEGER, key TEXT, value TEXT)
+                #
+                # NOTE: Uses INSERT OR REPLACE because user_timezones migration (above) may
+                # have already inserted timezone entries for some users. This ensures we
+                # don't fail on PRIMARY KEY conflicts if both tables had data for the same user.
+                #
+                # WHAT THIS MIGRATION DOES:
+                # Direct copy from `user_config` to `user_settings` with conflict handling.
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated. Running
+                # on a new DB is a no-op since `user_config` table won't exist.
+                # ==================================================================================
+                elif table_name == 'user_config':
+                    logging.info("...migrating %d entries from user_config -> user_settings", len(rows))
+                    for row in rows:
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?, ?, ?)",
+                            (row['user_id'], row['key'], row['value'])
+                        )
+
+                # ==================================================================================
+                # MIGRATION: guild_config -> guild_settings (table rename)
+                # ==================================================================================
+                # Date Added: 16-12-2025
+                #
+                # WHY THIS EXISTS:
+                # Table renamed: "guild_config" -> "guild_settings" (see TABLE_RENAMES)
+                # The schema is unchanged: (guild_id INTEGER, key TEXT, value TEXT)
+                #
+                # WHAT THIS MIGRATION DOES:
+                # Direct copy from `guild_config` to `guild_settings`.
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated. Running
+                # on a new DB is a no-op since `guild_config` table won't exist.
+                # ==================================================================================
+                elif table_name == 'guild_config':
+                    logging.info("...migrating %d entries from guild_config -> guild_settings", len(rows))
+                    for row in rows:
+                        cursor.execute(
+                            "INSERT INTO guild_settings (guild_id, key, value) VALUES (?, ?, ?)",
+                            (row['guild_id'], row['key'], row['value'])
+                        )
+
+                # ==================================================================================
+                # MIGRATION: starboard -> starboard_entries (table rename + NOT NULL constraint)
+                # ==================================================================================
+                # Date Added: 16-12-2025
+                #
+                # WHY THIS EXISTS:
+                # 1. Table renamed: "starboard" -> "starboard_entries" (see TABLE_RENAMES)
+                #    The old name was ambiguous (could mean config or entries).
+                # 2. Schema change: `original_channel_id INTEGER` -> `original_channel_id INTEGER NOT NULL`
+                #    The column was nullable in the old schema, but every starboard entry should
+                #    have a source channel. Very old data may have NULL values from bugs.
+                #
+                # WHAT THIS MIGRATION DOES:
+                # 1. Reads from old `starboard` table
+                # 2. For rows with NULL original_channel_id, uses 0 as a placeholder
+                #    (These entries are from very old data and the channel is unknown)
+                # 3. Inserts into `starboard_entries`
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated. Running
+                # on a new DB is a no-op since `starboard` table won't exist.
+                # ==================================================================================
+                elif table_name == 'starboard':
+                    logging.info("...migrating %d entries from starboard -> starboard_entries", len(rows))
+                    null_channel_count = 0
+                    for row in rows:
+                        channel_id = row.get('original_channel_id')
+                        if channel_id is None:
+                            channel_id = 0  # Placeholder for unknown channels
+                            null_channel_count += 1
+                        cursor.execute(
+                            "INSERT INTO starboard_entries (original_message_id, starboard_message_id, guild_id, starboard_reply_id, original_channel_id) VALUES (?, ?, ?, ?, ?)",
+                            (row['original_message_id'], row['starboard_message_id'], row['guild_id'], row.get('starboard_reply_id'), channel_id)
+                        )
+                    if null_channel_count > 0:
+                        logging.warning(f"    {null_channel_count} starboard entries had NULL original_channel_id, set to 0.")
+
+                # ==================================================================================
+                # MIGRATION: bod_leaderboard (drop user_name column)
+                # ==================================================================================
+                # Date Added: 16-12-2025
+                #
+                # WHY THIS EXISTS:
+                # The `user_name` column stored denormalized data: the Discord username at the
+                # time the user achieved their best chain. This is problematic because:
+                #   1. Discord usernames can change (via Nitro or the username migration)
+                #   2. Display names vary by server (nicknames)
+                #   3. Stale usernames cause confusion in the leaderboard display
+                #
+                # The bot now fetches display names dynamically at render time:
+                #   - First tries ctx.guild.get_member(user_id) for server nickname
+                #   - Falls back to bot.get_user(user_id) for cached username
+                #   - Falls back to bot.fetch_user(user_id) with exponential backoff
+                #   - Shows "User {id}" if all else fails
+                #
+                # WHAT THIS MIGRATION DOES:
+                # Copies user_id, best_chain, and achieved_at from old table, dropping user_name.
+                # Uses .get() with defaults to handle potential missing columns gracefully.
+                #
+                # IS THIS SAFE TO REMOVE?: Yes, once all databases have been migrated. Running
+                # on a new DB is a no-op since the new schema already lacks user_name.
+                # ==================================================================================
+                elif table_name == 'bod_leaderboard':
+                    logging.info("...migrating %d bod_leaderboard entries (dropping user_name column)", len(rows))
+                    for row in rows:
+                        cursor.execute(
+                            "INSERT INTO bod_leaderboard (user_id, best_chain, achieved_at) VALUES (?, ?, ?)",
+                            (row['user_id'], row.get('best_chain', 0), row.get('achieved_at', 0))
+                        )
+
+                # ==================================================================================
+                # DEFAULT MIGRATION: Tables with unchanged schema
+                # ==================================================================================
+                # For tables that exist in both old and new schemas with the same name,
+                # perform a standard column-aligned copy.
+                # ==================================================================================
                 elif table_name in TABLE_SCHEMAS:
                     # Align columns with new schema
                     cursor.execute(f"PRAGMA table_info({table_name})")
@@ -326,6 +598,7 @@ def migrate_database() -> None:
                     if extra_columns:
                         logging.warning(f"Table '{table_name}' has extra columns in old DB: {extra_columns}. Data will be dropped.")
 
+                    logging.info(f"...migrating {len(rows)} rows for table '{table_name}'")
                     placeholders = ', '.join('?' for _ in new_columns)
                     query = f"INSERT INTO {table_name} ({', '.join(new_columns)}) VALUES ({placeholders})"
 
@@ -345,6 +618,11 @@ def migrate_database() -> None:
                                 else:
                                     values.append(None)
                         cursor.execute(query, values)
+
+                else:
+                    # Table exists in old DB but not in new schema - skip with warning
+                    logging.warning(f"Table '{table_name}' exists in old database but not in new schema. Skipping.")
+
             cursor.execute("PRAGMA foreign_keys = ON;")
             new_conn.commit()
         logging.info("Data migration successful!")

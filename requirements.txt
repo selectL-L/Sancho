@@ -29,6 +29,12 @@ Pillow
 # For monitoring system resource usage (CPU, RAM) in the ping command.
 psutil
 
+# For YouTube audio extraction in the Music cog.
+yt-dlp
+
+# Required for Discord voice support (encryption).
+PyNaCl
+
 # Testing dependencies (tests are included but these libraries are not required for normal operation).
 pytest
 pytest-asyncio

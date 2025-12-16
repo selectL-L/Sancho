@@ -49,7 +49,30 @@ def build():
     for cog in cogs:
         hidden_import_args.append(f'--hidden-import={cog}')
 
-    # 2. Construct PyInstaller Arguments
+    # 2. Check for FFmpeg to bundle (optional but recommended for music playback)
+    ffmpeg_args = []
+    ffmpeg_path = None
+
+    # Check for platform-specific FFmpeg binary
+    if os.name == 'nt':
+        # Windows
+        candidate = os.path.join(HERE, 'ffmpeg.exe')
+        if os.path.exists(candidate):
+            ffmpeg_path = candidate
+    else:
+        # Linux/macOS
+        candidate = os.path.join(HERE, 'ffmpeg')
+        if os.path.exists(candidate):
+            ffmpeg_path = candidate
+
+    if ffmpeg_path:
+        print(f"🎵 Found FFmpeg at {ffmpeg_path} - will bundle for music playback")
+        ffmpeg_args.append(f'--add-binary={ffmpeg_path}{os.pathsep}.')
+    else:
+        print("⚠️  FFmpeg not found in project root - music playback will require FFmpeg in PATH")
+        print("   To bundle FFmpeg: download the ffmpeg binary and place it in the project root.")
+
+    # 3. Construct PyInstaller Arguments
     # Note: We are NOT bundling the 'assets' folder. The bot expects 'assets' to be
     # in the same directory as the executable (see config.py). This allows for
     # easy customization and database persistence without rebuilding.
@@ -63,9 +86,9 @@ def build():
         # Include the manifest file in the root of the bundle
         f'--add-data=cogs_manifest.json{os.pathsep}.',
         # '--debug=all',                # Uncomment if you need to debug the bootloader
-    ] + hidden_import_args
+    ] + hidden_import_args + ffmpeg_args
 
-    # 3. Run PyInstaller
+    # 4. Run PyInstaller
     print("🔨 Running PyInstaller...")
     try:
         PyInstaller.__main__.run(args)

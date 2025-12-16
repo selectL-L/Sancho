@@ -21,7 +21,25 @@ import logging
 import signal
 import sys
 import threading
+import time
 from typing import Any
+
+
+def _suppress_post_shutdown_exceptions(args: Any) -> None:
+    """Suppresses aiohttp cleanup exceptions that occur after event loop closure.
+
+    These exceptions are harmless - they occur when aiohttp's garbage collection
+    runs after the event loop is closed. We suppress them to keep shutdown clean.
+    """
+    # Check if this is the specific "Event loop is closed" error from aiohttp cleanup
+    if isinstance(args.exc_value, RuntimeError) and "Event loop is closed" in str(args.exc_value):
+        return  # Suppress silently
+    # For any other unraisable exception, use default behavior
+    sys.__unraisablehook__(args)
+
+
+# Install the hook to suppress post-shutdown aiohttp noise
+sys.unraisablehook = _suppress_post_shutdown_exceptions
 
 # Global queue for console input, shared across restarts
 CONSOLE_QUEUE: asyncio.Queue = asyncio.Queue()
@@ -160,6 +178,8 @@ async def run_bot_lifecycle() -> None:
     logging.info("Console reader thread started.")
 
     restart_count = 0
+    log_path: str | None = None  # Persist log path across restarts
+    start_time: float = 0.0  # Track start time for runtime calculation
 
     while True:
         if restart_count > 0:
@@ -205,13 +225,19 @@ async def run_bot_lifecycle() -> None:
 
         # ─── INIT ───
         # Setup Logging (safe to call repeatedly as it clears existing handlers)
+        # On restart, reuse existing log file; on fresh start, create new one
         log_level = "DEBUG" if config.DEV_MODE else "INFO"
         log_path = mod_logging.setup_logging(
             level=log_level,
             logs_dir=config.LOGS_DIR,
             bot_name=config.BOT_NAME,
-            retention_count=config.LOG_RETENTION_COUNT
+            retention_count=config.LOG_RETENTION_COUNT,
+            existing_log_path=log_path if restart_count > 0 else None
         )
+
+        # Track start time on first run only (persists across restarts)
+        if restart_count == 0:
+            start_time = time.time()
 
         # ─── INIT ───
         mod_lifecycle.log_phase("INIT")
@@ -304,11 +330,16 @@ async def run_bot_lifecycle() -> None:
         # Check for Restart Signal
         if bot.restart_signal:
             logging.info("Restart signal received. Purging modules...")
+            mod_logging.stop_queue_listener()  # Clean up before purge to avoid orphaned thread
             mod_lifecycle.purge_modules()
             restart_count += 1
             # Loop continues -> Modules re-imported -> New Bot made
         else:
             logging.info("No restart signal. Exiting.")
+            # Finalize log file (rename with runtime) only on full exit, not restart
+            if log_path:
+                runtime_seconds = time.time() - start_time
+                mod_logging.finalize_log(log_path, runtime_seconds)
             break
 
 if __name__ == '__main__':
