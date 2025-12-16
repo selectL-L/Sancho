@@ -32,6 +32,9 @@ psutil
 # For YouTube audio extraction in the Music cog.
 yt-dlp
 
+# For fetching synced lyrics from LRCLIB in the Music cog.
+syncedlyrics
+
 # Required for Discord voice support (encryption).
 PyNaCl
 

@@ -287,12 +287,14 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     ],
     # Music Group
     [
+        # Lyrics search (check before general music commands)
+        ((r'\blyrics?\b', r'\bfind\s*lyrics\b', r'\bsearch\s*lyrics\b'), 'Music', 'lyrics_nlp'),
         # Listen along / play music (most common entry point)
         ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
         # Skip current track
-        ((r'\bskip\b',), 'Music', 'skip_nlp'),
+        ((r'\bskip\b', r'\bnext\b'), 'Music', 'skip_nlp'),
         # Now playing / current song
-        ((r'\bnow\s*playing\b', r'\bcurrent\s*(song|track)\b', r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
+        ((r'\bnow\s*playing\b', r'\bnp\b', r'\bcurrent\s*(song|track)\b', r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
         # Queue / playlist
         ((r'\bqueue\b', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
         # Shuffle toggle
