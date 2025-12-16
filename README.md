@@ -1,4 +1,4 @@
-# Sancho (V0.83 - The Logging Update)
+# Sancho (V0.96 - The Music Update)
 
 **A Discord bot designed to be more reasonable.**
 
