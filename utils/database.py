@@ -11,9 +11,14 @@ Responsibilities:
 - Establishing a connection to the database.
 - Creating necessary tables on startup (`setup_databases`).
 - Handling all CRUD (Create, Read, Update, Delete) operations.
+
+Methods are organized alphabetically by the cog that primarily uses them.
+Generic/shared methods appear in the "Core / Shared" section. Each method
+includes a "Used By:" line documenting which cog(s) call it.
 """
 
 import logging
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +31,19 @@ class DatabaseManager:
     """Manages all database operations for the bot.
 
     Provides an async interface for interacting with the SQLite database.
+
+    Methods are organized into sections alphabetically by cog name:
+    - Core / Shared: Fundamental methods used by multiple cogs (includes Admin utilities)
+    - Fun Cog: BOD command game mechanics
+    - Help Cog: (Placeholder - no DB operations yet)
+    - Image Cog: (Placeholder - no DB operations yet)
+    - Math Cog: (Placeholder - no DB operations yet)
+    - Reminders Cog: Reminder scheduling and user timezone management
+    - Skills Cog: User skill management
+    - Starboard Cog: Starboard tracking and guild configuration
+
+    Note: The Admin cog uses methods from multiple sections (Core, Skills, Reminders)
+    for administrative operations. Look for "Used By: cogs/admin.py" in docstrings.
     """
 
     def __init__(self, db_path: str):
@@ -37,63 +55,10 @@ class DatabaseManager:
         self.db_path = db_path
         self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
 
-    async def update_starboard_entry(self, entry: dict) -> None:
-        """Updates an existing starboard entry in the database.
-
-        Expects all relevant keys in entry dict.
-
-        Args:
-            entry (dict): The dictionary containing starboard entry data.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                UPDATE starboard SET
-                    starboard_message_id = ?,
-                    guild_id = ?,
-                    original_channel_id = ?,
-                    starboard_reply_id = ?
-                WHERE original_message_id = ?
-                """,
-                (
-                    entry.get("starboard_message_id"),
-                    entry.get("guild_id"),
-                    entry.get("original_channel_id"),
-                    entry.get("starboard_reply_id"),
-                    entry["original_message_id"]
-                )
-            )
-            await db.commit()
-
-    async def db_fetchall(self, query: str, params: tuple = ()) -> List[aiosqlite.Row]:
-        """Executes a raw SQL query and returns all results.
-
-        This method is intended for administrative/export purposes only.
-        Prefer using specific methods for normal operations.
-
-        Args:
-            query: The SQL query to execute.
-            params: Optional parameters for the query.
-
-        Returns:
-            List of Row objects that can be converted to dicts.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(query, params) as cursor:
-                return list(await cursor.fetchall())
-
-    async def ping(self) -> float:
-        """Performs a quick, simple query to the database to measure latency.
-
-        Returns:
-            float: The latency in milliseconds.
-        """
-        start_time = time.monotonic()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("SELECT 1")
-        end_time = time.monotonic()
-        return (end_time - start_time) * 1000
+    # ==========================================================================
+    # CORE / SHARED METHODS
+    # These methods are used by multiple cogs or are fundamental to the system.
+    # ==========================================================================
 
     @classmethod
     async def create(cls, db_path: str) -> "DatabaseManager":
@@ -101,6 +66,8 @@ class DatabaseManager:
 
         This factory method handles the asynchronous setup, including creating
         tables and loading initial configuration from the database.
+
+        Used By: utils/lifecycle.py (bot startup)
 
         Args:
             db_path (str): The file path to the SQLite database.
@@ -118,6 +85,8 @@ class DatabaseManager:
 
         Creates missing tables automatically.
         Checks for schema mismatches in existing tables and warns if found.
+
+        Used By: DatabaseManager.create (internal)
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
@@ -245,13 +214,22 @@ class DatabaseManager:
                 logger.info("Database schema verified.")
 
     async def _warn_and_backup_db(self, issue: str) -> None:
-        import shutil
+        """Creates a backup of the database and logs a warning about schema issues.
+
+        Used By: _setup_databases (internal)
+
+        Args:
+            issue (str): Description of the schema issue detected.
+        """
         backup_path = self.db_path + ".backup"
         shutil.copyfile(self.db_path, backup_path)
         logger.warning(f"Database schema issue detected: {issue}. A backup has been created at {backup_path}. Please run migrate_db.py at your earliest convenience.")
 
     async def _load_skill_limit(self) -> None:
-        """Loads the global skill limit from the database into the instance."""
+        """Loads the global skill limit from the database into the instance.
+
+        Used By: DatabaseManager.create (internal, startup)
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT value FROM config WHERE key = 'skill_limit'")
             row = await cursor.fetchone()
@@ -262,6 +240,8 @@ class DatabaseManager:
     async def set_skill_limit(self, limit: int) -> None:
         """Sets the global skill limit in the database and updates the instance.
 
+        Used By: cogs/admin.py (global_limit command)
+
         Args:
             limit (int): The new skill limit.
         """
@@ -271,16 +251,98 @@ class DatabaseManager:
         self.skill_limit = limit
         logger.info(f"Global skill limit set to {limit}.")
 
+    async def ping(self) -> float:
+        """Performs a quick, simple query to the database to measure latency.
+
+        Used By: cogs/admin.py (status command)
+
+        Returns:
+            float: The latency in milliseconds.
+        """
+        start_time = time.monotonic()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("SELECT 1")
+        end_time = time.monotonic()
+        return (end_time - start_time) * 1000
+
+    async def db_fetchall(self, query: str, params: tuple = ()) -> List[aiosqlite.Row]:
+        """Executes a raw SQL query and returns all results.
+
+        This method is intended for administrative/export purposes only.
+        Prefer using specific methods for normal operations.
+
+        Used By: cogs/admin.py (dump_database callback for raw table exports)
+
+        Args:
+            query: The SQL query to execute.
+            params: Optional parameters for the query.
+
+        Returns:
+            List of Row objects that can be converted to dicts.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, params) as cursor:
+                return list(await cursor.fetchall())
+
+    async def set_user_config(self, user_id: int, key: str, value: str) -> None:
+        """Sets a generic configuration value for a specific user.
+
+        Used By: cogs/reminders.py (reminder_destination preference),
+                 cogs/skills.py (via set_user_skill_limit)
+
+        Args:
+            user_id (int): The user's ID.
+            key (str): The configuration key.
+            value (str): The configuration value.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, ?, ?)",
+                (user_id, key, value)
+            )
+            await db.commit()
+        logger.info(f"User config for {user_id} set: {key} = {value}")
+
+    async def get_user_config(self, user_id: int, key: str) -> Optional[str]:
+        """Gets a generic configuration value for a specific user.
+
+        Used By: cogs/reminders.py (reminder_destination preference),
+                 cogs/skills.py (via get_user_skill_limit)
+
+        Args:
+            user_id (int): The user's ID.
+            key (str): The configuration key.
+
+        Returns:
+            Optional[str]: The configuration value, or None if not found.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM user_config WHERE user_id = ? AND key = ?",
+                (user_id, key)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    # ==========================================================================
+    # FUN COG METHODS
+    # Methods for the 'bod' (Ball of Death) game mechanics.
+    # ==========================================================================
+
     async def get_bod_usage(self, user_id: int) -> Dict[str, Any]:
         """Retrieves the last usage time, current chain, and last channel for a user's 'bod' command.
 
         If the user is not in the table, it returns default values.
 
+        Used By: cogs/fun.py (bod command, _handle_bod_session_timeout)
+
         Args:
             user_id (int): The user's ID.
 
         Returns:
-            Dict[str, Any]: A dictionary containing usage data.
+            Dict[str, Any]: A dictionary containing usage data with keys:
+                            'last_used_timestamp', 'current_chain', 'last_channel_id'.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -294,6 +356,8 @@ class DatabaseManager:
         """Updates or inserts a user's 'bod' command usage data.
 
         If channel_id is not provided, it remains unchanged.
+
+        Used By: cogs/fun.py (bod command, _handle_bod_session_timeout, _cleanup_bod_chains)
 
         Args:
             user_id (int): The user's ID.
@@ -321,6 +385,8 @@ class DatabaseManager:
     async def get_all_active_bod_chains(self) -> List[Dict[str, Any]]:
         """Retrieves all users who are currently in an active 'bod' chain.
 
+        Used By: cogs/fun.py (_cleanup_bod_chains in cog_ready)
+
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing user chain data.
         """
@@ -333,6 +399,8 @@ class DatabaseManager:
     async def get_bod_leaderboard(self) -> List[Dict[str, Any]]:
         """Retrieves the entire 'bod' leaderboard, ordered by best chain.
 
+        Used By: cogs/fun.py (bod_leaderboard command)
+
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing leaderboard data.
         """
@@ -344,6 +412,8 @@ class DatabaseManager:
 
     async def get_user_bod_best(self, user_id: int) -> int:
         """Retrieves a single user's best chain from the leaderboard.
+
+        Used By: cogs/fun.py (bod command, _handle_bod_session_timeout, _cleanup_bod_chains)
 
         Args:
             user_id (int): The user's ID.
@@ -359,6 +429,8 @@ class DatabaseManager:
     async def update_bod_leaderboard(self, user_id: int, user_name: str, chain_length: int, achieved_at: int = 0) -> None:
         """Updates the 'bod' leaderboard with a user's new best score.
 
+        Used By: cogs/fun.py (bod command, _handle_bod_session_timeout, _cleanup_bod_chains)
+
         Args:
             user_id (int): The user's ID.
             user_name (str): The user's name.
@@ -373,151 +445,251 @@ class DatabaseManager:
             await db.commit()
             logger.info(f"New BOD leaderboard score for {user_name}: {chain_length} at {achieved_at}.")
 
-    async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
-        """Sets a configuration value for a specific guild.
+    # ==========================================================================
+    # HELP COG METHODS
+    # (No database operations required for this cog yet.)
+    # ==========================================================================
 
-        Args:
-            guild_id (int): The guild's ID.
-            key (str): The configuration key.
-            value (str): The configuration value.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)",
-                (guild_id, key, value)
-            )
-            await db.commit()
-        logger.info(f"Guild config for {guild_id} set: {key} = {value}")
+    # ==========================================================================
+    # IMAGE COG METHODS
+    # (No database operations required for this cog yet.)
+    # ==========================================================================
 
-    async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
-        """Gets a configuration value for a specific guild.
+    # ==========================================================================
+    # MATH COG METHODS
+    # (No database operations required for this cog yet.)
+    # ==========================================================================
 
-        Args:
-            guild_id (int): The guild's ID.
-            key (str): The configuration key.
+    # ==========================================================================
+    # REMINDERS COG METHODS
+    # Methods for reminder scheduling and user timezone management.
+    # ==========================================================================
 
-        Returns:
-            Optional[str]: The configuration value, or None if not found.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
-                (guild_id, key)
-            )
-            row = await cursor.fetchone()
-            return row[0] if row else None
+    async def add_reminder(
+        self, user_id: int, channel_id: int, reminder_time: int, message: str,
+        created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None,
+        reply_message_id: Optional[int] = None
+    ) -> Optional[int]:
+        """Adds a reminder to the database and returns the new reminder's ID.
 
-    async def set_user_config(self, user_id: int, key: str, value: str) -> None:
-        """Sets a generic configuration value for a specific user.
+        Used By: cogs/reminders.py (remind_me_nlp, set_reminder slash command)
 
         Args:
             user_id (int): The user's ID.
-            key (str): The configuration key.
-            value (str): The configuration value.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO user_config (user_id, key, value) VALUES (?, ?, ?)",
-                (user_id, key, value)
-            )
-            await db.commit()
-        logger.info(f"User config for {user_id} set: {key} = {value}")
-
-    async def get_user_config(self, user_id: int, key: str) -> Optional[str]:
-        """Gets a generic configuration value for a specific user.
-
-        Args:
-            user_id (int): The user's ID.
-            key (str): The configuration key.
+            channel_id (int): The channel ID.
+            reminder_time (int): The reminder time as Unix timestamp.
+            message (str): The reminder message.
+            created_at (int): The creation timestamp.
+            is_recurring (bool): Whether the reminder is recurring.
+            recurrence_rule (Optional[str]): The rrule recurrence rule string.
+            reply_message_id (Optional[int]): The ID of the message to reply to.
 
         Returns:
-            Optional[str]: The configuration value, or None if not found.
+            Optional[int]: The new reminder's ID.
         """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "SELECT value FROM user_config WHERE user_id = ? AND key = ?",
-                (user_id, key)
+                """
+                INSERT INTO reminders
+                (user_id, channel_id, reminder_time, message, created_at, is_recurring, recurrence_rule, reply_message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, channel_id, reminder_time, message, created_at, 1 if is_recurring else 0, recurrence_rule, reply_message_id)
             )
-            row = await cursor.fetchone()
-            return row[0] if row else None
+            await db.commit()
+            return cursor.lastrowid
 
-    async def add_starboard_entry(
-        self,
-        original_message_id: int,
-        starboard_message_id: int,
-        guild_id: int,
-        channel_id: Optional[int],
-        starboard_reply_id: Optional[int] = None
-    ) -> None:
-        """Saves a new starboard entry to the database.
+    async def update_reminder(self, reminder_id: int, user_id: int, updates: Dict[str, Any]) -> int:
+        """Updates specific fields of a reminder for a user.
+
+        Used By: cogs/reminders.py (edit_reminder_nlp), cogs/admin.py (edit_entry)
 
         Args:
-            original_message_id (int): The ID of the original message.
-            starboard_message_id (int): The ID of the message in the starboard channel.
-            guild_id (int): The guild's ID.
-            channel_id (Optional[int]): The ID of the original channel.
-            starboard_reply_id (Optional[int]): The ID of the reply message in the starboard channel.
+            reminder_id (int): The reminder's ID.
+            user_id (int): The user's ID.
+            updates (Dict[str, Any]): A dictionary of fields to update.
+
+        Returns:
+            int: The number of rows affected.
+        """
+        if not updates:
+            return 0
+
+        async with aiosqlite.connect(self.db_path) as db:
+            set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
+            params = list(updates.values())
+            params.extend([reminder_id, user_id])
+
+            query = f"UPDATE reminders SET {set_clause} WHERE id = ? AND user_id = ?"
+            cursor = await db.execute(query, params)
+            await db.commit()
+            return cursor.rowcount
+
+    async def update_reminder_time(self, reminder_id: int, new_time: int) -> None:
+        """Updates the trigger time (`reminder_time`) for a specific reminder.
+
+        This is a specialized, efficient method for rescheduling recurring reminders
+        without needing user_id validation.
+
+        Used By: cogs/reminders.py (_handle_missed_recurring, _reschedule_recurring)
+
+        Args:
+            reminder_id (int): The reminder's ID.
+            new_time (int): The new reminder time as Unix timestamp.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
-                (original_message_id, starboard_message_id, guild_id, channel_id, starboard_reply_id)
+                "UPDATE reminders SET reminder_time = ? WHERE id = ?",
+                (new_time, reminder_id)
             )
             await db.commit()
 
-    async def get_starboard_entry(self, original_message_id: int) -> Optional[Dict[str, Any]]:
-        """Retrieves a starboard entry by the original message's ID.
+    async def get_due_reminders(self, current_time: int) -> List[Dict[str, Any]]:
+        """Fetches all reminders that are due to be sent (time is in the past).
+
+        Used By: cogs/reminders.py (_process_missed_reminders, _scheduler_loop)
 
         Args:
-            original_message_id (int): The ID of the original message.
+            current_time (int): The current timestamp.
 
         Returns:
-            Optional[Dict[str, Any]]: A dictionary containing the starboard entry data.
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def get_all_starboard_entries_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all starboard entries for a specific guild.
-
-        Args:
-            guild_id (int): The guild's ID.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing starboard entry data.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM starboard WHERE guild_id = ?", (guild_id,))
+            cursor = await db.execute("SELECT * FROM reminders WHERE reminder_time <= ? ORDER BY reminder_time ASC", (current_time,))
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def clear_starboard_for_guild(self, guild_id: int) -> None:
-        """Deletes all starboard entries for a specific guild.
+    async def get_all_reminders(self) -> List[Dict[str, Any]]:
+        """Retrieves all reminders for all users, ordered by user_id.
 
-        Args:
-            guild_id (int): The guild's ID.
+        Used By: cogs/admin.py (report command dashboard)
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM starboard WHERE guild_id = ?", (guild_id,))
-            await db.commit()
-            logger.info(f"Cleared all starboard entries for guild {guild_id}.")
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM reminders ORDER BY user_id, reminder_time ASC")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
-    async def remove_starboard_entry(self, original_message_id: int) -> None:
-        """Removes a starboard entry from the database.
+    async def delete_reminders(self, reminder_ids: List[int]) -> None:
+        """Deletes one or more reminders from the database by their IDs.
+
+        Used By: cogs/reminders.py (multiple: _handle_missed_reminder, _fire_reminder,
+                                   _reschedule_recurring, delete_reminders_nlp),
+                 cogs/admin.py (edit_entry)
 
         Args:
-            original_message_id (int): The ID of the original message.
+            reminder_ids (List[int]): A list of reminder IDs to delete.
+        """
+        if not reminder_ids:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            # Use a parameterized query to safely delete multiple IDs.
+            await db.execute(f"DELETE FROM reminders WHERE id IN ({','.join('?' for _ in reminder_ids)})", reminder_ids)
+            await db.commit()
+
+    async def get_user_reminders(self, user_id: int) -> List[Dict[str, Any]]:
+        """Fetches all reminders for a specific user, ordered by due time.
+
+        Used By: cogs/reminders.py (list_reminders_nlp, delete_reminders_nlp, edit_reminder_nlp)
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
+                (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_reminder_by_id(self, reminder_id: int) -> Optional[Dict[str, Any]]:
+        """Fetches a single reminder by its unique ID.
+
+        Used By: cogs/reminders.py (_fire_reminder), cogs/admin.py (edit_entry)
+
+        Args:
+            reminder_id (int): The reminder's ID.
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary containing the reminder data.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_user_timezone(self, user_id: int) -> Optional[str]:
+        """Fetches a user's saved timezone string (e.g., 'America/New_York').
+
+        Used By: cogs/reminders.py (_get_user_timezone helper)
+
+        Args:
+            user_id (int): The user's ID.
+
+        Returns:
+            Optional[str]: The timezone string, or None if not found.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT timezone FROM user_timezones WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def set_user_timezone(self, user_id: int, timezone: str) -> None:
+        """Saves or updates a user's timezone.
+
+        Used By: cogs/reminders.py (set_timezone command)
+
+        Args:
+            user_id (int): The user's ID.
+            timezone (str): The timezone string (pytz-compatible format).
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
             await db.commit()
+
+    async def get_next_upcoming_reminder(self, current_time: int) -> Optional[Dict[str, Any]]:
+        """Retrieves the single next reminder that is scheduled for the future.
+
+        Used By: cogs/reminders.py (_scheduler_loop)
+
+        Args:
+            current_time (int): The current timestamp.
+
+        Returns:
+            Optional[Dict[str, Any]]: The next reminder, or None if no future reminders exist.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # We want the earliest reminder that is AFTER the current time.
+            cursor = await db.execute(
+                "SELECT * FROM reminders WHERE reminder_time > ? ORDER BY reminder_time ASC LIMIT 1",
+                (current_time,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    # ==========================================================================
+    # SKILLS COG METHODS
+    # Methods for user skill management (dice macros, etc.).
+    # ==========================================================================
 
     async def set_user_skill_limit(self, user_id: int, limit: int) -> None:
         """Sets a skill limit override for a specific user.
+
+        This is a convenience wrapper around set_user_config for the 'skill_limit' key.
+
+        Used By: cogs/admin.py (user_limit command)
 
         Args:
             user_id (int): The user's ID.
@@ -535,6 +707,9 @@ class DatabaseManager:
         """Gets a user's skill limit.
 
         Checks for a user-specific override before falling back to the global limit.
+        This is a convenience wrapper around get_user_config for the 'skill_limit' key.
+
+        Used By: cogs/skills.py (save_skill_nlp, list_skills_nlp)
 
         Args:
             user_id (int): The user's ID.
@@ -552,24 +727,12 @@ class DatabaseManager:
                 return int(row[0])
         return self.skill_limit
 
-    async def count_user_skills(self, user_id: int) -> int:
-        """Counts the total number of skills a user has created.
-
-        Args:
-            user_id (int): The user's ID.
-
-        Returns:
-            int: The number of skills.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM skills WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-
     async def save_skill(self, user_id: int, name: str, aliases: List[str], dice_roll: str, skill_type: str, description: Optional[str] = None) -> None:
         """Saves a new skill and its aliases to the database.
 
         This is a transactional operation to ensure data integrity.
+
+        Used By: cogs/skills.py (save_skill_nlp)
 
         Args:
             user_id (int): The user's ID.
@@ -602,37 +765,10 @@ class DatabaseManager:
                     raise
             await db.commit()
 
-    async def get_skill(self, user_id: int, skill_name: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a skill by its name or one of its aliases for a specific user.
-
-        It joins the skills and skill_aliases tables to perform the search.
-
-        Args:
-            user_id (int): The user's ID.
-            skill_name (str): The name or alias of the skill.
-
-        Returns:
-            Optional[Dict[str, Any]]: A dictionary containing the skill data.
-        """
-        query = """
-            SELECT s.id, s.user_id, s.name, s.dice_roll, s.skill_type, s.description,
-                   GROUP_CONCAT(sa.alias, '|') as aliases
-            FROM skills s
-            LEFT JOIN skill_aliases sa ON s.id = sa.skill_id
-            WHERE s.user_id = ?
-              AND (s.name = ? COLLATE NOCASE OR s.id IN (
-                SELECT skill_id FROM skill_aliases WHERE alias = ? COLLATE NOCASE
-              ))
-            GROUP BY s.id
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(query, (user_id, skill_name, skill_name))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
     async def get_skill_by_id(self, skill_id: int) -> Optional[Dict[str, Any]]:
         """Retrieves a skill by its unique ID.
+
+        Used By: cogs/admin.py (edit_entry command)
 
         Args:
             skill_id (int): The skill's ID.
@@ -656,6 +792,9 @@ class DatabaseManager:
 
     async def get_user_skills(self, user_id: int) -> List[Dict[str, Any]]:
         """Retrieves all skills for a specific user, including their aliases.
+
+        Used By: cogs/skills.py (save_skill_nlp, use_skill_nlp, edit_skill_nlp,
+                                list_skills_nlp, delete_skill_nlp)
 
         Args:
             user_id (int): The user's ID.
@@ -681,6 +820,8 @@ class DatabaseManager:
     async def get_all_skills(self) -> List[Dict[str, Any]]:
         """Retrieves all skills for all users, including their aliases.
 
+        Used By: cogs/admin.py (report command dashboard)
+
         Returns:
             List[Dict[str, Any]]: A list of dictionaries containing skill data.
         """
@@ -703,6 +844,8 @@ class DatabaseManager:
 
         The `ON DELETE CASCADE` constraint will automatically delete its aliases.
 
+        Used By: cogs/skills.py (delete_skill_nlp), cogs/admin.py (edit_entry)
+
         Args:
             user_id (int): The user's ID.
             skill_id (int): The skill's ID.
@@ -720,6 +863,8 @@ class DatabaseManager:
         """Updates specific fields of a skill for a user.
 
         If aliases are updated, it replaces all existing aliases for the skill.
+
+        Used By: cogs/skills.py (edit_skill_nlp), cogs/admin.py (edit_entry)
 
         Args:
             skill_id (int): The skill's ID.
@@ -766,189 +911,160 @@ class DatabaseManager:
             await db.commit()
             return rows_affected
 
-    async def add_reminder(
-        self, user_id: int, channel_id: int, reminder_time: int, message: str,
-        created_at: int, is_recurring: bool = False, recurrence_rule: Optional[str] = None,
-        reply_message_id: Optional[int] = None
-    ) -> Optional[int]:
-        """Adds a reminder to the database and returns the new reminder's ID.
+    # ==========================================================================
+    # STARBOARD COG METHODS
+    # Methods for starboard tracking and guild configuration.
+    # ==========================================================================
+
+    async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
+        """Sets a configuration value for a specific guild.
+
+        Used By: cogs/starboard.py (set_channel, set_emoji, set_threshold commands)
 
         Args:
-            user_id (int): The user's ID.
-            channel_id (int): The channel ID.
-            reminder_time (int): The reminder time.
-            message (str): The reminder message.
-            created_at (int): The creation timestamp.
-            is_recurring (bool): Whether the reminder is recurring.
-            recurrence_rule (Optional[str]): The recurrence rule.
-            reply_message_id (Optional[int]): The ID of the message to reply to.
-
-        Returns:
-            Optional[int]: The new reminder's ID.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO reminders
-                (user_id, channel_id, reminder_time, message, created_at, is_recurring, recurrence_rule, reply_message_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (user_id, channel_id, reminder_time, message, created_at, 1 if is_recurring else 0, recurrence_rule, reply_message_id)
-            )
-            await db.commit()
-            return cursor.lastrowid
-
-    async def update_reminder(self, reminder_id: int, user_id: int, updates: Dict[str, Any]) -> int:
-        """Updates specific fields of a reminder for a user.
-
-        Args:
-            reminder_id (int): The reminder's ID.
-            user_id (int): The user's ID.
-            updates (Dict[str, Any]): A dictionary of fields to update.
-
-        Returns:
-            int: The number of rows affected.
-        """
-        if not updates:
-            return 0
-
-        async with aiosqlite.connect(self.db_path) as db:
-            set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
-            params = list(updates.values())
-            params.extend([reminder_id, user_id])
-
-            query = f"UPDATE reminders SET {set_clause} WHERE id = ? AND user_id = ?"
-            cursor = await db.execute(query, params)
-            await db.commit()
-            return cursor.rowcount
-
-    async def update_reminder_time(self, reminder_id: int, new_time: int) -> None:
-        """Updates the trigger time (`reminder_time`) for a specific reminder.
-
-        Args:
-            reminder_id (int): The reminder's ID.
-            new_time (int): The new reminder time.
+            guild_id (int): The guild's ID.
+            key (str): The configuration key.
+            value (str): The configuration value.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "UPDATE reminders SET reminder_time = ? WHERE id = ?",
-                (new_time, reminder_id)
+                "INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)",
+                (guild_id, key, value)
             )
             await db.commit()
+        logger.info(f"Guild config for {guild_id} set: {key} = {value}")
 
-    async def get_due_reminders(self, current_time: int) -> List[Dict[str, Any]]:
-        """Fetches all reminders that are due to be sent (time is in the past).
+    async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
+        """Gets a configuration value for a specific guild.
 
-        Args:
-            current_time (int): The current timestamp.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM reminders WHERE reminder_time <= ? ORDER BY reminder_time ASC", (current_time,))
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_all_reminders(self) -> List[Dict[str, Any]]:
-        """Retrieves all reminders for all users, ordered by user_id.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM reminders ORDER BY user_id, reminder_time ASC")
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def delete_reminders(self, reminder_ids: List[int]) -> None:
-        """Deletes one or more reminders from the database by their IDs.
+        Used By: cogs/starboard.py (get_starboard_config helper)
 
         Args:
-            reminder_ids (List[int]): A list of reminder IDs to delete.
-        """
-        if not reminder_ids:
-            return
-        async with aiosqlite.connect(self.db_path) as db:
-            # Use a parameterized query to safely delete multiple IDs.
-            await db.execute(f"DELETE FROM reminders WHERE id IN ({','.join('?' for _ in reminder_ids)})", reminder_ids)
-            await db.commit()
-
-    async def get_user_reminders(self, user_id: int) -> List[Dict[str, Any]]:
-        """Fetches all reminders for a specific user, ordered by due time.
-
-        Args:
-            user_id (int): The user's ID.
+            guild_id (int): The guild's ID.
+            key (str): The configuration key.
 
         Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing reminder data.
+            Optional[str]: The configuration value, or None if not found.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM reminders WHERE user_id = ? ORDER BY reminder_time ASC",
-                (user_id,)
+                "SELECT value FROM guild_config WHERE guild_id = ? AND key = ?",
+                (guild_id, key)
             )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_reminder_by_id(self, reminder_id: int) -> Optional[Dict[str, Any]]:
-        """Fetches a single reminder by its unique ID.
-
-        Args:
-            reminder_id (int): The reminder's ID.
-
-        Returns:
-            Optional[Dict[str, Any]]: A dictionary containing the reminder data.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def get_user_timezone(self, user_id: int) -> Optional[str]:
-        """Fetches a user's saved timezone string (e.g., 'America/New_York').
-
-        Args:
-            user_id (int): The user's ID.
-
-        Returns:
-            Optional[str]: The timezone string, or None if not found.
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT timezone FROM user_timezones WHERE user_id = ?", (user_id,))
             row = await cursor.fetchone()
             return row[0] if row else None
 
-    async def set_user_timezone(self, user_id: int, timezone: str) -> None:
-        """Saves or updates a user's timezone.
+    async def add_starboard_entry(
+        self,
+        original_message_id: int,
+        starboard_message_id: int,
+        guild_id: int,
+        channel_id: Optional[int],
+        starboard_reply_id: Optional[int] = None
+    ) -> None:
+        """Saves a new starboard entry to the database.
+
+        Used By: cogs/starboard.py (_handle_star_event, _remake_impl, _migrate_starboard_channel)
 
         Args:
-            user_id (int): The user's ID.
-            timezone (str): The timezone string.
+            original_message_id (int): The ID of the original message.
+            starboard_message_id (int): The ID of the message in the starboard channel.
+            guild_id (int): The guild's ID.
+            channel_id (Optional[int]): The ID of the original channel.
+            starboard_reply_id (Optional[int]): The ID of the reply message in the starboard channel.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO user_timezones (user_id, timezone) VALUES (?, ?)", (user_id, timezone))
+            await db.execute(
+                "INSERT INTO starboard (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
+                (original_message_id, starboard_message_id, guild_id, channel_id, starboard_reply_id)
+            )
             await db.commit()
 
-    async def get_next_upcoming_reminder(self, current_time: int) -> Optional[Dict[str, Any]]:
-        """Retrieves the single next reminder that is scheduled for the future.
+    async def get_starboard_entry(self, original_message_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieves a starboard entry by the original message's ID.
+
+        Used By: cogs/starboard.py (_handle_star_event, on_raw_reaction_remove)
 
         Args:
-            current_time (int): The current timestamp.
+            original_message_id (int): The ID of the original message.
 
         Returns:
-            Optional[Dict[str, Any]]: The next reminder, or None if no future reminders exist.
+            Optional[Dict[str, Any]]: A dictionary containing the starboard entry data.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            # We want the earliest reminder that is AFTER the current time.
-            cursor = await db.execute(
-                "SELECT * FROM reminders WHERE reminder_time > ? ORDER BY reminder_time ASC LIMIT 1",
-                (current_time,)
-            )
+            cursor = await db.execute("SELECT * FROM starboard WHERE original_message_id = ?", (original_message_id,))
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def get_all_starboard_entries_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
+        """Retrieves all starboard entries for a specific guild.
+
+        Used By: cogs/starboard.py (remake_starboard, fix_starboard, _remake_impl)
+
+        Args:
+            guild_id (int): The guild's ID.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing starboard entry data.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM starboard WHERE guild_id = ?", (guild_id,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def clear_starboard_for_guild(self, guild_id: int) -> None:
+        """Deletes all starboard entries for a specific guild.
+
+        Used By: cogs/starboard.py (_remake_impl)
+
+        Args:
+            guild_id (int): The guild's ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM starboard WHERE guild_id = ?", (guild_id,))
+            await db.commit()
+            logger.info(f"Cleared all starboard entries for guild {guild_id}.")
+
+    async def remove_starboard_entry(self, original_message_id: int) -> None:
+        """Removes a starboard entry from the database.
+
+        Used By: cogs/starboard.py (_handle_star_event, _fix_impl, on_raw_reaction_remove)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM starboard WHERE original_message_id = ?", (original_message_id,))
+            await db.commit()
+
+    async def update_starboard_entry(self, entry: dict) -> None:
+        """Updates an existing starboard entry in the database.
+
+        Expects all relevant keys in entry dict.
+
+        Used By: cogs/starboard.py (_remake_impl, _migrate_starboard_channel, _fix_impl)
+
+        Args:
+            entry (dict): The dictionary containing starboard entry data.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE starboard SET
+                    starboard_message_id = ?,
+                    guild_id = ?,
+                    original_channel_id = ?,
+                    starboard_reply_id = ?
+                WHERE original_message_id = ?
+                """,
+                (
+                    entry.get("starboard_message_id"),
+                    entry.get("guild_id"),
+                    entry.get("original_channel_id"),
+                    entry.get("starboard_reply_id"),
+                    entry["original_message_id"]
+                )
+            )
+            await db.commit()
