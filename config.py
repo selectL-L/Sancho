@@ -297,6 +297,8 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bqueue\b', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
         # Shuffle toggle
         ((r'\bshuffle\b',), 'Music', 'shuffle_nlp'),
+        # Jump to track
+        ((r'\bjump\b', r'\bgoto\b', r'\bgo to\b'), 'Music', 'jump_nlp'),
         # Loop toggle
         ((r'\bloop\b', r'\brepeat\b'), 'Music', 'loop_nlp'),
         # Leave / disconnect
