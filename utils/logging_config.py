@@ -77,6 +77,26 @@ class NoisyAsyncioFilter(logging.Filter):
         return True
 
 
+class ConsoleRegionFilter(logging.Filter):
+    """Strips #region/#endregion markers from console output.
+
+    These markers are useful for log file folding in VS Code but add
+    visual noise to console output.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Modifies the record message to strip region markers for console."""
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            # Strip region markers and their surrounding blank lines for cleaner console output
+            lines = record.msg.split('\n')
+            filtered_lines = [
+                line for line in lines
+                if not line.strip().startswith('#region') and not line.strip().startswith('#endregion')
+            ]
+            record.msg = '\n'.join(filtered_lines)
+        return True
+
+
 class ResourceTracker:
     """Tracks CPU and RAM usage over time, integrated with the logging system.
 
@@ -302,7 +322,7 @@ class ResourceTracker:
         self._logger.info("ResourceTracker stopped")
 
     def _log_history_summary(self) -> None:
-        """Logs a compact session summary."""
+        """Logs a compact session summary with detailed snapshot history."""
         if not self.usage_history:
             return
 
@@ -322,7 +342,21 @@ class ResourceTracker:
             parts.append(f"End: {shutdown['cpu']:.1f}% CPU, {shutdown['ram']:.1f}MB RAM")
         parts.append(f"Peak: {peak_cpu:.1f}% CPU, {peak_ram:.1f}MB RAM")
 
-        self._logger.info(f"Session summary: {' | '.join(parts)}")
+        # Build detailed snapshot table with fold markers
+        snapshot_lines = [
+            "",
+            "#region ─── ResourceTracker Snapshots ───────────────────",
+            f"  {'Timestamp':<19} | {'CPU %':>6} | {'RAM MB':>8} | Label",
+            "  " + "-" * 55
+        ]
+        for entry in self.usage_history:
+            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+            label = entry.get('label') or ""
+            snapshot_lines.append(f"  {ts:<19} | {entry['cpu']:>6.1f} | {entry['ram']:>8.1f} | {label}")
+        snapshot_lines.append("#endregion ResourceTracker Snapshots")
+        snapshot_lines.append("")  # Trailing blank line for consistency
+
+        self._logger.info(f"Session summary: {' | '.join(parts)}\n" + "\n".join(snapshot_lines))
 
     def format_history_for_export(self) -> str:
         """Formats history as a string for file export.
@@ -486,6 +520,7 @@ def setup_logging(
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(CustomFormatter())
+    console_handler.addFilter(ConsoleRegionFilter())  # Strip #region markers from console
     root_logger.addHandler(console_handler)
 
     log_file_path: Optional[str] = None

@@ -4,7 +4,9 @@ import PyInstaller.__main__  # type: ignore
 
 import config
 
-# Force UTF-8 output for Windows consoles to support emojis
+# Platform behavior:
+#   - Windows: Console defaults to cp1252/cp437; must force UTF-8 for emoji support
+#   - Linux: System default is usually UTF-8; no reconfiguration needed
 if sys.platform == "win32":
     # Pylance doesn't know sys.stdout is a TextIOWrapper here
     sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
@@ -50,17 +52,18 @@ def build():
         hidden_import_args.append(f'--hidden-import={cog}')
 
     # 2. Check for FFmpeg to bundle (optional but recommended for music playback)
+    # Platform behavior:
+    #   - Windows: Expects ffmpeg.exe in project root
+    #   - Linux: Expects ffmpeg (no extension) in project root
+    # Note: get_ffmpeg_path() in utils/music_helpers.py must match this logic
     ffmpeg_args = []
     ffmpeg_path = None
 
-    # Check for platform-specific FFmpeg binary
     if os.name == 'nt':
-        # Windows
         candidate = os.path.join(HERE, 'ffmpeg.exe')
         if os.path.exists(candidate):
             ffmpeg_path = candidate
     else:
-        # Linux/macOS
         candidate = os.path.join(HERE, 'ffmpeg')
         if os.path.exists(candidate):
             ffmpeg_path = candidate

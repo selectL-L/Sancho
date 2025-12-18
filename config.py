@@ -291,12 +291,18 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\blyrics?\b', r'\bfind\s*lyrics\b', r'\bsearch\s*lyrics\b'), 'Music', 'lyrics_nlp'),
         # Listen along / play music (most common entry point)
         ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
+        # Pause playback
+        ((r'\bpause\b',), 'Music', 'pause_nlp'),
+        # Resume playback - 'play' only when it's the whole command (no song name after)
+        ((r'\bresume\b', r'\bunpause\b', r'\bcontinue\b', r'\bplay\s*$'), 'Music', 'resume_nlp'),
+        # Play/queue a specific song - 'play' or 'queue' followed by something (URL or search query)
+        ((r'\bplay\s+\S+', r'\bqueue\s+\S+'), 'Music', 'play_nlp'),
         # Skip current track
         ((r'\bskip\b', r'\bnext\b'), 'Music', 'skip_nlp'),
         # Now playing / current song
         ((r'\bnow\s*playing\b', r'\bnp\b', r'\bcurrent\s*(song|track)\b', r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
-        # Queue / playlist
-        ((r'\bqueue\b', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
+        # Queue / playlist - show queue (only when no song after)
+        ((r'\bqueue\s*$', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
         # Shuffle toggle
         ((r'\bshuffle\b',), 'Music', 'shuffle_nlp'),
         # Jump to track

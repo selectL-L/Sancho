@@ -28,21 +28,37 @@ import config
 if TYPE_CHECKING:
     from .bot_class import CoreBot
 
+# Track current phase for fold markers
+_current_phase: Optional[str] = None
+
 
 def log_phase(phase: str) -> None:
-    """Logs a phase separator for visual clarity in logs.
+    """Logs a phase separator with fold markers for Notepad++ collapsing.
+
+    Emits #region/#endregion markers that can be folded in Notepad++
+    with a custom User Defined Language.
 
     Args:
         phase: The name of the phase to log.
     """
+    global _current_phase
+
+    # Close previous region if one was open
+    if _current_phase:
+        logging.info(f"#endregion {_current_phase}")
+
+    # Open new region with visual separator
     separator = f"─── {phase} " + "─" * (40 - len(phase))
-    logging.info(separator)
+    logging.info(f"#region {separator}")
+    _current_phase = phase
 
 
 def is_system_rebooting() -> bool:
     """Checks if the system is in the process of rebooting or shutting down.
 
-    This check is only relevant on Linux systems with systemd.
+    Platform behavior:
+        - Linux (systemd): Queries `systemctl list-jobs` to detect reboot/shutdown targets.
+        - Windows: Always returns False (no equivalent detection; shows generic shutdown message).
 
     Returns:
         bool: True if a reboot/shutdown is detected, False otherwise.
@@ -214,6 +230,13 @@ async def shutdown_handler(
             logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} was configuered but not found or not a text channel.")
 
     logging.info("Closing Discord connection...")
+
+    # Close the final GOODBYE region
+    global _current_phase
+    if _current_phase:
+        logging.info(f"#endregion {_current_phase}")
+        _current_phase = None
+
     await bot.close()
     # Note: Code after bot.close() won't execute - control returns to main.py
 
