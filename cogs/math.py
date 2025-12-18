@@ -74,8 +74,8 @@ def safe_eval_math(expr: str) -> Optional[float]:
 
     try:
         tree = ast.parse(expr, mode='eval').body
-    except SyntaxError:
-        raise ValueError("Invalid expression: could not parse.")
+    except SyntaxError as e:
+        raise ValueError("Invalid expression: could not parse.") from e
 
     def _eval_node(node: ast.AST) -> float:
         # Handles numeric constants (e.g., 5, 3.14).
@@ -95,8 +95,8 @@ def safe_eval_math(expr: str) -> Optional[float]:
                 right = _eval_node(node.right)
                 try:
                     return ALLOWED_OPERATORS[op_type](left, right)
-                except ZeroDivisionError:
-                    raise ValueError("Math error: division by zero.")
+                except ZeroDivisionError as e:
+                    raise ValueError("Math error: division by zero.") from e
             else:  # UnaryOp (e.g., -5)
                 operand = _eval_node(node.operand)
                 return ALLOWED_OPERATORS[op_type](operand)
@@ -110,7 +110,7 @@ def safe_eval_math(expr: str) -> Optional[float]:
             try:
                 return ALLOWED_FUNCTIONS[node.func.id](*args)
             except (ValueError, ZeroDivisionError) as e:
-                raise ValueError(f"Math error: {e}")
+                raise ValueError(f"Math error: {e}") from e
         # Handles named constants (e.g., pi, e).
         elif isinstance(node, ast.Name):
             if node.id not in ALLOWED_NAMES:

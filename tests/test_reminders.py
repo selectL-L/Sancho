@@ -380,8 +380,8 @@ class TestParseReminderBasicPatterns:
         pytest.param("call john in 2 hours", "call john", "2", id="relative_hours"),
         pytest.param("open presents december 25th at 9am", "presents", "25", id="specific_date"),
     ])
-    # fmt: on
     async def test_basic_patterns(self, reminders_cog, input_str, expected_msg, expected_time_contains):
+        # fmt: on
         """Verify basic time pattern extraction."""
         result = await reminders_cog._parse_reminder(input_str)
         assert result is not None, f"Failed to parse: {input_str}"
@@ -404,7 +404,7 @@ class TestParseReminderSplitTime:
         """Split: 'On Monday call dentist at 3pm'."""
         result = await reminders_cog._parse_reminder("on monday call dentist at 3pm")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "dentist" in message.lower()
         assert "monday" in time_str.lower() or "3pm" in time_str.lower()
 
@@ -413,7 +413,7 @@ class TestParseReminderSplitTime:
         """Split: 'On Dec 21 go to party at 8pm'."""
         result = await reminders_cog._parse_reminder("on dec 21 go to party at 8pm")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "party" in message.lower()
 
     @pytest.mark.asyncio
@@ -421,7 +421,7 @@ class TestParseReminderSplitTime:
         """Split: 'Tomorrow pick up package at noon'."""
         result = await reminders_cog._parse_reminder("tomorrow pick up package at noon")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "package" in message.lower()
 
 
@@ -460,12 +460,12 @@ class TestParseReminderRecurrence:
         # Monthly
         pytest.param("every 15th of the month pay rent", "rent", "MONTHLY", ["BYMONTHDAY=15"], id="monthly_15th"),
     ])
-    # fmt: on
     async def test_recurrence_patterns(self, reminders_cog, input_str, expected_msg, expected_freq, expected_parts):
+        # fmt: on
         """Verify recurrence pattern detection through full parser."""
         result = await reminders_cog._parse_reminder(input_str)
         assert result is not None, f"Failed to parse: {input_str}"
-        message, time_str, recurrence = result
+        message, _time_str, recurrence = result
 
         assert expected_msg in message.lower(), f"Expected '{expected_msg}' in message '{message}'"
         assert recurrence is not None, f"Expected recurrence rule for '{input_str}'"
@@ -488,7 +488,7 @@ class TestParseReminderTriggerStripping:
         """Strip 'remind me to'."""
         result = await reminders_cog._parse_reminder("remind me to buy milk tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "buy milk" in message.lower()
         assert "remind" not in message.lower()
 
@@ -497,7 +497,7 @@ class TestParseReminderTriggerStripping:
         """Strip 'set a reminder to'."""
         result = await reminders_cog._parse_reminder("set a reminder to call mom at 5pm")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "call mom" in message.lower()
         assert "reminder" not in message.lower()
 
@@ -506,7 +506,7 @@ class TestParseReminderTriggerStripping:
         """Strip 'remember to'."""
         result = await reminders_cog._parse_reminder("remember to take out trash tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "trash" in message.lower()
         assert "remember" not in message.lower()
 
@@ -515,7 +515,7 @@ class TestParseReminderTriggerStripping:
         """Strip filler words like 'me', 'to', 'for'."""
         result = await reminders_cog._parse_reminder("remind me for us to check oven in 10 minutes")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert not message.lower().startswith("me ")
         assert not message.lower().startswith("for ")
 
@@ -545,7 +545,7 @@ class TestParseReminderEdgeCases:
         """No time expression in query."""
         result = await reminders_cog._parse_reminder("buy milk and eggs")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert time_str == "" or time_str is None or message
 
     @pytest.mark.asyncio
@@ -553,7 +553,7 @@ class TestParseReminderEdgeCases:
         """Message containing numbers that aren't times."""
         result = await reminders_cog._parse_reminder("buy 5 apples tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "5 apples" in message.lower() or "apples" in message.lower()
         assert "tomorrow" in time_str.lower()
 
@@ -562,7 +562,7 @@ class TestParseReminderEdgeCases:
         """Message containing time-like words that are part of content."""
         result = await reminders_cog._parse_reminder("watch the movie 'Tomorrow Never Dies' at 8pm")
         assert result is not None
-        message, time_str, recurrence = result
+        _message, time_str, _recurrence = result
         assert time_str != ""
 
     @pytest.mark.asyncio
@@ -571,7 +571,7 @@ class TestParseReminderEdgeCases:
         long_msg = "call the very important client about the contract renewal and quarterly review"
         result = await reminders_cog._parse_reminder(f"{long_msg} tomorrow at 3pm")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "client" in message.lower()
         assert "tomorrow" in time_str.lower() or "3pm" in time_str.lower()
 
@@ -587,7 +587,7 @@ class TestParseReminderEdgeCases:
         for time_fmt in ["5pm", "5 pm", "5PM", "5 PM", "17:00"]:
             result = await reminders_cog._parse_reminder(f"call mom at {time_fmt}")
             assert result is not None, f"Failed for format: {time_fmt}"
-            message, time_str, recurrence = result
+            message, _time_str, _recurrence = result
             assert "mom" in message.lower()
 
     @pytest.mark.asyncio
@@ -607,7 +607,7 @@ class TestParseReminderEdgeCases:
         """
         result = await reminders_cog._parse_reminder("monday submit report")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "report" in message.lower()
         assert "monday" in time_str.lower()
 
@@ -624,7 +624,7 @@ class TestParseReminderEdgeCases:
         for time_expr in test_cases:
             result = await reminders_cog._parse_reminder(f"check oven {time_expr}")
             assert result is not None, f"Failed for: {time_expr}"
-            message, time_str, recurrence = result
+            message, _time_str, _recurrence = result
             assert "oven" in message.lower(), f"Message not extracted for: {time_expr}"
 
     @pytest.mark.asyncio
@@ -636,7 +636,7 @@ class TestParseReminderEdgeCases:
         """
         result = await reminders_cog._parse_reminder("next monday in half an hour meeting")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "meeting" in message.lower()
         assert time_str != ""
 
@@ -648,7 +648,7 @@ class TestParseReminderEdgeCases:
         """
         result = await reminders_cog._parse_reminder("every monday")
         assert result is not None
-        message, time_str, recurrence = result
+        _message, _time_str, recurrence = result
         assert recurrence is not None
         assert "WEEKLY" in recurrence
 
@@ -657,7 +657,7 @@ class TestParseReminderEdgeCases:
         """Extra whitespace should not break parsing."""
         result = await reminders_cog._parse_reminder("  tomorrow   buy   milk  ")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "milk" in message.lower()
         assert "tomorrow" in time_str.lower()
 
@@ -670,7 +670,7 @@ class TestParseReminderEdgeCases:
         """
         result = await reminders_cog._parse_reminder("buy 10 items at 10pm")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "10" in message or "items" in message.lower()
         assert "10" in time_str or "pm" in time_str.lower()
 
@@ -679,7 +679,7 @@ class TestParseReminderEdgeCases:
         """Emoji and unicode should not break parsing."""
         result = await reminders_cog._parse_reminder("🎂 birthday party tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
         assert "birthday" in message.lower() or "🎂" in message
         assert "tomorrow" in time_str.lower()
 
@@ -697,7 +697,7 @@ class TestParseReminderComplexScenarios:
         """Message with apostrophe."""
         result = await reminders_cog._parse_reminder("pick up mom's prescription tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "prescription" in message.lower()
 
     @pytest.mark.asyncio
@@ -705,7 +705,7 @@ class TestParseReminderComplexScenarios:
         """Message containing a URL."""
         result = await reminders_cog._parse_reminder("check https://example.com tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "example.com" in message.lower() or "https" in message.lower()
 
     @pytest.mark.asyncio
@@ -713,7 +713,7 @@ class TestParseReminderComplexScenarios:
         """Message with Discord-like mention."""
         result = await reminders_cog._parse_reminder("tell @John about meeting tomorrow")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "john" in message.lower() or "@" in message
 
     @pytest.mark.asyncio
@@ -721,7 +721,7 @@ class TestParseReminderComplexScenarios:
         """Recurring reminder with specific start time."""
         result = await reminders_cog._parse_reminder("every monday starting next week team sync at 10am")
         assert result is not None
-        message, time_str, recurrence = result
+        _message, _time_str, recurrence = result
         assert recurrence is not None
         assert "WEEKLY" in recurrence
 
@@ -731,7 +731,7 @@ class TestParseReminderComplexScenarios:
         for expr in ["tonight", "this evening", "this afternoon"]:
             result = await reminders_cog._parse_reminder(f"take out trash {expr}")
             assert result is not None, f"Failed for: {expr}"
-            message, time_str, recurrence = result
+            message, _time_str, _recurrence = result
             assert "trash" in message.lower()
 
     @pytest.mark.asyncio
@@ -740,7 +740,7 @@ class TestParseReminderComplexScenarios:
         for special_time in ["noon", "midnight"]:
             result = await reminders_cog._parse_reminder(f"check server at {special_time}")
             assert result is not None, f"Failed for: {special_time}"
-            message, time_str, recurrence = result
+            message, _time_str, _recurrence = result
             assert "server" in message.lower()
 
     @pytest.mark.asyncio
@@ -786,8 +786,8 @@ class TestExtractRecurrenceRule:
         # Monthly with specific day
         pytest.param("every 15th of the month", "MONTHLY", ["BYMONTHDAY=15"], None, id="monthly_15th"),
     ])
-    # fmt: on
     def test_recurrence_extraction(self, reminders_cog, input_str, expected_freq, expected_parts, expected_match):
+        # fmt: on
         """Verify recurrence rule extraction for various patterns."""
         rule, matched = reminders_cog._extract_recurrence_rule(input_str)
 
@@ -820,7 +820,7 @@ class TestParseReminderRegressions:
         """'to' should not be consumed as part of message when it's a connector."""
         result = await reminders_cog._parse_reminder("tomorrow to call mom")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert not message.lower().startswith("to ")
 
     @pytest.mark.asyncio
@@ -828,7 +828,7 @@ class TestParseReminderRegressions:
         """'the' in date phrases like 'on the 25th'."""
         result = await reminders_cog._parse_reminder("on the 25th buy presents")
         assert result is not None
-        message, time_str, recurrence = result
+        message, _time_str, _recurrence = result
         assert "presents" in message.lower()
 
     @pytest.mark.asyncio
@@ -836,7 +836,7 @@ class TestParseReminderRegressions:
         """Recurrence without explicit time should use 'now'."""
         result = await reminders_cog._parse_reminder("every day drink water")
         assert result is not None
-        message, time_str, recurrence = result
+        _message, time_str, recurrence = result
         assert recurrence is not None
         assert time_str == "now" or time_str != ""
 
@@ -874,12 +874,12 @@ class TestModifierStripping:
         pytest.param("NEXT Monday test", "test", "monday", id="case_upper_next"),
         pytest.param("Next MONDAY test", "test", "monday", id="case_upper_day"),
     ])
-    # fmt: on
     async def test_modifier_stripping_success(self, reminders_cog, input_str, expected_msg, expected_day):
+        # fmt: on
         """Verify future modifiers are stripped and days are parsed."""
         result = await reminders_cog._parse_reminder(input_str)
         assert result is not None, f"Failed to parse: {input_str}"
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
 
         assert not message.startswith("ERROR:"), f"Unexpected error for '{input_str}': {message}"
         assert expected_msg in message.lower(), f"Expected '{expected_msg}' in message '{message}'"
@@ -893,12 +893,12 @@ class TestModifierStripping:
         pytest.param("last week something", "last week", id="last_week"),
         pytest.param("last month something", "last month", id="last_month"),
     ])
-    # fmt: on
     async def test_modifier_stripping_past_error(self, reminders_cog, input_str, past_indicator):
+        # fmt: on
         """Verify past date expressions return ERROR:PAST_DATE."""
         result = await reminders_cog._parse_reminder(input_str)
         assert result is not None, f"Expected error result for: {input_str}"
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
 
         assert message.startswith("ERROR:PAST_DATE:"), f"Expected PAST_DATE error for '{input_str}', got: {message}"
         assert time_str == "", f"Expected empty time_str for error, got: {time_str}"
@@ -934,12 +934,12 @@ class TestFractionalTimeNormalization:
         pytest.param("in half a day review progress", "progress", id="half_a_day"),
         pytest.param("in a half day review progress", "progress", id="a_half_day"),
     ])
-    # fmt: on
     async def test_fractional_normalization(self, reminders_cog, input_str, expected_msg):
+        # fmt: on
         """Verify fractional time expressions are normalized and parsed."""
         result = await reminders_cog._parse_reminder(input_str)
         assert result is not None, f"Failed to parse: {input_str}"
-        message, time_str, recurrence = result
+        message, time_str, _recurrence = result
 
         assert expected_msg in message.lower(), f"Expected '{expected_msg}' in message '{message}'"
         assert time_str != "", f"Expected non-empty time_str for '{input_str}'"

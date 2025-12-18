@@ -180,7 +180,7 @@ class TestGetStarboardConfig:
             "starboard_threshold": "3"
         }.get(key)
 
-        channel_id, emoji, threshold = await starboard_cog.get_starboard_config(1001)
+        channel_id, _emoji, _threshold = await starboard_cog.get_starboard_config(1001)
 
         assert channel_id is None
 
@@ -193,7 +193,7 @@ class TestGetStarboardConfig:
             "starboard_threshold": "invalid"
         }.get(key)
 
-        channel_id, emoji, threshold = await starboard_cog.get_starboard_config(1001)
+        _channel_id, _emoji, threshold = await starboard_cog.get_starboard_config(1001)
 
         assert threshold == 3  # Default
 
@@ -437,7 +437,7 @@ class TestCreateStarboardEmbed:
         """Truncates content over 4096 characters."""
         mock_message.content = "x" * 5000
 
-        embed, files = await starboard_cog.create_starboard_embed_and_files(mock_message)
+        embed, _files = await starboard_cog.create_starboard_embed_and_files(mock_message)
 
         assert len(embed.description) == 4096
         assert embed.description.endswith("...")
@@ -445,7 +445,7 @@ class TestCreateStarboardEmbed:
     @pytest.mark.asyncio
     async def test_includes_jump_link(self, starboard_cog, mock_message):
         """Embed includes a jump link to the original message."""
-        embed, files = await starboard_cog.create_starboard_embed_and_files(mock_message)
+        embed, _files = await starboard_cog.create_starboard_embed_and_files(mock_message)
 
         jump_field = next((f for f in embed.fields if f.name == "Original Message"), None)
         assert jump_field is not None

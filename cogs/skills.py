@@ -147,7 +147,7 @@ class Skills(BaseCog):
             return False, "That doesn't look like a valid dice or coin roll. Please include a notation like `d20`, `2d6`, or `4c`."
 
         if error_messages:
-            unique_errors = sorted(list(set(error_messages)))
+            unique_errors = sorted(set(error_messages))
             error_summary = ", ".join(unique_errors)
             return False, (
                 f"Your roll {error_summary}. "
@@ -212,7 +212,7 @@ class Skills(BaseCog):
             # --- Step 1: Get Skill Name ---
             skill_name = ""
             while True:
-                await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel this process.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")  # noqa: E501
+                await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel this process.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")
                 name_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
 
                 if name_msg.content.strip().lower() == 'exit':
@@ -230,7 +230,7 @@ class Skills(BaseCog):
             # --- Step 2: Get Aliases ---
             aliases = []
             while True:
-                await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")  # noqa: E501
+                await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")
                 aliases_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
 
                 if aliases_msg.content.strip().lower() == 'exit':
@@ -693,9 +693,7 @@ class Skills(BaseCog):
             for field in skill_fields:
                 embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
         else:
-            description = []
-            for field in skill_fields:
-                description.append(f"{field['name']}\n{field['value']}")
+            description = [f"{field['name']}\n{field['value']}" for field in skill_fields]
             embed.description = "\n\n".join(description)
 
         user_skill_limit = await self.db_manager.get_user_skill_limit(ctx.author.id)

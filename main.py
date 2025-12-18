@@ -307,8 +307,9 @@ async def run_bot_lifecycle() -> None:
                             loop.remove_signal_handler(s)  # Clear old handlers
                             loop.add_signal_handler(
                                 s,
-                                lambda s=s: asyncio.create_task(
-                                    mod_lifecycle.shutdown_handler(s, bot, is_restart=False, log_path=log_path)
+                                # Capture all variables by value (not by name) to avoid stale references after restart
+                                lambda s=s, _lifecycle=mod_lifecycle, _bot=bot, _log=log_path: asyncio.create_task(
+                                    _lifecycle.shutdown_handler(s, _bot, is_restart=False, log_path=_log)
                                 )
                             )
                         except NotImplementedError:

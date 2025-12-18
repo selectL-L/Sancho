@@ -214,3 +214,4 @@ __marimo__/
 *.env
 *.db
 *.db.backup
+*.toml

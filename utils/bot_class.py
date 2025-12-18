@@ -91,7 +91,7 @@ class CoreBot(commands.Bot):
             if not handler:
                 return
 
-            cog, method, method_name = handler
+            _cog, method, _method_name = handler
             if asyncio.iscoroutinefunction(method):
                 await method(ctx, query=query)
             else:
@@ -276,8 +276,7 @@ class CoreBot(commands.Bot):
         if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
             help_cog = self.get_cog('Help')
             if help_cog:
-                # We need to tell Pylance that this cog has the method.
-                await getattr(help_cog, "send_command_help")(ctx, ctx.command)
+                await help_cog.send_command_help(ctx, ctx.command)  # type: ignore[attr-defined]
             else:
                 # Fallback to default behavior if Help cog isn't available
                 await ctx.send_help(ctx.command)

@@ -45,4 +45,3 @@ class BaseCog(commands.Cog):
         This is called AFTER the bot logs "Bot is ready!" and can
         safely send messages to channels/users.
         """
-        pass
