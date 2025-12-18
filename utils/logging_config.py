@@ -78,22 +78,20 @@ class NoisyAsyncioFilter(logging.Filter):
 
 
 class ConsoleRegionFilter(logging.Filter):
-    """Strips #region/#endregion markers from console output.
+    """Filters out #region/#endregion log records from console output.
 
-    These markers are useful for log file folding in VS Code but add
-    visual noise to console output.
+    These markers are useful for log file folding in VS Code/Notepad++ but add
+    visual noise to console output. Unlike modifying record.msg (which affects
+    all handlers), this filter drops the entire record for console only.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Modifies the record message to strip region markers for console."""
+        """Returns False to drop region marker records from console output."""
         if hasattr(record, 'msg') and isinstance(record.msg, str):
-            # Strip region markers and their surrounding blank lines for cleaner console output
-            lines = record.msg.split('\n')
-            filtered_lines = [
-                line for line in lines
-                if not line.strip().startswith('#region') and not line.strip().startswith('#endregion')
-            ]
-            record.msg = '\n'.join(filtered_lines)
+            msg = record.msg.strip()
+            # Drop records that are purely region markers
+            if msg.startswith('#region') or msg.startswith('#endregion'):
+                return False
         return True
 
 
@@ -520,7 +518,10 @@ def setup_logging(
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(CustomFormatter())
-    console_handler.addFilter(ConsoleRegionFilter())  # Strip #region markers from console
+    # Only filter region markers when running in an interactive terminal.
+    # When stdout goes to journald/pipes, we want the markers preserved.
+    if sys.stdout.isatty():
+        console_handler.addFilter(ConsoleRegionFilter())
     root_logger.addHandler(console_handler)
 
     log_file_path: Optional[str] = None
