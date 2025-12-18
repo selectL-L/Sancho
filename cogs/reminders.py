@@ -328,7 +328,7 @@ class Reminders(BaseCog):
                         original_msg = await targetable_with_fetch.fetch_message(reply_msg_id)
                         await original_msg.reply(msg_content)
                         sent = True
-                    except:  # noqa: E722 (REASON: We want to catch all exceptions here since discord may send us something weird as a response)
+                    except Exception:  # Catch all: discord may return unexpected responses
                         pass  # Fallback to normal send.
 
                 if not sent:
@@ -602,7 +602,7 @@ class Reminders(BaseCog):
 
         # Pattern C: Complex phrases like "Every 2 days", "Every other Monday", "Every weekend"
         complex_freq_match = re.search(
-            r'\bevery\s+(?:(?P<other>other)\s+)?(?:(?P<interval>\d+)\s+)?(?P<unit>second|minute|hour|day|week|month|year|weekend|weekday|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b',  # noqa: E501
+            r'\bevery\s+(?:(?P<other>other)\s+)?(?:(?P<interval>\d+)\s+)?(?P<unit>second|minute|hour|day|week|month|year|weekend|weekday|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b',
             text, re.IGNORECASE
         )
 
@@ -1486,7 +1486,7 @@ class Reminders(BaseCog):
 
         except pytz.UnknownTimeZoneError:
             self.logger.warning(f"Failed to set timezone for user {ctx.author.id}: Unrecognized timezone '{timezone_str}'.")
-            await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")  # noqa: E501
+            await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")
         except Exception as e:
             self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")
@@ -1654,7 +1654,7 @@ class Reminders(BaseCog):
             channel = self.bot.get_channel(int(dest_pref))
             # Check if channel has a name attribute (TextChannel, VoiceChannel, etc.)
             if channel and hasattr(channel, 'name'):
-                display_dest = f"#{getattr(channel, 'name')}"
+                display_dest = f"#{getattr(channel, 'name')}"  # noqa: B009 (getattr bypasses Pylance's incomplete type narrowing)
             else:
                 display_dest = f"Unknown Channel (ID: {dest_pref})"
         elif dest_pref == 'channel':  # Handle legacy value

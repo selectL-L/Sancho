@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import queue
+import re
 import sys
 import time
 from datetime import datetime
@@ -77,22 +78,50 @@ class NoisyAsyncioFilter(logging.Filter):
         return True
 
 
-class ConsoleRegionFilter(logging.Filter):
-    """Filters out #region/#endregion log records from console output.
+class RegionStrippingFormatter(logging.Formatter):
+    """Formatter that strips #region/#endregion markers while preserving content.
 
     These markers are useful for log file folding in VS Code/Notepad++ but add
-    visual noise to console output. Unlike modifying record.msg (which affects
-    all handlers), this filter drops the entire record for console only.
+    visual noise to console/journald output. This formatter removes the marker
+    prefixes while keeping any meaningful content (like phase headers).
+
+    Wraps another formatter (e.g., CustomFormatter) to handle the actual formatting
+    after the message has been cleaned.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Returns False to drop region marker records from console output."""
-        if hasattr(record, 'msg') and isinstance(record.msg, str):
-            msg = record.msg.strip()
-            # Drop records that are purely region markers
-            if msg.startswith('#region') or msg.startswith('#endregion'):
-                return False
-        return True
+    # Pattern matches #region or #endregion at line start, with optional trailing content
+    _REGION_PATTERN = re.compile(r'^#(?:end)?region\s*', re.MULTILINE)
+
+    def __init__(self, wrapped_formatter: logging.Formatter):
+        """Initialize with a wrapped formatter for final output formatting.
+
+        Args:
+            wrapped_formatter: The formatter to use after stripping markers.
+        """
+        super().__init__()
+        self._wrapped = wrapped_formatter
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Strips region markers from the message, then delegates to wrapped formatter.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            Formatted log string with region markers stripped from the message.
+        """
+        # Work on a copy to avoid affecting other handlers (like file handler)
+        # that need the original message with markers intact
+        record_copy = logging.makeLogRecord(record.__dict__)
+
+        if isinstance(record_copy.msg, str):
+            # Strip #region and #endregion prefixes from all lines
+            cleaned = self._REGION_PATTERN.sub('', record_copy.msg)
+            # Remove lines that became empty/whitespace-only after stripping
+            lines = [line for line in cleaned.split('\n') if line.strip()]
+            record_copy.msg = '\n'.join(lines)
+
+        return self._wrapped.format(record_copy)
 
 
 class ResourceTracker:
@@ -516,12 +545,10 @@ def setup_logging(
         _queue_listener = None
 
     # Console Handler
+    # Use RegionStrippingFormatter to remove fold markers while keeping headers
+    # This applies to both interactive terminals AND journald/pipes
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(CustomFormatter())
-    # Only filter region markers when running in an interactive terminal.
-    # When stdout goes to journald/pipes, we want the markers preserved.
-    if sys.stdout.isatty():
-        console_handler.addFilter(ConsoleRegionFilter())
+    console_handler.setFormatter(RegionStrippingFormatter(CustomFormatter()))
     root_logger.addHandler(console_handler)
 
     log_file_path: Optional[str] = None

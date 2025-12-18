@@ -143,7 +143,7 @@ class Help(BaseCog):
         # Build arguments field.
         if command.clean_params:
             param_details = []
-            for name, param in command.clean_params.items():
+            for name, _param in command.clean_params.items():
                 # Get description from app_command or default
                 description = param_descriptions.get(name, "No description given")
                 param_details.append(f"**`{name}`**: {description}")
@@ -189,7 +189,7 @@ class Help(BaseCog):
         embed = discord.Embed(
             title=f"Hello, I'm {config.BOT_NAME}!",
             description=(
-                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"  # noqa: E501
+                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),
             color=discord.Color.purple()

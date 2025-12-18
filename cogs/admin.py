@@ -699,7 +699,7 @@ class AdminCog(BaseCog):
         uptime_delta = timedelta(seconds=time.time() - self.bot.start_time)
         days, remainder = divmod(uptime_delta.total_seconds(), 86400)
         hours, remainder = divmod(remainder, 3600)
-        minutes, seconds = divmod(remainder, 60)
+        minutes, _seconds = divmod(remainder, 60)
         uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m"
 
         # Cogs

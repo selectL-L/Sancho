@@ -156,8 +156,8 @@ class LoopMode(Enum):
         """Case-insensitive converter for discord.py commands."""
         try:
             return cls[argument.upper()]
-        except KeyError:
-            raise commands.BadArgument(f"'{argument}' is not a valid loop mode. Use: off, one, or all")
+        except KeyError as e:
+            raise commands.BadArgument(f"'{argument}' is not a valid loop mode. Use: off, one, or all") from e
 
     @property
     def display(self) -> str:

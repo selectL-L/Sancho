@@ -401,7 +401,6 @@ class Starboard(BaseCog):
                     deleted_count += 1
             except (discord.NotFound, KeyError):
                 self.logger.debug(f"Starboard message {entry.get('starboard_message_id')} not found when attempting deletion")
-                pass
             except discord.HTTPException as e:
                 self.logger.error(f"Failed to delete starboard message {entry.get('starboard_message_id')}: {e}")
 
@@ -415,7 +414,6 @@ class Starboard(BaseCog):
                     self.logger.info(f"Deleted starboard reply context {reply_id}")
                 except (discord.NotFound, KeyError):
                     self.logger.debug(f"Starboard reply context {reply_id} not found during deletion")
-                    pass
                 except discord.HTTPException as e:
                     self.logger.error(f"Failed to delete starboard reply context {reply_id}: {e}")
 
@@ -685,7 +683,7 @@ class Starboard(BaseCog):
             return
         guild = ctx.guild
 
-        starboard_channel_id, starboard_emoji, starboard_threshold = await self.get_starboard_config(guild.id)
+        starboard_channel_id, starboard_emoji, _starboard_threshold = await self.get_starboard_config(guild.id)
         if not starboard_channel_id:
             await ctx.send("Starboard channel is not configured.")
             return
