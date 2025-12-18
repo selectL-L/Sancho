@@ -51,15 +51,26 @@ def console_reader(loop: asyncio.AbstractEventLoop) -> None:
     This runs forever to avoid blocking the main loop or creating zombie threads
     on restart (especially on Windows where stdin.readline is blocking).
 
+    Platform behavior:
+        - Windows: stdin stays open in interactive consoles; readline() blocks.
+        - Linux (systemd): stdin is closed/redirected to /dev/null; readline()
+          returns "" (EOF) immediately. We must detect EOF and exit to avoid
+          a tight CPU-burning loop.
+
     Args:
         loop (asyncio.AbstractEventLoop): The main event loop.
     """
     while True:
         try:
             line = sys.stdin.readline()
+            if not line:
+                # EOF - stdin closed (common in background services on Linux)
+                # Exit cleanly to avoid a tight CPU-burning loop
+                break
+            line = line.strip()
             if line:
                 # Thread-safe put into the asyncio queue
-                loop.call_soon_threadsafe(CONSOLE_QUEUE.put_nowait, line.strip())
+                loop.call_soon_threadsafe(CONSOLE_QUEUE.put_nowait, line)
         except Exception as e:
             # If stdin closes or errors, log it (though we can't do much from this thread)
             print(f"Console reader error: {e}", file=sys.stderr)
@@ -287,7 +298,9 @@ async def run_bot_lifecycle() -> None:
                     tcp_task = loop.create_task(tcp_control_server(bot, mod_lifecycle.shutdown_handler, log_path, config.CONTROL_PORT))
 
                 # Setup signal handlers for this iteration
-                # Windows doesn't support add_signal_handler fully, but we try for graceful SIGINT
+                # Platform behavior:
+                #   - Linux: Register SIGINT/SIGTERM handlers for graceful shutdown (systemd sends SIGTERM)
+                #   - Windows: Skip (no add_signal_handler support); relies on KeyboardInterrupt for Ctrl+C
                 if sys.platform != "win32":
                     for s in (signal.SIGINT, signal.SIGTERM):
                         try:

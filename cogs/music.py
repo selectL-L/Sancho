@@ -21,527 +21,39 @@ Dependencies:
 """
 
 import asyncio
-import html
 import json
 import os
 import random
 import re
-import shutil
 import time
-from dataclasses import dataclass, field
-from urllib.parse import quote_plus
-from enum import Enum
-from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import cast, Dict, List, Optional, TYPE_CHECKING
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 import config
 from utils.base_cog import BaseCog
 from utils.database import DatabaseManager
+from utils.music_helpers import (
+    YTDLP_AVAILABLE,
+    FFMPEG_OPTIONS,
+    get_ffmpeg_path,
+    LoopMode,
+    Track,
+    LyricsResult,
+    ActiveSession,
+    LyricalNonsenseScraper,
+    LRCLIBProvider,
+    GeniusScraper,
+    get_audio_url,
+    search_youtube,
+    fetch_url_info,
+    fetch_playlist_metadata,
+    chunk_text,
+)
 
 if TYPE_CHECKING:
     from utils.bot_class import CoreBot
-
-# Attempt to import yt-dlp
-try:
-    import yt_dlp
-    YTDLP_AVAILABLE = True
-except ImportError:
-    yt_dlp = None  # type: ignore[assignment]
-    YTDLP_AVAILABLE = False
-
-# Attempt to import syncedlyrics (for LRCLIB lyrics fetching)
-try:
-    import syncedlyrics
-    SYNCEDLYRICS_AVAILABLE = True
-except ImportError:
-    syncedlyrics = None
-    SYNCEDLYRICS_AVAILABLE = False
-
-# aiohttp for web scraping (Genius, etc.)
-try:
-    import aiohttp
-    AIOHTTP_AVAILABLE = True
-except ImportError:
-    aiohttp = None
-    AIOHTTP_AVAILABLE = False
-
-# FFmpeg options for Discord audio streaming
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=0.5"'
-}
-
-# yt-dlp options for extracting audio
-YTDLP_OPTIONS = {
-    'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'opus',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': False,  # We want playlist support
-    'nocheckcertificate': True,
-    'ignoreerrors': True,  # Skip unavailable videos
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-}
-
-
-class LoopMode(Enum):
-    """Loop mode options for the music player."""
-    OFF = 0
-    ONE = 1
-    ALL = 2
-
-    @classmethod
-    async def convert(cls, ctx: commands.Context, argument: str) -> 'LoopMode':
-        """Case-insensitive converter for discord.py commands."""
-        try:
-            return cls[argument.upper()]
-        except KeyError:
-            raise commands.BadArgument(f"'{argument}' is not a valid loop mode. Use: off, one, or all")
-
-    @property
-    def display(self) -> str:
-        """Human-readable display name."""
-        return {
-            LoopMode.OFF: "Off",
-            LoopMode.ONE: "One",
-            LoopMode.ALL: "All"
-        }[self]
-
-    @property
-    def emoji(self) -> str:
-        """Emoji representation for the mode."""
-        return {
-            LoopMode.OFF: "➡️",
-            LoopMode.ONE: "🔂",
-            LoopMode.ALL: "🔁"
-        }[self]
-
-    def next(self) -> 'LoopMode':
-        """Returns the next loop mode in the cycle."""
-        return {
-            LoopMode.OFF: LoopMode.ONE,
-            LoopMode.ONE: LoopMode.ALL,
-            LoopMode.ALL: LoopMode.OFF
-        }[self]
-
-
-@dataclass
-class Track:
-    """Represents a single track in the playlist."""
-    title: str
-    artist: str
-    url: str  # YouTube URL
-    duration: int  # Duration in seconds
-    thumbnail: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for caching."""
-        return {
-            'title': self.title,
-            'artist': self.artist,
-            'url': self.url,
-            'duration': self.duration,
-            'thumbnail': self.thumbnail
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Track':
-        """Create from dictionary."""
-        return cls(
-            title=data['title'],
-            artist=data['artist'],
-            url=data['url'],
-            duration=data['duration'],
-            thumbnail=data.get('thumbnail')
-        )
-
-
-@dataclass
-class LyricsResult:
-    """Represents lyrics search result from a provider."""
-    title: str
-    artist: str
-    source: str  # Provider name (e.g., "Lyrical Nonsense", "LRCLIB")
-    url: str  # Direct link to lyrics page
-    has_translation: bool = False
-    lyrics_text: Optional[str] = None  # Populated when fetched
-    translation_text: Optional[str] = None  # EN translation if available
-
-    @property
-    def display_name(self) -> str:
-        """Formatted display name for selection menus."""
-        trans = " 🌐" if self.has_translation else ""
-        return f"{self.title} - {self.artist}{trans}"
-
-
-@dataclass
-class ActiveSession:
-    """Represents an active voice session."""
-    guild_id: int
-    channel_id: int
-    voice_client: discord.VoiceClient
-    started_at: float = field(default_factory=time.time)
-    waiting_for_users: bool = False
-
-
-# Type alias for contexts that support send()
-Respondable = Union[commands.Context, discord.Interaction]
-
-
-class InteractionPseudoContext:
-    """A pseudo-context wrapper for discord.Interaction.
-
-    Allows using Interactions with utilities that expect Context-like objects
-    (e.g., get_selection, PaginatorView). Only implements the minimum required
-    interface: author, channel, bot, and send().
-    """
-
-    def __init__(self, interaction: discord.Interaction):
-        self.author = interaction.user
-        self.channel = interaction.channel
-        self.bot = interaction.client
-        self._interaction = interaction
-
-    async def send(self, *args: Any, **kwargs: Any) -> discord.Message:
-        """Send a message via interaction followup."""
-        return await self._interaction.followup.send(*args, **kwargs)
-
-
-async def respond(target: Respondable, *args: Any, **kwargs: Any) -> None:
-    """Send a message to either a Context or Interaction.
-
-    Args:
-        target: Either a commands.Context or discord.Interaction.
-        *args: Positional arguments for send/response.
-        **kwargs: Keyword arguments for send/response.
-    """
-    if isinstance(target, commands.Context):
-        await target.send(*args, **kwargs)
-    else:
-        # Interaction
-        if target.response.is_done():
-            await target.followup.send(*args, **kwargs)
-        else:
-            await target.response.send_message(*args, **kwargs)
-
-
-# ==========================================================================
-# LYRICS PROVIDERS
-# ==========================================================================
-
-
-class LyricalNonsenseScraper:
-    """Scrapes lyrics from lyrical-nonsense.com (best for JP content with EN translations).
-
-    NOTE: This provider is currently NON-FUNCTIONAL. Lyrical Nonsense uses JavaScript-based
-    search with no public API endpoint. The /global/search/ URL returns 404.
-    Keeping this class for potential future implementation if an API is discovered.
-    """
-
-    BASE_URL = "https://www.lyrical-nonsense.com"
-    SEARCH_URL = "https://www.lyrical-nonsense.com/global/search/"
-
-    @classmethod
-    async def search(cls, query: str) -> List[LyricsResult]:
-        """Search for lyrics on Lyrical Nonsense.
-
-        NOTE: Currently non-functional - Lyrical Nonsense uses JavaScript search
-        with no public API. Always returns empty list.
-
-        Args:
-            query: Search query (song title, artist, or both).
-
-        Returns:
-            Empty list (search not implemented).
-        """
-        # Lyrical Nonsense uses JavaScript-based search with no public API
-        # The /global/search/ endpoint returns 404
-        # TODO: Investigate if there's a hidden API or consider browser automation
-        return []
-
-    @classmethod
-    async def fetch_lyrics(cls, result: LyricsResult) -> LyricsResult:
-        """Fetch full lyrics and translation from a Lyrical Nonsense page.
-
-        Args:
-            result: LyricsResult with URL to fetch.
-
-        Returns:
-            Updated LyricsResult with lyrics_text and translation_text populated.
-        """
-        if not AIOHTTP_AVAILABLE or aiohttp is None:
-            return result
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(result.url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        return result
-                    html_text = await resp.text()
-
-            # Extract original lyrics
-            # Look for the Japanese/original lyrics container
-            original_pattern = re.compile(
-                r'<div[^>]*(?:id="(?:Lyrics|lyricsjpn|lyrics-original)"[^>]*|class="[^"]*(?:olyrictext|lyrics-original|lyrictext)[^"]*")[^>]*>(.*?)</div>',
-                re.IGNORECASE | re.DOTALL
-            )
-            original_match = original_pattern.search(html_text)
-
-            if original_match:
-                lyrics_html = original_match.group(1)
-                # Clean HTML tags, preserve line breaks
-                lyrics_text = re.sub(r'<br\s*/?>', '\n', lyrics_html)
-                lyrics_text = re.sub(r'<[^>]+>', '', lyrics_text)
-                lyrics_text = html.unescape(lyrics_text).strip()
-                result.lyrics_text = lyrics_text
-
-            # Extract English translation
-            trans_pattern = re.compile(
-                r'<div[^>]*(?:id="(?:Romaji|lyricseng|lyrics-english)"[^>]*|class="[^"]*(?:tlyrictext|lyrics-english|elyrictext)[^"]*")[^>]*>(.*?)</div>',
-                re.IGNORECASE | re.DOTALL
-            )
-            trans_match = trans_pattern.search(html_text)
-
-            if trans_match:
-                trans_html = trans_match.group(1)
-                trans_text = re.sub(r'<br\s*/?>', '\n', trans_html)
-                trans_text = re.sub(r'<[^>]+>', '', trans_text)
-                trans_text = html.unescape(trans_text).strip()
-                if trans_text:
-                    result.translation_text = trans_text
-                    result.has_translation = True
-
-            # If we couldn't find structured lyrics, try a more general approach
-            if not result.lyrics_text:
-                # Look for any large text block that might be lyrics
-                general_pattern = re.compile(
-                    r'<div[^>]*class="[^"]*lyric[^"]*"[^>]*>(.*?)</div>',
-                    re.IGNORECASE | re.DOTALL
-                )
-                for match in general_pattern.finditer(html_text):
-                    text = match.group(1)
-                    text = re.sub(r'<br\s*/?>', '\n', text)
-                    text = re.sub(r'<[^>]+>', '', text)
-                    text = html.unescape(text).strip()
-                    if len(text) > 100:  # Likely actual lyrics
-                        result.lyrics_text = text
-                        break
-
-        except Exception:
-            pass
-
-        return result
-
-
-class LRCLIBProvider:
-    """Fetches lyrics from LRCLIB via syncedlyrics library."""
-
-    @classmethod
-    async def search(cls, query: str) -> List[LyricsResult]:
-        """Search for lyrics on LRCLIB.
-
-        Args:
-            query: Search query (song title, artist, or both).
-
-        Returns:
-            List of LyricsResult objects (typically one result if found).
-        """
-        if not SYNCEDLYRICS_AVAILABLE or syncedlyrics is None:
-            return []
-
-        results: List[LyricsResult] = []
-
-        try:
-            # syncedlyrics.search returns lyrics directly, not a list of results
-            # We'll do a simple search and return it as a single result
-            # Capture module reference for type narrowing in nested function
-            _syncedlyrics = syncedlyrics
-
-            def do_search() -> Optional[str]:
-                return _syncedlyrics.search(query, providers=['lrclib'])
-
-            lyrics = await asyncio.to_thread(do_search)
-
-            if lyrics:
-                # Extract title/artist from query (best effort)
-                parts = query.split(' - ', 1)
-                if len(parts) == 2:
-                    artist, title = parts[0].strip(), parts[1].strip()
-                else:
-                    title = query
-                    artist = "Unknown Artist"
-
-                results.append(LyricsResult(
-                    title=title,
-                    artist=artist,
-                    source="LRCLIB",
-                    url=f"https://lrclib.net/search?q={quote_plus(query)}",
-                    has_translation=False,
-                    lyrics_text=lyrics
-                ))
-
-        except Exception:
-            pass
-
-        return results
-
-    @classmethod
-    async def fetch_lyrics(cls, result: LyricsResult) -> LyricsResult:
-        """LRCLIB results already have lyrics populated from search.
-
-        Args:
-            result: LyricsResult (lyrics already populated).
-
-        Returns:
-            The same result (no additional fetching needed).
-        """
-        return result
-
-
-class GeniusScraper:
-    """Scrapes lyrics from Genius (good general coverage, no API key needed)."""
-
-    BASE_URL = "https://genius.com"
-    SEARCH_URL = "https://genius.com/api/search/multi"
-
-    @classmethod
-    async def search(cls, query: str) -> List[LyricsResult]:
-        """Search for lyrics on Genius.
-
-        Args:
-            query: Search query (song title, artist, or both).
-
-        Returns:
-            List of LyricsResult objects for matching songs.
-        """
-        if not AIOHTTP_AVAILABLE or aiohttp is None:
-            return []
-
-        results: List[LyricsResult] = []
-
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            params = {'q': query}
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    cls.SEARCH_URL,
-                    params=params,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status != 200:
-                        return []
-                    data = await resp.json()
-
-            # Parse API response
-            sections = data.get('response', {}).get('sections', [])
-            for section in sections:
-                if section.get('type') != 'song':
-                    continue
-
-                for hit in section.get('hits', [])[:5]:  # Limit results
-                    song = hit.get('result', {})
-                    title = song.get('title', 'Unknown')
-                    artist = song.get('primary_artist', {}).get('name', 'Unknown')
-                    url = song.get('url', '')
-
-                    if url:
-                        results.append(LyricsResult(
-                            title=title,
-                            artist=artist,
-                            source="Genius",
-                            url=url,
-                            has_translation=False
-                        ))
-
-        except Exception:
-            pass
-
-        return results
-
-    @classmethod
-    async def fetch_lyrics(cls, result: LyricsResult) -> LyricsResult:
-        """Fetch full lyrics from a Genius page.
-
-        Args:
-            result: LyricsResult with URL to fetch.
-
-        Returns:
-            Updated LyricsResult with lyrics_text populated.
-        """
-        if not AIOHTTP_AVAILABLE or aiohttp is None:
-            return result
-
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    result.url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status != 200:
-                        return result
-                    html_text = await resp.text()
-
-            # Genius embeds lyrics in data-lyrics-container divs
-            # Find the start of each lyrics container and extract content properly
-            lyrics_parts = []
-
-            # Find all opening tags of lyrics containers
-            container_pattern = re.compile(
-                r'<div[^>]*data-lyrics-container="true"[^>]*>',
-                re.IGNORECASE
-            )
-
-            for match in container_pattern.finditer(html_text):
-                start_pos = match.end()
-                # Find the matching closing div by counting nested divs
-                depth = 1
-                pos = start_pos
-                while depth > 0 and pos < len(html_text):
-                    next_open = html_text.find('<div', pos)
-                    next_close = html_text.find('</div>', pos)
-
-                    if next_close == -1:
-                        break
-
-                    if next_open != -1 and next_open < next_close:
-                        depth += 1
-                        pos = next_open + 4
-                    else:
-                        depth -= 1
-                        if depth == 0:
-                            content = html_text[start_pos:next_close]
-                            # Clean HTML
-                            content = re.sub(r'<br\s*/?>', '\n', content)
-                            content = re.sub(r'<[^>]+>', '', content)
-                            content = html.unescape(content).strip()
-                            if content:
-                                lyrics_parts.append(content)
-                        pos = next_close + 6
-
-            if lyrics_parts:
-                result.lyrics_text = '\n\n'.join(lyrics_parts)
-
-        except Exception:
-            pass
-
-        return result
 
 
 class Music(BaseCog):
@@ -561,7 +73,6 @@ class Music(BaseCog):
         self.playlist: List[Track] = []
         self.original_playlist: List[Track] = []  # Unshuffled copy
         self.current_index: int = 0
-        self.shuffle_enabled: bool = True
         self.loop_mode: LoopMode = LoopMode.ALL
 
         # Presence cycling state (idle mode)
@@ -578,40 +89,18 @@ class Music(BaseCog):
         self._prefetched_track_url: Optional[str] = None  # Track URL this prefetch is for
         self._prefetch_task: Optional[asyncio.Task[None]] = None
 
-        # FFmpeg path (can be overridden for bundled builds)
-        self._ffmpeg_path: Optional[str] = None
+        # Internal flag: when True the next track-end callback will NOT advance
+        # the playlist (used for intentional stops like jump/skip that manually
+        # set `current_index`). The flag is consumed by `_on_track_end`.
+        self._suppress_next_track_end: bool = False
+
+        # Tracks if the playlist was modified during a voice session.
+        # Set True when tracks are added/removed. Used to decide whether to
+        # reset to the cached playlist when returning to idle.
+        self._playlist_modified_during_session: bool = False
 
         # Cache path
         self.cache_path = config.MUSIC_CACHE_PATH
-
-    def _get_ffmpeg_path(self) -> str:
-        """Gets the path to FFmpeg executable.
-
-        For bundled builds, checks for FFmpeg in the app directory.
-        Otherwise, assumes FFmpeg is in system PATH.
-
-        Returns:
-            str: Path to FFmpeg executable.
-        """
-        if self._ffmpeg_path:
-            return self._ffmpeg_path
-
-        # Check for bundled FFmpeg (PyInstaller build)
-        if getattr(__import__('sys'), 'frozen', False):
-            bundled_path = os.path.join(config.APP_PATH, 'ffmpeg.exe')
-            if os.path.exists(bundled_path):
-                self._ffmpeg_path = bundled_path
-                return self._ffmpeg_path
-
-        # Fallback to system PATH
-        ffmpeg_in_path = shutil.which('ffmpeg')
-        if ffmpeg_in_path:
-            self._ffmpeg_path = ffmpeg_in_path
-            return self._ffmpeg_path
-
-        # Last resort - just return 'ffmpeg' and let it fail with a clear error
-        self._ffmpeg_path = 'ffmpeg'
-        return self._ffmpeg_path
 
     async def cog_ready(self) -> None:
         """Called after the bot is fully ready. Loads playlist and starts presence cycling."""
@@ -662,6 +151,14 @@ class Music(BaseCog):
             except asyncio.CancelledError:
                 pass
 
+        # Cancel prefetch task
+        if self._prefetch_task:
+            self._prefetch_task.cancel()
+            try:
+                await self._prefetch_task
+            except asyncio.CancelledError:
+                pass
+
         # Disconnect from voice if connected
         if self.active_session and self.active_session.voice_client:
             await self.active_session.voice_client.disconnect()
@@ -695,6 +192,8 @@ class Music(BaseCog):
                         self.original_playlist = [Track.from_dict(t) for t in data.get('tracks', [])]
                         if self.original_playlist:
                             self.logger.info(f"Loaded {len(self.original_playlist)} tracks from cache.")
+                            # Copy to playlist and shuffle for initial playback
+                            self.playlist = self.original_playlist.copy()
                             self._apply_shuffle()
                             return
             except (json.JSONDecodeError, KeyError) as e:
@@ -702,54 +201,27 @@ class Music(BaseCog):
 
         # Fetch from YouTube
         await self._fetch_playlist()
+        # Copy to playlist and shuffle for initial playback
+        self.playlist = self.original_playlist.copy()
         self._apply_shuffle()
 
     async def _fetch_playlist(self) -> None:
         """Fetches playlist metadata from YouTube using yt-dlp."""
-        if not config.YOUTUBE_PLAYLIST_URL or not yt_dlp:
+        if not config.YOUTUBE_PLAYLIST_URL or not YTDLP_AVAILABLE:
             return
 
         self.logger.info("Fetching playlist from YouTube...")
 
-        try:
-            ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': 'in_playlist'}
+        tracks = await fetch_playlist_metadata(config.YOUTUBE_PLAYLIST_URL, self.logger)
 
-            def extract() -> Dict[str, Any]:
-                with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                    return ydl.extract_info(config.YOUTUBE_PLAYLIST_URL, download=False)  # type: ignore
-
-            info = await asyncio.to_thread(extract)
-
-            if not info:
-                self.logger.error("Failed to extract playlist info.")
-                return
-
-            tracks: List[Track] = []
-            entries = info.get('entries', [])
-
-            for entry in entries:
-                if not entry:  # Skip unavailable videos
-                    continue
-
-                # For flat extraction, we get minimal info
-                # We'll fetch full info when actually playing
-                track = Track(
-                    title=entry.get('title', 'Unknown Title'),
-                    artist=entry.get('uploader', entry.get('channel', 'Unknown Artist')),
-                    url=entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}",
-                    duration=entry.get('duration', 180),  # Default 3 min if unknown
-                    thumbnail=entry.get('thumbnail')
-                )
-                tracks.append(track)
-
+        if tracks:
             self.original_playlist = tracks
             self.logger.info(f"Fetched {len(tracks)} tracks from playlist.")
 
             # Save to cache
             await self._save_playlist_cache()
-
-        except Exception as e:
-            self.logger.error(f"Error fetching playlist: {e}", exc_info=True)
+        else:
+            self.logger.error("Failed to fetch playlist or playlist is empty.")
 
     async def _save_playlist_cache(self) -> None:
         """Saves playlist to cache file."""
@@ -766,22 +238,17 @@ class Music(BaseCog):
             self.logger.error(f"Failed to save playlist cache: {e}")
 
     def _apply_shuffle(self, preserve_current: bool = False) -> None:
-        """Applies or removes shuffle from playlist.
+        """Shuffles the playlist.
 
         Args:
-            preserve_current: If True, attempts to keep the current track at
-                the same position after reshuffling. Useful when toggling
-                shuffle during idle mode.
+            preserve_current: If True, keeps the current track at index 0
+                after shuffling so playback continues from the same song.
         """
         current = self._get_current_track() if preserve_current else None
 
-        if self.shuffle_enabled:
-            self.playlist = self.original_playlist.copy()
-            random.shuffle(self.playlist)
-        else:
-            self.playlist = self.original_playlist.copy()
+        random.shuffle(self.playlist)
 
-        # Restore current track position if requested
+        # Move current track to front if requested
         if current and preserve_current:
             try:
                 self.current_index = self.playlist.index(current)
@@ -841,9 +308,6 @@ class Music(BaseCog):
         # Check if we've reached the end
         if self.current_index >= len(self.playlist):
             if self.loop_mode == LoopMode.ALL:
-                # Reshuffle if shuffle is enabled
-                if self.shuffle_enabled:
-                    random.shuffle(self.playlist)
                 self.current_index = 0
             else:
                 # Loop OFF: stop playback
@@ -867,6 +331,10 @@ class Music(BaseCog):
         removed_track = self.playlist.pop(index)
         self.logger.info(f"Removed track from playlist: {removed_track.title}")
 
+        # Mark playlist as modified during this session
+        if self.active_session:
+            self._playlist_modified_during_session = True
+
         # Also remove from original_playlist so it persists to cache
         # Match by URL since order may differ between shuffled and original
         self.original_playlist = [t for t in self.original_playlist if t.url != removed_track.url]
@@ -882,6 +350,45 @@ class Music(BaseCog):
             # Make sure we don't go past end of playlist
             if self.current_index >= len(self.playlist):
                 self.current_index = 0
+
+    async def _restore_idle_playlist(self) -> None:
+        """Restores playlist state when returning to idle mode after a voice session.
+
+        Behavior:
+        - If playlist was NOT modified during the session: Keep current position
+          and order intact (the presence loop will continue from where we left off).
+        - If playlist WAS modified (tracks added/removed): Reload the cached/original
+          playlist. If the current track still exists in the reloaded playlist,
+          start from that track; otherwise, start from the beginning.
+        """
+        current_track = self._get_current_track()
+
+        if not self._playlist_modified_during_session:
+            # Playlist unchanged - keep current state, just reset the timer
+            # so presence loop shows correct elapsed time
+            self.track_started_at = time.time()
+            self.logger.info("Returning to idle - playlist unchanged, keeping position.")
+            return
+
+        # Playlist was modified - reload from cache
+        self.logger.info("Returning to idle - playlist was modified, reloading from cache.")
+        await self._load_playlist()  # Reloads original_playlist and applies shuffle
+
+        # Try to find the current track in the reloaded playlist
+        if current_track:
+            for i, track in enumerate(self.playlist):
+                if track.url == current_track.url:
+                    self.current_index = i
+                    self.logger.info(f"Found current track in reloaded playlist: {track.title}")
+                    break
+            else:
+                # Track not found, start from beginning
+                self.current_index = 0
+                self.logger.info("Current track not in reloaded playlist, starting from beginning.")
+        else:
+            self.current_index = 0
+
+        self.track_started_at = time.time()
 
     # ==========================================================================
     # PRESENCE CYCLING (IDLE MODE)
@@ -952,90 +459,84 @@ class Music(BaseCog):
             - url: The streamable URL, or None if failed
             - is_unavailable: True if the video is permanently unavailable and should be removed
         """
-        if not yt_dlp:
-            return None, False
+        return await get_audio_url(track, self.logger)
 
-        try:
-            ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': False}
+    async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]:
+        """Searches YouTube for tracks matching the query.
 
-            def extract() -> Dict[str, Any]:
-                with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                    return ydl.extract_info(track.url, download=False)  # type: ignore
+        Args:
+            query: The search query string.
+            max_results: Maximum number of results to return.
 
-            info = await asyncio.to_thread(extract)
+        Returns:
+            A list of Track objects representing search results.
+        """
+        return await search_youtube(query, max_results, self.logger)
 
-            if not info:
-                return None, True  # No info usually means unavailable
+    async def _fetch_url_info(self, url: str) -> tuple[List[Track], Optional[str]]:
+        """Fetches track info from a YouTube URL (video or playlist).
 
-            # Find an audio-only format (has audio codec, no video codec)
-            # This gives us the smallest stream that Discord can play
-            formats = info.get('formats', [])
-            for fmt in formats:
-                if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
-                    return fmt.get('url'), False
+        Args:
+            url: The YouTube URL to fetch.
 
-            # Fallback to url directly
-            return info.get('url'), False
-
-        except Exception as e:
-            error_str = str(e).lower()
-            # Check for unavailability indicators in the error message
-            unavailable_indicators = [
-                'video unavailable', 'this video is unavailable',
-                'video is private', 'private video',
-                'video has been removed', 'been removed',
-                'this video is no longer available',
-                'sign in to confirm your age',  # Age-restricted without workaround
-                'join this channel to get access',  # Members-only
-                'this video requires payment',  # Paid content
-                'copyright claim', 'blocked',
-            ]
-            is_unavailable = any(indicator in error_str for indicator in unavailable_indicators)
-
-            if is_unavailable:
-                self.logger.warning(f"Video unavailable (will be removed): {track.title} - {e}")
-            else:
-                self.logger.error(f"Error getting audio URL for {track.title}: {e}")
-
-            return None, is_unavailable
+        Returns:
+            A tuple of (tracks, error_message) where:
+            - tracks: List of Track objects (single for video, multiple for playlist)
+            - error_message: Human-readable error if failed, None if success
+        """
+        return await fetch_url_info(url, self.logger)
 
     async def _prefetch_next_track(self) -> None:
         """Pre-fetches the audio URL for the next track in the background.
 
         This runs while the current track is playing, so when it ends,
         we already have the URL ready and can start playback immediately.
+
+        Note: This intentionally ignores loop mode and always prefetches the
+        next sequential track. Even if loop is OFF, the user might enable it,
+        skip manually, or the prefetch is simply discarded - better to have it
+        ready than delay playback.
         """
-        next_track = self._get_next_track()
-        if not next_track:
+        if not self.playlist:
+            self.logger.debug("[Prefetch] No playlist, clearing prefetch cache")
             self._prefetched_url = None
             self._prefetched_track_url = None
             return
 
+        # Always get the next sequential track, ignoring loop mode
+        next_index = (self.current_index + 1) % len(self.playlist)
+        next_track = self.playlist[next_index]
+        self.logger.debug(f"[Prefetch] Current index: {self.current_index}, next index: {next_index}, playlist size: {len(self.playlist)}")
+
         # Don't refetch if we already have this track prefetched
         if self._prefetched_track_url == next_track.url and self._prefetched_url:
+            self.logger.debug(f"[Prefetch] Already prefetched: {next_track.title}")
             return
 
         try:
-            self.logger.debug(f"Pre-fetching next track: {next_track.title}")
+            self.logger.debug(f"[Prefetch] Starting prefetch for: {next_track.title} ({next_track.url})")
             audio_url, is_unavailable = await self._get_audio_url(next_track)
 
             if audio_url:
                 self._prefetched_url = audio_url
                 self._prefetched_track_url = next_track.url
-                self.logger.debug(f"Pre-fetched successfully: {next_track.title}")
+                self.logger.debug(f"[Prefetch] Success: {next_track.title} - URL length: {len(audio_url)}")
             else:
                 # Clear prefetch cache on failure
                 self._prefetched_url = None
                 self._prefetched_track_url = None
                 if is_unavailable:
-                    self.logger.debug(f"Next track unavailable during prefetch: {next_track.title}")
+                    self.logger.debug(f"[Prefetch] Track unavailable: {next_track.title}")
+                else:
+                    self.logger.debug(f"[Prefetch] Failed (no URL returned): {next_track.title}")
         except Exception as e:
-            self.logger.debug(f"Prefetch failed for {next_track.title}: {e}")
+            self.logger.debug(f"[Prefetch] Exception for {next_track.title}: {e}")
             self._prefetched_url = None
             self._prefetched_track_url = None
 
     def _clear_prefetch(self) -> None:
         """Clears prefetch cache and cancels any pending prefetch task."""
+        self.logger.debug("[Prefetch] Clearing prefetch cache")
         self._prefetched_url = None
         self._prefetched_track_url = None
         if self._prefetch_task and not self._prefetch_task.done():
@@ -1096,7 +597,7 @@ class Music(BaseCog):
                 self.logger.debug("Session ended during track preparation, aborting playback.")
                 return
 
-            ffmpeg_path = self._get_ffmpeg_path()
+            ffmpeg_path = get_ffmpeg_path()
             source = discord.FFmpegPCMAudio(
                 audio_url,
                 executable=ffmpeg_path,
@@ -1137,6 +638,23 @@ class Music(BaseCog):
     async def _on_track_end(self) -> None:
         """Called when a track finishes playing."""
         if not self.active_session:
+            return
+
+        # Check if session has exceeded 8 hours
+        session_duration = time.time() - self.active_session.started_at
+        max_session_duration = 8 * 60 * 60  # 8 hours in seconds
+        if session_duration >= max_session_duration:
+            hours = int(session_duration // 3600)
+            await self._end_session(f"Session ended after {hours} hours. Take a break! 🎧")
+            return
+
+        # When True, the next _on_track_end call will NOT advance the playlist.
+        # Used by _do_jump to prevent double-advancement when stopping playback.
+        # Automatically cleared after being checked.
+        if getattr(self, '_suppress_next_track_end', False):
+            self._suppress_next_track_end = False
+            # Play the track at the current index (do not advance)
+            await self._play_current_track()
             return
 
         next_track = self._advance_track()
@@ -1200,6 +718,12 @@ class Music(BaseCog):
         # Clear prefetch cache
         self._clear_prefetch()
 
+        # Restore playlist state for idle mode
+        await self._restore_idle_playlist()
+
+        # Reset modification flag for next session
+        self._playlist_modified_during_session = False
+
         self.logger.info(f"Voice session ended: {reason}")
 
     async def _idle_timeout_loop(self, text_channel: discord.abc.Messageable) -> None:
@@ -1211,7 +735,7 @@ class Music(BaseCog):
                 # Check if anyone joined
                 vc = self.active_session.voice_client
                 if vc and len(vc.channel.members) <= 1:  # Just the bot
-                    await text_channel.send("No one joined, so I'm heading out! Use `/listen-along` when you're ready.")
+                    await text_channel.send("No one joined, so I'm heading out! Type 'listen along' when you're ready.")
                     await self._end_session("No one joined within 5 minutes.")
 
         except asyncio.CancelledError:
@@ -1256,128 +780,227 @@ class Music(BaseCog):
                 await self._end_session("Everyone left the voice channel.")
 
     # ==========================================================================
-    # COMMANDS (Internal implementations)
+    # COMMAND HELPERS (Complex operations only)
     # ==========================================================================
-    # These `_do_*` methods contain the actual command logic. Both slash commands
-    # and NLP handlers call these, allowing a single implementation to serve both
-    # interaction types. They accept `Respondable` (Context or Interaction) and
-    # use the `respond()` helper to send messages.
+    # These methods contain substantial logic that benefits from being named,
+    # testable units. Simple operations are inlined directly into NLP handlers.
 
-    async def _do_listen_along(
-        self,
-        target: Respondable,
-        user: Union[discord.User, discord.Member],
-        guild: Optional[discord.Guild]
-    ) -> None:
-        """Internal implementation for listen-along."""
+    async def _do_listen_along(self, ctx: commands.Context) -> None:
+        """Internal implementation for listen-along.
+
+        Args:
+            ctx: The command context.
+        """
         if not YTDLP_AVAILABLE:
-            await respond(target, "Music playback isn't available - yt-dlp is not installed.")
+            await ctx.send("Music playback isn't available - yt-dlp is not installed.")
             return
 
         if not self.playlist:
-            await respond(target, "I don't have any music loaded! Make sure `YOUTUBE_PLAYLIST_URL` is configured.")
+            await ctx.send("I don't have any music loaded! Make sure `YOUTUBE_PLAYLIST_URL` is configured.")
             return
 
         # Check if already in a session
         if self.active_session:
-            if guild and self.active_session.guild_id == guild.id:
-                await respond(target, f"I'm already playing music in <#{self.active_session.channel_id}>!")
+            if ctx.guild and self.active_session.guild_id == ctx.guild.id:
+                await ctx.send(f"I'm already playing music in <#{self.active_session.channel_id}>!")
             else:
                 other_guild = self.bot.get_guild(self.active_session.guild_id)
                 guild_name = other_guild.name if other_guild else "another server"
-                await respond(target, f"I'm currently playing music in **{guild_name}**. I can only be in one place at a time!")
+                await ctx.send(f"I'm currently playing music in **{guild_name}**. I can only be in one place at a time!")
             return
 
         # Check if user is in a voice channel
-        # Note: `user` may be a User (from DMs) or Member (from guild). Only Members have voice state.
-        member = user if isinstance(user, discord.Member) else None
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
         if not member or not member.voice or not member.voice.channel:
             # User isn't in a VC - try the guild's designated music channel as fallback
-            if guild:
-                designated_channel_id = await self.db_manager.get_guild_config(guild.id, 'music_channel_id')
+            if ctx.guild:
+                designated_channel_id = await self.db_manager.get_guild_config(ctx.guild.id, 'music_channel_id')
                 if designated_channel_id:
-                    channel = guild.get_channel(int(designated_channel_id))
+                    channel = ctx.guild.get_channel(int(designated_channel_id))
                     if channel and isinstance(channel, discord.VoiceChannel):
-                        await respond(target, f"I'll be in {channel.mention}! Join me there within 5 minutes.")
-                        # For _start_session we need a context-like object for the text channel
-                        if isinstance(target, commands.Context):
-                            await self._start_session(channel, target)
-                        else:
-                            # Create a minimal context adapter for the interaction
-                            await self._start_session(channel, target)  # type: ignore
+                        await ctx.send(f"I'll be in {channel.mention}! Join me there within 5 minutes.")
+                        await self._start_session(channel, ctx)
 
                         # Mark session as waiting and start 5-minute timeout
                         # If no one joins, _idle_timeout_loop will disconnect
                         self.active_session.waiting_for_users = True  # type: ignore
-                        text_channel = target.channel if isinstance(target, commands.Context) else target.channel
                         self.idle_timeout_task = self.bot.loop.create_task(
-                            self._idle_timeout_loop(text_channel)  # type: ignore
+                            self._idle_timeout_loop(ctx.channel)  # type: ignore
                         )
                         return
 
-            await respond(target, "Join a voice channel first, or ask an admin to set a music channel with `/set-music-channel`!")
+            await ctx.send("Join a voice channel first, or ask an admin to set a music channel!")
             return
 
         # Join user's channel
         channel = member.voice.channel
         if not isinstance(channel, discord.VoiceChannel):
-            await respond(target, "I can only join regular voice channels, not stage channels.")
+            await ctx.send("I can only join regular voice channels, not stage channels.")
             return
 
-        await self._start_session(channel, target)  # type: ignore
+        await self._start_session(channel, ctx)
 
-    async def _do_skip(self, target: Respondable, guild: Optional[discord.Guild]) -> None:
-        """Internal implementation for skip."""
+    async def _do_play(self, ctx: commands.Context, query: str) -> None:
+        """Internal implementation for play/queue.
+
+        Handles both URL-based and search-based track additions.
+
+        Args:
+            ctx: The command context.
+            query: URL or search query for the track(s).
+        """
+        from utils.views import get_selection
+
+        if not YTDLP_AVAILABLE:
+            await ctx.send("Music playback isn't available - yt-dlp is not installed.")
+            return
+
+        if not query.strip():
+            await ctx.send("Please provide a song name or URL to play!")
+            return
+
+        # Determine if it's a URL or search query
+        is_url = query.startswith(('http://', 'https://', 'www.'))
+
+        tracks_to_add: List[Track] = []
+
+        if is_url:
+            # Fetch directly from URL - no substitutions
+            await ctx.send("🔍 Fetching track info...")
+
+            tracks, error = await self._fetch_url_info(query)
+            if error:
+                await ctx.send(f"❌ {error}")
+                return
+
+            tracks_to_add = tracks
+
+        else:
+            # Search YouTube
+            await ctx.send(f"🔍 Searching for: **{query}**")
+
+            results = await self._search_youtube(query, max_results=5)
+            if not results:
+                await ctx.send("No results found. Try a different search term!")
+                return
+
+            if len(results) == 1:
+                # Only one result - use it directly
+                tracks_to_add = results
+            else:
+                # Multiple results - let user choose
+                embed = discord.Embed(
+                    title="🎵 Select a Track",
+                    description="Choose the track you want to play:",
+                    color=discord.Color.blue()
+                )
+
+                options = {}
+                for i, track in enumerate(results, 1):
+                    duration_str = f"{int(track.duration) // 60}:{int(track.duration) % 60:02d}"
+                    embed.add_field(
+                        name=f"{i}. {track.title}",
+                        value=f"by {track.artist} • {duration_str}",
+                        inline=False
+                    )
+                    options[str(i)] = str(i)
+
+                selection = await get_selection(ctx, embed, options, timeout=30.0)
+
+                if not selection:
+                    await ctx.send("Selection timed out. Call me again when you're ready!")
+                    return
+
+                try:
+                    selected_idx = int(selection) - 1
+                    if 0 <= selected_idx < len(results):
+                        tracks_to_add = [results[selected_idx]]
+                    else:
+                        await ctx.send("Invalid selection.")
+                        return
+                except ValueError:
+                    await ctx.send("Invalid selection.")
+                    return
+
+        if not tracks_to_add:
+            await ctx.send("No tracks to add.")
+            return
+
+        # Mark all tracks as user-added (should already be, but ensure it)
+        for track in tracks_to_add:
+            track.user_added = True
+
+        # If not in a voice session, join the user's VC and start fresh
         if not self.active_session:
-            await respond(target, "I'm not playing anything right now!")
-            return
+            # Get the member's voice channel
+            member = ctx.author if isinstance(ctx.author, discord.Member) else None
+            if not member or not member.voice or not member.voice.channel:
+                await ctx.send("Join a voice channel first so I can play your request!")
+                return
 
-        if guild and self.active_session.guild_id != guild.id:
-            await respond(target, "I'm not playing music in this server!")
-            return
+            channel = member.voice.channel
+            if not isinstance(channel, discord.VoiceChannel):
+                await ctx.send("I can only join regular voice channels, not stage channels.")
+                return
 
-        vc = self.active_session.voice_client
-        if vc.is_playing():
-            vc.stop()
-            await respond(target, "⏭️ Skipped!")
+            # Clear existing playlist and set to just the requested tracks
+            self.playlist = tracks_to_add.copy()
+            self.current_index = 0
+            self._playlist_modified_during_session = True  # Mark as modified
+
+            # Join and start playing
+            try:
+                vc = await channel.connect()
+                self.active_session = ActiveSession(
+                    guild_id=channel.guild.id,
+                    channel_id=channel.id,
+                    voice_client=vc
+                )
+
+                await self._play_current_track()
+
+                if len(tracks_to_add) == 1:
+                    await ctx.send(f"🎵 Now playing **{tracks_to_add[0].title}** in {channel.mention}!")
+                else:
+                    await ctx.send(f"🎵 Now playing **{len(tracks_to_add)} tracks** in {channel.mention}!")
+
+            except discord.ClientException as e:
+                self.logger.error(f"Failed to connect to voice: {e}")
+                await ctx.send("I couldn't connect to the voice channel. Please try again.")
+            except Exception as e:
+                self.logger.error(f"Error starting session: {e}", exc_info=True)
+                await ctx.send("Something went wrong starting playback.")
+
         else:
-            await respond(target, "Nothing is playing right now.")
+            # Already in a session - append to playlist
+            if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+                await ctx.send("I'm currently playing in another server!")
+                return
 
-    async def _do_now_playing(self, target: Respondable) -> None:
-        """Internal implementation for now playing."""
-        track = self._get_current_track()
-        if not track:
-            await respond(target, "No track is loaded.")
-            return
+            # Add tracks at the end of the playlist
+            self.playlist.extend(tracks_to_add)
 
-        elapsed = int(time.time() - self.track_started_at)
-        elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
-        duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
+            # Mark as modified since we added user tracks
+            self._playlist_modified_during_session = True
 
-        embed = discord.Embed(
-            title="🎵 Now Playing" if self.active_session else "🎧 Currently Listening To",
-            description=f"**{track.title}**\nby {track.artist}",
-            color=discord.Color.purple()
-        )
-        embed.add_field(name="Duration", value=f"{elapsed_str} / {duration_str}", inline=True)
-        embed.add_field(name="Shuffle", value="On" if self.shuffle_enabled else "Off", inline=True)
+            # Clear prefetch since playlist changed
+            self._clear_prefetch()
 
-        if track.thumbnail:
-            embed.set_thumbnail(url=track.thumbnail)
+            if len(tracks_to_add) == 1:
+                await ctx.send(f"⭐ Added **{tracks_to_add[0].title}** to the queue!")
+            else:
+                await ctx.send(f"⭐ Added **{len(tracks_to_add)} tracks** to the queue!")
 
-        if self.active_session:
-            embed.set_footer(text=f"Playing in voice | {len(self.playlist)} tracks in playlist")
-        else:
-            embed.set_footer(text="Idle mode | Use /listen-along to play in voice")
+    async def _do_queue(self, ctx: commands.Context) -> None:
+        """Internal implementation for queue.
 
-        await respond(target, embed=embed)
-
-    async def _do_queue(self, target: Respondable) -> None:
-        """Internal implementation for queue."""
+        Args:
+            ctx: The command context.
+        """
         from utils.views import PaginatorView
 
         if not self.playlist:
-            await respond(target, "No playlist loaded.")
+            await ctx.send("No playlist loaded.")
             return
 
         current = self._get_current_track()
@@ -1396,11 +1019,13 @@ class Music(BaseCog):
             for i in range(start_idx, end_idx):
                 track = self.playlist[i]
                 track_num = i + 1
+                # Star icon for user-added tracks
+                star = "⭐ " if track.user_added else ""
                 if i == self.current_index:
                     # Highlight currently playing track
-                    lines.append(f"▶️ **{track_num}. {track.title}** - {track.artist}")
+                    lines.append(f"▶️ **{track_num}. {star}{track.title}** - {track.artist}")
                 else:
-                    lines.append(f"{track_num}. {track.title} - {track.artist}")
+                    lines.append(f"{track_num}. {star}{track.title} - {track.artist}")
 
             embed = discord.Embed(
                 title="🎶 Playlist",
@@ -1414,7 +1039,7 @@ class Music(BaseCog):
 
             embed.set_footer(
                 text=f"Page {page_num + 1}/{total_pages} • {total_tracks} tracks • "
-                     f"Shuffle: {'On' if self.shuffle_enabled else 'Off'} • Loop: {self.loop_mode.display}"
+                f"Loop: {self.loop_mode.display}"
             )
             pages.append(embed)
 
@@ -1422,34 +1047,27 @@ class Music(BaseCog):
         current_page_idx = self.current_index // tracks_per_page
 
         if len(pages) == 1:
-            await respond(target, embed=pages[0])
+            await ctx.send(embed=pages[0])
         else:
-            # Use paginator - wrap interaction if needed
-            ctx_for_paginator: Any = target if isinstance(target, commands.Context) else InteractionPseudoContext(target)
-
-            view = PaginatorView(ctx_for_paginator, pages, start_index=current_page_idx)
-            msg = await ctx_for_paginator.send(embed=pages[current_page_idx], view=view)
+            view = PaginatorView(ctx, pages, start_index=current_page_idx)
+            msg = await ctx.send(embed=pages[current_page_idx], view=view)
             view.message = msg
 
-    async def _do_shuffle(self, target: Respondable) -> None:
-        """Internal implementation for shuffle."""
-        self.shuffle_enabled = not self.shuffle_enabled
-        self._apply_shuffle(preserve_current=True)
-        # Clear prefetch since playlist order changed
-        self._clear_prefetch()
-        status = "enabled" if self.shuffle_enabled else "disabled"
-        await respond(target, f"🔀 Shuffle {status}!")
+    async def _do_jump(self, ctx: commands.Context, position: int) -> None:
+        """Internal implementation for jump.
 
-    async def _do_jump(self, target: Respondable, position: int) -> None:
-        """Internal implementation for jump."""
+        Args:
+            ctx: The command context.
+            position: The 1-indexed track number to jump to.
+        """
         if not self.playlist:
-            await respond(target, "No playlist loaded.")
+            await ctx.send("No playlist loaded.")
             return
 
         index = position - 1
 
         if index < 0 or index >= len(self.playlist):
-            await respond(target, f"❌ Invalid position. Please choose a number between 1 and {len(self.playlist)}.")
+            await ctx.send(f"❌ Invalid position. Please choose a number between 1 and {len(self.playlist)}.")
             return
 
         self.current_index = index
@@ -1461,47 +1079,28 @@ class Music(BaseCog):
         track = self._get_current_track()
 
         if track:
-            await respond(target, f"⏭️ Jumped to **#{position}**: {track.title} - {track.artist}")
+            await ctx.send(f"⏭️ Jumped to **#{position}**: {track.title} - {track.artist}")
 
             # If playing, stop current track - the `after` callback will trigger _on_track_end
             # which calls _play_current_track with our new index
-            if self.active_session and self.active_session.voice_client.is_playing():
-                self.active_session.voice_client.stop()
+            if self.active_session:
+                vc = self.active_session.voice_client
+                if vc.is_playing():
+                    # Prevent the normal end-callback from advancing the index
+                    self._suppress_next_track_end = True
+                    vc.stop()
+                else:
+                    # If we're connected but not playing, start playback immediately
+                    await self._play_current_track()
 
-    async def _do_leave(self, target: Respondable, guild: Optional[discord.Guild]) -> None:
-        """Internal implementation for leave."""
-        if not self.active_session:
-            await respond(target, "I'm not in a voice channel!")
-            return
-
-        if guild and self.active_session.guild_id != guild.id:
-            await respond(target, "I'm not playing music in this server!")
-            return
-
-        await self._end_session("Disconnected by user request.")
-        await respond(target, "👋 Disconnected!")
-
-    async def _do_loop(self, target: Respondable, mode: LoopMode) -> None:
-        """Internal implementation for loop."""
-        if mode == LoopMode.OFF:
-            await respond(
-                target,
-                "➡️ Loop **Off** mode isn't available yet - the music player isn't fully implemented!\n"
-                "For now, use **One** (repeat current track) or **All** (repeat playlist)."
-            )
-            return
-
-        self.loop_mode = mode
-        await respond(target, f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
-
-    async def _do_lyrics(self, target: Respondable, query: Optional[str] = None) -> None:
+    async def _do_lyrics(self, ctx: commands.Context, query: Optional[str] = None) -> None:
         """Internal implementation for lyrics search.
 
         Searches multiple providers for lyrics, presents options to the user,
         and displays the selected lyrics with translation if available.
 
         Args:
-            target: Context or Interaction to respond to.
+            ctx: The command context.
             query: Search query. If None, uses current playing track.
         """
         from utils.views import get_selection, PaginatorView
@@ -1516,16 +1115,12 @@ class Music(BaseCog):
                 query = current.title
                 artist_hint = current.artist
             else:
-                await respond(target, "🎵 No song is currently playing. Please provide a search query!\n"
-                              "Usage: `/lyrics [song name]` or `lyrics [song name]`")
+                await ctx.send("🎵 No song is currently playing. Please provide a search query!\n"
+                               "Example: 'lyrics [song name]'")
                 return
 
         # Send initial searching message
-        if isinstance(target, discord.Interaction):
-            await target.response.defer()
-            searching_msg = await target.followup.send(f"🔍 Searching for lyrics: **{query}**...")
-        else:
-            searching_msg = await target.send(f"🔍 Searching for lyrics: **{query}**...")
+        searching_msg = await ctx.send(f"🔍 Searching for lyrics: **{query}**...")
 
         # Search all providers concurrently
         # NOTE: LyricalNonsenseScraper is disabled (no public search API)
@@ -1563,7 +1158,7 @@ class Music(BaseCog):
                 try:
                     await searching_msg.edit(
                         content=f"❌ No lyrics found for **{query}**.\n"
-                                "Try a different search term or check the spelling."
+                        "Try a different search term or check the spelling."
                     )
                 except Exception:
                     pass
@@ -1600,11 +1195,9 @@ class Music(BaseCog):
                 except Exception:
                     pass
 
-            # Get user selection - wrap interaction in pseudo-context if needed
+            # Get user selection
             # Use buttons_only=True to ignore text input
-            ctx_for_selection: Any = target if isinstance(target, commands.Context) else InteractionPseudoContext(target)
-
-            selection = await get_selection(ctx_for_selection, embed, options, buttons_only=True)
+            selection = await get_selection(ctx, embed, options, buttons_only=True)
 
             if selection is None:
                 return  # Timeout or cancelled
@@ -1619,10 +1212,7 @@ class Music(BaseCog):
         fetching_msg = None
         if not selected.lyrics_text:
             try:
-                if isinstance(target, commands.Context):
-                    fetching_msg = await target.send(f"📜 Fetching lyrics from {selected.source}...")
-                else:
-                    fetching_msg = await target.followup.send(f"📜 Fetching lyrics from {selected.source}...")
+                fetching_msg = await ctx.send(f"📜 Fetching lyrics from {selected.source}...")
             except Exception:
                 pass
 
@@ -1640,14 +1230,7 @@ class Music(BaseCog):
                     pass
 
         if not selected.lyrics_text:
-            try:
-                error_msg = f"❌ Couldn't retrieve lyrics from {selected.source}. Try another source."
-                if isinstance(target, commands.Context):
-                    await target.send(error_msg)
-                else:
-                    await target.followup.send(error_msg)
-            except Exception:
-                pass
+            await ctx.send(f"❌ Couldn't retrieve lyrics from {selected.source}. Try another source.")
             return
 
         # Build lyrics embeds (paginated if long)
@@ -1655,7 +1238,7 @@ class Music(BaseCog):
 
         # Split lyrics into smaller chunks for better readability (1200 chars per page)
         # This prevents embeds from being cut off on mobile/smaller screens
-        lyrics_chunks = self._chunk_text(selected.lyrics_text, 1200)
+        lyrics_chunks = chunk_text(selected.lyrics_text, 1200)
 
         for i, chunk in enumerate(lyrics_chunks):
             embed = discord.Embed(
@@ -1670,7 +1253,7 @@ class Music(BaseCog):
 
         # If translation exists, add it as additional pages
         if selected.translation_text:
-            trans_chunks = self._chunk_text(selected.translation_text, 1200)
+            trans_chunks = chunk_text(selected.translation_text, 1200)
             for i, chunk in enumerate(trans_chunks):
                 embed = discord.Embed(
                     title=f"🌐 {selected.title} (Translation)",
@@ -1684,123 +1267,17 @@ class Music(BaseCog):
 
         # Send lyrics
         if len(pages) == 1:
-            if isinstance(target, commands.Context):
-                await target.send(embed=pages[0])
-            else:
-                await target.followup.send(embed=pages[0])
+            await ctx.send(embed=pages[0])
         else:
-            # Use paginator for multiple pages - wrap interaction if needed
-            ctx_for_paginator: Any = target if isinstance(target, commands.Context) else InteractionPseudoContext(target)
-
-            view = PaginatorView(ctx_for_paginator, pages)
-            msg = await ctx_for_paginator.send(embed=pages[0], view=view)
+            view = PaginatorView(ctx, pages)
+            msg = await ctx.send(embed=pages[0], view=view)
             view.message = msg
 
-    def _chunk_text(self, text: str, max_length: int) -> List[str]:
-        """Split text into chunks that fit within a character limit.
-
-        Tries to split on paragraph boundaries, then sentences, then words.
-
-        Args:
-            text: Text to split.
-            max_length: Maximum characters per chunk.
-
-        Returns:
-            List of text chunks.
-        """
-        if len(text) <= max_length:
-            return [text]
-
-        chunks: List[str] = []
-        current_chunk = ""
-
-        # Split by paragraphs first
-        paragraphs = text.split('\n\n')
-
-        for para in paragraphs:
-            if len(current_chunk) + len(para) + 2 <= max_length:
-                current_chunk = current_chunk + '\n\n' + para if current_chunk else para
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                # Handle paragraphs longer than max_length
-                if len(para) > max_length:
-                    # Split by lines
-                    lines = para.split('\n')
-                    current_chunk = ""
-                    for line in lines:
-                        if len(current_chunk) + len(line) + 1 <= max_length:
-                            current_chunk = current_chunk + '\n' + line if current_chunk else line
-                        else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                            # Truncate very long lines
-                            if len(line) > max_length:
-                                chunks.append(line[:max_length - 3] + "...")
-                                current_chunk = ""
-                            else:
-                                current_chunk = line
-                else:
-                    current_chunk = para
-
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-
-        return chunks if chunks else [text[:max_length]]
+    # chunk_text moved to utils.music_helpers
 
     # ==========================================================================
-    # SLASH COMMANDS
+    # HYBRID COMMANDS (Admin/Config only)
     # ==========================================================================
-    # These are registered as Discord slash commands (app_commands). They're thin
-    # wrappers that extract the needed info from the Interaction and delegate to
-    # the corresponding `_do_*` method. No prefix command registration here -
-    # prefix input is handled by NLP handlers below.
-
-    @app_commands.command(name='listen-along', description='Have me join your voice channel and play music!')
-    async def listen_along_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for listen-along."""
-        await self._do_listen_along(interaction, interaction.user, interaction.guild)
-
-    @app_commands.command(name='skip', description='Skip the current song.')
-    async def skip_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for skip."""
-        await self._do_skip(interaction, interaction.guild)
-
-    @app_commands.command(name='nowplaying', description='Shows the currently playing song.')
-    async def now_playing_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for now playing."""
-        await self._do_now_playing(interaction)
-
-    @app_commands.command(name='queue', description='Shows the upcoming songs in the queue.')
-    async def queue_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for queue."""
-        await self._do_queue(interaction)
-
-    @app_commands.command(name='shuffle', description='Toggle shuffle mode for the playlist.')
-    async def shuffle_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for shuffle."""
-        await self._do_shuffle(interaction)
-
-    @app_commands.command(name='jump', description='Jump to a specific track in the playlist by number.')
-    async def jump_slash(self, interaction: discord.Interaction, position: int) -> None:
-        """Slash command for jump."""
-        await self._do_jump(interaction, position)
-
-    @app_commands.command(name='leave', description='Disconnect from voice channel.')
-    async def leave_slash(self, interaction: discord.Interaction) -> None:
-        """Slash command for leave."""
-        await self._do_leave(interaction, interaction.guild)
-
-    @app_commands.command(name='loop', description='Set loop mode for the playlist.')
-    async def loop_slash(self, interaction: discord.Interaction, mode: LoopMode) -> None:
-        """Slash command for loop."""
-        await self._do_loop(interaction, mode)
-
-    @app_commands.command(name='lyrics', description='Search for song lyrics with translations.')
-    @app_commands.describe(query='Song name and/or artist to search for. Leave empty to use current track.')
-    async def lyrics_slash(self, interaction: discord.Interaction, query: Optional[str] = None) -> None:
-        """Slash command for lyrics search."""
-        await self._do_lyrics(interaction, query)
 
     @commands.hybrid_command(
         name='set-music-channel',
@@ -1830,15 +1307,134 @@ class Music(BaseCog):
 
     async def listen_along_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for listen along requests."""
-        await self._do_listen_along(ctx, ctx.author, ctx.guild)
+        await self._do_listen_along(ctx)
 
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
-        await self._do_skip(ctx, ctx.guild)
+        if not self.active_session:
+            await ctx.send("I'm not playing anything right now!")
+            return
+
+        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+            await ctx.send("I'm not playing music in this server!")
+            return
+
+        vc = self.active_session.voice_client
+        if vc.is_playing():
+            vc.stop()
+            await ctx.send("⏭️ Skipped!")
+        else:
+            await ctx.send("Nothing is playing right now.")
+
+    async def pause_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for pause requests."""
+        if not self.active_session:
+            await ctx.send("I'm not playing anything right now!")
+            return
+
+        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+            await ctx.send("I'm not playing music in this server!")
+            return
+
+        vc = self.active_session.voice_client
+        if vc.is_paused():
+            await ctx.send("Already paused! Type 'resume' to continue!")
+            return
+
+        if vc.is_playing():
+            vc.pause()
+            await ctx.send("⏸️ Paused!")
+        else:
+            await ctx.send("Nothing is playing right now.")
+
+    async def resume_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for resume/play requests.
+
+        Note: This is only triggered when 'play' has no text after it,
+        otherwise it would be interpreted as a song request.
+        The NLP pattern matching in config.py handles this distinction.
+        """
+        if not self.active_session:
+            await ctx.send("I'm not in a voice channel! Type 'listen along' to start.")
+            return
+
+        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+            await ctx.send("I'm not playing music in this server!")
+            return
+
+        vc = self.active_session.voice_client
+        if vc.is_playing():
+            await ctx.send("Already playing!")
+            return
+
+        if vc.is_paused():
+            vc.resume()
+            await ctx.send("▶️ Resumed!")
+        else:
+            await ctx.send("Nothing to resume. Type 'listen along' to start playback!")
+
+    async def play_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for play/queue requests with a song/URL.
+
+        Extracts the song query from the message, removing the 'play' or 'queue' keyword.
+        """
+        import re
+        # Remove 'play' or 'queue' keyword and any leading/trailing whitespace
+        # The query might be "play something", "queue something", or URLs
+        song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
+
+        if not song_query:
+            # No query provided, treat as resume - inline the resume logic
+            if not self.active_session:
+                await ctx.send("I'm not in a voice channel! Type 'listen along' to start.")
+                return
+
+            if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+                await ctx.send("I'm not playing music in this server!")
+                return
+
+            vc = self.active_session.voice_client
+            if vc.is_playing():
+                await ctx.send("Already playing!")
+                return
+
+            if vc.is_paused():
+                vc.resume()
+                await ctx.send("▶️ Resumed!")
+            else:
+                await ctx.send("Nothing to resume. Type 'listen along' to start playback!")
+            return
+
+        await self._do_play(ctx, song_query)
 
     async def now_playing_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for now playing requests."""
-        await self._do_now_playing(ctx)
+        track = self._get_current_track()
+        if not track:
+            await ctx.send("No track is loaded.")
+            return
+
+        elapsed = int(time.time() - self.track_started_at)
+        elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
+        duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
+
+        embed = discord.Embed(
+            title="🎵 Now Playing" if self.active_session else "🎧 Currently Listening To",
+            description=f"**{track.title}**\nby {track.artist}",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="Duration", value=f"{elapsed_str} / {duration_str}", inline=True)
+        embed.add_field(name="Loop", value=self.loop_mode.display, inline=True)
+
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+
+        if self.active_session:
+            embed.set_footer(text=f"Playing in voice | {len(self.playlist)} tracks in playlist")
+        else:
+            embed.set_footer(text="Idle mode | Type 'listen along' to play in voice!")
+
+        await ctx.send(embed=embed)
 
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
@@ -1846,7 +1442,17 @@ class Music(BaseCog):
 
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
-        await self._do_shuffle(ctx)
+        if not self.playlist:
+            await ctx.send("No playlist to shuffle.")
+            return
+
+        self._apply_shuffle(preserve_current=True)
+        # Clear prefetch since playlist order changed
+        self._clear_prefetch()
+        # Mark as modified so idle mode reloads the preset playlist
+        if self.active_session:
+            self._playlist_modified_during_session = True
+        await ctx.send("🔀 Playlist shuffled!")
 
     async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for jump requests.
@@ -1870,22 +1476,44 @@ class Music(BaseCog):
         Parses the query for 'one', 'all', or 'off' to set loop mode.
         """
         query_lower = query.lower()
+        mode: Optional[LoopMode] = None
 
         if 'one' in query_lower or 'single' in query_lower or 'track' in query_lower:
-            await self._do_loop(ctx, LoopMode.ONE)
+            mode = LoopMode.ONE
         elif 'all' in query_lower or 'playlist' in query_lower:
-            await self._do_loop(ctx, LoopMode.ALL)
+            mode = LoopMode.ALL
         elif 'off' in query_lower or 'disable' in query_lower or 'none' in query_lower:
-            await self._do_loop(ctx, LoopMode.OFF)
-        else:
+            mode = LoopMode.OFF
+
+        if mode is None:
             await ctx.send(
                 f"{self.loop_mode.emoji} Current loop mode: **{self.loop_mode.display}**\n"
-                "Usage: `loop one` (repeat track) or `loop all` (repeat playlist)"
+                "Usage: 'loop one' (repeat track) or 'loop all' (repeat playlist)"
             )
+            return
+
+        if mode == LoopMode.OFF:
+            await ctx.send(
+                "➡️ Loop **Off** mode isn't available yet - the music player isn't fully implemented!\n"
+                "For now, use **One** (repeat current track) or **All** (repeat playlist)."
+            )
+            return
+
+        self.loop_mode = mode
+        await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
 
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests."""
-        await self._do_leave(ctx, ctx.guild)
+        if not self.active_session:
+            await ctx.send("I'm not in a voice channel!")
+            return
+
+        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
+            await ctx.send("I'm not playing music in this server!")
+            return
+
+        await self._end_session("Disconnected by user request.")
+        await ctx.send("👋 Disconnected!")
 
     async def lyrics_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for lyrics search.
@@ -1907,11 +1535,13 @@ class Music(BaseCog):
 async def setup(bot: 'CoreBot') -> None:
     """Sets up the Music cog.
 
-    The cog will not load if YOUTUBE_PLAYLIST_URL is not configured.
+    Raises:
+        commands.ExtensionFailed: If YOUTUBE_PLAYLIST_URL is not configured.
     """
     if not config.YOUTUBE_PLAYLIST_URL:
-        import logging
-        logging.getLogger('Music').info("Music cog not loaded: YOUTUBE_PLAYLIST_URL not configured.")
-        return
+        raise commands.ExtensionFailed(
+            'cogs.music',
+            RuntimeError("YOUTUBE_PLAYLIST_URL not configured - Music cog disabled.")
+        )
 
     await bot.add_cog(Music(bot))

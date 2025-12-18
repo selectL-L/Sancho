@@ -1735,7 +1735,7 @@ class Reminders(BaseCog):
         message="What to remind you about",
         when="When to remind you (e.g., 'in 30 minutes', 'tomorrow at 3pm')"
     )
-    async def reminder_command(self, ctx: commands.Context, message: str, *, when: str = "") -> None:
+    async def reminder_command(self, ctx: commands.Context, message: str, *, when: str) -> None:
         """Set a reminder with a rigid format, bypassing NLP parsing and confirmation.
 
         For slash commands: Use the separate message and when fields.
@@ -1757,10 +1757,7 @@ class Reminders(BaseCog):
         else:
             # Prefix command: expect 'message / time' format in the message param
             if '/' not in message:
-                await ctx.send(
-                    "❌ Invalid format. Please use: `message / time`\n"
-                    "Example: `. reminder Take out trash / in 30 minutes`"
-                )
+                await ctx.send(f"Invalid format. Please refer to `{ctx.prefix}help reminder` for the correct format.")
                 return
 
             parts = message.split('/', 1)
@@ -1768,11 +1765,11 @@ class Reminders(BaseCog):
             time_str = parts[1].strip()
 
         if not reminder_message:
-            await ctx.send("❌ Please provide a reminder message.")
+            await ctx.send(f"Invalid format. Please refer to `{ctx.prefix}help reminder` for the correct format.")
             return
 
         if not time_str:
-            await ctx.send("❌ Please provide a time.")
+            await ctx.send(f"Invalid format. Please refer to `{ctx.prefix}help reminder` for the correct format.")
             return
 
         # Parse the time string using dateparser
