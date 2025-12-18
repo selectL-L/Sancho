@@ -719,7 +719,7 @@ class AdminCog(BaseCog):
 
         # Create status embed.
         embed = discord.Embed(
-            title=f"{config.BOT_NAME} Status Report",
+            title=f"{config.BOT_NAME}'s Status Report",
             color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
         )
         if self.bot.user and self.bot.user.display_avatar:
