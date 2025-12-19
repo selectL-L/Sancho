@@ -1,5 +1,7 @@
 """Ambience system for bot personality and idle activities.
 
+Please note that this functions development is on pause due to API constraints with discord.
+
 Architecture:
     TOML (ambience.toml) = Static personality data (interests, playlists)
     Python (this file) = Structure (moods, activities) + Runtime state
@@ -109,6 +111,28 @@ def get_playlist_description(music_mood: str) -> Optional[str]:
     """Get the description for a music mood."""
     toml = _load_toml()
     return toml.get("playlists", {}).get("descriptions", {}).get(music_mood)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# AMBIENCE TOGGLE
+# ════════════════════════════════════════════════════════════════════════════════
+
+
+def is_enabled() -> bool:
+    """Check if ambience user-facing output is enabled.
+
+    When disabled, moods/activities still cycle internally, but user-facing
+    strings (greetings, interrupts, activity descriptions, etc.) return empty.
+    Music playlist selection is NOT affected—she still picks playlists based
+    on her internal mood.
+
+    This is read-only at runtime—set via AMBIENCE_ENABLED in info.env.
+    A bot restart is required to change this setting.
+
+    Returns:
+        True if user-facing ambience strings should be shown, False to silence.
+    """
+    return config.AMBIENCE_ENABLED
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1186,11 +1210,15 @@ class RemindersAmbience:
     @staticmethod
     def get_interrupt() -> str:
         """Get interrupt text for when user sets a reminder."""
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         return get_cog_value("reminders", "interrupt", "")
 
     @staticmethod
     def get_flavor() -> str:
         """Get flavor text to append to reminder delivery."""
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         return get_cog_random("reminders", "flavor", "")
 
 
@@ -1200,6 +1228,8 @@ class HelpAmbience:
     @staticmethod
     def get_greeting() -> str:
         """Get a mood-appropriate greeting."""
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         return get_cog_random("help", "greeting", "Hey!")
 
     @staticmethod
@@ -1209,6 +1239,8 @@ class HelpAmbience:
         Returns:
             A string like "I'm busy studying 📚" or "I'm just relaxing".
         """
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         return get_cog_random("help", "intro", "I'm here")
 
     @staticmethod
@@ -1218,6 +1250,8 @@ class HelpAmbience:
         Returns:
             A string like "but if you need me I'll still be around!".
         """
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         return get_cog_random("help", "availability", "What can I help with?")
 
     @staticmethod
@@ -1228,7 +1262,10 @@ class HelpAmbience:
 
         Returns:
             A string like "I'm busy studying 📚, but if you need me I'll still be around!"
+            Returns empty string when ambience is disabled.
         """
+        if not is_enabled():
+            return ""  # Silenced - ambience still running internally
         intro = HelpAmbience.get_intro()
         availability = HelpAmbience.get_availability()
         return f"{intro}, {availability}"
@@ -1244,21 +1281,45 @@ class FunAmbience:
 
 
 class MusicAmbience:
-    """Ambience helpers for the Music cog (special handling!)."""
+    """Ambience helpers for the Music cog (special handling!).
+
+    Music is NOT affected by the ambience toggle; playlist selection still
+    uses mood data. These helpers handle presence and user responses.
+    """
 
     @staticmethod
     def should_show_track_presence() -> bool:
         """Should the presence show the current track?
 
-        True if music is playing AND (activity is music OR allows background).
+        Returns True if music is playing. We treat ALL activities as
+        backgroundable—she's always vibing to music regardless of what
+        she's "doing". The background_music field on activities is preserved
+        for future use but currently ignored via assertion.
+
+        Returns:
+            True if music is playing (presence should show track).
         """
+        # Assert: treat all activities as backgroundable (music always plays alongside)
+        # When activity states can be shown to users, remove this assertion to restore
+        # the conditional check: `return allows_background_music()`
+        _all_activities_backgroundable = True
+
         if not _music_state.is_playing:
             return False
+
+        if _all_activities_backgroundable:
+            return True
+
+        # Preserved for future: respects activity.background_music field
         return allows_background_music()
 
     @staticmethod
     def get_status_for_presence() -> str:
         """Get what to show in Discord status.
+
+        Currently returns activity status, but this is only used for debugging
+        since presence always shows music when playing (all activities are
+        treated as backgroundable).
 
         If is_music activity: returns music status
         Otherwise: returns activity status
@@ -1271,14 +1332,23 @@ class MusicAmbience:
     def get_listen_along_response() -> str:
         """Get a response for when user asks to listen along.
 
-        If the current activity doesn't allow background music, adds flavor text
-        about "putting things down" to play music instead.
+        Since we treat all activities as backgroundable, she's always
+        already listening to music. Returns a simple vibe response.
+
+        NOTE: The elaborate "putting things down" responses for non-background
+        activities are preserved below for future use when we can properly
+        communicate activity states to users.
         """
         activity = get_current_activity()
         activity_id = get_current_activity_id()
 
+        # Assert: treat all activities as backgroundable (music always plays alongside)
+        # When activity states can be shown to users, remove this assertion to restore
+        # the contextual "putting things down" responses below.
+        _all_activities_backgroundable = True
+
         # If activity allows background music or IS music, simple response
-        if activity is None or activity.background_music or activity.is_music:
+        if _all_activities_backgroundable or activity is None or activity.background_music or activity.is_music:
             options = [
                 "Come vibe with me! 🎵",
                 "Perfect timing, this playlist is *chef's kiss* 🎧",
@@ -1286,6 +1356,9 @@ class MusicAmbience:
                 "Music time? Let's go! 🎵",
             ]
             return random.choice(options)
+
+        # Everything below is preserved for future use - currently unreachable
+        # due to _all_activities_backgroundable assertion above.
 
         # Activity doesn't allow background music - she's "putting it down"
         put_down_responses: dict[str, list[str]] = {

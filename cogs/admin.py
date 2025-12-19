@@ -58,7 +58,8 @@ class DashboardView(discord.ui.View):
 
         view = PaginatorView(self.ctx, self.skill_pages)
         # Add a "Back to Dashboard" button to the paginator
-        back_button = discord.ui.Button(label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
+        back_button = discord.ui.Button(
+            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
 
         async def back_callback(interaction: discord.Interaction):
             if self.dashboard_embed:
@@ -79,7 +80,8 @@ class DashboardView(discord.ui.View):
 
         view = PaginatorView(self.ctx, self.reminder_pages)
         # Add a "Back to Dashboard" button to the paginator
-        back_button = discord.ui.Button(label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
+        back_button = discord.ui.Button(
+            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
 
         async def back_callback(interaction: discord.Interaction):
             if self.dashboard_embed:
@@ -238,7 +240,8 @@ class AdminCog(BaseCog):
                     skills_by_user[uid].append(skill)
 
                 # Build pages with clear user sections
-                current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                current_embed = discord.Embed(
+                    title="Database: Skills", color=discord.Color.blue())
                 field_count = 0
                 page_num = 1
 
@@ -247,9 +250,11 @@ class AdminCog(BaseCog):
 
                     # Add user header
                     if field_count >= 6:  # Start new page if near limit
-                        current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                        current_embed.set_footer(
+                            text=f"Page {page_num} | Total Skills: {len(all_skills)}")
                         skill_pages.append(current_embed)
-                        current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                        current_embed = discord.Embed(
+                            title="Database: Skills", color=discord.Color.blue())
                         field_count = 0
                         page_num += 1
 
@@ -263,9 +268,11 @@ class AdminCog(BaseCog):
 
                     for skill in user_skills:
                         if field_count >= 8:  # Max fields before new page
-                            current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                            current_embed.set_footer(
+                                text=f"Page {page_num} | Total Skills: {len(all_skills)}")
                             skill_pages.append(current_embed)
-                            current_embed = discord.Embed(title="Database: Skills", color=discord.Color.blue())
+                            current_embed = discord.Embed(
+                                title="Database: Skills", color=discord.Color.blue())
                             field_count = 0
                             page_num += 1
                             # Re-add user header on continued page
@@ -287,12 +294,14 @@ class AdminCog(BaseCog):
 
                 # Add final page
                 if field_count > 0:
-                    current_embed.set_footer(text=f"Page {page_num} | Total Skills: {len(all_skills)}")
+                    current_embed.set_footer(
+                        text=f"Page {page_num} | Total Skills: {len(all_skills)}")
                     skill_pages.append(current_embed)
 
                 # Update page numbers in footers
                 for i, embed in enumerate(skill_pages):
-                    embed.set_footer(text=f"Page {i+1}/{len(skill_pages)} | Total Skills: {len(all_skills)}")
+                    embed.set_footer(
+                        text=f"Page {i+1}/{len(skill_pages)} | Total Skills: {len(all_skills)}")
 
             # 2. Generate Reminder Pages (grouped by user with better formatting)
             reminder_pages = []
@@ -306,7 +315,8 @@ class AdminCog(BaseCog):
                     reminders_by_user[uid].append(rem)
 
                 # Build pages with clear user sections
-                current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                current_embed = discord.Embed(
+                    title="Database: Reminders", color=discord.Color.orange())
                 field_count = 0
                 page_num = 1
 
@@ -314,10 +324,13 @@ class AdminCog(BaseCog):
                     user_display = get_user_display(user_id)
 
                     # Add user header
-                    if field_count >= 5:  # Start new page if near limit (fewer per page for reminders)
-                        current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                    # Start new page if near limit (fewer per page for reminders)
+                    if field_count >= 5:
+                        current_embed.set_footer(
+                            text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
                         reminder_pages.append(current_embed)
-                        current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                        current_embed = discord.Embed(
+                            title="Database: Reminders", color=discord.Color.orange())
                         field_count = 0
                         page_num += 1
 
@@ -331,9 +344,11 @@ class AdminCog(BaseCog):
 
                     for rem in user_reminders:
                         if field_count >= 6:  # Fewer fields per page for readability
-                            current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                            current_embed.set_footer(
+                                text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
                             reminder_pages.append(current_embed)
-                            current_embed = discord.Embed(title="Database: Reminders", color=discord.Color.orange())
+                            current_embed = discord.Embed(
+                                title="Database: Reminders", color=discord.Color.orange())
                             field_count = 0
                             page_num += 1
                             # Re-add user header on continued page
@@ -361,25 +376,31 @@ class AdminCog(BaseCog):
 
                 # Add final page
                 if field_count > 0:
-                    current_embed.set_footer(text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
+                    current_embed.set_footer(
+                        text=f"Page {page_num} | Total Reminders: {len(all_reminders)}")
                     reminder_pages.append(current_embed)
 
                 # Update page numbers in footers
                 for i, embed in enumerate(reminder_pages):
-                    embed.set_footer(text=f"Page {i+1}/{len(reminder_pages)} | Total Reminders: {len(all_reminders)}")
+                    embed.set_footer(
+                        text=f"Page {i+1}/{len(reminder_pages)} | Total Reminders: {len(all_reminders)}")
 
             # 3. Define Export Callback (human-readable report)
             async def export_callback(interaction_ctx):
                 assert config.BOT_NAME is not None
-                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---", f"Generated: {discord.utils.utcnow()}", ""]
+                report_lines = [f"--- {config.BOT_NAME.upper()} DATABASE REPORT ---",
+                                f"Generated: {discord.utils.utcnow()}", ""]
 
                 report_lines.append(f"\n--- SKILLS ({len(all_skills)}) ---")
                 for s in all_skills:
-                    report_lines.append(f"ID: {s['id']} | User: {s['user_id']} | Name: {s['name']} | Roll: {s['dice_roll']} | Type: {s['skill_type']}")
+                    report_lines.append(
+                        f"ID: {s['id']} | User: {s['user_id']} | Name: {s['name']} | Roll: {s['dice_roll']} | Type: {s['skill_type']}")
 
-                report_lines.append(f"\n--- REMINDERS ({len(all_reminders)}) ---")
+                report_lines.append(
+                    f"\n--- REMINDERS ({len(all_reminders)}) ---")
                 for r in all_reminders:
-                    report_lines.append(f"ID: {r['id']} | User: {r['user_id']} | Time: {r['reminder_time']} | Msg: {r['message']}")
+                    report_lines.append(
+                        f"ID: {r['id']} | User: {r['user_id']} | Time: {r['reminder_time']} | Msg: {r['message']}")
 
                 with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8", suffix="_db_report.txt") as f:
                     f.write("\n".join(report_lines))
@@ -399,7 +420,8 @@ class AdminCog(BaseCog):
                 try:
                     # Copy the actual SQLite database file
                     db_path = self.db_manager.db_path
-                    db_copy_path = os.path.join(dump_dir, f"{config.BOT_NAME}_database.db")
+                    db_copy_path = os.path.join(
+                        dump_dir, f"{config.BOT_NAME}_database.db")
                     shutil.copy2(db_path, db_copy_path)
 
                     # Also create a JSON export of all data for easy inspection
@@ -418,43 +440,50 @@ class AdminCog(BaseCog):
                     # Get additional tables
                     try:
                         skill_aliases = await self.db_manager.db_fetchall("SELECT * FROM skill_aliases")
-                        tables_to_export.append(("skill_aliases", [dict(row) for row in skill_aliases]))
+                        tables_to_export.append(
+                            ("skill_aliases", [dict(row) for row in skill_aliases]))
                     except Exception:
                         pass
 
                     try:
                         user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
-                        tables_to_export.append(("user_settings", [dict(row) for row in user_settings]))
+                        tables_to_export.append(
+                            ("user_settings", [dict(row) for row in user_settings]))
                     except Exception:
                         pass
 
                     try:
                         bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
-                        tables_to_export.append(("bot_settings", [dict(row) for row in bot_settings]))
+                        tables_to_export.append(
+                            ("bot_settings", [dict(row) for row in bot_settings]))
                     except Exception:
                         pass
 
                     try:
                         guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
-                        tables_to_export.append(("guild_settings", [dict(row) for row in guild_settings]))
+                        tables_to_export.append(
+                            ("guild_settings", [dict(row) for row in guild_settings]))
                     except Exception:
                         pass
 
                     try:
                         starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
-                        tables_to_export.append(("starboard_entries", [dict(row) for row in starboard_entries]))
+                        tables_to_export.append(
+                            ("starboard_entries", [dict(row) for row in starboard_entries]))
                     except Exception:
                         pass
 
                     try:
                         bod_usage = await self.db_manager.db_fetchall("SELECT * FROM bod_usage")
-                        tables_to_export.append(("bod_usage", [dict(row) for row in bod_usage]))
+                        tables_to_export.append(
+                            ("bod_usage", [dict(row) for row in bod_usage]))
                     except Exception:
                         pass
 
                     try:
                         bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
-                        tables_to_export.append(("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
+                        tables_to_export.append(
+                            ("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
                     except Exception:
                         pass
 
@@ -464,22 +493,26 @@ class AdminCog(BaseCog):
                             "rows": data
                         }
 
-                    json_path = os.path.join(dump_dir, f"{config.BOT_NAME}_database.json")
+                    json_path = os.path.join(
+                        dump_dir, f"{config.BOT_NAME}_database.json")
                     with open(json_path, "w", encoding="utf-8") as f:
                         json.dump(json_data, f, indent=2, default=str)
 
                     # Create a zip archive containing both files
                     import zipfile
-                    zip_path = os.path.join(dump_dir, f"{config.BOT_NAME}_db_dump.zip")
+                    zip_path = os.path.join(
+                        dump_dir, f"{config.BOT_NAME}_db_dump.zip")
                     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.write(db_copy_path, os.path.basename(db_copy_path))
+                        zipf.write(
+                            db_copy_path, os.path.basename(db_copy_path))
                         zipf.write(json_path, os.path.basename(json_path))
 
                     await interaction_ctx.send(
                         "**Full database dump attached.**\nContains:\n"
                         "• `.db` - SQLite database file (for migrations)\n"
                         "• `.json` - Human-readable JSON export",
-                        file=discord.File(zip_path, filename=f"{config.BOT_NAME}_db_dump.zip")
+                        file=discord.File(
+                            zip_path, filename=f"{config.BOT_NAME}_db_dump.zip")
                     )
                 finally:
                     # Cleanup temp directory
@@ -493,10 +526,12 @@ class AdminCog(BaseCog):
                             "**🗄️ Dump Database** - Full SQLite + JSON export for migrations",
                 color=discord.Color.dark_grey()
             )
-            dashboard_embed.add_field(name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
+            dashboard_embed.add_field(
+                name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
             # 6. Launch View
-            view = DashboardView(ctx, skill_pages, reminder_pages, export_callback, dump_db_callback, dashboard_embed)
+            view = DashboardView(ctx, skill_pages, reminder_pages,
+                                 export_callback, dump_db_callback, dashboard_embed)
             sent_msg = await ctx.send(embed=dashboard_embed, view=view)
             view.message = sent_msg
 
@@ -541,14 +576,20 @@ class AdminCog(BaseCog):
                     await ctx.send(f"No skill found with ID {entry_id}.")
                     return
 
-                embed = discord.Embed(title=f"Edit Skill #{entry_id}", color=discord.Color.blue())
-                embed.add_field(name="1. Name", value=skill['name'], inline=False)
-                embed.add_field(name="2. Roll", value=skill['dice_roll'], inline=False)
-                embed.add_field(name="3. Description", value=skill['description'] or "None", inline=False)
-                embed.add_field(name="4. DELETE", value="⚠️ Delete this skill", inline=False)
+                embed = discord.Embed(
+                    title=f"Edit Skill #{entry_id}", color=discord.Color.blue())
+                embed.add_field(
+                    name="1. Name", value=skill['name'], inline=False)
+                embed.add_field(
+                    name="2. Roll", value=skill['dice_roll'], inline=False)
+                embed.add_field(
+                    name="3. Description", value=skill['description'] or "None", inline=False)
+                embed.add_field(name="4. DELETE",
+                                value="⚠️ Delete this skill", inline=False)
                 embed.set_footer(text="Select an option to edit.")
 
-                options = {"1️⃣ Name": "1", "2️⃣ Roll": "2", "3️⃣ Desc": "3", "🗑️ Delete": "4"}
+                options = {"1️⃣ Name": "1", "2️⃣ Roll": "2",
+                           "3️⃣ Desc": "3", "🗑️ Delete": "4"}
                 choice = await get_selection(ctx, embed, options)
 
                 if not choice:
@@ -568,7 +609,8 @@ class AdminCog(BaseCog):
                     await ctx.send(f"Current Desc: `{skill['description']}`. Enter new description (or 'none'):")
                     msg = await self.bot.wait_for('message', check=check, timeout=60)
                     content = msg.content.strip()
-                    updates['description'] = None if content.lower() == 'none' else content
+                    updates['description'] = None if content.lower(
+                    ) == 'none' else content
                 elif choice == '4':
                     await ctx.send("Are you sure you want to DELETE this skill? (yes/no)")
                     msg = await self.bot.wait_for('message', check=check, timeout=30)
@@ -591,13 +633,18 @@ class AdminCog(BaseCog):
                     await ctx.send(f"No reminder found with ID {entry_id}.")
                     return
 
-                embed = discord.Embed(title=f"Edit Reminder #{entry_id}", color=discord.Color.orange())
-                embed.add_field(name="1. Message", value=rem['message'], inline=False)
-                embed.add_field(name="2. Time", value=f"<t:{rem['reminder_time']}:F>", inline=False)
-                embed.add_field(name="3. DELETE", value="⚠️ Delete this reminder", inline=False)
+                embed = discord.Embed(
+                    title=f"Edit Reminder #{entry_id}", color=discord.Color.orange())
+                embed.add_field(name="1. Message",
+                                value=rem['message'], inline=False)
+                embed.add_field(
+                    name="2. Time", value=f"<t:{rem['reminder_time']}:F>", inline=False)
+                embed.add_field(name="3. DELETE",
+                                value="⚠️ Delete this reminder", inline=False)
                 embed.set_footer(text="Select an option to edit.")
 
-                options = {"1️⃣ Message": "1", "2️⃣ Time": "2", "🗑️ Delete": "3"}
+                options = {"1️⃣ Message": "1",
+                           "2️⃣ Time": "2", "🗑️ Delete": "3"}
                 choice = await get_selection(ctx, embed, options)
 
                 if not choice:
@@ -616,7 +663,8 @@ class AdminCog(BaseCog):
                     # we can just use dateparser directly or ask them to be precise.
                     # For simplicity in this admin tool, we'll assume they know what they are doing or use a simple parser.
                     import dateparser
-                    dt = dateparser.parse(msg.content.strip(), languages=['en'], settings={'PREFER_DATES_FROM': 'future'})
+                    dt = dateparser.parse(msg.content.strip(), languages=[
+                                          'en'], settings={'PREFER_DATES_FROM': 'future'})
                     if dt:
                         updates['reminder_time'] = int(dt.timestamp())
                     else:
@@ -638,7 +686,8 @@ class AdminCog(BaseCog):
                     await ctx.send("✅ Reminder updated.")
 
         except Exception as e:
-            logging.error(f"Error editing entry {entry_id}: {e}", exc_info=True)
+            logging.error(
+                f"Error editing entry {entry_id}: {e}", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(
@@ -661,6 +710,15 @@ class AdminCog(BaseCog):
         """
         from utils import ambience
 
+        # Warn if ambience user-facing output is disabled
+        ambience_warning = ""
+        if not ambience.is_enabled():
+            ambience_warning = (
+                "⚠️ **Ambience is currently disabled** (`AMBIENCE_ENABLED=false` in info.env).\n"
+                "Moods still cycle internally and affect playlist selection, but user-facing strings are silenced.\n"
+                "A bot restart is required to change this setting.\n\n"
+            )
+
         current_mood_id = ambience.get_current_mood_id()
         current_activity = ambience.get_current_activity()
         available_moods = list(ambience.MOODS.keys())
@@ -669,6 +727,7 @@ class AdminCog(BaseCog):
         if mood_name is None:
             embed = discord.Embed(
                 title="🎭 Mood Management",
+                description=ambience_warning if ambience_warning else None,
                 color=discord.Color.purple()
             )
 
@@ -835,14 +894,16 @@ class AdminCog(BaseCog):
         # Add a field for loaded cogs, formatted nicely
         if loaded_cogs:
             # Format cog names by removing 'cogs.' prefix and joining them
-            cog_list_str = ", ".join([cog.replace('cogs.', '') for cog in sorted(loaded_cogs)])
+            cog_list_str = ", ".join([cog.replace('cogs.', '')
+                                     for cog in sorted(loaded_cogs)])
             embed.add_field(
                 name="Loaded Cogs",
                 value=f"```{cog_list_str}```",
                 inline=False
             )
 
-        embed.set_footer(text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+        embed.set_footer(
+            text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
         embed.timestamp = discord.utils.utcnow()
 
         # Update message.

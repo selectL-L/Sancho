@@ -188,15 +188,25 @@ class Help(BaseCog):
         example_prefix = prefixes[0] if prefixes else ''
 
         # Get mood-appropriate activity description from ambience system
+        # Returns empty string when ambience is disabled
         activity_description = HelpAmbience.get_activity_description()
+
+        # Build description - only include activity line if ambience provides one
+        base_description = (
+            "I can respond to two kinds of instructions: **standard commands** and **natural commands** "
+            "though the majority will be natural and handled via NLP! (hopefully)\n\n"
+            f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. "
+            "(which displays this helpful message!)"
+        )
+
+        if activity_description:
+            full_description = f"{activity_description}\n\n{base_description}"
+        else:
+            full_description = base_description
 
         embed = discord.Embed(
             title=f"I'm {config.BOT_NAME}!",
-            description=(
-                f"{activity_description}\n\n"
-                "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
-                f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
-            ),
+            description=full_description,
             color=discord.Color.purple()
         )
 
