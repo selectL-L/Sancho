@@ -784,27 +784,27 @@ async def search_youtube(query: str, max_results: int, logger: Any) -> List['Tra
         return []
 
 
-async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional[str]]:
+async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional[str], Optional[str]]:
     """Fetches track info from a YouTube URL (video or playlist).
 
     Behavior:
     - If the URL contains both a video ID and a playlist ID (e.g., a video link
       with ?list= param), only the single video is extracted.
     - Pure playlist URLs (no video context) extract the entire playlist.
-    - "Mix" playlists (list=RD...) are always rejected as they're auto-generated
-      and absurdly large.
+    - "Mix" playlists (list=RD...) are limited to 60 tracks to prevent crashes.
 
     Args:
         url: The YouTube URL to fetch.
         logger: Logger instance for error messages.
 
     Returns:
-        A tuple of (tracks, error_message) where:
+        A tuple of (tracks, error_message, warning_message) where:
         - tracks: List of Track objects (single for video, multiple for playlist)
         - error_message: Human-readable error if failed, None if success
+        - warning_message: Non-fatal warning (e.g., mix truncation), None if none
     """
     if not yt_dlp:
-        return [], "yt-dlp is not available."
+        return [], "yt-dlp is not available.", None
 
     try:
         # Detect URL type and extract relevant parts
@@ -829,25 +829,26 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
         elif '/shorts/' in parsed.path:
             has_video_id = True
 
-        # If URL has a video ID, always treat as single video (ignore playlist param)
-        # Only reject Mix playlists when it's a pure playlist URL with no video context
-        if list_param and list_param.startswith('RD') and not has_video_id:
-            logger.info(f"Rejected Mix playlist: {list_param}")
-            return [], (
-                "I can't add YouTube Mix playlists — they're auto-generated and grow "
-                "indefinitely, which could destabilize my queue. Please link a specific "
-                "video or a regular playlist instead!"
-            )
+        # Check if this is a Mix playlist (auto-generated, potentially infinite)
+        is_mix_playlist = bool(list_param and list_param.startswith('RD') and not has_video_id)
 
         # If URL has both video ID and playlist param, treat as single video
         # User linked a specific video, just happens to be from a playlist
         is_playlist = bool(list_param) and not has_video_id
+
+        # For mix playlists, we'll limit extraction to 60 songs
+        mix_limit = 60 if is_mix_playlist else None
 
         ydl_opts = {
             **YTDLP_OPTIONS,
             'extract_flat': 'in_playlist' if is_playlist else False,
             'noplaylist': not is_playlist,  # Only extract playlist if pure playlist URL
         }
+
+        # Add playlist limit for mix playlists
+        if mix_limit:
+            ydl_opts['playlistend'] = mix_limit
+            logger.info(f"Mix playlist detected - limiting to {mix_limit} tracks")
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
@@ -856,13 +857,19 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
         info = await asyncio.to_thread(extract)
 
         if not info:
-            return [], "Could not fetch video information. The URL may be invalid or the video unavailable."
+            return [], "Could not fetch video information. The URL may be invalid or the video unavailable.", None
 
         tracks: List[Track] = []
+        was_truncated = False
 
         # Check if it's a playlist result
         if info.get('_type') == 'playlist' or 'entries' in info:
             entries = info.get('entries', [])
+
+            # Check if mix playlist was truncated
+            if is_mix_playlist and len(entries) >= mix_limit:  # type: ignore[arg-type]
+                was_truncated = True
+
             for entry in entries:
                 if not entry:  # Skip unavailable videos
                     continue
@@ -878,7 +885,17 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
                 tracks.append(track)
 
             if not tracks:
-                return [], "The playlist is empty or all videos are unavailable."
+                return [], "The playlist is empty or all videos are unavailable.", None
+
+            # Return warning if mix playlist was truncated
+            warning = None
+            if was_truncated:
+                warning = (
+                    f"⚠️ This is a Mix playlist - I only loaded the first {len(tracks)} tracks. "
+                    "Mix playlists grow indefinitely and could crash the bot!"
+                )
+
+            return tracks, None, warning
 
         else:
             # Single video
@@ -892,22 +909,22 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
             )
             tracks.append(track)
 
-        return tracks, None
+        return tracks, None, None
 
     except Exception as e:
         error_str = str(e).lower()
         # User-friendly error messages
         if 'video unavailable' in error_str or 'unavailable' in error_str:
-            return [], "This video is unavailable. It may be private, deleted, or region-locked."
+            return [], "This video is unavailable. It may be private, deleted, or region-locked.", None
         elif 'private video' in error_str:
-            return [], "This video is private."
+            return [], "This video is private.", None
         elif 'sign in' in error_str:
-            return [], "This video is age-restricted and cannot be played."
+            return [], "This video is age-restricted and cannot be played.", None
         elif 'copyright' in error_str or 'blocked' in error_str:
-            return [], "This video is blocked due to copyright."
+            return [], "This video is blocked due to copyright.", None
         else:
             logger.error(f"Error fetching URL info: {e}", exc_info=True)
-            return [], f"Could not access that URL: {e}"
+            return [], f"Could not access that URL: {e}", None
 
 
 async def fetch_playlist_metadata(playlist_url: str, logger: Any) -> List['Track']:
