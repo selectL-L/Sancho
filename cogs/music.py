@@ -26,30 +26,42 @@ import os
 import random
 import re
 import time
-from typing import cast, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
 import discord
 from discord.ext import commands
 
 import config
+from utils import ambience
+from utils.ambience import (
+    MusicAmbience,
+    ensure_music_for_user,
+    get_context_value,
+    get_current_activity,
+    get_current_playlist,
+    maybe_cycle,
+    start_music,
+    subscribe_playlist_change,
+    unsubscribe_playlist_change,
+)
 from utils.base_cog import BaseCog
 from utils.database import DatabaseManager
 from utils.music_helpers import (
-    YTDLP_AVAILABLE,
     FFMPEG_OPTIONS,
-    get_ffmpeg_path,
-    LoopMode,
-    Track,
-    LyricsResult,
+    YTDLP_AVAILABLE,
     ActiveSession,
-    LyricalNonsenseScraper,
-    LRCLIBProvider,
     GeniusScraper,
-    get_audio_url,
-    search_youtube,
-    fetch_url_info,
-    fetch_playlist_metadata,
+    LoopMode,
+    LRCLIBProvider,
+    LyricalNonsenseScraper,
+    LyricsResult,
+    Track,
     chunk_text,
+    fetch_playlist_metadata,
+    fetch_url_info,
+    get_audio_url,
+    get_ffmpeg_path,
+    search_youtube,
 )
 
 if TYPE_CHECKING:
@@ -86,7 +98,8 @@ class Music(BaseCog):
 
         # Pre-buffering: cache the next track's audio URL for smoother transitions
         self._prefetched_url: Optional[str] = None
-        self._prefetched_track_url: Optional[str] = None  # Track URL this prefetch is for
+        # Track URL this prefetch is for
+        self._prefetched_track_url: Optional[str] = None
         self._prefetch_task: Optional[asyncio.Task[None]] = None
 
         # Internal flag: when True the next track-end callback will NOT advance
@@ -102,31 +115,116 @@ class Music(BaseCog):
         # Cache path
         self.cache_path = config.MUSIC_CACHE_PATH
 
-    async def cog_ready(self) -> None:
-        """Called after the bot is fully ready. Loads playlist and starts presence cycling."""
-        if not YTDLP_AVAILABLE:
-            self.logger.warning("yt-dlp is not installed. Music cog will be limited.")
-            return
+        # Track current playlist URL to detect ambience-driven changes
+        self._current_playlist_url: Optional[str] = None
 
-        if not config.YOUTUBE_PLAYLIST_URL:
-            self.logger.info("No YOUTUBE_PLAYLIST_URL configured. Music cog idle.")
+        # Flag for pending playlist switch from ambience
+        self._pending_playlist_url: Optional[str] = None
+        self._pending_playlist_switch: bool = False
+
+    def _on_playlist_change(self, playlist_url: Optional[str], description: Optional[str]) -> None:
+        """Callback from ambience system when playlist should change.
+
+        This is called by the ambience system, not from within an async context,
+        so we just set a flag for the presence loop to handle.
+
+        Args:
+            playlist_url: New playlist URL, or None to stop.
+            description: Mood description.
+        """
+        if playlist_url is None:
+            # Ambience wants us to stop
+            self._pending_playlist_url = None
+            self._pending_playlist_switch = True
+            self.logger.info("Ambience requested music stop")
+        elif playlist_url != self._current_playlist_url:
+            # Ambience wants a different playlist
+            self._pending_playlist_url = playlist_url
+            self._pending_playlist_switch = True
+            self.logger.info(
+                f"Ambience requested playlist change: {description}")
+
+    def _get_presence_for_activity(self) -> str:
+        """Get a presence string for the current foreground activity.
+
+        In the new ambience system, activities have their status built-in.
+        We just need to potentially inject dynamic context.
+
+        Returns:
+            A string suitable for Discord presence.
+        """
+        activity = get_current_activity()
+        if activity is None:
+            return "vibing ✨"
+
+        # Get base status from activity
+        status = activity.status
+
+        # If activity has dynamic context, try to get it
+        context = get_context_value()
+        if context and activity.context_key:
+            # Some activities can have context injected into their status
+            # E.g., "reading 📚" could become "reading The House in the Cerulean Sea 📚"
+            # For now, we just use the base status - context is available for
+            # cog-specific behaviors
+            pass
+
+        return status
+
+    async def cog_ready(self) -> None:
+        """Called after the bot is fully ready. Sets up ambience subscription and loads playlist."""
+        if not YTDLP_AVAILABLE:
+            self.logger.warning(
+                "yt-dlp is not installed. Music cog will be limited.")
             return
 
         # Ensure cache directory exists
         os.makedirs(self.cache_path, exist_ok=True)
+
+        # Initialize ambience state (picks random mood/activity)
+        ambience.initialize()
+
+        # Subscribe to ambience playlist changes
+        subscribe_playlist_change(self._on_playlist_change)
+        self.logger.info("Subscribed to ambience playlist changes")
+
+        # Tell ambience to start music (it will pick a mood/playlist)
+        playlist_url, description = start_music()
+
+        if not playlist_url:
+            self.logger.info(
+                "No playlists configured in ambience.toml. Music cog idle (can still play user requests).")
+            # Start presence loop anyway - it will handle the no-playlist case
+            # and react when ambience eventually has a playlist
+            self.presence_task = self.bot.loop.create_task(
+                self._presence_loop())
+            return
+
+        self._current_playlist_url = playlist_url
+        self.logger.info(
+            f"Ambience selected playlist ({description}): {playlist_url}")
 
         # Load or fetch playlist
         await self._load_playlist()
 
         if self.playlist:
             # Start presence cycling
-            self.presence_task = self.bot.loop.create_task(self._presence_loop())
-            self.logger.info(f"Music cog ready with {len(self.playlist)} tracks.")
+            self.presence_task = self.bot.loop.create_task(
+                self._presence_loop())
+            self.logger.info(
+                f"Music cog ready with {len(self.playlist)} tracks.")
         else:
-            self.logger.warning("No tracks loaded. Music cog will not cycle presence.")
+            self.logger.warning(
+                "No tracks loaded. Music cog will not cycle presence.")
+            # Start loop anyway to handle future playlist changes
+            self.presence_task = self.bot.loop.create_task(
+                self._presence_loop())
 
     async def cog_unload(self) -> None:
         """Cleanup when cog is unloaded."""
+        # Unsubscribe from ambience
+        unsubscribe_playlist_change(self._on_playlist_change)
+
         # Cancel presence task
         if self.presence_task:
             self.presence_task.cancel()
@@ -175,6 +273,11 @@ class Music(BaseCog):
     async def _load_playlist(self) -> None:
         """Loads playlist from cache or fetches from YouTube."""
         cache_file = os.path.join(self.cache_path, 'playlist.json')
+        playlist_url = self._current_playlist_url or get_current_playlist()
+
+        if not playlist_url:
+            self.logger.info("No playlist URL available to load")
+            return
 
         # Try loading from cache first
         if os.path.exists(cache_file):
@@ -185,13 +288,16 @@ class Music(BaseCog):
                     cache_time = data.get('cached_at', 0)
 
                     # Invalidate cache if playlist URL changed
-                    if cached_url != config.YOUTUBE_PLAYLIST_URL:
-                        self.logger.info("Playlist URL changed, invalidating cache.")
+                    if cached_url != playlist_url:
+                        self.logger.info(
+                            "Playlist URL changed, invalidating cache.")
                     # Refresh if cache is older than 24 hours
                     elif time.time() - cache_time < 86400:
-                        self.original_playlist = [Track.from_dict(t) for t in data.get('tracks', [])]
+                        self.original_playlist = [Track.from_dict(
+                            t) for t in data.get('tracks', [])]
                         if self.original_playlist:
-                            self.logger.info(f"Loaded {len(self.original_playlist)} tracks from cache.")
+                            self.logger.info(
+                                f"Loaded {len(self.original_playlist)} tracks from cache.")
                             # Copy to playlist and shuffle for initial playback
                             self.playlist = self.original_playlist.copy()
                             self._apply_shuffle()
@@ -207,12 +313,13 @@ class Music(BaseCog):
 
     async def _fetch_playlist(self) -> None:
         """Fetches playlist metadata from YouTube using yt-dlp."""
-        if not config.YOUTUBE_PLAYLIST_URL or not YTDLP_AVAILABLE:
+        playlist_url = self._current_playlist_url or get_current_playlist()
+        if not playlist_url or not YTDLP_AVAILABLE:
             return
 
-        self.logger.info("Fetching playlist from YouTube...")
+        self.logger.info(f"Fetching playlist from YouTube: {playlist_url}")
 
-        tracks = await fetch_playlist_metadata(config.YOUTUBE_PLAYLIST_URL, self.logger)
+        tracks = await fetch_playlist_metadata(playlist_url, self.logger)
 
         if tracks:
             self.original_playlist = tracks
@@ -226,11 +333,12 @@ class Music(BaseCog):
     async def _save_playlist_cache(self) -> None:
         """Saves playlist to cache file."""
         cache_file = os.path.join(self.cache_path, 'playlist.json')
+        playlist_url = self._current_playlist_url or get_current_playlist()
         try:
             data = {
                 'tracks': [t.to_dict() for t in self.original_playlist],
                 'cached_at': time.time(),
-                'playlist_url': config.YOUTUBE_PLAYLIST_URL
+                'playlist_url': playlist_url or ''
             }
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -337,7 +445,8 @@ class Music(BaseCog):
 
         # Also remove from original_playlist so it persists to cache
         # Match by URL since order may differ between shuffled and original
-        self.original_playlist = [t for t in self.original_playlist if t.url != removed_track.url]
+        self.original_playlist = [
+            t for t in self.original_playlist if t.url != removed_track.url]
 
         # Adjust current_index if needed
         if not self.playlist:
@@ -350,6 +459,145 @@ class Music(BaseCog):
             # Make sure we don't go past end of playlist
             if self.current_index >= len(self.playlist):
                 self.current_index = 0
+
+    def _move_track(self, from_index: int, to_index: int) -> Optional[Track]:
+        """Moves a track from one position to another in the playlist.
+
+        Adjusts current_index appropriately to maintain playback position.
+
+        Args:
+            from_index: The current index of the track to move.
+            to_index: The target index to move the track to.
+
+        Returns:
+            The moved track, or None if indices are invalid.
+        """
+        if not self.playlist:
+            return None
+        if from_index < 0 or from_index >= len(self.playlist):
+            return None
+        if to_index < 0 or to_index >= len(self.playlist):
+            return None
+        if from_index == to_index:
+            return self.playlist[from_index]  # No-op but valid
+
+        track = self.playlist.pop(from_index)
+        self.playlist.insert(to_index, track)
+
+        self.logger.info(
+            f"Moved track '{track.title}' from position {from_index + 1} to {to_index + 1}")
+
+        # Mark playlist as modified during this session
+        if self.active_session:
+            self._playlist_modified_during_session = True
+
+        # Adjust current_index to maintain playback position
+        if from_index == self.current_index:
+            # We moved the currently playing track
+            self.current_index = to_index
+        elif from_index < self.current_index <= to_index:
+            # Track moved from before current to after current
+            self.current_index -= 1
+        elif to_index <= self.current_index < from_index:
+            # Track moved from after current to before current
+            self.current_index += 1
+
+        return track
+
+    def _swap_tracks(self, index_a: int, index_b: int) -> Optional[tuple[Track, Track]]:
+        """Swaps two tracks in the playlist.
+
+        Adjusts current_index appropriately to maintain playback position.
+
+        Args:
+            index_a: The index of the first track.
+            index_b: The index of the second track.
+
+        Returns:
+            A tuple of (track_a, track_b), or None if indices are invalid.
+        """
+        if not self.playlist:
+            return None
+        if index_a < 0 or index_a >= len(self.playlist):
+            return None
+        if index_b < 0 or index_b >= len(self.playlist):
+            return None
+        if index_a == index_b:
+            return (self.playlist[index_a], self.playlist[index_a])
+
+        # Perform the swap
+        self.playlist[index_a], self.playlist[index_b] = self.playlist[index_b], self.playlist[index_a]
+
+        self.logger.info(
+            f"Swapped tracks: '{self.playlist[index_a].title}' (pos {index_a + 1}) "
+            f"<-> '{self.playlist[index_b].title}' (pos {index_b + 1})"
+        )
+
+        # Mark playlist as modified during this session
+        if self.active_session:
+            self._playlist_modified_during_session = True
+
+        # Adjust current_index if we swapped the currently playing track
+        if self.current_index == index_a:
+            self.current_index = index_b
+        elif self.current_index == index_b:
+            self.current_index = index_a
+
+        return (self.playlist[index_a], self.playlist[index_b])
+
+    def _find_track_by_query(self, query: str) -> Optional[int]:
+        """Finds a track index by matching against title or artist.
+
+        Uses fuzzy matching - returns the best match if confidence is high enough.
+
+        Args:
+            query: Search query (song title, artist, or partial match).
+
+        Returns:
+            The index of the best matching track, or None if no good match.
+        """
+        query_lower = query.lower().strip()
+        if not query_lower or not self.playlist:
+            return None
+
+        best_match_index: Optional[int] = None
+        best_score = 0.0
+
+        for i, track in enumerate(self.playlist):
+            title_lower = track.title.lower()
+            artist_lower = track.artist.lower()
+
+            # Check for exact substring match (high confidence)
+            if query_lower in title_lower or query_lower in artist_lower:
+                # Prefer title matches over artist matches
+                if query_lower in title_lower:
+                    score = len(query_lower) / len(title_lower) + 0.5
+                else:
+                    score = len(query_lower) / len(artist_lower) + 0.3
+
+                if score > best_score:
+                    best_score = score
+                    best_match_index = i
+
+            # Check for word overlap
+            query_words = set(query_lower.split())
+            title_words = set(title_lower.split())
+            artist_words = set(artist_lower.split())
+
+            title_overlap = len(query_words & title_words) / \
+                max(len(query_words), 1)
+            artist_overlap = len(query_words & artist_words) / \
+                max(len(query_words), 1)
+
+            overlap_score = max(title_overlap * 0.8, artist_overlap * 0.6)
+            if overlap_score > best_score:
+                best_score = overlap_score
+                best_match_index = i
+
+        # Require minimum confidence threshold
+        if best_score >= 0.3:
+            return best_match_index
+        return None
 
     async def _restore_idle_playlist(self) -> None:
         """Restores playlist state when returning to idle mode after a voice session.
@@ -367,11 +615,13 @@ class Music(BaseCog):
             # Playlist unchanged - keep current state, just reset the timer
             # so presence loop shows correct elapsed time
             self.track_started_at = time.time()
-            self.logger.info("Returning to idle - playlist unchanged, keeping position.")
+            self.logger.info(
+                "Returning to idle - playlist unchanged, keeping position.")
             return
 
         # Playlist was modified - reload from cache
-        self.logger.info("Returning to idle - playlist was modified, reloading from cache.")
+        self.logger.info(
+            "Returning to idle - playlist was modified, reloading from cache.")
         await self._load_playlist()  # Reloads original_playlist and applies shuffle
 
         # Try to find the current track in the reloaded playlist
@@ -379,12 +629,14 @@ class Music(BaseCog):
             for i, track in enumerate(self.playlist):
                 if track.url == current_track.url:
                     self.current_index = i
-                    self.logger.info(f"Found current track in reloaded playlist: {track.title}")
+                    self.logger.info(
+                        f"Found current track in reloaded playlist: {track.title}")
                     break
             else:
                 # Track not found, start from beginning
                 self.current_index = 0
-                self.logger.info("Current track not in reloaded playlist, starting from beginning.")
+                self.logger.info(
+                    "Current track not in reloaded playlist, starting from beginning.")
         else:
             self.current_index = 0
 
@@ -400,30 +652,67 @@ class Music(BaseCog):
 
         while not self.bot.is_closed():
             try:
+                # Check for ambience-driven playlist changes
+                if self._pending_playlist_switch:
+                    self._pending_playlist_switch = False
+                    if self._pending_playlist_url is None:
+                        # Ambience wants us to stop
+                        self.playlist = []
+                        self.original_playlist = []
+                        self._current_playlist_url = None
+                        await self.bot.change_presence(activity=None)
+                        self.logger.info("Stopped music per ambience request")
+                    elif self._pending_playlist_url != self._current_playlist_url:
+                        # Switch to new playlist
+                        self._current_playlist_url = self._pending_playlist_url
+                        await self._load_playlist()
+                        self.current_index = 0
+                        self.track_started_at = time.time()
+                        self.logger.info(
+                            "Switched to new playlist from ambience")
+                    self._pending_playlist_url = None
+
+                # Let ambience decide if it's time to change mood/activity
+                # This may trigger _on_playlist_change callback
+                maybe_cycle()
+
                 # Don't update presence while in VC - playback handles that
                 if self.active_session:
                     await asyncio.sleep(5)
                     continue
+
+                # No playlist loaded - check if ambience has one now
+                if not self.playlist:
+                    playlist_url = get_current_playlist()
+                    if playlist_url and playlist_url != self._current_playlist_url:
+                        self._current_playlist_url = playlist_url
+                        await self._load_playlist()
+                        self.track_started_at = time.time()
 
                 current_track = self._get_current_track()
                 if not current_track:
                     await asyncio.sleep(30)
                     continue
 
-                # Update presence
-                activity = discord.Activity(
+                # Presence logic:
+                # - When music is playing, ALWAYS show "Listening to X"
+                # - Activity status is handled when music ISN'T playing
+                presence_activity = discord.Activity(
                     type=discord.ActivityType.listening,
                     name=f"{current_track.title} - {current_track.artist}"
                 )
-                await self.bot.change_presence(activity=activity)
+                await self.bot.change_presence(activity=presence_activity)
 
                 # Calculate remaining time for current track
                 elapsed = time.time() - self.track_started_at
                 remaining = max(current_track.duration - elapsed, 0)
 
                 if remaining <= 0:
-                    # Track "finished", advance
-                    self._advance_track()
+                    # Track "finished", advance (always loop in idle mode)
+                    # Presence cycling ignores loop_mode - we always want to cycle
+                    self.current_index = (
+                        self.current_index + 1) % len(self.playlist)
+                    self.track_started_at = time.time()
                     continue
 
                 # Sleep until track "ends" or 30 seconds, whichever is shorter
@@ -433,7 +722,8 @@ class Music(BaseCog):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Error in presence loop: {e}", exc_info=True)
+                self.logger.error(
+                    f"Error in presence loop: {e}", exc_info=True)
                 await asyncio.sleep(10)
 
     async def _update_playing_presence(self, track: Track) -> None:
@@ -473,16 +763,17 @@ class Music(BaseCog):
         """
         return await search_youtube(query, max_results, self.logger)
 
-    async def _fetch_url_info(self, url: str) -> tuple[List[Track], Optional[str]]:
+    async def _fetch_url_info(self, url: str) -> tuple[List[Track], Optional[str], Optional[str]]:
         """Fetches track info from a YouTube URL (video or playlist).
 
         Args:
             url: The YouTube URL to fetch.
 
         Returns:
-            A tuple of (tracks, error_message) where:
+            A tuple of (tracks, error_message, warning_message) where:
             - tracks: List of Track objects (single for video, multiple for playlist)
             - error_message: Human-readable error if failed, None if success
+            - warning_message: Non-fatal warning (e.g., mix truncation), None if none
         """
         return await fetch_url_info(url, self.logger)
 
@@ -498,7 +789,8 @@ class Music(BaseCog):
         ready than delay playback.
         """
         if not self.playlist:
-            self.logger.debug("[Prefetch] No playlist, clearing prefetch cache")
+            self.logger.debug(
+                "[Prefetch] No playlist, clearing prefetch cache")
             self._prefetched_url = None
             self._prefetched_track_url = None
             return
@@ -506,31 +798,38 @@ class Music(BaseCog):
         # Always get the next sequential track, ignoring loop mode
         next_index = (self.current_index + 1) % len(self.playlist)
         next_track = self.playlist[next_index]
-        self.logger.debug(f"[Prefetch] Current index: {self.current_index}, next index: {next_index}, playlist size: {len(self.playlist)}")
+        self.logger.debug(
+            f"[Prefetch] Current index: {self.current_index}, next index: {next_index}, playlist size: {len(self.playlist)}")
 
         # Don't refetch if we already have this track prefetched
         if self._prefetched_track_url == next_track.url and self._prefetched_url:
-            self.logger.debug(f"[Prefetch] Already prefetched: {next_track.title}")
+            self.logger.debug(
+                f"[Prefetch] Already prefetched: {next_track.title}")
             return
 
         try:
-            self.logger.debug(f"[Prefetch] Starting prefetch for: {next_track.title} ({next_track.url})")
+            self.logger.debug(
+                f"[Prefetch] Starting prefetch for: {next_track.title} ({next_track.url})")
             audio_url, is_unavailable = await self._get_audio_url(next_track)
 
             if audio_url:
                 self._prefetched_url = audio_url
                 self._prefetched_track_url = next_track.url
-                self.logger.debug(f"[Prefetch] Success: {next_track.title} - URL length: {len(audio_url)}")
+                self.logger.debug(
+                    f"[Prefetch] Success: {next_track.title} - URL length: {len(audio_url)}")
             else:
                 # Clear prefetch cache on failure
                 self._prefetched_url = None
                 self._prefetched_track_url = None
                 if is_unavailable:
-                    self.logger.debug(f"[Prefetch] Track unavailable: {next_track.title}")
+                    self.logger.debug(
+                        f"[Prefetch] Track unavailable: {next_track.title}")
                 else:
-                    self.logger.debug(f"[Prefetch] Failed (no URL returned): {next_track.title}")
+                    self.logger.debug(
+                        f"[Prefetch] Failed (no URL returned): {next_track.title}")
         except Exception as e:
-            self.logger.debug(f"[Prefetch] Exception for {next_track.title}: {e}")
+            self.logger.debug(
+                f"[Prefetch] Exception for {next_track.title}: {e}")
             self._prefetched_url = None
             self._prefetched_track_url = None
 
@@ -581,7 +880,8 @@ class Music(BaseCog):
                 await self._save_playlist_cache()
             else:
                 # Temporary error, just skip
-                self.logger.warning(f"Could not get audio URL for {track.title}, skipping...")
+                self.logger.warning(
+                    f"Could not get audio URL for {track.title}, skipping...")
                 self._advance_track()
             await self._play_current_track()
             return
@@ -594,7 +894,8 @@ class Music(BaseCog):
         try:
             # Re-check connection state after async work (race condition guard)
             if not self.active_session or not vc.is_connected():
-                self.logger.debug("Session ended during track preparation, aborting playback.")
+                self.logger.debug(
+                    "Session ended during track preparation, aborting playback.")
                 return
 
             ffmpeg_path = get_ffmpeg_path()
@@ -623,7 +924,8 @@ class Music(BaseCog):
             self.logger.info(f"Now playing: {track.title}")
 
             # Start prefetching the next track in the background
-            self._prefetch_task = asyncio.create_task(self._prefetch_next_track())
+            self._prefetch_task = asyncio.create_task(
+                self._prefetch_next_track())
 
         except discord.ClientException as e:
             # Expected if disconnected during preparation - not an error
@@ -661,11 +963,50 @@ class Music(BaseCog):
         if next_track:
             await self._play_current_track()
         else:
-            # Playlist ended and loop is disabled
-            await self._end_session("Playlist finished!")
+            # Playlist ended with loop OFF - stay silent on last track
+            # Rewind index to last track so it can be replayed/looped
+            self.current_index = max(0, len(self.playlist) - 1)
+            self.logger.info(
+                "Playlist finished with loop OFF - waiting for user action.")
 
-    async def _start_session(self, channel: discord.VoiceChannel, ctx: commands.Context) -> None:
-        """Starts a new voice session."""
+            # Notify the channel
+            if self.active_session:
+                try:
+                    channel = self.bot.get_channel(
+                        self.active_session.channel_id)
+                    if channel and isinstance(channel, discord.abc.Messageable):
+                        await channel.send(
+                            "🎵 Playlist finished! I'll wait here for 5 minutes.\n"
+                            "Add more songs, enable loop, or I'll have to disconnect!~"
+                        )
+                except Exception:
+                    pass
+
+                # Start idle timeout - disconnect if no activity
+                self.active_session.waiting_for_users = True
+                if self.idle_timeout_task:
+                    self.idle_timeout_task.cancel()
+                # Get a messageable channel for the timeout notification
+                text_channel = self.bot.get_channel(
+                    self.active_session.channel_id)
+                if text_channel and isinstance(text_channel, discord.abc.Messageable):
+                    self.idle_timeout_task = asyncio.create_task(
+                        self._playlist_end_timeout_loop(text_channel)
+                    )
+
+    async def _start_session(
+        self,
+        channel: discord.VoiceChannel,
+        ctx: commands.Context,
+        join_message: Optional[str] = None
+    ) -> None:
+        """Starts a new voice session.
+
+        Args:
+            channel: The voice channel to join.
+            ctx: The command context.
+            join_message: Optional custom message to send. If None, uses a default.
+        """
         try:
             vc = await channel.connect()
             self.active_session = ActiveSession(
@@ -677,7 +1018,8 @@ class Music(BaseCog):
             # Start playback from current track
             await self._play_current_track()
 
-            await ctx.send(f"🎵 Now playing in {channel.mention}!")
+            message = join_message or f"🎵 Now playing in {channel.mention}!"
+            await ctx.send(message)
 
         except discord.ClientException as e:
             self.logger.error(f"Failed to connect to voice: {e}")
@@ -741,6 +1083,28 @@ class Music(BaseCog):
         except asyncio.CancelledError:
             pass
 
+    async def _playlist_end_timeout_loop(self, text_channel: discord.abc.Messageable) -> None:
+        """Waits for user action after playlist ends with loop OFF.
+
+        If no new songs are added, loop mode changed, or manual play within 5 minutes,
+        disconnects from voice.
+        """
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+
+            # Still waiting and no playback resumed?
+            if self.active_session and self.active_session.waiting_for_users:
+                vc = self.active_session.voice_client
+                if vc and not vc.is_playing():
+                    await text_channel.send(
+                        "No activity for 5 minutes - disconnecting. "
+                        "Type 'listen along' when you're ready to continue!"
+                    )
+                    await self._end_session("Playlist ended with no user activity.")
+
+        except asyncio.CancelledError:
+            pass
+
     # ==========================================================================
     # VOICE STATE TRACKING
     # ==========================================================================
@@ -785,6 +1149,48 @@ class Music(BaseCog):
     # These methods contain substantial logic that benefits from being named,
     # testable units. Simple operations are inlined directly into NLP handlers.
 
+    def _user_in_voice_with_bot(self, ctx: commands.Context) -> bool:
+        """Checks if the command author is in the same voice channel as the bot.
+
+        Args:
+            ctx: The command context.
+
+        Returns:
+            True if the user is in the bot's voice channel, False otherwise.
+        """
+        if not self.active_session:
+            return False
+
+        # Get user's voice state
+        if not ctx.author or not hasattr(ctx.author, 'voice'):
+            return False
+
+        author_voice = ctx.author.voice  # type: ignore[union-attr]
+        if not author_voice or not author_voice.channel:
+            return False
+
+        # Check if user is in the same channel as the bot
+        return author_voice.channel.id == self.active_session.channel_id
+
+    async def _require_user_in_vc(self, ctx: commands.Context) -> bool:
+        """Checks if user is in VC with bot, sends error message if not.
+
+        Args:
+            ctx: The command context.
+
+        Returns:
+            True if user is in VC with bot (command can proceed), False otherwise.
+        """
+        if not self.active_session:
+            await ctx.send("I'm not playing music right now!")
+            return False
+
+        if not self._user_in_voice_with_bot(ctx):
+            await ctx.send("You need to be in the voice channel to control playback!")
+            return False
+
+        return True
+
     async def _do_listen_along(self, ctx: commands.Context) -> None:
         """Internal implementation for listen-along.
 
@@ -795,8 +1201,16 @@ class Music(BaseCog):
             await ctx.send("Music playback isn't available - yt-dlp is not installed.")
             return
 
+        # If we don't have a playlist, ask ambience to start music
         if not self.playlist:
-            await ctx.send("I don't have any music loaded! Make sure `YOUTUBE_PLAYLIST_URL` is configured.")
+            playlist_url, _ = ensure_music_for_user()
+            if playlist_url:
+                self._current_playlist_url = playlist_url
+                await self._load_playlist()
+                self.track_started_at = time.time()
+
+        if not self.playlist:
+            await ctx.send("I don't have any music loaded! Check if playlists are configured in `ambience.toml`.")
             return
 
         # Check if already in a session
@@ -825,7 +1239,8 @@ class Music(BaseCog):
                         # If no one joins, _idle_timeout_loop will disconnect
                         self.active_session.waiting_for_users = True  # type: ignore
                         self.idle_timeout_task = self.bot.loop.create_task(
-                            self._idle_timeout_loop(ctx.channel)  # type: ignore
+                            self._idle_timeout_loop(
+                                ctx.channel)  # type: ignore
                         )
                         return
 
@@ -837,6 +1252,9 @@ class Music(BaseCog):
         if not isinstance(channel, discord.VoiceChannel):
             await ctx.send("I can only join regular voice channels, not stage channels.")
             return
+
+        # Send personality-aware flavor text based on current idle activity
+        await ctx.send(MusicAmbience.get_listen_along_response())
 
         await self._start_session(channel, ctx)
 
@@ -868,12 +1286,16 @@ class Music(BaseCog):
             # Fetch directly from URL - no substitutions
             await ctx.send("🔍 Fetching track info...")
 
-            tracks, error = await self._fetch_url_info(query)
+            tracks, error, warning = await self._fetch_url_info(query)
             if error:
                 await ctx.send(f"❌ {error}")
                 return
 
             tracks_to_add = tracks
+
+            # Send warning if mix playlist was truncated
+            if warning:
+                await ctx.send(warning)
 
         else:
             # Search YouTube
@@ -933,7 +1355,8 @@ class Music(BaseCog):
         # If not in a voice session, join the user's VC and start fresh
         if not self.active_session:
             # Get the member's voice channel
-            member = ctx.author if isinstance(ctx.author, discord.Member) else None
+            member = ctx.author if isinstance(
+                ctx.author, discord.Member) else None
             if not member or not member.voice or not member.voice.channel:
                 await ctx.send("Join a voice channel first so I can play your request!")
                 return
@@ -968,7 +1391,8 @@ class Music(BaseCog):
                 self.logger.error(f"Failed to connect to voice: {e}")
                 await ctx.send("I couldn't connect to the voice channel. Please try again.")
             except Exception as e:
-                self.logger.error(f"Error starting session: {e}", exc_info=True)
+                self.logger.error(
+                    f"Error starting session: {e}", exc_info=True)
                 await ctx.send("Something went wrong starting playback.")
 
         else:
@@ -1023,9 +1447,11 @@ class Music(BaseCog):
                 star = "⭐ " if track.user_added else ""
                 if i == self.current_index:
                     # Highlight currently playing track
-                    lines.append(f"▶️ **{track_num}. {star}{track.title}** - {track.artist}")
+                    lines.append(
+                        f"▶️ **{track_num}. {star}{track.title}** - {track.artist}")
                 else:
-                    lines.append(f"{track_num}. {star}{track.title} - {track.artist}")
+                    lines.append(
+                        f"{track_num}. {star}{track.title} - {track.artist}")
 
             embed = discord.Embed(
                 title="🎶 Playlist",
@@ -1035,7 +1461,8 @@ class Music(BaseCog):
 
             # Add now playing info in the author field
             if current:
-                embed.set_author(name=f"Now Playing: {current.title} - {current.artist}")
+                embed.set_author(
+                    name=f"Now Playing: {current.title} - {current.artist}")
 
             embed.set_footer(
                 text=f"Page {page_num + 1}/{total_pages} • {total_tracks} tracks • "
@@ -1103,7 +1530,7 @@ class Music(BaseCog):
             ctx: The command context.
             query: Search query. If None, uses current playing track.
         """
-        from utils.views import get_selection, PaginatorView
+        from utils.views import PaginatorView, get_selection
 
         # Determine search query - prioritize title over full "artist - title" string
         artist_hint: Optional[str] = None
@@ -1149,7 +1576,8 @@ class Music(BaseCog):
         if artist_hint and len(all_results) > 5:
             artist_lower = artist_hint.lower()
             # Try to find results matching the artist
-            filtered = [r for r in all_results if artist_lower in r.artist.lower() or r.artist.lower() in artist_lower]
+            filtered = [r for r in all_results if artist_lower in r.artist.lower(
+            ) or r.artist.lower() in artist_lower]
             if filtered:
                 all_results = filtered
 
@@ -1186,7 +1614,8 @@ class Music(BaseCog):
                 ]),
                 color=discord.Color.blue()
             )
-            embed.set_footer(text="🌐 = Translation available • Select within 30s")
+            embed.set_footer(
+                text="🌐 = Translation available • Select within 30s")
 
             # Delete searching message
             if searching_msg:
@@ -1248,7 +1677,8 @@ class Music(BaseCog):
                 url=selected.url
             )
             embed.set_author(name=selected.artist)
-            embed.set_footer(text=f"Source: {selected.source} • Page {i + 1}/{len(lyrics_chunks)}")
+            embed.set_footer(
+                text=f"Source: {selected.source} • Page {i + 1}/{len(lyrics_chunks)}")
             pages.append(embed)
 
         # If translation exists, add it as additional pages
@@ -1262,7 +1692,8 @@ class Music(BaseCog):
                     url=selected.url
                 )
                 embed.set_author(name=selected.artist)
-                embed.set_footer(text=f"Source: {selected.source} • Translation {i + 1}/{len(trans_chunks)}")
+                embed.set_footer(
+                    text=f"Source: {selected.source} • Translation {i + 1}/{len(trans_chunks)}")
                 pages.append(embed)
 
         # Send lyrics
@@ -1272,6 +1703,206 @@ class Music(BaseCog):
             view = PaginatorView(ctx, pages)
             msg = await ctx.send(embed=pages[0], view=view)
             view.message = msg
+
+    async def _do_remove(self, ctx: commands.Context, query: str) -> None:
+        """Internal implementation for removing a track from the playlist.
+
+        Supports both position numbers and song name matching.
+
+        Args:
+            ctx: The command context.
+            query: Track number or song name to remove.
+        """
+        if not self.playlist:
+            await ctx.send("The playlist is empty!")
+            return
+
+        if not query:
+            await ctx.send(
+                "What should I remove? Give me a track number or song name.\n"
+                "Example: 'remove 5' or 'remove bohemian rhapsody'"
+            )
+            return
+
+        target_index: Optional[int] = None
+
+        # Try to parse as a number first
+        number_match = re.search(r'\b(\d+)\b', query)
+        if number_match:
+            position = int(number_match.group(1))
+            if 1 <= position <= len(self.playlist):
+                target_index = position - 1
+            else:
+                await ctx.send(f"Invalid track number. Playlist has {len(self.playlist)} tracks.")
+                return
+        else:
+            # Try to find by song name
+            target_index = self._find_track_by_query(query)
+
+        if target_index is None:
+            await ctx.send(f"Couldn't find a track matching '{query}'.")
+            return
+
+        track = self.playlist[target_index]
+        is_current = (target_index == self.current_index)
+
+        self._remove_track(target_index)
+        await ctx.send(f"🗑️ Removed **{track.title}** from the playlist.")
+
+        # If we removed the currently playing track, advance playback
+        if is_current and self.active_session and self.active_session.voice_client:
+            vc = self.active_session.voice_client
+            if vc.is_playing():
+                vc.stop()  # Triggers _on_track_end via callback
+            else:
+                await self._play_current_track()
+
+    def _parse_track_reference(self, text: str) -> Optional[int]:
+        """Parses a track reference (number or name) into a playlist index.
+
+        Args:
+            text: The text to parse (e.g., "5", "bohemian rhapsody").
+
+        Returns:
+            The 0-based playlist index, or None if not found/invalid.
+        """
+        text = text.strip()
+        if not text:
+            return None
+
+        # Try as number first
+        number_match = re.search(r'\b(\d+)\b', text)
+        if number_match:
+            pos = int(number_match.group(1))
+            if 1 <= pos <= len(self.playlist):
+                return pos - 1
+            return None
+
+        # Try as song name
+        return self._find_track_by_query(text)
+
+    def _parse_destination(self, text: str, mode: str = 'to') -> Optional[int]:
+        """Parses a destination reference for move commands.
+
+        Args:
+            text: The destination text (e.g., "2", "top", "after 5").
+            mode: How to interpret the destination - 'to' (exact), 'after', 'before'.
+
+        Returns:
+            The 0-based target index, or None if invalid.
+        """
+        text = text.strip().lower()
+        if not text:
+            return None
+
+        # Handle keywords
+        if text in ('top', 'first', 'beginning', 'start'):
+            return 0
+        if text in ('bottom', 'last', 'end'):
+            return len(self.playlist) - 1
+
+        # Try as number
+        number_match = re.search(r'\b(\d+)\b', text)
+        if number_match:
+            pos = int(number_match.group(1))
+            if 1 <= pos <= len(self.playlist):
+                if mode == 'after':
+                    # After pos X = index X
+                    return min(pos, len(self.playlist) - 1)
+                elif mode == 'before':
+                    return pos - 1  # Before pos X = index X-1
+                return pos - 1  # Exact position
+            return None
+
+        # Try as song name
+        track_index = self._find_track_by_query(text)
+        if track_index is not None:
+            if mode == 'after':
+                return min(track_index + 1, len(self.playlist) - 1)
+            elif mode == 'before':
+                return track_index  # Before track at index X = insert at index X
+            return track_index
+
+        return None
+
+    async def _do_move(self, ctx: commands.Context, query: str) -> None:
+        """Internal implementation for moving a track in the playlist.
+
+        Parses natural language queries like:
+        - "5 to 2", "track 5 to position 2"
+        - "bohemian rhapsody to the top"
+        - "3 after 7", "3 before 5"
+
+        Args:
+            ctx: The command context.
+            query: The move instruction.
+        """
+        if not self.playlist:
+            await ctx.send("The playlist is empty!")
+            return
+
+        if len(self.playlist) < 2:
+            await ctx.send("Need at least 2 tracks to move anything!")
+            return
+
+        if not query:
+            await ctx.send(
+                "What should I move? Examples:\n"
+                "• 'move 5 to 2'\n"
+                "• 'move bohemian rhapsody to the top'\n"
+                "• 'move 3 after 7'"
+            )
+            return
+
+        from_index: Optional[int] = None
+        to_index: Optional[int] = None
+        use_swap = False  # 'to' uses swap, 'after'/'before' use insert
+
+        # Try different patterns
+        # Check more specific patterns first (after/before), then fall back to 'to'
+        # This handles "move 5 to after 7" correctly (matches 'after', not 'to')
+        for pattern, mode in [
+            (r'^(.+?)\s+(?:to\s+)?after\s+(.+)$', 'after'),
+            (r'^(.+?)\s+(?:to\s+)?before\s+(.+)$', 'before'),
+            (r'^(.+?)\s+to\s+(?:position\s+|#)?(.+)$', 'to'),
+        ]:
+            match = re.match(pattern, query, re.IGNORECASE)
+            if match:
+                from_index = self._parse_track_reference(match.group(1))
+                to_index = self._parse_destination(match.group(2), mode)
+                use_swap = (mode == 'to')
+                break
+
+        if from_index is None:
+            await ctx.send("I couldn't figure out which track you want to move.")
+            return
+
+        if to_index is None:
+            await ctx.send("I couldn't figure out where you want to move it to.")
+            return
+
+        if from_index == to_index:
+            await ctx.send("That track is already at that position!")
+            return
+
+        if use_swap:
+            # "move X to Y" swaps the two tracks
+            result = self._swap_tracks(from_index, to_index)
+            if result:
+                track_a, track_b = result
+                await ctx.send(
+                    f"🔄 Swapped **{track_a.title}** (#{from_index + 1}) "
+                    f"with **{track_b.title}** (#{to_index + 1})."
+                )
+            else:
+                await ctx.send("Something went wrong swapping those tracks.")
+        else:
+            # "move X after/before Y" inserts the track
+            track = self._move_track(from_index, to_index)
+            if track:
+                await ctx.send(f"📋 Moved **{track.title}** to position {to_index + 1}.")
+            else:
+                await ctx.send("Something went wrong moving that track.")
 
     # chunk_text moved to utils.music_helpers
 
@@ -1311,15 +1942,10 @@ class Music(BaseCog):
 
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
-        if not self.active_session:
-            await ctx.send("I'm not playing anything right now!")
+        if not await self._require_user_in_vc(ctx):
             return
 
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
-            return
-
-        vc = self.active_session.voice_client
+        vc = self.active_session.voice_client  # type: ignore[union-attr]
         if vc.is_playing():
             vc.stop()
             await ctx.send("⏭️ Skipped!")
@@ -1328,15 +1954,10 @@ class Music(BaseCog):
 
     async def pause_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for pause requests."""
-        if not self.active_session:
-            await ctx.send("I'm not playing anything right now!")
+        if not await self._require_user_in_vc(ctx):
             return
 
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
-            return
-
-        vc = self.active_session.voice_client
+        vc = self.active_session.voice_client  # type: ignore[union-attr]
         if vc.is_paused():
             await ctx.send("Already paused! Type 'resume' to continue!")
             return
@@ -1354,15 +1975,10 @@ class Music(BaseCog):
         otherwise it would be interpreted as a song request.
         The NLP pattern matching in config.py handles this distinction.
         """
-        if not self.active_session:
-            await ctx.send("I'm not in a voice channel! Type 'listen along' to start.")
+        if not await self._require_user_in_vc(ctx):
             return
 
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
-            return
-
-        vc = self.active_session.voice_client
+        vc = self.active_session.voice_client  # type: ignore[union-attr]
         if vc.is_playing():
             await ctx.send("Already playing!")
             return
@@ -1381,7 +1997,8 @@ class Music(BaseCog):
         import re
         # Remove 'play' or 'queue' keyword and any leading/trailing whitespace
         # The query might be "play something", "queue something", or URLs
-        song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
+        song_query = re.sub(r'^\s*(play|queue)\s+', '',
+                            query, flags=re.IGNORECASE).strip()
 
         if not song_query:
             # No query provided, treat as resume - inline the resume logic
@@ -1423,16 +2040,19 @@ class Music(BaseCog):
             description=f"**{track.title}**\nby {track.artist}",
             color=discord.Color.purple()
         )
-        embed.add_field(name="Duration", value=f"{elapsed_str} / {duration_str}", inline=True)
+        embed.add_field(name="Duration",
+                        value=f"{elapsed_str} / {duration_str}", inline=True)
         embed.add_field(name="Loop", value=self.loop_mode.display, inline=True)
 
         if track.thumbnail:
             embed.set_thumbnail(url=track.thumbnail)
 
         if self.active_session:
-            embed.set_footer(text=f"Playing in voice | {len(self.playlist)} tracks in playlist")
+            embed.set_footer(
+                text=f"Playing in voice | {len(self.playlist)} tracks in playlist")
         else:
-            embed.set_footer(text="Idle mode | Type 'listen along' to play in voice!")
+            embed.set_footer(
+                text="Idle mode | Type 'listen along' to play in voice!")
 
         await ctx.send(embed=embed)
 
@@ -1442,6 +2062,9 @@ class Music(BaseCog):
 
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
+        if not await self._require_user_in_vc(ctx):
+            return
+
         if not self.playlist:
             await ctx.send("No playlist to shuffle.")
             return
@@ -1449,9 +2072,6 @@ class Music(BaseCog):
         self._apply_shuffle(preserve_current=True)
         # Clear prefetch since playlist order changed
         self._clear_prefetch()
-        # Mark as modified so idle mode reloads the preset playlist
-        if self.active_session:
-            self._playlist_modified_during_session = True
         await ctx.send("🔀 Playlist shuffled!")
 
     async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
@@ -1459,7 +2079,9 @@ class Music(BaseCog):
 
         Parses the query for a number to jump to.
         """
-        import re
+        if not await self._require_user_in_vc(ctx):
+            return
+
         match = re.search(r'\b(\d+)\b', query)
         if match:
             position = int(match.group(1))
@@ -1486,34 +2108,65 @@ class Music(BaseCog):
             mode = LoopMode.OFF
 
         if mode is None:
+            # Just showing info, no VC required
             await ctx.send(
                 f"{self.loop_mode.emoji} Current loop mode: **{self.loop_mode.display}**\n"
-                "Usage: 'loop one' (repeat track) or 'loop all' (repeat playlist)"
+                "Usage: 'loop one' (repeat track), 'loop all' (repeat playlist), or 'loop off'"
             )
             return
+
+        # Require user in VC to change mode
+        if not await self._require_user_in_vc(ctx):
+            return
+
+        # Cancel any playlist-end timeout if enabling loop
+        if mode != LoopMode.OFF and self.active_session and self.active_session.waiting_for_users:
+            self.active_session.waiting_for_users = False
+            if self.idle_timeout_task:
+                self.idle_timeout_task.cancel()
+                self.idle_timeout_task = None
+
+        self.loop_mode = mode
 
         if mode == LoopMode.OFF:
             await ctx.send(
-                "➡️ Loop **Off** mode isn't available yet - the music player isn't fully implemented!\n"
-                "For now, use **One** (repeat current track) or **All** (repeat playlist)."
+                f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**\n"
+                "Playback will stop after the last track."
             )
-            return
-
-        self.loop_mode = mode
-        await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
+        else:
+            await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
 
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests."""
-        if not self.active_session:
-            await ctx.send("I'm not in a voice channel!")
-            return
-
-        if ctx.guild and self.active_session.guild_id != ctx.guild.id:
-            await ctx.send("I'm not playing music in this server!")
+        if not await self._require_user_in_vc(ctx):
             return
 
         await self._end_session("Disconnected by user request.")
         await ctx.send("👋 Disconnected!")
+
+    async def remove_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for removing tracks from the playlist."""
+        if not await self._require_user_in_vc(ctx):
+            return
+
+        # Strip trigger words - config.py already matched on 'remove'/'delete'
+        clean_query = re.sub(
+            r'^\s*(remove|delete)\s*(track|song|number|#)?\s*',
+            '', query, flags=re.IGNORECASE
+        ).strip()
+        await self._do_remove(ctx, clean_query)
+
+    async def move_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for moving tracks in the playlist."""
+        if not await self._require_user_in_vc(ctx):
+            return
+
+        # Strip trigger word - config.py already matched on 'move'
+        clean_query = re.sub(
+            r'^\s*move\s*(track|song|number|#)?\s*',
+            '', query, flags=re.IGNORECASE
+        ).strip()
+        await self._do_move(ctx, clean_query)
 
     async def lyrics_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for lyrics search.
@@ -1533,15 +2186,5 @@ class Music(BaseCog):
 
 
 async def setup(bot: 'CoreBot') -> None:
-    """Sets up the Music cog.
-
-    Raises:
-        commands.ExtensionFailed: If YOUTUBE_PLAYLIST_URL is not configured.
-    """
-    if not config.YOUTUBE_PLAYLIST_URL:
-        raise commands.ExtensionFailed(
-            'cogs.music',
-            RuntimeError("YOUTUBE_PLAYLIST_URL not configured - Music cog disabled.")
-        )
-
+    """Sets up the Music cog."""
     await bot.add_cog(Music(bot))

@@ -23,6 +23,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from utils.ambience import HelpAmbience
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 
@@ -186,9 +187,13 @@ class Help(BaseCog):
         # Get the first prefix to use in examples.
         example_prefix = prefixes[0] if prefixes else ''
 
+        # Get mood-appropriate activity description from ambience system
+        activity_description = HelpAmbience.get_activity_description()
+
         embed = discord.Embed(
-            title=f"Hello, I'm {config.BOT_NAME}!",
+            title=f"I'm {config.BOT_NAME}!",
             description=(
+                f"{activity_description}\n\n"
                 "I can respond to two kinds of instructions: **standard commands** and **natural commands** though the majority will be natural and handled via NLP! (hopefully)\n\n"
                 f"My prefixes are {formatted_prefixes}. For example, `{example_prefix.strip()} help`. (which displays this helpful message!)"
             ),

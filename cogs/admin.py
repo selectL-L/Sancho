@@ -642,6 +642,90 @@ class AdminCog(BaseCog):
             await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(
+        name="mood",
+        hidden=True,
+        description="View or change the bot's current mood.",
+        help="View or change the bot's current mood. Use without arguments to see available moods."
+    )
+    @commands.is_owner()
+    @app_commands.describe(mood_name="The mood to switch to (optional). Leave empty to see available moods.")
+    async def mood(self, ctx: commands.Context, mood_name: typing.Optional[str] = None) -> None:
+        """View or change the bot's current mood.
+
+        When called without arguments, displays the current mood and a list
+        of available moods to choose from.
+
+        Args:
+            ctx (commands.Context): The command context.
+            mood_name (typing.Optional[str]): The mood to switch to.
+        """
+        from utils import ambience
+
+        current_mood_id = ambience.get_current_mood_id()
+        current_activity = ambience.get_current_activity()
+        available_moods = list(ambience.MOODS.keys())
+
+        # If no mood specified, show current state and available options
+        if mood_name is None:
+            embed = discord.Embed(
+                title="🎭 Mood Management",
+                color=discord.Color.purple()
+            )
+
+            # Current state
+            activity_status = current_activity.status if current_activity else "None"
+            embed.add_field(
+                name="Current State",
+                value=(
+                    f"**Mood:** `{current_mood_id}`\n"
+                    f"**Activity:** `{current_activity.id if current_activity else 'None'}`\n"
+                    f"**Status:** {activity_status}"
+                ),
+                inline=False
+            )
+
+            # Available moods
+            mood_list = "\n".join(f"• `{mood}`" for mood in available_moods)
+            embed.add_field(
+                name="Available Moods",
+                value=mood_list,
+                inline=False
+            )
+
+            embed.add_field(
+                name="Usage",
+                value=(
+                    f"`{ctx.prefix}mood <mood_name>` - Switch to a specific mood\n"
+                    f"Example: `{ctx.prefix}mood productive`"
+                ),
+                inline=False
+            )
+
+            await ctx.send(embed=embed)
+            return
+
+        # Normalize input
+        mood_name = mood_name.lower().strip()
+
+        # Check if valid mood
+        if mood_name not in available_moods:
+            await ctx.send(
+                f"❌ Unknown mood `{mood_name}`.\n"
+                f"Available moods: {', '.join(f'`{m}`' for m in available_moods)}"
+            )
+            return
+
+        # Set the mood
+        success = ambience.set_mood(mood_name)
+        if success:
+            new_activity = ambience.get_current_activity()
+            activity_info = f" (now: {new_activity.status})" if new_activity else ""
+            await ctx.send(f"✅ Mood changed to `{mood_name}`{activity_info}")
+            self.logger.info(f"Mood changed to {mood_name} by {ctx.author}")
+        else:
+            await ctx.send(f"❌ Failed to set mood to `{mood_name}`.")
+
+    @commands.hybrid_command(
         name="status",
         hidden=True,
         description="Provides a comprehensive health and status check for the bot.",
