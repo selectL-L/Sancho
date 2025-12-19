@@ -697,9 +697,11 @@ class Music(BaseCog):
                 # Presence logic:
                 # - When music is playing, ALWAYS show "Listening to X"
                 # - Activity status is handled when music ISN'T playing
+                # Format: "Listening to [title]" with "by [artist]" on second line
                 presence_activity = discord.Activity(
                     type=discord.ActivityType.listening,
-                    name=f"{current_track.title} - {current_track.artist}"
+                    name=current_track.title,
+                    state=f"by {current_track.artist}"
                 )
                 await self.bot.change_presence(activity=presence_activity)
 
@@ -730,7 +732,8 @@ class Music(BaseCog):
         """Updates presence while actively playing."""
         activity = discord.Activity(
             type=discord.ActivityType.listening,
-            name=f"{track.title} - {track.artist}"
+            name=track.title,
+            state=f"by {track.artist}"
         )
         await self.bot.change_presence(activity=activity)
 
