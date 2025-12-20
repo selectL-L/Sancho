@@ -985,18 +985,73 @@ async def search_youtube(query: str, max_results: int, logger: Any) -> List['Tra
         return []
 
 
-async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional[str], Optional[str]]:
+def detect_mix_in_url(url: str) -> tuple[bool, Optional[str], Optional[str]]:
+    """Detects if a URL contains both a video ID and a mix playlist.
+
+    This is used to prompt users whether they want just the single video
+    or the entire mix playlist.
+
+    Args:
+        url: The YouTube URL to check.
+
+    Returns:
+        A tuple of (has_mix, single_video_url, mix_playlist_url) where:
+        - has_mix: True if the URL has both a video ID and a mix playlist
+        - single_video_url: URL for just the single video (stripped of playlist param)
+        - mix_playlist_url: URL for fetching the mix playlist (stripped of video param)
+    """
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+
+    # Check for playlist parameter that's a mix (starts with RD)
+    list_param = query_params.get('list', [None])[0]
+    if not list_param or not list_param.startswith('RD'):
+        return False, None, None
+
+    # Check if there's also a video ID
+    video_id = None
+    if 'youtu.be' in parsed.netloc:
+        video_id = parsed.path.strip('/')
+    elif 'v' in query_params:
+        video_id = query_params.get('v', [None])[0]
+    elif '/shorts/' in parsed.path:
+        video_id = parsed.path.split('/shorts/')[-1].split('/')[0]
+
+    if not video_id:
+        return False, None, None
+
+    # Build single video URL (no playlist param)
+    single_params = {k: v[0] for k, v in query_params.items() if k != 'list'}
+    single_query = urlencode(single_params)
+    single_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', single_query, ''))
+
+    # For mix playlists, keep the original URL format - mixes require video context
+    # (playlist?list=RD... URLs don't work, you need watch?v=VIDEO&list=RD...)
+    # Just return the original URL; fetch_url_info with force_playlist=True will handle it
+    mix_url = url
+
+    return True, single_url, mix_url
+
+
+async def fetch_url_info(
+    url: str,
+    logger: Any,
+    force_playlist: bool = False
+) -> tuple[List['Track'], Optional[str], Optional[str]]:
     """Fetches track info from a YouTube URL (video or playlist).
 
     Behavior:
     - If the URL contains both a video ID and a playlist ID (e.g., a video link
-      with ?list= param), only the single video is extracted.
+      with ?list= param), only the single video is extracted UNLESS force_playlist=True.
     - Pure playlist URLs (no video context) extract the entire playlist.
     - "Mix" playlists (list=RD...) are limited to 60 tracks to prevent crashes.
 
     Args:
         url: The YouTube URL to fetch.
         logger: Logger instance for error messages.
+        force_playlist: If True, extract the playlist even if URL has a video ID.
 
     Returns:
         A tuple of (tracks, error_message, warning_message) where:
@@ -1031,11 +1086,17 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
             has_video_id = True
 
         # Check if this is a Mix playlist (auto-generated, potentially infinite)
-        is_mix_playlist = bool(list_param and list_param.startswith('RD') and not has_video_id)
+        is_mix_playlist = bool(list_param and list_param.startswith('RD'))
 
-        # If URL has both video ID and playlist param, treat as single video
-        # User linked a specific video, just happens to be from a playlist
-        is_playlist = bool(list_param) and not has_video_id
+        # Determine if we should extract as playlist
+        # - If force_playlist is True, always treat as playlist (for mix prompts)
+        # - Otherwise, only treat as playlist if there's no video ID
+        if force_playlist and list_param:
+            is_playlist = True
+        else:
+            # If URL has both video ID and playlist param, treat as single video
+            # User linked a specific video, just happens to be from a playlist
+            is_playlist = bool(list_param) and not has_video_id
 
         # For mix playlists, we'll limit extraction to 60 songs
         mix_limit = 60 if is_mix_playlist else None

@@ -59,6 +59,7 @@ from utils.music_helpers import (
     Track,
     chunk_text,
     crop_thumbnail_to_square,
+    detect_mix_in_url,
     fetch_playlist_metadata,
     fetch_url_info,
     get_audio_url,
@@ -819,11 +820,16 @@ class Music(BaseCog):
         """
         return await search_youtube(query, max_results, self.logger)
 
-    async def _fetch_url_info(self, url: str) -> tuple[List[Track], Optional[str], Optional[str]]:
+    async def _fetch_url_info(
+        self,
+        url: str,
+        force_playlist: bool = False
+    ) -> tuple[List[Track], Optional[str], Optional[str]]:
         """Fetches track info from a YouTube URL (video or playlist).
 
         Args:
             url: The YouTube URL to fetch.
+            force_playlist: If True, extract as playlist even if URL has video ID.
 
         Returns:
             A tuple of (tracks, error_message, warning_message) where:
@@ -831,7 +837,7 @@ class Music(BaseCog):
             - error_message: Human-readable error if failed, None if success
             - warning_message: Non-fatal warning (e.g., mix truncation), None if none
         """
-        return await fetch_url_info(url, self.logger)
+        return await fetch_url_info(url, self.logger, force_playlist=force_playlist)
 
     async def _prefetch_next_track(self) -> None:
         """Pre-fetches the audio URL for the next track in the background.
@@ -1372,10 +1378,38 @@ class Music(BaseCog):
         tracks_to_add: List[Track] = []
 
         if is_url:
-            # Fetch directly from URL - no substitutions
-            await ctx.send("🔍 Fetching track info...")
+            # Check if this is a video URL that also contains a mix playlist
+            has_mix, single_url, mix_url = detect_mix_in_url(query)
 
-            tracks, error, warning = await self._fetch_url_info(query)
+            if has_mix and single_url and mix_url:
+                # Prompt the user: single song or whole mix?
+                embed = discord.Embed(
+                    title="🎵 Mix Playlist Detected",
+                    description=(
+                        "This link includes a Mix playlist. Would you like to add:\n\n"
+                        "**1.** Just this single song\n"
+                        "**2.** Up to 60 songs from the mix playlist"
+                    ),
+                    color=discord.Color.blue()
+                )
+                embed.set_footer(text="Defaults to single song in 10 seconds...")
+
+                options = {"1. Single Song": "single", "2. Mix Playlist": "mix"}
+                selection = await get_selection(ctx, embed, options, timeout=10.0, buttons_only=True)
+
+                if selection == "mix":
+                    # User wants the mix playlist
+                    await ctx.send("🔍 Fetching mix playlist (up to 60 songs)...")
+                    tracks, error, warning = await self._fetch_url_info(mix_url, force_playlist=True)
+                else:
+                    # Default: single song (timeout or explicit selection)
+                    await ctx.send("🔍 Fetching track info...")
+                    tracks, error, warning = await self._fetch_url_info(single_url)
+            else:
+                # Regular URL (not a video+mix combo)
+                await ctx.send("🔍 Fetching track info...")
+                tracks, error, warning = await self._fetch_url_info(query)
+
             if error:
                 await ctx.send(f"❌ {error}")
                 return
