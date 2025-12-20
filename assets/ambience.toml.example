@@ -1,0 +1,106 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# AMBIENCE CONFIGURATION - TEMPLATE
+# ═══════════════════════════════════════════════════════════════════════════════
+# This file contains the bot's personality DATA - her interests, favorites, etc.
+# The STRUCTURE (moods, activities, cog behaviors) lives in utils/ambience.py
+#
+# SETUP:
+#   1. Copy this file to 'ambience.toml' (same folder)
+#   2. Customize the values below with your own preferences
+#   3. The bot hot-reloads this file on changes - no restart needed!
+#
+# NOTE: ambience.toml is gitignored to keep your personal playlists private.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[config]
+# How often to potentially cycle mood/activity (minutes)
+cycle_minutes = 60
+
+# Weight for music-related activities (0.0 - 1.0)
+# Higher = more likely to be "listening to music" as an activity
+music_weight = 0.4
+
+# ───────────────────────────────────────────────────────────────────────────────
+# INTERESTS - What the bot is currently into (used for dynamic flavor text)
+# ───────────────────────────────────────────────────────────────────────────────
+# These are used to add personality to responses. When the bot mentions
+# "I'm reading..." or "I've been playing...", it pulls from these lists.
+# Customize these with YOUR favorite things to give the bot YOUR personality!
+
+[interests.reading]
+books = ["Book Title 1", "Book Title 2", "Book Title 3"]
+manga = ["Manga Title 1", "Manga Title 2", "Manga Title 3"]
+webnovels = ["Web Novel 1", "Web Novel 2"]
+
+[interests.watching]
+anime = ["Anime Title 1", "Anime Title 2"]
+youtube_topics = ["topic 1", "topic 2", "topic 3"]
+
+[interests.gaming]
+cozy_games = ["Cozy Game 1", "Cozy Game 2", "Cozy Game 3"]
+rhythm_games = ["Rhythm Game 1", "Rhythm Game 2"]
+gacha_games = ["Gacha Game 1", "Gacha Game 2"]
+puzzle_games = ["Puzzle Game 1", "Puzzle Game 2", "Puzzle Game 3"]
+
+[interests.creative]
+art_subjects = ["subject 1", "subject 2", "subject 3"]
+writing_projects = ["project type 1", "project type 2", "project type 3"]
+
+[interests.comfort]
+boba_flavors = ["flavor 1", "flavor 2", "flavor 3", "flavor 4"]
+snacks = ["snack 1", "snack 2", "snack 3", "snack 4"]
+candle_scents = ["scent 1", "scent 2", "scent 3", "scent 4"]
+
+[interests.learning]
+topics = ["topic 1", "topic 2", "topic 3"]
+hyperfixations = ["interest 1", "interest 2", "interest 3"]
+podcast_topics = ["genre 1", "genre 2", "genre 3"]
+
+[interests.pets]
+cat_names = ["Name 1", "Name 2", "Name 3", "Name 4"]
+
+# ───────────────────────────────────────────────────────────────────────────────
+# PLAYLISTS - Mood-based music (YouTube playlist URLs for the music cog)
+# ───────────────────────────────────────────────────────────────────────────────
+# Each key corresponds to a "music mood" that affects what the bot plays.
+# You can have multiple playlists per mood - one will be chosen randomly.
+#
+# To get a playlist URL:
+#   1. Go to your YouTube playlist
+#   2. Copy the URL (should look like: https://www.youtube.com/playlist?list=XXXXX)
+#
+# The bot will cycle through these based on its current mood state.
+
+[playlists]
+# Calm, relaxed vibes - lofi, acoustic, ambient
+cozy = [
+    "https://www.youtube.com/playlist?list=YOUR_COZY_PLAYLIST_ID_HERE"
+]
+
+# Upbeat, energetic - pop, electronic, workout music
+energetic = [
+    "https://www.youtube.com/playlist?list=YOUR_ENERGETIC_PLAYLIST_ID_HERE"
+]
+
+# Late night, sleepy - ambient, sleep music, gentle instrumentals
+sleepy = [
+    "https://www.youtube.com/playlist?list=YOUR_SLEEPY_PLAYLIST_ID_HERE"
+]
+
+# Focus music - study beats, concentration playlists
+creative = [
+    "https://www.youtube.com/playlist?list=YOUR_CREATIVE_PLAYLIST_ID_HERE"
+]
+
+# Throwback vibes - nostalgic favorites, comfort songs
+nostalgic = [
+    "https://www.youtube.com/playlist?list=YOUR_NOSTALGIC_PLAYLIST_ID_HERE"
+]
+
+# Optional: Descriptions shown when the bot mentions what it's listening to
+[playlists.descriptions]
+cozy = "lofi beats, cozy vibes"
+energetic = "upbeat tracks, city pop"
+sleepy = "late night ambient, sleepy tunes"
+creative = "focus music, study beats"
+nostalgic = "nostalgic favorites, comfort songs"

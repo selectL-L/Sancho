@@ -96,6 +96,27 @@ The music cog requires FFmpeg to be installed and available in your system PATH:
 
 *Note: Pre-built executables may include FFmpeg bundled, so end-users don't need to install it separately.*
 
+#### Ambience System (Optional)
+
+The bot has an optional "ambience" system that gives it personality - it cycles through moods, activities, and can play music from your playlists. To set this up:
+
+1.  Copy `assets/ambience.toml.example` to `assets/ambience.toml`
+2.  Customize the interests and playlists with your own preferences
+3.  The file hot-reloads on changes - no restart needed!
+
+**What's in `ambience.toml`:**
+
+| Section | Purpose |
+|---------|---------|
+| `[config]` | Timing settings (mood cycle frequency, music weight) |
+| `[interests.*]` | Personality data (favorite books, games, snacks, etc.) used for flavor text |
+| `[playlists]` | YouTube playlist URLs organized by mood (cozy, energetic, sleepy, etc.) |
+| `[playlists.descriptions]` | Short descriptions for each playlist mood |
+
+The mood/activity *structure* (what moods exist, what activities belong to each) is defined in `utils/ambience.py`. The TOML file only contains the *content* - your personal preferences and playlists.
+
+To disable ambience output while keeping internal mood cycling, set `AMBIENCE_ENABLED=False` in `info.env`.
+
 ### Installation
 
 1.  **Clone the repository**

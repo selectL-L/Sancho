@@ -15,7 +15,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 from urllib.parse import quote_plus
 
 import discord
@@ -89,7 +89,12 @@ FFMPEG_BEFORE_OPTIONS = (
 
 FFMPEG_OPTIONS = {
     'before_options': FFMPEG_BEFORE_OPTIONS,
-    'options': '-vn -filter:a "volume=0.5"'
+    # loudnorm: EBU R128 volume normalization for consistent loudness across tracks
+    # I=target integrated loudness (-14 LUFS is typical for streaming)
+    # LRA=loudness range (7 is moderate dynamic range preservation)
+    # TP=true peak limit (-1 dB prevents clipping)
+    # volume=0.5: additional headroom reduction for safety
+    'options': '-vn -filter:a "loudnorm=I=-14:LRA=7:TP=-1,volume=0.5"'
 }
 
 # Cached FFmpeg path (set on first call to get_ffmpeg_path)
@@ -119,6 +124,7 @@ def get_ffmpeg_path() -> str:
     import os
     import shutil
     import sys
+
     import config
 
     # Check for bundled FFmpeg (PyInstaller build)
@@ -194,6 +200,7 @@ class Track:
     url: str  # YouTube URL
     duration: int  # Duration in seconds
     thumbnail: Optional[str] = None
+    thumbnail_needs_crop: bool = False  # True if thumbnail needs center-crop to square
     user_added: bool = False  # True if added by user (not from ambient playlist)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -207,7 +214,8 @@ class Track:
             'artist': self.artist,
             'url': self.url,
             'duration': self.duration,
-            'thumbnail': self.thumbnail
+            'thumbnail': self.thumbnail,
+            'thumbnail_needs_crop': self.thumbnail_needs_crop
         }
 
     @classmethod
@@ -218,7 +226,8 @@ class Track:
             artist=data['artist'],
             url=data['url'],
             duration=data['duration'],
-            thumbnail=data.get('thumbnail')
+            thumbnail=data.get('thumbnail'),
+            thumbnail_needs_crop=data.get('thumbnail_needs_crop', False)
         )
 
 
@@ -624,7 +633,7 @@ class GeniusScraper:
 # ==========================================================================
 
 
-async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], bool]:
+async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], bool, Optional[str], bool]:
     """Gets the actual streamable audio URL for a track.
 
     Args:
@@ -632,12 +641,14 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         logger: Logger instance for debug/error messages.
 
     Returns:
-        A tuple of (url, is_unavailable) where:
+        A tuple of (url, is_unavailable, thumbnail, needs_crop) where:
         - url: The streamable URL, or None if failed
         - is_unavailable: True if the video is permanently unavailable and should be removed
+        - thumbnail: Best thumbnail URL found, or None
+        - needs_crop: True if thumbnail needs center-cropping to extract album art
     """
     if not yt_dlp:
-        return None, False
+        return None, False, None, False
 
     try:
         ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': False}
@@ -649,7 +660,10 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         info = await asyncio.to_thread(extract)
 
         if not info:
-            return None, True  # No info usually means unavailable
+            return None, True, None, False  # No info usually means unavailable
+
+        # Extract best thumbnail - prefer square (for album art)
+        thumbnail_url, needs_crop = await _extract_best_thumbnail(info, logger)
 
         formats = info.get('formats', [])
 
@@ -662,7 +676,7 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         if audio_only:
             # Prefer higher audio bitrate among audio-only formats
             best = max(audio_only, key=lambda f: f.get('abr') or f.get('tbr') or 0)
-            return best.get('url'), False
+            return best.get('url'), False, thumbnail_url, needs_crop
 
         # Priority 2: Video+audio combined formats (muxed)
         # Less efficient but necessary for some videos that lack audio-only streams
@@ -674,16 +688,16 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
             # Prefer by audio bitrate, then lowest video bitrate (less bandwidth waste)
             best = max(combined, key=lambda f: (f.get('abr') or 0, -(f.get('vbr') or f.get('tbr') or 0)))
             logger.debug(f"Using combined format for {track.title} (no audio-only available)")
-            return best.get('url'), False
+            return best.get('url'), False, thumbnail_url, needs_crop
 
         # Priority 3: Direct URL fallback (rare, usually livestreams or direct file links)
         if info.get('url'):
             logger.debug(f"Using direct URL fallback for {track.title}")
-            return info.get('url'), False
+            return info.get('url'), False, thumbnail_url, needs_crop
 
         # No usable format found
         logger.warning(f"No playable format found for {track.title}")
-        return None, False
+        return None, False, thumbnail_url, needs_crop
 
     except Exception as e:
         error_str = str(e).lower()
@@ -705,7 +719,194 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         else:
             logger.error(f"Error getting audio URL for {track.title}: {e}")
 
-        return None, is_unavailable
+        return None, is_unavailable, None, False
+
+
+async def _probe_thumbnail_dimensions(url: str, logger: Any) -> Optional[tuple[int, int]]:
+    """Uses ffprobe to get actual dimensions of a thumbnail URL.
+    
+    Args:
+        url: The thumbnail URL to probe.
+        logger: Logger for debug output.
+        
+    Returns:
+        Tuple of (width, height) or None if probe fails.
+    """
+    ffmpeg_path = get_ffmpeg_path()
+    # ffprobe is in the same directory as ffmpeg
+    if ffmpeg_path.endswith('.exe'):
+        ffprobe_path = ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
+    else:
+        ffprobe_path = ffmpeg_path.replace('ffmpeg', 'ffprobe')
+    
+    cmd = [
+        ffprobe_path,
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height',
+        '-of', 'csv=p=0',
+        url
+    ]
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        
+        output = stdout.decode().strip()
+        if ',' in output:
+            w, h = output.split(',')
+            return int(w), int(h)
+    except asyncio.TimeoutError:
+        logger.debug(f"[Thumbnail] ffprobe timeout for {url[:60]}...")
+    except Exception as e:
+        logger.debug(f"[Thumbnail] ffprobe failed: {e}")
+    
+    return None
+
+
+async def crop_thumbnail_to_square(url: str, logger: Any) -> Optional[bytes]:
+    """Crops a thumbnail to a square by extracting the center portion.
+    
+    YouTube Music "Art Track" videos have album art centered in a 16:9 frame.
+    This function extracts the center square, which contains the album art.
+    
+    Args:
+        url: The thumbnail URL to crop.
+        logger: Logger for debug output.
+        
+    Returns:
+        JPEG bytes of the cropped square image, or None if cropping fails.
+    """
+    ffmpeg_path = get_ffmpeg_path()
+    
+    # crop filter: crop=out_w:out_h:x:y
+    # For center square: crop=min(iw,ih):min(iw,ih):(iw-min(iw,ih))/2:(ih-min(iw,ih))/2
+    # Simplified: crop=ih:ih:(iw-ih)/2:0 for landscape (width > height)
+    crop_filter = "crop='min(iw,ih):min(iw,ih):(iw-min(iw,ih))/2:(ih-min(iw,ih))/2'"
+    
+    cmd = [
+        ffmpeg_path,
+        '-y',  # Overwrite output
+        '-i', url,
+        '-vf', crop_filter,
+        '-frames:v', '1',  # Only one frame (it's an image)
+        '-f', 'mjpeg',  # Output as JPEG
+        '-q:v', '2',  # High quality
+        'pipe:1'  # Output to stdout
+    ]
+    
+    logger.debug(f"[Thumbnail] Cropping to square: {url[:80]}...")
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        
+        if proc.returncode == 0 and stdout:
+            logger.debug(f"[Thumbnail] Cropped successfully, {len(stdout)} bytes")
+            return stdout
+        else:
+            logger.debug(f"[Thumbnail] Crop failed: {stderr.decode()[:200] if stderr else 'no stderr'}")
+    except asyncio.TimeoutError:
+        logger.debug(f"[Thumbnail] Crop timeout for {url[:60]}...")
+    except Exception as e:
+        logger.debug(f"[Thumbnail] Crop failed: {e}")
+    
+    return None
+
+
+async def _extract_best_thumbnail(info: Dict[str, Any], logger: Any) -> tuple[Optional[str], bool]:
+    """Extracts the best thumbnail URL from yt-dlp info, preferring square images.
+
+    Uses ffprobe to determine dimensions of thumbnails that don't have them.
+    Filters out thumbnails under 480px and prefers square album art.
+
+    Args:
+        info: The yt-dlp extraction info dict.
+        logger: Logger for debug output.
+
+    Returns:
+        Tuple of (thumbnail_url, needs_crop). If needs_crop is True, the caller
+        should use crop_thumbnail_to_square() to extract the center square.
+    """
+    MIN_SIZE = 480  # Minimum acceptable dimension
+    
+    thumbnails = info.get('thumbnails', [])
+    
+    logger.debug(f"[Thumbnail] Found {len(thumbnails)} raw thumbnails from yt-dlp")
+
+    if not thumbnails:
+        fallback = info.get('thumbnail')
+        logger.debug(f"[Thumbnail] No thumbnails list, using fallback: {fallback}")
+        return fallback, True  # Assume fallback needs crop
+
+    # Log all thumbnails and probe those missing dimensions
+    unknown_dims = []
+    for i, t in enumerate(thumbnails):
+        w, h = t.get('width'), t.get('height')
+        if w and h:
+            url_preview = t.get('url', 'no-url')[:80] + '...' if len(t.get('url', '')) > 80 else t.get('url', 'no-url')
+            logger.debug(f"[Thumbnail] [{i}] {w}x{h} - {url_preview}")
+        else:
+            unknown_dims.append((i, t))
+    
+    # Probe unknown dimensions with ffprobe (limit to avoid slowdown)
+    if unknown_dims:
+        logger.debug(f"[Thumbnail] Probing {len(unknown_dims)} thumbnails with unknown dimensions...")
+        for i, t in unknown_dims[:5]:  # Probe max 5 to avoid delays
+            url = t.get('url')
+            if url:
+                dims = await _probe_thumbnail_dimensions(url, logger)
+                if dims:
+                    t['width'], t['height'] = dims
+                    t['_probed'] = True
+                    logger.debug(f"[Thumbnail] [{i}] {dims[0]}x{dims[1]} (probed) - {url[:80]}...")
+                else:
+                    logger.debug(f"[Thumbnail] [{i}] ?x? (probe failed) - {url[:80]}...")
+
+    # Filter to only thumbnails with known dimensions >= MIN_SIZE
+    usable = [
+        t for t in thumbnails
+        if t.get('width') and t.get('height')
+        and t.get('width') >= MIN_SIZE and t.get('height') >= MIN_SIZE
+    ]
+    
+    logger.debug(f"[Thumbnail] {len(usable)} thumbnails pass {MIN_SIZE}px minimum filter")
+
+    if not usable:
+        # Nothing meets minimum size - fall back to largest available
+        with_dims = [t for t in thumbnails if t.get('width') and t.get('height')]
+        if with_dims:
+            best = max(with_dims, key=lambda t: t.get('width', 0) * t.get('height', 0))
+            logger.debug(f"[Thumbnail] No thumbnails >= {MIN_SIZE}px, using largest: {best.get('width')}x{best.get('height')}")
+            is_square = best.get('width') == best.get('height')
+            return best.get('url'), not is_square
+        # No dimensions at all - return any URL
+        for t in thumbnails:
+            if t.get('url'):
+                logger.debug("[Thumbnail] No dimension info available, using first URL")
+                return t.get('url'), True  # Assume needs crop
+        return info.get('thumbnail'), True
+
+    # Try to find square thumbnails (width == height) - these are album art
+    square_thumbnails = [t for t in usable if t.get('width') == t.get('height')]
+
+    if square_thumbnails:
+        best = max(square_thumbnails, key=lambda t: t.get('width', 0))
+        logger.debug(f"[Thumbnail] Found {len(square_thumbnails)} square thumbnails >= {MIN_SIZE}px, using: {best.get('width')}x{best.get('height')}")
+        return best.get('url'), False  # Already square, no crop needed
+
+    # No square thumbnail - return the largest one for cropping
+    best = max(usable, key=lambda t: t.get('width', 0) * t.get('height', 0))
+    logger.debug(f"[Thumbnail] No square found, will crop largest: {best.get('width')}x{best.get('height')}")
+    return best.get('url'), True  # Needs cropping
 
 
 async def search_youtube(query: str, max_results: int, logger: Any) -> List['Track']:
@@ -808,7 +1009,7 @@ async def fetch_url_info(url: str, logger: Any) -> tuple[List['Track'], Optional
 
     try:
         # Detect URL type and extract relevant parts
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import parse_qs, urlparse
 
         parsed = urlparse(url)
         query_params = parse_qs(parsed.query)
