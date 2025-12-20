@@ -1471,6 +1471,19 @@ class Music(BaseCog):
             await ctx.send("No tracks to add.")
             return
 
+        # Queue size limit: 2000 tracks max
+        MAX_QUEUE_SIZE = 2000
+        current_queue_size = len(self.playlist) if self.active_session else 0
+        available_slots = MAX_QUEUE_SIZE - current_queue_size
+
+        if available_slots <= 0:
+            await ctx.send(f"❌ The queue is full ({MAX_QUEUE_SIZE} tracks max). Remove some tracks first!")
+            return
+
+        if len(tracks_to_add) > available_slots:
+            tracks_to_add = tracks_to_add[:available_slots]
+            await ctx.send(f"⚠️ Only adding {available_slots} tracks to stay within the {MAX_QUEUE_SIZE} track limit.")
+
         # Mark all tracks as user-added (should already be, but ensure it)
         for track in tracks_to_add:
             track.user_added = True

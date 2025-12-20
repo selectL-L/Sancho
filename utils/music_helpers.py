@@ -1098,8 +1098,13 @@ async def fetch_url_info(
             # User linked a specific video, just happens to be from a playlist
             is_playlist = bool(list_param) and not has_video_id
 
-        # For mix playlists, we'll limit extraction to 60 songs
-        mix_limit = 60 if is_mix_playlist else None
+        # Playlist limits: mixes capped at 60, regular playlists at 1000
+        if is_mix_playlist:
+            playlist_limit = 60
+        elif is_playlist:
+            playlist_limit = 1000
+        else:
+            playlist_limit = None
 
         ydl_opts = {
             **YTDLP_OPTIONS,
@@ -1107,10 +1112,13 @@ async def fetch_url_info(
             'noplaylist': not is_playlist,  # Only extract playlist if pure playlist URL
         }
 
-        # Add playlist limit for mix playlists
-        if mix_limit:
-            ydl_opts['playlistend'] = mix_limit
-            logger.info(f"Mix playlist detected - limiting to {mix_limit} tracks")
+        # Add playlist limit
+        if playlist_limit:
+            ydl_opts['playlistend'] = playlist_limit
+            if is_mix_playlist:
+                logger.info(f"Mix playlist detected - limiting to {playlist_limit} tracks")
+            else:
+                logger.info(f"Playlist detected - limiting to {playlist_limit} tracks")
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
@@ -1128,8 +1136,8 @@ async def fetch_url_info(
         if info.get('_type') == 'playlist' or 'entries' in info:
             entries = info.get('entries', [])
 
-            # Check if mix playlist was truncated
-            if is_mix_playlist and len(entries) >= mix_limit:  # type: ignore[arg-type]
+            # Check if playlist was truncated
+            if playlist_limit and len(entries) >= playlist_limit:
                 was_truncated = True
 
             for entry in entries:
@@ -1149,13 +1157,16 @@ async def fetch_url_info(
             if not tracks:
                 return [], "The playlist is empty or all videos are unavailable.", None
 
-            # Return warning if mix playlist was truncated
+            # Return warning if playlist was truncated
             warning = None
             if was_truncated:
-                warning = (
-                    f"⚠️ This is a Mix playlist - I only loaded the first {len(tracks)} tracks. "
-                    "Mix playlists grow indefinitely and could crash the bot!"
-                )
+                if is_mix_playlist:
+                    warning = (
+                        f"⚠️ This is a Mix playlist - I only loaded the first {len(tracks)} tracks. "
+                        "Mix playlists grow indefinitely and could crash the bot!"
+                    )
+                else:
+                    warning = f"⚠️ This playlist was truncated to {len(tracks)} tracks (limit: {playlist_limit})."
 
             return tracks, None, warning
 
