@@ -21,6 +21,7 @@ Dependencies:
 """
 
 import asyncio
+import io
 import json
 import os
 import random
@@ -57,6 +58,7 @@ from utils.music_helpers import (
     LyricsResult,
     Track,
     chunk_text,
+    crop_thumbnail_to_square,
     fetch_playlist_metadata,
     fetch_url_info,
     get_audio_url,
@@ -101,6 +103,11 @@ class Music(BaseCog):
         # Track URL this prefetch is for
         self._prefetched_track_url: Optional[str] = None
         self._prefetch_task: Optional[asyncio.Task[None]] = None
+
+        # Current track cache: stores the audio URL of the currently/last played track
+        # Used for loop ONE mode to avoid re-fetching the same track
+        self._current_audio_url: Optional[str] = None
+        self._current_audio_track_url: Optional[str] = None
 
         # Internal flag: when True the next track-end callback will NOT advance
         # the playlist (used for intentional stops like jump/skip that manually
@@ -301,6 +308,7 @@ class Music(BaseCog):
                             # Copy to playlist and shuffle for initial playback
                             self.playlist = self.original_playlist.copy()
                             self._apply_shuffle()
+                            self._dedupe_playlist()
                             return
             except (json.JSONDecodeError, KeyError) as e:
                 self.logger.warning(f"Cache corrupted, will re-fetch: {e}")
@@ -310,6 +318,7 @@ class Music(BaseCog):
         # Copy to playlist and shuffle for initial playback
         self.playlist = self.original_playlist.copy()
         self._apply_shuffle()
+        self._dedupe_playlist()
 
     async def _fetch_playlist(self) -> None:
         """Fetches playlist metadata from YouTube using yt-dlp."""
@@ -423,6 +432,48 @@ class Music(BaseCog):
 
         self.track_started_at = time.time()
         return self._get_current_track()
+
+    def _dedupe_playlist(self) -> int:
+        """Removes duplicate tracks from the playlist, keeping later occurrences.
+
+        When a track appears multiple times, keeps the one at the later position
+        (i.e., duplicates are effectively "moved" to their final occurrence).
+        Adjusts current_index if tracks before it are removed.
+
+        Returns:
+            The number of duplicates removed.
+        """
+        if not self.playlist:
+            return 0
+
+        seen_urls: dict[str, int] = {}  # url -> index of last occurrence
+        indices_to_remove: list[int] = []
+
+        # First pass: find all duplicate indices (keep the last occurrence)
+        for i, track in enumerate(self.playlist):
+            if track.url in seen_urls:
+                # Mark the earlier occurrence for removal
+                indices_to_remove.append(seen_urls[track.url])
+            seen_urls[track.url] = i
+
+        if not indices_to_remove:
+            return 0
+
+        # Sort in reverse order so we can remove without index shifting issues
+        indices_to_remove.sort(reverse=True)
+
+        # Count how many removed indices are before current_index
+        adjustment = sum(1 for i in indices_to_remove if i < self.current_index)
+
+        # Remove duplicates
+        for idx in indices_to_remove:
+            self.playlist.pop(idx)
+
+        # Adjust current_index
+        self.current_index = max(0, self.current_index - adjustment)
+
+        self.logger.debug(f"Removed {len(indices_to_remove)} duplicate tracks from playlist")
+        return len(indices_to_remove)
 
     def _remove_track(self, index: int) -> None:
         """Removes a track from the playlist by index.
@@ -741,16 +792,18 @@ class Music(BaseCog):
     # VOICE PLAYBACK
     # ==========================================================================
 
-    async def _get_audio_url(self, track: Track) -> tuple[Optional[str], bool]:
+    async def _get_audio_url(self, track: Track) -> tuple[Optional[str], bool, Optional[str], bool]:
         """Gets the actual streamable audio URL for a track.
 
         Args:
             track: The track to get the audio URL for.
 
         Returns:
-            A tuple of (url, is_unavailable) where:
+            A tuple of (url, is_unavailable, thumbnail, needs_crop) where:
             - url: The streamable URL, or None if failed
             - is_unavailable: True if the video is permanently unavailable and should be removed
+            - thumbnail: Best thumbnail URL found, or None
+            - needs_crop: True if thumbnail needs center-cropping to extract album art
         """
         return await get_audio_url(track, self.logger)
 
@@ -813,7 +866,13 @@ class Music(BaseCog):
         try:
             self.logger.debug(
                 f"[Prefetch] Starting prefetch for: {next_track.title} ({next_track.url})")
-            audio_url, is_unavailable = await self._get_audio_url(next_track)
+            audio_url, is_unavailable, thumbnail, needs_crop = await self._get_audio_url(next_track)
+
+            # Update track thumbnail if we found a better one
+            if thumbnail and not next_track.thumbnail:
+                next_track.thumbnail = thumbnail
+                next_track.thumbnail_needs_crop = needs_crop
+                self.logger.debug(f"[Prefetch] Updated thumbnail for: {next_track.title} (needs_crop={needs_crop})")
 
             if audio_url:
                 self._prefetched_url = audio_url
@@ -845,6 +904,13 @@ class Music(BaseCog):
             self._prefetch_task.cancel()
             self._prefetch_task = None
 
+    def _clear_audio_caches(self) -> None:
+        """Clears all audio URL caches (prefetch and current track)."""
+        self._clear_prefetch()
+        self._current_audio_url = None
+        self._current_audio_track_url = None
+        self.logger.debug("Cleared all audio URL caches")
+
     async def _play_current_track(self) -> None:
         """Plays the current track in the active voice session."""
         if not self.active_session or not self.active_session.voice_client:
@@ -860,19 +926,29 @@ class Music(BaseCog):
         if vc.is_playing():
             vc.stop()
 
-        # Check if we have a prefetched URL for this track
+        # Check caches for audio URL (current track cache first, then prefetch)
         audio_url: Optional[str] = None
         is_unavailable = False
 
-        if self._prefetched_track_url == track.url and self._prefetched_url:
+        if self._current_audio_track_url == track.url and self._current_audio_url:
+            # Current track cache hit (e.g., loop ONE replaying same track)
+            audio_url = self._current_audio_url
+            self.logger.debug(f"Using current track cache for: {track.title}")
+        elif self._prefetched_track_url == track.url and self._prefetched_url:
+            # Prefetch cache hit (next sequential track)
             audio_url = self._prefetched_url
             self.logger.debug(f"Using prefetched URL for: {track.title}")
             # Clear the prefetch since we're using it
             self._prefetched_url = None
             self._prefetched_track_url = None
         else:
-            # No prefetch available, fetch now
-            audio_url, is_unavailable = await self._get_audio_url(track)
+            # No cache available, fetch now
+            audio_url, is_unavailable, thumbnail, needs_crop = await self._get_audio_url(track)
+            # Update track thumbnail if we found a better one
+            if thumbnail and not track.thumbnail:
+                track.thumbnail = thumbnail
+                track.thumbnail_needs_crop = needs_crop
+                self.logger.debug(f"Updated thumbnail for: {track.title} (needs_crop={needs_crop})")
 
         if not audio_url:
             if is_unavailable:
@@ -925,6 +1001,10 @@ class Music(BaseCog):
 
             vc.play(source, after=after_playing)
             self.logger.info(f"Now playing: {track.title}")
+
+            # Cache this track's audio URL for potential replay (loop ONE)
+            self._current_audio_url = audio_url
+            self._current_audio_track_url = track.url
 
             # Start prefetching the next track in the background
             self._prefetch_task = asyncio.create_task(
@@ -1060,8 +1140,8 @@ class Music(BaseCog):
             self.idle_timeout_task.cancel()
             self.idle_timeout_task = None
 
-        # Clear prefetch cache
-        self._clear_prefetch()
+        # Clear all audio URL caches
+        self._clear_audio_caches()
 
         # Restore playlist state for idle mode
         await self._restore_idle_playlist()
@@ -1155,14 +1235,20 @@ class Music(BaseCog):
     def _user_in_voice_with_bot(self, ctx: commands.Context) -> bool:
         """Checks if the command author is in the same voice channel as the bot.
 
+        Bot owner bypasses this check for debugging purposes.
+
         Args:
             ctx: The command context.
 
         Returns:
-            True if the user is in the bot's voice channel, False otherwise.
+            True if the user is in the bot's voice channel (or is owner), False otherwise.
         """
         if not self.active_session:
             return False
+
+        # Bot owner bypasses VC check for debugging
+        if ctx.author.id == self.bot.owner_id:
+            return True
 
         # Get user's voice state
         if not ctx.author or not hasattr(ctx.author, 'voice'):
@@ -1404,8 +1490,28 @@ class Music(BaseCog):
                 await ctx.send("I'm currently playing in another server!")
                 return
 
-            # Add tracks at the end of the playlist
-            self.playlist.extend(tracks_to_add)
+            # Handle duplicates - move existing tracks to end instead of adding twice
+            moved_tracks: List[Track] = []
+            new_tracks: List[Track] = []
+
+            for track in tracks_to_add:
+                # Find if this track already exists in playlist (by URL)
+                existing_idx = next(
+                    (i for i, t in enumerate(self.playlist) if t.url == track.url),
+                    None
+                )
+                if existing_idx is not None:
+                    # Remove from current position (will re-add at end)
+                    existing_track = self.playlist.pop(existing_idx)
+                    # Adjust current_index if we removed before it
+                    if existing_idx < self.current_index:
+                        self.current_index -= 1
+                    moved_tracks.append(existing_track)
+                else:
+                    new_tracks.append(track)
+
+            # Add all tracks (moved + new) at the end
+            self.playlist.extend(moved_tracks + new_tracks)
 
             # Mark as modified since we added user tracks
             self._playlist_modified_during_session = True
@@ -1413,10 +1519,19 @@ class Music(BaseCog):
             # Clear prefetch since playlist changed
             self._clear_prefetch()
 
+            # Build response message
             if len(tracks_to_add) == 1:
-                await ctx.send(f"⭐ Added **{tracks_to_add[0].title}** to the queue!")
+                if moved_tracks:
+                    await ctx.send(f"⭐ Moved **{tracks_to_add[0].title}** to the end of the queue!")
+                else:
+                    await ctx.send(f"⭐ Added **{tracks_to_add[0].title}** to the end of the queue!")
             else:
-                await ctx.send(f"⭐ Added **{len(tracks_to_add)} tracks** to the queue!")
+                parts = []
+                if new_tracks:
+                    parts.append(f"added {len(new_tracks)}")
+                if moved_tracks:
+                    parts.append(f"moved {len(moved_tracks)}")
+                await ctx.send(f"⭐ **{' and '.join(parts).capitalize()} tracks** to the end of the queue!")
 
     async def _do_queue(self, ctx: commands.Context) -> None:
         """Internal implementation for queue.
@@ -1503,8 +1618,8 @@ class Music(BaseCog):
         self.current_index = index
         self.track_started_at = time.time()
 
-        # Clear prefetch since we jumped to a different position
-        self._clear_prefetch()
+        # Clear all audio caches since we jumped to a different track
+        self._clear_audio_caches()
 
         track = self._get_current_track()
 
@@ -1535,13 +1650,12 @@ class Music(BaseCog):
         """
         from utils.views import PaginatorView, get_selection
 
-        # Determine search query - prioritize title over full "artist - title" string
+        # Determine search query - use title directly (user can specify manually if needed)
         artist_hint: Optional[str] = None
         if not query:
             # Use currently playing track
             current = self._get_current_track()
             if current:
-                # Use just the title for search, keep artist as hint for filtering
                 query = current.title
                 artist_hint = current.artist
             else:
@@ -1549,7 +1663,6 @@ class Music(BaseCog):
                                "Example: 'lyrics [song name]'")
                 return
 
-        # Send initial searching message
         searching_msg = await ctx.send(f"🔍 Searching for lyrics: **{query}**...")
 
         # Search all providers concurrently
@@ -2040,15 +2153,47 @@ class Music(BaseCog):
 
         embed = discord.Embed(
             title="🎵 Now Playing" if self.active_session else "🎧 Currently Listening To",
-            description=f"**{track.title}**\nby {track.artist}",
+            description=f"**[{track.title}]({track.url})**\nby {track.artist}",
             color=discord.Color.purple()
         )
         embed.add_field(name="Duration",
                         value=f"{elapsed_str} / {duration_str}", inline=True)
         embed.add_field(name="Loop", value=self.loop_mode.display, inline=True)
 
-        if track.thumbnail:
-            embed.set_thumbnail(url=track.thumbnail)
+        # Use track thumbnail if available (populated during prefetch/play)
+        # Fall back to standard YouTube thumbnail URL if not
+        thumbnail_url = track.thumbnail
+        needs_crop = track.thumbnail_needs_crop
+        self.logger.debug(f"Track thumbnail from data: {track.thumbnail} (needs_crop={needs_crop})")
+        
+        if not thumbnail_url and track.url:
+            import re
+            video_id_match = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', track.url)
+            if video_id_match:
+                thumbnail_url = f"https://img.youtube.com/vi/{video_id_match.group(1)}/hqdefault.jpg"
+                needs_crop = True  # YouTube fallback thumbnails are 16:9
+                self.logger.debug(f"Using fallback thumbnail: {thumbnail_url}")
+
+        self.logger.debug(f"Final thumbnail URL: {thumbnail_url}, needs_crop: {needs_crop}")
+
+        # Handle thumbnail - crop if needed, otherwise use URL directly
+        thumbnail_file = None
+        if thumbnail_url:
+            if needs_crop:
+                self.logger.debug("Cropping thumbnail to square...")
+                cropped_bytes = await crop_thumbnail_to_square(thumbnail_url, self.logger)
+                if cropped_bytes:
+                    thumbnail_file = discord.File(
+                        io.BytesIO(cropped_bytes),
+                        filename="thumbnail.jpg"
+                    )
+                    embed.set_thumbnail(url="attachment://thumbnail.jpg")
+                else:
+                    # Crop failed, use original URL as fallback
+                    self.logger.debug("Crop failed, using original thumbnail URL")
+                    embed.set_thumbnail(url=thumbnail_url)
+            else:
+                embed.set_thumbnail(url=thumbnail_url)
 
         if self.active_session:
             embed.set_footer(
@@ -2057,7 +2202,10 @@ class Music(BaseCog):
             embed.set_footer(
                 text="Idle mode | Type 'listen along' to play in voice!")
 
-        await ctx.send(embed=embed)
+        if thumbnail_file:
+            await ctx.send(embed=embed, file=thumbnail_file)
+        else:
+            await ctx.send(embed=embed)
 
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
@@ -2186,6 +2334,58 @@ class Music(BaseCog):
 
         # Pass None if query is empty (will use current track)
         await self._do_lyrics(ctx, clean_query if clean_query else None)
+
+    async def clear_queue_nlp(self, ctx: commands.Context, query: str) -> None:
+        """NLP handler for clearing the queue.
+
+        Removes all tracks except the currently playing one.
+        """
+        if not await self._require_user_in_vc(ctx):
+            return
+
+        if not self.playlist:
+            await ctx.send("The queue is already empty!")
+            return
+
+        # Keep only the current track
+        current_track = self._get_current_track()
+        if current_track:
+            self.playlist = [current_track]
+            self.current_index = 0
+            self._playlist_modified_during_session = True
+            self._clear_prefetch()
+            await ctx.send(f"🗑️ Queue cleared! Only **{current_track.title}** remains.")
+        else:
+            self.playlist = []
+            self.current_index = 0
+            await ctx.send("🗑️ Queue cleared!")
+
+    # ==========================================================================
+    # TODO: FUTURE NLP HANDLERS
+    # ==========================================================================
+
+    # TODO: seek_nlp - Seek to a specific timestamp in the current track
+    # Example triggers: "seek 1:30", "rewind 10s", "forward 30s", "go to 2:00"
+    # Implementation notes:
+    # - Parse timestamp from query (MM:SS or seconds)
+    # - Recreate FFmpeg source with -ss offset
+    # - Track elapsed time needs adjustment
+    # - Consider relative seeking (forward/back N seconds)
+
+    # TODO: replay_nlp - Restart the current track from the beginning
+    # Example triggers: "replay", "restart", "play again", "from the top"
+    # Implementation notes:
+    # - Set track_started_at to current time
+    # - Stop and restart playback with same track
+    # - Could reuse cached audio URL (_current_audio_url)
+
+    # TODO: autoplay_nlp - Toggle autoplay/radio mode
+    # Example triggers: "autoplay on", "radio mode", "keep playing"
+    # Implementation notes:
+    # - When queue ends, fetch related tracks via YouTube recommendations
+    # - Use yt-dlp's --flat-playlist with related video extraction
+    # - Consider user preference storage in DB
+    # - Need to handle "autoplay off" to disable
 
 
 async def setup(bot: 'CoreBot') -> None:

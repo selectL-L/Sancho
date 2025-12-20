@@ -342,6 +342,8 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bremove\b', r'\bdelete\b'), 'Music', 'remove_nlp'),
         # Move track in playlist
         ((r'\bmove\b',), 'Music', 'move_nlp'),
+        # Clear queue (keep current track only)
+        ((r'\bclear\s*(queue|playlist)\b', r'\bempty\s*(queue|playlist)\b'), 'Music', 'clear_queue_nlp'),
         # Leave / disconnect
         ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
     ]
