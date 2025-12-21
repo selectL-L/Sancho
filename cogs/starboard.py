@@ -49,9 +49,11 @@ class StarboardEmbedStyle:
     Attributes:
         embed_color (discord.Color): The color of the embed sidebar.
         jump_field_name (str): The label for the "Jump to Message" field.
+        jump_link_text (str): The clickable link text within the field.
     """
     embed_color: discord.Color = field(default_factory=lambda: discord.Color.gold())
     jump_field_name: str = "Original Message"
+    jump_link_text: str = "Jump to Message"
 
 
 class Starboard(BaseCog):
@@ -1206,7 +1208,7 @@ class Starboard(BaseCog):
         )
         new_embed.set_author(name=f"{message.author.display_name} ({message.author.name})", icon_url=message.author.display_avatar.url)
         new_embed.set_footer(text=f"ID: {message.id}")
-        new_embed.add_field(name=style.jump_field_name, value=f"[Jump to Message]({message.jump_url})", inline=False)
+        new_embed.add_field(name=style.jump_field_name, value=f"[{style.jump_link_text}]({message.jump_url})", inline=False)
 
         return new_embed, files
 
