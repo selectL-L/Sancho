@@ -243,6 +243,8 @@ LOG_BACKUP_COUNT = 5
 #   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 1
 #   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 2
 # ]
+#
+# Note: *Never* use black formatting, it makes this section unreadable.
 NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Math Group
     [
@@ -251,45 +253,44 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Dice rolling (should be checked before basic calculation)
         ((r'\broll\b', r'\bdice\b'), 'Math', 'roll'),
         # Basic calculation
-        ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b',
-         r'\bevaluate\b'), 'Math', 'calculate'),
+        ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
     ],
     # Skills Group
     [
-        # Management commands are checked first for specific verb-noun phrases.
+        # Managment commands should be checked first to avoid conflicting with *casting* skills
+        # Delete a saved skill
         ((r'\b(delete|remove)\s.*skill(s)?\b',), 'Skills', 'delete_skill_nlp'),
+        # Edit an existing skill
         ((r'\b(edit|change|update)\s.*skill(s)?\b',), 'Skills', 'edit_skill_nlp'),
-        ((r'\b(list|check|show)\s.*skill(s)?\b',
-         r'^\s*skills\s*$'), 'Skills', 'list_skills_nlp'),
+        # List all saved skills
+        ((r'\b(list|check|show)\s.*skill(s)?\b', r'^\s*skills\s*$'), 'Skills', 'list_skills_nlp'),
+        # Save a new skill
         ((r'\b(save|create|make)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
-
-        # Commands for casting or using skills.
+        # Cast or use a skill
         ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
     ],
     # Reminders Group (note: unlike other groups, this one ENFORCES matching at the front to prevent polluting the query)
     [
         # Deleting reminders (catches "delete/remove reminder 1", etc.)
-        # This should be checked BEFORE setting reminders, to avoid conflict on the word "remind"
-        ((r'^\s*(delete|remove)\b.*\breminder',),
-         'Reminders', 'delete_reminders_nlp'),
+        # This should be checked BEFORE setting reminders, to avoid a conflict on the word "remind"
+        ((r'^\s*(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
         # Editing reminders
-        ((r'^\s*(edit|change|update)\b.*\breminder',),
-         'Reminders', 'edit_reminder_nlp'),
+        ((r'^\s*(edit|change|update)\b.*\breminder',), 'Reminders', 'edit_reminder_nlp'),
         # Checking reminders (catches "check my reminders", "show reminders", etc.)
-        ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders',
-         r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
+        ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
         # Setting user timezone
-        ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b',
-         r'^\s*timezone\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
+        ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*timezone\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
         # Reminder Settings
-        ((r'^\s*reminder\s+settings\b', r'^\s*reminders\s+settings\b'),
-         'Reminders', 'reminder_settings_nlp'),
+        ((r'^\s*reminder\s+settings\b', r'^\s*reminders\s+settings\b'), 'Reminders', 'reminder_settings_nlp'),
         # Setting reminders
-        ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',),
-         'Reminders', 'remind'),
+        ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
     ],
     # Image Group
     [
+        # Profile picture / avatar
+        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'ImageCog', 'pfp'),
+        # Banner
+        ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'ImageCog', 'banner'),
         # Resize image
         ((r'\bresize\b', r'\bscale\b'), 'ImageCog', 'resize'),
         # Convert image format
@@ -313,23 +314,19 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Music Group
     [
         # Lyrics search (check before general music commands)
-        ((r'\blyrics?\b', r'\bfind\s*lyrics\b',
-         r'\bsearch\s*lyrics\b'), 'Music', 'lyrics_nlp'),
+        ((r'\blyrics?\b', r'\bfind\s*lyrics\b', r'\bsearch\s*lyrics\b'), 'Music', 'lyrics_nlp'),
         # Listen along / play music (most common entry point)
-        ((r'\blisten\s*along\b', r'\bplay\s*music\b',
-         r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
+        ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
         # Pause playback
         ((r'\bpause\b',), 'Music', 'pause_nlp'),
         # Resume playback - 'play' only when it's the whole command (no song name after)
-        ((r'\bresume\b', r'\bunpause\b', r'\bcontinue\b',
-         r'\bplay\s*$'), 'Music', 'resume_nlp'),
+        ((r'\bresume\b', r'\bunpause\b', r'\bcontinue\b', r'\bplay\s*$'), 'Music', 'resume_nlp'),
         # Play/queue a specific song - 'play' or 'queue' followed by something (URL or search query)
         ((r'\bplay\s+\S+', r'\bqueue\s+\S+'), 'Music', 'play_nlp'),
         # Skip current track
         ((r'\bskip\b', r'\bnext\b'), 'Music', 'skip_nlp'),
         # Now playing / current song
-        ((r'\bnow\s*playing\b', r'\bnp\b', r'\bcurrent\s*(song|track)\b',
-         r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
+        ((r'\bnow\s*playing\b', r'\bnp\b', r'\bcurrent\s*(song|track)\b', r"\bwhat('?s| is)\s*(playing|this)\b"), 'Music', 'now_playing_nlp'),
         # Queue / playlist - show queue (only when no song after)
         ((r'\bqueue\s*$', r'\bplaylist\b', r'\bup\s*next\b'), 'Music', 'queue_nlp'),
         # Shuffle toggle
