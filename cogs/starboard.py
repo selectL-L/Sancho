@@ -25,6 +25,7 @@ import asyncio
 import datetime
 import io
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -41,8 +42,24 @@ from utils.views import FastConfirmModal, launch_modal
 MessageableGuildChannel = (discord.TextChannel, discord.VoiceChannel, discord.Thread)
 
 
+@dataclass
+class StarboardEmbedStyle:
+    """Configuration for starboard embed appearance.
+
+    Attributes:
+        embed_color (discord.Color): The color of the embed sidebar.
+        jump_field_name (str): The label for the "Jump to Message" field.
+    """
+    embed_color: discord.Color = field(default_factory=lambda: discord.Color.gold())
+    jump_field_name: str = "Original Message"
+
+
 class Starboard(BaseCog):
     """The cog for managing the Starboard feature."""
+
+    # Preset embed styles for different starboard message types
+    STARRED_STYLE = StarboardEmbedStyle(jump_field_name="Jump to starred message")
+    CONTEXT_STYLE = StarboardEmbedStyle(jump_field_name="Jump to reply")
 
     def __init__(self, bot: CoreBot):
         """Initializes the Starboard cog.
@@ -638,11 +655,15 @@ class Starboard(BaseCog):
                 replied_to_message = await message.channel.fetch_message(message.reference.message_id)
 
                 # 1. Post the context of the replied-to message.
-                reply_embed, reply_files = await self.create_starboard_embed_and_files(replied_to_message)
+                reply_embed, reply_files = await self.create_starboard_embed_and_files(
+                    replied_to_message, style=self.CONTEXT_STYLE
+                )
                 reply_context_message = await starboard_channel.send(embed=reply_embed, files=reply_files)
 
                 # 2. Post the main starred message as a reply to the context message.
-                main_embed, main_files = await self.create_starboard_embed_and_files(message)
+                main_embed, main_files = await self.create_starboard_embed_and_files(
+                    message, style=self.STARRED_STYLE
+                )
                 starboard_message = await reply_context_message.reply(content=content, embed=main_embed, files=main_files)
 
                 return starboard_message.id, reply_context_message.id
@@ -1011,20 +1032,23 @@ class Starboard(BaseCog):
         """
         # If it's a reply, handle the two-message system
         if message.reference and message.reference.message_id and isinstance(message.channel, MessageableGuildChannel):
+            reply_files: List[discord.File] = []
+            main_files: List[discord.File] = []
+            reply_context_message: Optional[discord.Message] = None
             try:
                 replied_to_message = await message.channel.fetch_message(message.reference.message_id)
 
                 # 1. Post the context of the replied-to message.
-                reply_embed, reply_files = await self.create_starboard_embed_and_files(replied_to_message)
+                reply_embed, reply_files = await self.create_starboard_embed_and_files(
+                    replied_to_message, style=self.CONTEXT_STYLE
+                )
                 reply_context_message = await starboard_channel.send(embed=reply_embed, files=reply_files)
-                for file in reply_files:
-                    file.close()
 
                 # 2. Post the main starred message as a reply to the context message.
-                main_embed, main_files = await self.create_starboard_embed_and_files(message)
+                main_embed, main_files = await self.create_starboard_embed_and_files(
+                    message, style=self.STARRED_STYLE
+                )
                 starboard_message = await reply_context_message.reply(content=content, embed=main_embed, files=main_files)
-                for file in main_files:
-                    file.close()
 
                 # 3. Save to DB with both IDs
                 if message.guild:
@@ -1037,6 +1061,17 @@ class Starboard(BaseCog):
                 await self.create_single_starboard_post(message, starboard_channel, content)
             except discord.HTTPException as e:
                 self.logger.error(f"Failed to create two-part starboard post: {e}")
+                # Clean up orphaned context message if it was created before failure
+                if reply_context_message:
+                    try:
+                        await reply_context_message.delete()
+                    except discord.HTTPException:
+                        pass
+            finally:
+                for file in reply_files:
+                    file.close()
+                for file in main_files:
+                    file.close()
 
         # If it's not a reply, just post it directly
         else:
@@ -1061,17 +1096,25 @@ class Starboard(BaseCog):
             for file in files:
                 file.close()
 
-    async def create_starboard_embed_and_files(self, message: discord.Message) -> Tuple[discord.Embed, List[discord.File]]:
+    async def create_starboard_embed_and_files(
+        self,
+        message: discord.Message,
+        style: Optional[StarboardEmbedStyle] = None
+    ) -> Tuple[discord.Embed, List[discord.File]]:
         """Creates an embed and a list of discord.File objects for a starboard message.
 
         Handles regular content, attachments, and embeds.
 
         Args:
             message (discord.Message): The message to convert.
+            style (Optional[StarboardEmbedStyle]): Configuration for embed appearance.
+                If None, uses default style (gold color, "Original Message" field name).
 
         Returns:
             Tuple[discord.Embed, List[discord.File]]: The embed and list of files.
         """
+        if style is None:
+            style = StarboardEmbedStyle()
 
         description_parts = []
         files = []
@@ -1158,12 +1201,12 @@ class Starboard(BaseCog):
 
         new_embed = discord.Embed(
             description=description,
-            color=discord.Color.gold(),
+            color=style.embed_color,
             timestamp=message.created_at
         )
         new_embed.set_author(name=f"{message.author.display_name} ({message.author.name})", icon_url=message.author.display_avatar.url)
         new_embed.set_footer(text=f"ID: {message.id}")
-        new_embed.add_field(name="Original Message", value=f"[Jump to Message]({message.jump_url})", inline=False)
+        new_embed.add_field(name=style.jump_field_name, value=f"[Jump to Message]({message.jump_url})", inline=False)
 
         return new_embed, files
 

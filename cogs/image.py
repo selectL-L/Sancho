@@ -7,19 +7,69 @@ A key feature of this cog is the use of `asyncio.to_thread` to run the
 synchronous, blocking image processing functions in a separate thread. This
 prevents the bot's main event loop from being blocked, ensuring the bot
 remains responsive while handling potentially time-consuming image operations.
+
+This cog also provides utilities to fetch user assets (avatars, banners) at
+both global and guild levels, with helper functions designed to be reusable
+for other image operations like applying masks or overlays.
 """
 
 import asyncio
 import io
 import re
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional, Tuple, Union
 
+import aiohttp
 import discord
 from discord.ext import commands
 from PIL import Image as PILImage
 
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
+
+
+@dataclass
+class UserAsset:
+    """Represents a fetched user asset (avatar or banner).
+
+    Attributes:
+        url: The CDN URL of the asset.
+        image_bytes: The raw image data as bytes (None if not yet fetched).
+        source: A description of where this asset came from (e.g., "Global", "Server").
+    """
+    url: str
+    image_bytes: Optional[bytes] = None
+    source: str = "Unknown"
+
+    async def fetch(self, session: aiohttp.ClientSession) -> bytes:
+        """Fetches the image bytes from the URL.
+
+        Args:
+            session: An aiohttp client session to use for the request.
+
+        Returns:
+            The raw image data as bytes.
+
+        Raises:
+            aiohttp.ClientError: If the fetch fails.
+        """
+        async with session.get(self.url) as response:
+            response.raise_for_status()
+            self.image_bytes = await response.read()
+            return self.image_bytes
+
+    def to_pil_image(self) -> PILImage.Image:
+        """Converts the fetched bytes to a PIL Image.
+
+        Returns:
+            A PIL Image object.
+
+        Raises:
+            ValueError: If image_bytes has not been fetched yet.
+        """
+        if self.image_bytes is None:
+            raise ValueError("Image bytes not fetched. Call fetch() first.")
+        return PILImage.open(io.BytesIO(self.image_bytes))
 
 
 class ImageCog(BaseCog):
@@ -32,6 +82,310 @@ class ImageCog(BaseCog):
             bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
+
+    # -------------------------------------------------------------------------
+    # User Asset Helpers (Reusable for other operations)
+    # -------------------------------------------------------------------------
+
+    async def get_avatar(
+        self,
+        user: Union[discord.User, discord.Member],
+        *,
+        size: int = 1024
+    ) -> UserAsset:
+        """Gets a user's global avatar as a UserAsset.
+
+        Args:
+            user: The user or member to get the avatar for.
+            size: The size of the avatar to fetch (default 1024).
+
+        Returns:
+            A UserAsset containing the global avatar URL.
+        """
+        avatar = user.avatar or user.default_avatar
+        url = avatar.replace(size=size, format='png').url
+        return UserAsset(url=url, source="Global")
+
+    async def get_guild_avatar(
+        self,
+        member: discord.Member,
+        *,
+        size: int = 1024
+    ) -> Optional[UserAsset]:
+        """Gets a member's guild-specific avatar as a UserAsset.
+
+        Args:
+            member: The member to get the guild avatar for.
+            size: The size of the avatar to fetch (default 1024).
+
+        Returns:
+            A UserAsset containing the guild avatar URL, or None if not set.
+        """
+        if member.guild_avatar is None:
+            return None
+        url = member.guild_avatar.replace(size=size, format='png').url
+        return UserAsset(url=url, source="Server")
+
+    async def get_all_avatars(
+        self,
+        user: Union[discord.User, discord.Member],
+        *,
+        size: int = 1024
+    ) -> list[UserAsset]:
+        """Gets all available avatars (global and guild) for a user.
+
+        Args:
+            user: The user or member to get avatars for.
+            size: The size of the avatars to fetch (default 1024).
+
+        Returns:
+            A list of UserAsset objects for each available avatar.
+        """
+        assets = [await self.get_avatar(user, size=size)]
+
+        if isinstance(user, discord.Member):
+            guild_avatar = await self.get_guild_avatar(user, size=size)
+            if guild_avatar:
+                assets.append(guild_avatar)
+
+        return assets
+
+    async def get_banner(
+        self,
+        user: Union[discord.User, discord.Member],
+        *,
+        size: int = 1024
+    ) -> Optional[UserAsset]:
+        """Gets a user's global banner as a UserAsset.
+
+        Note: Requires fetching the full user object to access banner data.
+
+        Args:
+            user: The user or member to get the banner for.
+            size: The size of the banner to fetch (default 1024).
+
+        Returns:
+            A UserAsset containing the global banner URL, or None if not set.
+        """
+        # Fetch the full user object to access banner data
+        try:
+            fetched_user = await self.bot.fetch_user(user.id)
+        except discord.HTTPException:
+            return None
+
+        if fetched_user.banner is None:
+            return None
+
+        # Banners can be animated (GIF), so we check and preserve the format
+        fmt = 'gif' if fetched_user.banner.is_animated() else 'png'
+        url = fetched_user.banner.replace(size=size, format=fmt).url
+        return UserAsset(url=url, source="Global")
+
+    async def get_guild_banner(
+        self,
+        member: discord.Member,
+        *,
+        size: int = 1024
+    ) -> Optional[UserAsset]:
+        """Gets a member's guild-specific banner as a UserAsset.
+
+        Args:
+            member: The member to get the guild banner for.
+            size: The size of the banner to fetch (default 1024).
+
+        Returns:
+            A UserAsset containing the guild banner URL, or None if not set.
+        """
+        # Guild banners require fetching the member with the guild profile
+        try:
+            # Refetch the member to ensure we have the latest data
+            fetched_member = await member.guild.fetch_member(member.id)
+        except discord.HTTPException:
+            return None
+
+        # Check if the member has a guild-specific banner
+        # Note: Guild banners are a Nitro feature and require Server Boosting
+        if not hasattr(fetched_member, 'guild_banner') or fetched_member.guild_banner is None:
+            return None
+
+        fmt = 'gif' if fetched_member.guild_banner.is_animated() else 'png'
+        url = fetched_member.guild_banner.replace(size=size, format=fmt).url
+        return UserAsset(url=url, source="Server")
+
+    async def get_all_banners(
+        self,
+        user: Union[discord.User, discord.Member],
+        *,
+        size: int = 1024
+    ) -> list[UserAsset]:
+        """Gets all available banners (global and guild) for a user.
+
+        Args:
+            user: The user or member to get banners for.
+            size: The size of the banners to fetch (default 1024).
+
+        Returns:
+            A list of UserAsset objects for each available banner.
+        """
+        assets = []
+
+        global_banner = await self.get_banner(user, size=size)
+        if global_banner:
+            assets.append(global_banner)
+
+        if isinstance(user, discord.Member):
+            guild_banner = await self.get_guild_banner(user, size=size)
+            if guild_banner:
+                assets.append(guild_banner)
+
+        return assets
+
+    async def fetch_asset_bytes(self, asset: UserAsset) -> UserAsset:
+        """Fetches the image bytes for a UserAsset.
+
+        Args:
+            asset: The UserAsset to fetch bytes for.
+
+        Returns:
+            The same UserAsset with image_bytes populated.
+        """
+        async with aiohttp.ClientSession() as session:
+            await asset.fetch(session)
+        return asset
+
+    async def fetch_all_asset_bytes(self, assets: list[UserAsset]) -> list[UserAsset]:
+        """Fetches the image bytes for multiple UserAssets concurrently.
+
+        Args:
+            assets: The list of UserAssets to fetch bytes for.
+
+        Returns:
+            The same list of UserAssets with image_bytes populated.
+        """
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(*[asset.fetch(session) for asset in assets])
+        return assets
+
+    def _extract_user_from_query(self, ctx: commands.Context, query: str) -> Optional[discord.Member]:
+        """Extracts a mentioned user from the query string.
+
+        Args:
+            ctx: The command context.
+            query: The user's input string.
+
+        Returns:
+            The mentioned Member, or None if no valid mention found.
+        """
+        # Check for user mentions in the message
+        if ctx.message.mentions:
+            return ctx.message.mentions[0] if isinstance(ctx.message.mentions[0], discord.Member) else None
+
+        # Try to extract a user ID from the query
+        user_id_match = re.search(r'(\d{17,19})', query)
+        if user_id_match and ctx.guild:
+            try:
+                return ctx.guild.get_member(int(user_id_match.group(1)))
+            except (ValueError, AttributeError):
+                pass
+
+        return None
+
+    # -------------------------------------------------------------------------
+    # NLP Handlers for User Assets
+    # -------------------------------------------------------------------------
+
+    async def pfp(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for fetching a user's profile picture(s).
+
+        Returns both global and guild-specific avatars if available.
+
+        Args:
+            ctx: The command context.
+            query: The user's input string (should contain a mention or user ID).
+        """
+        # Determine target user
+        target = self._extract_user_from_query(ctx, query)
+        if target is None:
+            # If no mention, default to the author
+            if ctx.guild:
+                target = ctx.guild.get_member(ctx.author.id)
+            if target is None:
+                await ctx.send("Please mention a user or provide their ID to fetch their profile picture.")
+                return
+
+        try:
+            async with ctx.typing():
+                avatars = await self.get_all_avatars(target, size=1024)
+
+                embeds = []
+
+                for avatar in avatars:
+                    embed = discord.Embed(
+                        title=f"{target.display_name}'s {avatar.source} Avatar",
+                        color=target.color if hasattr(target, 'color') else discord.Color.blurple()
+                    )
+                    embed.set_image(url=avatar.url)
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                    embeds.append(embed)
+
+                if len(avatars) == 1:
+                    await ctx.send(embed=embeds[0])
+                else:
+                    # Send both avatars
+                    await ctx.send(content=f"Here are {target.display_name}'s avatars:", embeds=embeds)
+
+                self.logger.info(f"Fetched {len(avatars)} avatar(s) for {target} (requested by {ctx.author}).")
+        except Exception as e:
+            self.logger.error(f"Failed to fetch avatar: {e}", exc_info=True)
+            await ctx.send("Sorry, I encountered an error trying to fetch that profile picture.")
+
+    async def banner(self, ctx: commands.Context, *, query: str) -> None:
+        """NLP handler for fetching a user's banner(s).
+
+        Returns both global and guild-specific banners if available.
+
+        Args:
+            ctx: The command context.
+            query: The user's input string (should contain a mention or user ID).
+        """
+        # Determine target user
+        target = self._extract_user_from_query(ctx, query)
+        if target is None:
+            # If no mention, default to the author
+            if ctx.guild:
+                target = ctx.guild.get_member(ctx.author.id)
+            if target is None:
+                await ctx.send("Please mention a user or provide their ID to fetch their banner.")
+                return
+
+        try:
+            async with ctx.typing():
+                banners = await self.get_all_banners(target, size=1024)
+
+                if not banners:
+                    await ctx.send(f"{target.display_name} doesn't have any banners set.")
+                    return
+
+                embeds = []
+                for banner_asset in banners:
+                    embed = discord.Embed(
+                        title=f"{target.display_name}'s {banner_asset.source} Banner",
+                        color=target.color if hasattr(target, 'color') else discord.Color.blurple()
+                    )
+                    embed.set_image(url=banner_asset.url)
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                    embeds.append(embed)
+
+                if len(banners) == 1:
+                    await ctx.send(embed=embeds[0])
+                else:
+                    # Send both banners
+                    await ctx.send(content=f"Here are {target.display_name}'s banners:", embeds=embeds)
+
+                self.logger.info(f"Fetched {len(banners)} banner(s) for {target} (requested by {ctx.author}).")
+        except Exception as e:
+            self.logger.error(f"Failed to fetch banner: {e}", exc_info=True)
+            await ctx.send("Sorry, I encountered an error trying to fetch that banner.")
 
     async def _find_image_attachment(self, message: discord.Message) -> Optional[discord.Attachment]:
         """Finds a valid image attachment in the message or its reply context.

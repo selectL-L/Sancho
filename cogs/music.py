@@ -115,6 +115,11 @@ class Music(BaseCog):
         # set `current_index`). The flag is consumed by `_on_track_end`.
         self._suppress_next_track_end: bool = False
 
+        # Stale URL retry tracking: when FFmpeg fails quickly (< 3 seconds),
+        # it's likely due to an expired cached URL. We retry once with a fresh URL.
+        self._track_started_timestamp: float = 0.0
+        self._retry_with_fresh_url: bool = False
+
         # Tracks if the playlist was modified during a voice session.
         # Set True when tracks are added/removed. Used to decide whether to
         # reset to the cached playlist when returning to idle.
@@ -996,9 +1001,19 @@ class Music(BaseCog):
 
                 Runs in a separate thread, so we use run_coroutine_threadsafe to
                 schedule the async _on_track_end on the bot's event loop.
+                
+                If playback failed within 3 seconds, it's likely a stale URL (403 error).
+                We set a flag to retry with a fresh URL instead of advancing.
                 """
                 if error:
-                    self.logger.error(f"Playback error: {error}")
+                    elapsed = time.time() - self._track_started_timestamp
+                    if elapsed < 3.0:
+                        # Failed too fast - probably a stale/expired URL
+                        self.logger.warning(
+                            f"Playback failed after {elapsed:.1f}s (likely stale URL): {error}")
+                        self._retry_with_fresh_url = True
+                    else:
+                        self.logger.error(f"Playback error: {error}")
                 if self.active_session:
                     asyncio.run_coroutine_threadsafe(
                         self._on_track_end(),
@@ -1006,6 +1021,7 @@ class Music(BaseCog):
                     )
 
             vc.play(source, after=after_playing)
+            self._track_started_timestamp = time.time()
             self.logger.info(f"Now playing: {track.title}")
 
             # Cache this track's audio URL for potential replay (loop ONE)
@@ -1029,6 +1045,15 @@ class Music(BaseCog):
     async def _on_track_end(self) -> None:
         """Called when a track finishes playing."""
         if not self.active_session:
+            return
+
+        # Check if we should retry with a fresh URL (stale cached URL detected)
+        if self._retry_with_fresh_url:
+            self._retry_with_fresh_url = False
+            # Clear all cached URLs to force a fresh fetch
+            self._clear_audio_caches()
+            self.logger.info("Retrying current track with fresh URL...")
+            await self._play_current_track()
             return
 
         # Check if session has exceeded 8 hours

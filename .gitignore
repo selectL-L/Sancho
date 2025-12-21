@@ -214,5 +214,6 @@ __marimo__/
 *.env
 *.db
 *.db.backup
+*.py.backup
 *.toml
 !*.toml.example
