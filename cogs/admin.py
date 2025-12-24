@@ -20,6 +20,14 @@ import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 from utils.extensions import discover_cogs
+from utils.music_helpers import (
+    MUTAGEN_AVAILABLE,
+    YTDLP_AVAILABLE,
+    DownloadResult,
+    MusicCacheManager,
+    download_track_as_mp3,
+    get_track_info_for_download,
+)
 from utils.views import PaginatorView, get_selection
 
 
@@ -909,6 +917,411 @@ class AdminCog(BaseCog):
         # Update message.
         await message.edit(content=None, embed=embed)
         logging.info(f"Status command used by {ctx.author}.")
+
+    # ==========================================================================
+    # MUSIC DOWNLOAD COMMAND
+    # ==========================================================================
+
+    @commands.hybrid_command(
+        name="download-mp3",
+        hidden=True,
+        description="Downloads a YouTube video as MP3 with full metadata.",
+        help="Downloads a YouTube video as MP3 with full metadata including cover art."
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        url="YouTube URL to download",
+        title="Override the track title (optional)",
+        artist="Override the artist name (optional)",
+        album="Album name to embed (optional)",
+        genre="Genre tag to embed (optional)",
+        year="Year tag to embed (optional)",
+        track_num="Track number (e.g., '1' or '1/12') (optional)"
+    )
+    async def download_mp3(
+        self,
+        ctx: commands.Context,
+        url: str,
+        title: Optional[str] = None,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        genre: Optional[str] = None,
+        year: Optional[str] = None,
+        track_num: Optional[str] = None
+    ) -> None:
+        """Downloads a YouTube video as MP3 with full embedded metadata.
+
+        The file is saved to the music cache directory with embedded ID3 tags
+        including cover art. Metadata can be customized or auto-populated from
+        the source video.
+
+        Args:
+            ctx: The command context.
+            url: YouTube URL to download.
+            title: Override the track title.
+            artist: Override the artist name.
+            album: Album name to embed.
+            genre: Genre tag to embed.
+            year: Year tag to embed.
+            track_num: Track number to embed.
+        """
+        # Check dependencies
+        if not YTDLP_AVAILABLE:
+            await ctx.send("❌ **yt-dlp** is not installed. Install with: `pip install yt-dlp`")
+            return
+
+        if not MUTAGEN_AVAILABLE:
+            await ctx.send("❌ **mutagen** is not installed. Install with: `pip install mutagen`")
+            return
+
+        # Validate URL (basic check)
+        if not any(domain in url.lower() for domain in ['youtube.com', 'youtu.be', 'music.youtube.com']):
+            await ctx.send("❌ Please provide a valid YouTube URL.")
+            return
+
+        # Download directory - use a dedicated downloads folder
+        download_dir = os.path.join(config.APP_PATH, 'downloads', 'music')
+
+        # Show preview first
+        status_msg = await ctx.send("🔍 **Fetching track info...**")
+
+        track_info = await get_track_info_for_download(url, self.logger)
+        if not track_info:
+            await status_msg.edit(content="❌ Could not fetch track information. The video may be unavailable.")
+            return
+
+        # Build preview embed
+        preview_embed = discord.Embed(
+            title="📥 Download Preview",
+            color=discord.Color.blue()
+        )
+
+        # Show what metadata will be used
+        final_title = title or track_info['title']
+        final_artist = artist or track_info['artist']
+        final_album = album or track_info.get('album') or '*Not available*'
+        final_year = year
+        if not final_year and track_info.get('upload_date'):
+            final_year = track_info['upload_date'][:4]
+
+        preview_embed.add_field(
+            name="Title",
+            value=f"`{final_title}`",
+            inline=True
+        )
+        preview_embed.add_field(
+            name="Artist",
+            value=f"`{final_artist}`",
+            inline=True
+        )
+        preview_embed.add_field(
+            name="Album",
+            value=f"`{final_album}`",
+            inline=True
+        )
+
+        if final_year:
+            preview_embed.add_field(name="Year", value=f"`{final_year}`", inline=True)
+        if genre:
+            preview_embed.add_field(name="Genre", value=f"`{genre}`", inline=True)
+        if track_num:
+            preview_embed.add_field(name="Track #", value=f"`{track_num}`", inline=True)
+
+        # Duration
+        if track_info.get('duration'):
+            mins, secs = divmod(track_info['duration'], 60)
+            preview_embed.add_field(name="Duration", value=f"`{mins}:{secs:02d}`", inline=True)
+
+        # Thumbnail preview
+        if track_info.get('thumbnail'):
+            preview_embed.set_thumbnail(url=track_info['thumbnail'])
+
+        preview_embed.set_footer(text="Starting download...")
+
+        await status_msg.edit(content=None, embed=preview_embed)
+
+        # Start the download
+        await status_msg.edit(content="⏳ **Downloading and converting to MP3...**", embed=preview_embed)
+
+        result: DownloadResult = await download_track_as_mp3(
+            url=url,
+            output_dir=download_dir,
+            logger=self.logger,
+            custom_title=title,
+            custom_artist=artist,
+            custom_album=album,
+            custom_genre=genre,
+            custom_year=year,
+            custom_track_num=track_num,
+            embed_thumbnail=True
+        )
+
+        if not result.success:
+            error_embed = discord.Embed(
+                title="❌ Download Failed",
+                description=result.error_message or "Unknown error occurred.",
+                color=discord.Color.red()
+            )
+            await status_msg.edit(content=None, embed=error_embed)
+            return
+
+        # Success embed
+        success_embed = discord.Embed(
+            title="✅ Download Complete",
+            color=discord.Color.green()
+        )
+        success_embed.add_field(name="Title", value=f"`{result.title}`", inline=True)
+        success_embed.add_field(name="Artist", value=f"`{result.artist}`", inline=True)
+
+        if result.album:
+            success_embed.add_field(name="Album", value=f"`{result.album}`", inline=True)
+
+        if result.duration:
+            mins, secs = divmod(result.duration, 60)
+            success_embed.add_field(name="Duration", value=f"`{mins}:{secs:02d}`", inline=True)
+
+        success_embed.add_field(
+            name="Cover Art",
+            value="✅ Embedded" if result.thumbnail_embedded else "❌ Not embedded",
+            inline=True
+        )
+        success_embed.add_field(
+            name="File",
+            value=f"```{result.filename}```",
+            inline=False
+        )
+        success_embed.add_field(
+            name="Location",
+            value=f"```{result.file_path}```",
+            inline=False
+        )
+
+        if track_info.get('thumbnail'):
+            success_embed.set_thumbnail(url=track_info['thumbnail'])
+
+        await status_msg.edit(content=None, embed=success_embed)
+        self.logger.info(f"[Download] Completed download: {result.filename}")
+
+    # ==========================================================================
+    # MUSIC CACHE MANAGEMENT COMMANDS
+    # ==========================================================================
+
+    def _get_music_cache_manager(self) -> Optional[MusicCacheManager]:
+        """Gets the MusicCacheManager from the Music cog.
+
+        Returns:
+            MusicCacheManager instance, or None if Music cog not loaded.
+        """
+        music_cog = self.bot.get_cog('Music')
+        if music_cog and hasattr(music_cog, 'cache_manager'):
+            return typing.cast(MusicCacheManager, music_cog.cache_manager)  # type: ignore[attr-defined]
+        return None
+
+    @commands.hybrid_command(
+        name="cache-stats",
+        hidden=True,
+        description="Shows statistics about the music cache.",
+        help="Shows statistics about the music cache including downloads and orphans."
+    )
+    @commands.is_owner()
+    async def cache_stats(self, ctx: commands.Context) -> None:
+        """Shows statistics about the music cache.
+
+        Displays total playlists, tracks, downloaded tracks, orphaned tracks,
+        and disk usage.
+
+        Args:
+            ctx: The command context.
+        """
+        cache_manager = self._get_music_cache_manager()
+        if not cache_manager:
+            await ctx.send("❌ Music cog is not loaded.")
+            return
+
+        stats = cache_manager.get_stats()
+
+        embed = discord.Embed(
+            title="🎵 Music Cache Statistics",
+            color=discord.Color.blue()
+        )
+
+        # Format last refresh time
+        last_refresh_str = "Never"
+        if stats.get('last_refresh_ago'):
+            hours = stats['last_refresh_ago'] / 3600
+            if hours < 1:
+                last_refresh_str = f"{int(stats['last_refresh_ago'] / 60)} minutes ago"
+            elif hours < 24:
+                last_refresh_str = f"{hours:.1f} hours ago"
+            else:
+                last_refresh_str = f"{hours / 24:.1f} days ago"
+
+        embed.add_field(
+            name="Overview",
+            value=(
+                f"**Playlists:** {stats['total_playlists']}\n"
+                f"**Total Tracks:** {stats['total_tracks']}\n"
+                f"**Downloaded:** {stats['downloaded_tracks']}\n"
+                f"**Orphaned:** {stats['orphaned_tracks']}"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Storage",
+            value=(
+                f"**Active:** {stats['size_mb']:.1f} MB\n"
+                f"**Orphaned:** {stats['orphaned_size_mb']:.1f} MB\n"
+                f"**Total:** {stats['size_mb'] + stats['orphaned_size_mb']:.1f} MB"
+            ),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Last Refresh",
+            value=last_refresh_str,
+            inline=True
+        )
+
+        download_pct = (stats['downloaded_tracks'] / stats['total_tracks'] * 100) if stats['total_tracks'] > 0 else 0
+        embed.set_footer(text=f"Download progress: {download_pct:.0f}% | Cache location: {config.MUSIC_CACHE_PATH}")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="clear-orphaned",
+        hidden=True,
+        description="Clears all orphaned music files.",
+        help="Removes tracks that are no longer in any playlist."
+    )
+    @commands.is_owner()
+    async def clear_orphaned(self, ctx: commands.Context) -> None:
+        """Clears all orphaned music files.
+
+        Orphaned files are tracks that were removed from all playlists.
+        Normally they're auto-deleted after 90 days, but this clears them immediately.
+
+        Args:
+            ctx: The command context.
+        """
+        cache_manager = self._get_music_cache_manager()
+        if not cache_manager:
+            await ctx.send("❌ Music cog is not loaded.")
+            return
+
+        stats = cache_manager.get_stats()
+        if stats['orphaned_tracks'] == 0:
+            await ctx.send("📋 No orphaned files to clear.")
+            return
+
+        # Confirm before clearing
+        confirm_msg = await ctx.send(
+            f"⚠️ This will delete **{stats['orphaned_tracks']} orphaned tracks** "
+            f"({stats['orphaned_size_mb']:.1f} MB).\n"
+            "React with ✅ to confirm or ❌ to cancel."
+        )
+        await confirm_msg.add_reaction("✅")
+        await confirm_msg.add_reaction("❌")
+
+        def check(reaction: discord.Reaction, user: discord.User) -> bool:
+            return (
+                user == ctx.author
+                and reaction.message.id == confirm_msg.id
+                and str(reaction.emoji) in ["✅", "❌"]
+            )
+
+        try:
+            reaction, _ = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+            if str(reaction.emoji) == "✅":
+                deleted = cache_manager.clear_orphaned()
+                await confirm_msg.edit(content=f"✅ Cleared {deleted} orphaned files.")
+            else:
+                await confirm_msg.edit(content="❌ Clear cancelled.")
+        except TimeoutError:
+            await confirm_msg.edit(content="⏰ Timed out. Clear cancelled.")
+
+    @commands.hybrid_command(
+        name="refresh-cache",
+        hidden=True,
+        description="Forces immediate cache refresh from YouTube.",
+        help="Re-fetches all playlists from YouTube and reconciles downloads."
+    )
+    @commands.is_owner()
+    async def refresh_cache(self, ctx: commands.Context) -> None:
+        """Forces immediate cache refresh from YouTube.
+
+        This cancels the current 24-hour timer, fetches all playlists fresh,
+        reconciles downloads (handles orphans), and restarts the timer.
+
+        Args:
+            ctx: The command context.
+        """
+        cache_manager = self._get_music_cache_manager()
+        if not cache_manager:
+            await ctx.send("❌ Music cog is not loaded.")
+            return
+
+        status_msg = await ctx.send("🔄 **Refreshing cache from YouTube...**")
+
+        try:
+            # Cancel current timer
+            cache_manager.cancel_refresh_timer()
+
+            # Refresh all playlists
+            playlists = await cache_manager.refresh_all_playlists()
+
+            if not playlists:
+                await status_msg.edit(content="⚠️ No playlists found in ambience.toml or all failed to fetch.")
+                cache_manager.start_refresh_timer()
+                return
+
+            # Reconcile downloads
+            await status_msg.edit(content="🔄 **Reconciling downloads...**")
+            cache_manager.reconcile_downloads(playlists)
+
+            # Cleanup expired orphans
+            expired = await cache_manager.cleanup_expired_orphans()
+
+            # Queue missing downloads
+            queued = await cache_manager.queue_missing_downloads()
+
+            # Restart timer
+            cache_manager.start_refresh_timer()
+
+            # Report results
+            stats = cache_manager.get_stats()
+            result_embed = discord.Embed(
+                title="✅ Cache Refresh Complete",
+                color=discord.Color.green()
+            )
+            result_embed.add_field(
+                name="Playlists",
+                value=f"{len(playlists)} refreshed",
+                inline=True
+            )
+            result_embed.add_field(
+                name="Downloads",
+                value=f"{queued} queued",
+                inline=True
+            )
+            if expired > 0:
+                result_embed.add_field(
+                    name="Cleanup",
+                    value=f"{expired} expired orphans deleted",
+                    inline=True
+                )
+            result_embed.add_field(
+                name="Total Tracks",
+                value=f"{stats['downloaded_tracks']}/{stats['total_tracks']} downloaded",
+                inline=False
+            )
+
+            await status_msg.edit(content=None, embed=result_embed)
+
+        except Exception as e:
+            self.logger.error(f"Cache refresh error: {e}", exc_info=True)
+            await status_msg.edit(content=f"❌ Refresh failed: {e}")
+            # Make sure timer is restarted even on error
+            cache_manager.start_refresh_timer()
 
 
 async def setup(bot: CoreBot) -> None:
