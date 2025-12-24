@@ -32,6 +32,9 @@ psutil
 # For YouTube audio extraction in the Music cog.
 yt-dlp
 
+# For reading and writing MP3 ID3 metadata (title, artist, cover art, etc.).
+mutagen
+
 # For fetching synced lyrics from LRCLIB in the Music cog.
 syncedlyrics
 

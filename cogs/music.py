@@ -22,7 +22,6 @@ Dependencies:
 
 import asyncio
 import io
-import json
 import os
 import random
 import re
@@ -56,13 +55,14 @@ from utils.music_helpers import (
     LRCLIBProvider,
     LyricalNonsenseScraper,
     LyricsResult,
+    MusicCacheManager,
     Track,
     chunk_text,
-    crop_thumbnail_to_square,
     detect_mix_in_url,
     fetch_playlist_metadata,
     fetch_url_info,
     get_audio_url,
+    get_best_thumbnail_bytes,
     get_ffmpeg_path,
     search_youtube,
 )
@@ -125,8 +125,14 @@ class Music(BaseCog):
         # reset to the cached playlist when returning to idle.
         self._playlist_modified_during_session: bool = False
 
-        # Cache path
+        # Cache paths
         self.cache_path = config.MUSIC_CACHE_PATH
+
+        # Music cache manager for proactive caching
+        self.cache_manager = MusicCacheManager(
+            self.cache_path,
+            self.logger
+        )
 
         # Track current playlist URL to detect ambience-driven changes
         self._current_playlist_url: Optional[str] = None
@@ -194,6 +200,9 @@ class Music(BaseCog):
         # Ensure cache directory exists
         os.makedirs(self.cache_path, exist_ok=True)
 
+        # Initialize cache manager (loads cached data, no YouTube hit)
+        await self.cache_manager.initialize()
+
         # Initialize ambience state (picks random mood/activity)
         ambience.initialize()
 
@@ -211,13 +220,15 @@ class Music(BaseCog):
             # and react when ambience eventually has a playlist
             self.presence_task = self.bot.loop.create_task(
                 self._presence_loop())
+            # Still start background refresh for when playlists are added
+            self._start_cache_background_tasks()
             return
 
         self._current_playlist_url = playlist_url
         self.logger.info(
             f"Ambience selected playlist ({description}): {playlist_url}")
 
-        # Load or fetch playlist
+        # Load playlist from cache (no YouTube hit, quick startup)
         await self._load_playlist()
 
         if self.playlist:
@@ -233,10 +244,59 @@ class Music(BaseCog):
             self.presence_task = self.bot.loop.create_task(
                 self._presence_loop())
 
+        # Start background cache refresh (hits YouTube, downloads, etc.)
+        self._start_cache_background_tasks()
+
+    def _start_cache_background_tasks(self) -> None:
+        """Starts background cache tasks without blocking startup."""
+        self._cache_init_task: Optional[asyncio.Task[None]] = asyncio.create_task(self._background_cache_init())
+
+    async def _background_cache_init(self) -> None:
+        """Background task to refresh playlists and start downloads.
+
+        This runs after startup so the bot is responsive immediately.
+        """
+        try:
+            # Give the bot a moment to fully start
+            await asyncio.sleep(2.0)
+
+            self.logger.info("[Cache] Starting background playlist refresh...")
+
+            # Refresh all playlists from YouTube
+            playlists = await self.cache_manager.refresh_all_playlists()
+
+            if playlists:
+                # Reconcile downloads (handle orphans)
+                self.cache_manager.reconcile_downloads(playlists)
+
+                # Cleanup expired orphans
+                await self.cache_manager.cleanup_expired_orphans()
+
+                # Queue missing downloads
+                await self.cache_manager.queue_missing_downloads()
+
+                # Start background download worker
+                await self.cache_manager.start_background_downloads()
+
+                # If we're currently playing from a playlist, refresh local paths
+                if self._current_playlist_url and self.original_playlist:
+                    self._populate_local_paths(self._current_playlist_url)
+
+            # Start the 24-hour refresh timer
+            self.cache_manager.start_refresh_timer()
+
+            self.logger.info("[Cache] Background initialization complete")
+
+        except Exception as e:
+            self.logger.error(f"[Cache] Background init error: {e}", exc_info=True)
+
     async def cog_unload(self) -> None:
         """Cleanup when cog is unloaded."""
         # Unsubscribe from ambience
         unsubscribe_playlist_change(self._on_playlist_change)
+
+        # Shutdown cache manager
+        await self.cache_manager.shutdown()
 
         # Cancel presence task
         if self.presence_task:
@@ -284,50 +344,64 @@ class Music(BaseCog):
     # ==========================================================================
 
     async def _load_playlist(self) -> None:
-        """Loads playlist from cache or fetches from YouTube."""
-        cache_file = os.path.join(self.cache_path, 'playlist.json')
+        """Loads playlist from cache manager."""
         playlist_url = self._current_playlist_url or get_current_playlist()
 
         if not playlist_url:
             self.logger.info("No playlist URL available to load")
             return
 
-        # Try loading from cache first
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    cached_url = data.get('playlist_url', '')
-                    cache_time = data.get('cached_at', 0)
+        # Load from cache manager (no YouTube hit)
+        tracks = self.cache_manager.get_cached_tracks(playlist_url)
 
-                    # Invalidate cache if playlist URL changed
-                    if cached_url != playlist_url:
-                        self.logger.info(
-                            "Playlist URL changed, invalidating cache.")
-                    # Refresh if cache is older than 24 hours
-                    elif time.time() - cache_time < 86400:
-                        self.original_playlist = [Track.from_dict(
-                            t) for t in data.get('tracks', [])]
-                        if self.original_playlist:
-                            self.logger.info(
-                                f"Loaded {len(self.original_playlist)} tracks from cache.")
-                            # Copy to playlist and shuffle for initial playback
-                            self.playlist = self.original_playlist.copy()
-                            self._apply_shuffle()
-                            self._dedupe_playlist()
-                            return
-            except (json.JSONDecodeError, KeyError) as e:
-                self.logger.warning(f"Cache corrupted, will re-fetch: {e}")
+        if tracks:
+            self.original_playlist = tracks
+            self.logger.info(f"Loaded {len(tracks)} tracks from cache.")
+        else:
+            # Cache miss - trigger immediate refresh
+            self.logger.info("Cache miss, fetching from YouTube...")
+            tracks = await self.cache_manager.handle_cache_miss(playlist_url)
+            if tracks:
+                self.original_playlist = tracks
+                self.logger.info(f"Fetched {len(tracks)} tracks from YouTube.")
 
-        # Fetch from YouTube
-        await self._fetch_playlist()
-        # Copy to playlist and shuffle for initial playback
-        self.playlist = self.original_playlist.copy()
-        self._apply_shuffle()
-        self._dedupe_playlist()
+        if self.original_playlist:
+            # Populate local_path from downloaded files
+            self._populate_local_paths(playlist_url)
+            # Copy to playlist and shuffle for initial playback
+            self.playlist = self.original_playlist.copy()
+            self._apply_shuffle()
+            self._dedupe_playlist()
+
+    def _populate_local_paths(self, playlist_url: str) -> None:
+        """Populates local_path on tracks from downloaded cache.
+
+        Args:
+            playlist_url: The playlist URL to look up in cache.
+        """
+        if not self.original_playlist:
+            return
+
+        cached_count = 0
+        for track in self.original_playlist:
+            if track.video_id:
+                local_path = self.cache_manager.get_local_path(track.video_id, playlist_url)
+                if local_path:
+                    track.local_path = local_path
+                    cached_count += 1
+
+        if cached_count > 0:
+            self.logger.debug(
+                f"Populated {cached_count}/{len(self.original_playlist)} "
+                "tracks with local cache paths"
+            )
 
     async def _fetch_playlist(self) -> None:
-        """Fetches playlist metadata from YouTube using yt-dlp."""
+        """Fetches playlist metadata from YouTube using yt-dlp.
+
+        Note: This is now primarily used for fallback. The cache manager
+        handles most playlist fetching via refresh_all_playlists().
+        """
         playlist_url = self._current_playlist_url or get_current_playlist()
         if not playlist_url or not YTDLP_AVAILABLE:
             return
@@ -339,26 +413,8 @@ class Music(BaseCog):
         if tracks:
             self.original_playlist = tracks
             self.logger.info(f"Fetched {len(tracks)} tracks from playlist.")
-
-            # Save to cache
-            await self._save_playlist_cache()
         else:
             self.logger.error("Failed to fetch playlist or playlist is empty.")
-
-    async def _save_playlist_cache(self) -> None:
-        """Saves playlist to cache file."""
-        cache_file = os.path.join(self.cache_path, 'playlist.json')
-        playlist_url = self._current_playlist_url or get_current_playlist()
-        try:
-            data = {
-                'tracks': [t.to_dict() for t in self.original_playlist],
-                'cached_at': time.time(),
-                'playlist_url': playlist_url or ''
-            }
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            self.logger.error(f"Failed to save playlist cache: {e}")
 
     def _apply_shuffle(self, preserve_current: bool = False) -> None:
         """Shuffles the playlist.
@@ -937,37 +993,52 @@ class Music(BaseCog):
         if vc.is_playing():
             vc.stop()
 
-        # Check caches for audio URL (current track cache first, then prefetch)
-        audio_url: Optional[str] = None
+        # Check for locally cached file first (ambient playlist tracks)
+        audio_source: Optional[str] = None
+        is_local_file = False
         is_unavailable = False
 
-        if self._current_audio_track_url == track.url and self._current_audio_url:
-            # Current track cache hit (e.g., loop ONE replaying same track)
-            audio_url = self._current_audio_url
-            self.logger.debug(f"Using current track cache for: {track.title}")
-        elif self._prefetched_track_url == track.url and self._prefetched_url:
-            # Prefetch cache hit (next sequential track)
-            audio_url = self._prefetched_url
-            self.logger.debug(f"Using prefetched URL for: {track.title}")
-            # Clear the prefetch since we're using it
-            self._prefetched_url = None
-            self._prefetched_track_url = None
-        else:
-            # No cache available, fetch now
-            audio_url, is_unavailable, thumbnail, needs_crop = await self._get_audio_url(track)
-            # Update track thumbnail if we found a better one
-            if thumbnail and not track.thumbnail:
-                track.thumbnail = thumbnail
-                track.thumbnail_needs_crop = needs_crop
-                self.logger.debug(f"Updated thumbnail for: {track.title} (needs_crop={needs_crop})")
+        # Priority 1: Check local file cache (for ambient playlist tracks)
+        if track.is_cached:
+            audio_source = track.local_path
+            is_local_file = True
+            self.logger.debug(f"Using local cache for: {track.title}")
+        elif self._current_playlist_url and not track.user_added and track.video_id:
+            # Check if this track is downloaded
+            local_path = self.cache_manager.get_local_path(track.video_id, self._current_playlist_url)
+            if local_path:
+                audio_source = local_path
+                is_local_file = True
+                track.local_path = local_path  # Update track for future use
+                self.logger.debug(f"Found in local cache: {track.title}")
 
-        if not audio_url:
+        # Priority 2: Check memory caches for streaming URL
+        if not audio_source:
+            if self._current_audio_track_url == track.url and self._current_audio_url:
+                # Current track cache hit (e.g., loop ONE replaying same track)
+                audio_source = self._current_audio_url
+                self.logger.debug(f"Using current track cache for: {track.title}")
+            elif self._prefetched_track_url == track.url and self._prefetched_url:
+                # Prefetch cache hit (next sequential track)
+                audio_source = self._prefetched_url
+                self.logger.debug(f"Using prefetched URL for: {track.title}")
+                # Clear the prefetch since we're using it
+                self._prefetched_url = None
+                self._prefetched_track_url = None
+            else:
+                # No cache available, fetch from YouTube
+                audio_source, is_unavailable, thumbnail, needs_crop = await self._get_audio_url(track)
+                # Update track thumbnail if we found a better one
+                if thumbnail and not track.thumbnail:
+                    track.thumbnail = thumbnail
+                    track.thumbnail_needs_crop = needs_crop
+                    self.logger.debug(f"Updated thumbnail for: {track.title} (needs_crop={needs_crop})")
+
+        if not audio_source:
             if is_unavailable:
                 # Remove unavailable track from playlist
                 self.logger.info(f"Removing unavailable track: {track.title}")
                 self._remove_track(self.current_index)
-                # Save updated playlist to cache
-                await self._save_playlist_cache()
             else:
                 # Temporary error, just skip
                 self.logger.warning(
@@ -989,19 +1060,29 @@ class Music(BaseCog):
                 return
 
             ffmpeg_path = get_ffmpeg_path()
-            source = discord.FFmpegPCMAudio(
-                audio_url,
-                executable=ffmpeg_path,
-                before_options=FFMPEG_OPTIONS['before_options'],
-                options=FFMPEG_OPTIONS['options']
-            )
+
+            # Different options for local files vs streaming URLs
+            if is_local_file:
+                # Local files don't need reconnect options
+                source = discord.FFmpegPCMAudio(
+                    audio_source,
+                    executable=ffmpeg_path,
+                    options=FFMPEG_OPTIONS['options']
+                )
+            else:
+                source = discord.FFmpegPCMAudio(
+                    audio_source,
+                    executable=ffmpeg_path,
+                    before_options=FFMPEG_OPTIONS['before_options'],
+                    options=FFMPEG_OPTIONS['options']
+                )
 
             def after_playing(error: Optional[Exception]) -> None:
                 """Callback invoked by discord.py when the audio source finishes or errors.
 
                 Runs in a separate thread, so we use run_coroutine_threadsafe to
                 schedule the async _on_track_end on the bot's event loop.
-                
+
                 If playback failed within 3 seconds, it's likely a stale URL (403 error).
                 We set a flag to retry with a fresh URL instead of advancing.
                 """
@@ -1022,11 +1103,13 @@ class Music(BaseCog):
 
             vc.play(source, after=after_playing)
             self._track_started_timestamp = time.time()
-            self.logger.info(f"Now playing: {track.title}")
+            self.logger.info(f"Now playing: {track.title}" + (" (local)" if is_local_file else ""))
 
             # Cache this track's audio URL for potential replay (loop ONE)
-            self._current_audio_url = audio_url
-            self._current_audio_track_url = track.url
+            # Only cache if it's a streaming URL, not a local file
+            if not is_local_file:
+                self._current_audio_url = audio_source
+                self._current_audio_track_url = track.url
 
             # Start prefetching the next track in the background
             self._prefetch_task = asyncio.create_task(
@@ -2182,7 +2265,6 @@ class Music(BaseCog):
 
         Extracts the song query from the message, removing the 'play' or 'queue' keyword.
         """
-        import re
         # Remove 'play' or 'queue' keyword and any leading/trailing whitespace
         # The query might be "play something", "queue something", or URLs
         song_query = re.sub(r'^\s*(play|queue)\s+', '',
@@ -2232,40 +2314,15 @@ class Music(BaseCog):
                         value=f"{elapsed_str} / {duration_str}", inline=True)
         embed.add_field(name="Loop", value=self.loop_mode.display, inline=True)
 
-        # Use track thumbnail if available (populated during prefetch/play)
-        # Fall back to standard YouTube thumbnail URL if not
-        thumbnail_url = track.thumbnail
-        needs_crop = track.thumbnail_needs_crop
-        self.logger.debug(f"Track thumbnail from data: {track.thumbnail} (needs_crop={needs_crop})")
-        
-        if not thumbnail_url and track.url:
-            import re
-            video_id_match = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', track.url)
-            if video_id_match:
-                thumbnail_url = f"https://img.youtube.com/vi/{video_id_match.group(1)}/hqdefault.jpg"
-                needs_crop = True  # YouTube fallback thumbnails are 16:9
-                self.logger.debug(f"Using fallback thumbnail: {thumbnail_url}")
-
-        self.logger.debug(f"Final thumbnail URL: {thumbnail_url}, needs_crop: {needs_crop}")
-
-        # Handle thumbnail - crop if needed, otherwise use URL directly
+        # Use unified thumbnail logic - extracts from cached MP3 or fetches best thumbnail
         thumbnail_file = None
-        if thumbnail_url:
-            if needs_crop:
-                self.logger.debug("Cropping thumbnail to square...")
-                cropped_bytes = await crop_thumbnail_to_square(thumbnail_url, self.logger)
-                if cropped_bytes:
-                    thumbnail_file = discord.File(
-                        io.BytesIO(cropped_bytes),
-                        filename="thumbnail.jpg"
-                    )
-                    embed.set_thumbnail(url="attachment://thumbnail.jpg")
-                else:
-                    # Crop failed, use original URL as fallback
-                    self.logger.debug("Crop failed, using original thumbnail URL")
-                    embed.set_thumbnail(url=thumbnail_url)
-            else:
-                embed.set_thumbnail(url=thumbnail_url)
+        thumbnail_bytes = await get_best_thumbnail_bytes(track, self.logger)
+        if thumbnail_bytes:
+            thumbnail_file = discord.File(
+                io.BytesIO(thumbnail_bytes),
+                filename="thumbnail.jpg"
+            )
+            embed.set_thumbnail(url="attachment://thumbnail.jpg")
 
         if self.active_session:
             embed.set_footer(
