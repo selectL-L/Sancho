@@ -5,11 +5,192 @@ It provides standard selection menus and button interfaces used across multiple 
 """
 
 import discord
+from discord import ui
 import asyncio
-from typing import Optional, Dict, cast
+from dataclasses import dataclass
+from typing import Optional, Dict, Callable, Awaitable, cast
+
+
+# =============================================================================
+# Text Utility Functions
+# =============================================================================
+
+def visual_width(s: str) -> int:
+    """Calculate visual width of string (CJK/full-width chars count as 2).
+
+    Args:
+        s: The string to measure.
+
+    Returns:
+        The visual width in character units.
+    """
+    width = 0
+    for char in s:
+        if ord(char) > 0x2E7F:  # CJK and full-width characters
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def truncate_visual(s: str, max_width: int) -> str:
+    """Truncate string to max visual width, adding ellipsis if needed.
+
+    Args:
+        s: The string to truncate.
+        max_width: Maximum visual width (including ellipsis).
+
+    Returns:
+        The truncated string.
+    """
+    width = 0
+    for i, char in enumerate(s):
+        char_width = 2 if ord(char) > 0x2E7F else 1
+        if width + char_width > max_width - 3:  # Reserve space for "..."
+            return s[:i] + "..."
+        width += char_width
+    return s
+
+
+# =============================================================================
+# Now Playing View (Components V2)
+# =============================================================================
+
+@dataclass
+class NowPlayingState:
+    """State container for now playing widget."""
+    track_title: str
+    track_artist: str
+    track_url: str
+    elapsed_str: str
+    duration_str: str
+    progress: float  # 0.0 to 1.0
+    loop_display: str
+    is_playing: bool
+    is_paused: bool
+    in_voice: bool
+    playlist_count: int
+    thumbnail_url: Optional[str] = None
+
+
+# Type alias for button callbacks
+NowPlayingCallback = Callable[[discord.Interaction], Awaitable[None]]
+
+
+class NowPlayingView(ui.LayoutView):
+    """Components V2 now playing widget with interactive controls.
+
+    This view displays current track information with a large thumbnail,
+    progress bar, and playback control buttons.
+    """
+
+    def __init__(
+        self,
+        state: NowPlayingState,
+        on_play_pause: Optional[NowPlayingCallback] = None,
+        on_next: Optional[NowPlayingCallback] = None,
+        on_shuffle: Optional[NowPlayingCallback] = None,
+        on_loop: Optional[NowPlayingCallback] = None,
+        timeout: float = 300.0,
+    ):
+        """Initialize the now playing view.
+
+        Args:
+            state: Current state of the player.
+            on_play_pause: Callback for play/pause button.
+            on_next: Callback for next track button.
+            on_shuffle: Callback for shuffle button.
+            on_loop: Callback for loop mode button.
+            timeout: View timeout in seconds.
+        """
+        super().__init__(timeout=timeout)
+        self.state = state
+
+        # Build the view
+        container = ui.Container(accent_colour=discord.Colour.purple())
+
+        # Thumbnail
+        if state.thumbnail_url:
+            gallery = ui.MediaGallery(
+                discord.MediaGalleryItem(media=state.thumbnail_url)
+            )
+            container.add_item(gallery)
+
+        # Track info
+        status_emoji = "🎵" if state.in_voice else "🎧"
+        status_text = "Now Playing" if state.in_voice else "Currently Listening To"
+
+        display_title = truncate_visual(state.track_title, 48) if visual_width(state.track_title) > 48 else state.track_title
+        display_artist = truncate_visual(state.track_artist, 40) if visual_width(state.track_artist) > 40 else state.track_artist
+
+        container.add_item(ui.TextDisplay(
+            f"## {status_emoji} {status_text}\n"
+            f"**[{display_title}]({state.track_url})**\n"
+            f"by {display_artist}"
+        ))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Progress bar
+        filled = int(state.progress * 20)
+        bar = "▓" * filled + "░" * (20 - filled)
+
+        container.add_item(ui.TextDisplay(
+            f"`{bar}`\n"
+            f"⏱ **{state.elapsed_str}** / {state.duration_str}  •  🔁 {state.loop_display}"
+        ))
+
+        # Playback buttons
+        action_row = ui.ActionRow()
+
+        # Determine play/pause emoji
+        if state.is_playing:
+            play_emoji = "⏸️"
+        elif state.is_paused:
+            play_emoji = "▶️"
+        else:
+            play_emoji = "▶️" if not state.in_voice else "⏸️"
+
+        play_pause_btn = ui.Button(style=discord.ButtonStyle.primary, emoji=play_emoji, custom_id="np_playpause")
+        next_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="⏭️", custom_id="np_next")
+        shuffle_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="🔀", custom_id="np_shuffle")
+        loop_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="🔁", custom_id="np_loop")
+
+        # Assign callbacks (type: ignore for discord.py dynamic callback signature)
+        if on_play_pause:
+            play_pause_btn.callback = on_play_pause  # type: ignore[method-assign]
+        if on_next:
+            next_btn.callback = on_next  # type: ignore[method-assign]
+        if on_shuffle:
+            shuffle_btn.callback = on_shuffle  # type: ignore[method-assign]
+        if on_loop:
+            loop_btn.callback = on_loop  # type: ignore[method-assign]
+
+        action_row.add_item(play_pause_btn)
+        action_row.add_item(next_btn)
+        action_row.add_item(shuffle_btn)
+        action_row.add_item(loop_btn)
+
+        container.add_item(action_row)
+
+        # Footer
+        if state.in_voice:
+            footer = f"-# Playing in voice | {state.playlist_count} tracks in playlist"
+        else:
+            footer = "-# Idle mode | Type 'listen along' to play in voice!"
+        container.add_item(ui.TextDisplay(footer))
+
+        self.add_item(container)
+
+
+# =============================================================================
+# Selection View
+# =============================================================================
 
 
 class SelectionView(discord.ui.View):
+    """View with multiple selection buttons."""
+
     def __init__(self, ctx, options: Dict[str, str], timeout: float = 30.0):
         super().__init__(timeout=timeout)
         self.ctx = ctx
