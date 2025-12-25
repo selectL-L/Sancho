@@ -26,7 +26,7 @@ import os
 import random
 import re
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 import discord
 from discord.ext import commands
@@ -66,6 +66,7 @@ from utils.music_helpers import (
     get_ffmpeg_path,
     search_youtube,
 )
+from utils.views import NowPlayingState, NowPlayingView
 
 if TYPE_CHECKING:
     from utils.bot_class import CoreBot
@@ -119,6 +120,10 @@ class Music(BaseCog):
         # it's likely due to an expired cached URL. We retry once with a fresh URL.
         self._track_started_timestamp: float = 0.0
         self._retry_with_fresh_url: bool = False
+
+        # Pause state tracking: stores the exact track position (in seconds) when paused.
+        # When None, not paused or never paused. Used to resume from correct position.
+        self._paused_at_position: Optional[float] = None
 
         # Tracks if the playlist was modified during a voice session.
         # Set True when tracks are added/removed. Used to decide whether to
@@ -442,6 +447,19 @@ class Music(BaseCog):
             return None
         return self.playlist[self.current_index % len(self.playlist)]
 
+    def _get_elapsed_seconds(self) -> float:
+        """Gets the current elapsed time in the track, accounting for pause state.
+
+        When paused, returns the position where we paused.
+        When playing, calculates from track_started_at.
+
+        Returns:
+            Elapsed seconds into the current track.
+        """
+        if self._paused_at_position is not None:
+            return self._paused_at_position
+        return time.time() - self.track_started_at
+
     def _get_next_track(self) -> Optional[Track]:
         """Gets the next track without advancing the index.
 
@@ -493,7 +511,138 @@ class Music(BaseCog):
                 return None
 
         self.track_started_at = time.time()
+        self._paused_at_position = None  # Clear pause state on track change
         return self._get_current_track()
+
+    def _do_pause(self) -> bool:
+        """Pauses playback and captures the exact track position.
+
+        MUST be called BEFORE any other logic when handling pause.
+        Captures position immediately to ensure accuracy.
+
+        Returns:
+            True if pause succeeded, False if not playing.
+        """
+        if not self.active_session or not self.active_session.voice_client:
+            return False
+
+        vc = self.active_session.voice_client
+
+        if not vc.is_playing():
+            return False
+
+        # CRITICAL: Capture position FIRST, before any other operations.
+        # FFmpeg has internal buffering, so the actual playback position is
+        # slightly behind our calculated position. We use the calculated value
+        # as it represents what the user has heard.
+        self._paused_at_position = time.time() - self.track_started_at
+
+        # Now pause the audio
+        vc.pause()
+        self.logger.debug(f"Paused at position: {self._paused_at_position:.1f}s")
+        return True
+
+    async def _do_resume(self) -> bool:
+        """Resumes playback from paused position, rewinding 1 second.
+
+        Creates a new FFmpeg source with -ss seek to resume from the
+        correct position (pause position - 1 second).
+
+        Returns:
+            True if resume succeeded, False if not paused or failed.
+        """
+        if not self.active_session or not self.active_session.voice_client:
+            return False
+
+        vc = self.active_session.voice_client
+
+        if not vc.is_paused():
+            return False
+
+        if self._paused_at_position is None:
+            # Fallback: simple resume if we don't have a captured position
+            vc.resume()
+            return True
+
+        track = self._get_current_track()
+        if not track:
+            vc.resume()
+            return True
+
+        # Calculate seek position (rewind 1 second for smooth continuation)
+        seek_position = max(0.0, self._paused_at_position - 1.0)
+
+        # Stop current source so we can create a new one
+        # Note: This won't trigger _on_track_end because we're stopping while paused
+        vc.stop()
+
+        # Get audio source URL (use cached if available)
+        audio_source: Optional[str] = None
+        is_local_file = False
+        is_unavailable = False
+
+        if track.is_cached and track.local_path:
+            audio_source = track.local_path
+            is_local_file = True
+        elif self._current_audio_track_url == track.url and self._current_audio_url:
+            audio_source = self._current_audio_url
+        else:
+            # Need to fetch fresh URL
+            audio_source, is_unavailable, _, _ = await self._get_audio_url(track)
+
+        if not audio_source:
+            if is_unavailable:
+                # Track is permanently unavailable - remove it
+                self.logger.info(f"Removing unavailable track during resume: {track.title}")
+                self._remove_track(self.current_index)
+            else:
+                self.logger.warning("Could not get audio URL for resume")
+            self._paused_at_position = None
+            return False
+
+        try:
+            ffmpeg_path = get_ffmpeg_path()
+
+            # Build before_options with seek position
+            seek_option = f'-ss {seek_position:.2f}'
+            if is_local_file:
+                before_options = seek_option
+            else:
+                before_options = f'{seek_option} {FFMPEG_OPTIONS["before_options"]}'
+
+            source = discord.FFmpegPCMAudio(
+                audio_source,
+                executable=ffmpeg_path,
+                before_options=before_options,
+                options=FFMPEG_OPTIONS['options']
+            )
+
+            def after_playing(error: Optional[Exception]) -> None:
+                if error:
+                    elapsed = time.time() - self._track_started_timestamp
+                    if elapsed < 3.0:
+                        self.logger.warning(f"Playback failed after {elapsed:.1f}s (likely stale URL): {error}")
+                        self._retry_with_fresh_url = True
+                    else:
+                        self.logger.error(f"Playback error: {error}")
+                if self.active_session:
+                    asyncio.run_coroutine_threadsafe(self._on_track_end(), self.bot.loop)
+
+            vc.play(source, after=after_playing)
+            self._track_started_timestamp = time.time()
+
+            # Update track_started_at to reflect the seek position
+            # So elapsed = time.time() - track_started_at = seek_position when we just resumed
+            self.track_started_at = time.time() - seek_position
+            self._paused_at_position = None
+
+            self.logger.debug(f"Resumed playback at position: {seek_position:.1f}s")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error resuming playback: {e}", exc_info=True)
+            self._paused_at_position = None
+            return False
 
     def _dedupe_playlist(self) -> int:
         """Removes duplicate tracks from the playlist, keeping later occurrences.
@@ -1050,6 +1199,7 @@ class Music(BaseCog):
         # Update presence
         await self._update_playing_presence(track)
         self.track_started_at = time.time()
+        self._paused_at_position = None  # Clear pause state for fresh track
 
         # Create audio source and play
         try:
@@ -2233,8 +2383,7 @@ class Music(BaseCog):
             await ctx.send("Already paused! Type 'resume' to continue!")
             return
 
-        if vc.is_playing():
-            vc.pause()
+        if self._do_pause():
             await ctx.send("⏸️ Paused!")
         else:
             await ctx.send("Nothing is playing right now.")
@@ -2255,8 +2404,10 @@ class Music(BaseCog):
             return
 
         if vc.is_paused():
-            vc.resume()
-            await ctx.send("▶️ Resumed!")
+            if await self._do_resume():
+                await ctx.send("▶️ Resumed!")
+            else:
+                await ctx.send("Failed to resume playback.")
         else:
             await ctx.send("Nothing to resume. Type 'listen along' to start playback!")
 
@@ -2286,8 +2437,10 @@ class Music(BaseCog):
                 return
 
             if vc.is_paused():
-                vc.resume()
-                await ctx.send("▶️ Resumed!")
+                if await self._do_resume():
+                    await ctx.send("▶️ Resumed!")
+                else:
+                    await ctx.send("Failed to resume playback.")
             else:
                 await ctx.send("Nothing to resume. Type 'listen along' to start playback!")
             return
@@ -2301,40 +2454,177 @@ class Music(BaseCog):
             await ctx.send("No track is loaded.")
             return
 
-        elapsed = int(time.time() - self.track_started_at)
+        # Gather state - use _get_elapsed_seconds for accurate time (handles pause)
+        elapsed = int(self._get_elapsed_seconds())
         elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
         duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
+        progress = elapsed / track.duration if track.duration > 0 else 0.0
 
-        embed = discord.Embed(
-            title="🎵 Now Playing" if self.active_session else "🎧 Currently Listening To",
-            description=f"**[{track.title}]({track.url})**\nby {track.artist}",
-            color=discord.Color.purple()
-        )
-        embed.add_field(name="Duration",
-                        value=f"{elapsed_str} / {duration_str}", inline=True)
-        embed.add_field(name="Loop", value=self.loop_mode.display, inline=True)
+        is_playing = False
+        is_paused = False
+        if self.active_session and self.active_session.voice_client:
+            vc = self.active_session.voice_client
+            is_playing = vc.is_playing()
+            is_paused = vc.is_paused()
 
-        # Use unified thumbnail logic - extracts from cached MP3 or fetches best thumbnail
-        thumbnail_file = None
+        # Get thumbnail
         thumbnail_bytes = await get_best_thumbnail_bytes(track, self.logger)
+        files: List[discord.File] = []
+        thumbnail_url: Optional[str] = None
+
         if thumbnail_bytes:
-            thumbnail_file = discord.File(
-                io.BytesIO(thumbnail_bytes),
-                filename="thumbnail.jpg"
-            )
-            embed.set_thumbnail(url="attachment://thumbnail.jpg")
+            files.append(discord.File(io.BytesIO(thumbnail_bytes), filename="thumbnail.jpg"))
+            thumbnail_url = "attachment://thumbnail.jpg"
 
-        if self.active_session:
-            embed.set_footer(
-                text=f"Playing in voice | {len(self.playlist)} tracks in playlist")
-        else:
-            embed.set_footer(
-                text="Idle mode | Type 'listen along' to play in voice!")
+        # Build state object
+        state = NowPlayingState(
+            track_title=track.title,
+            track_artist=track.artist,
+            track_url=track.url,
+            elapsed_str=elapsed_str,
+            duration_str=duration_str,
+            progress=progress,
+            loop_display=self.loop_mode.display,
+            is_playing=is_playing,
+            is_paused=is_paused,
+            in_voice=self.active_session is not None,
+            playlist_count=len(self.playlist),
+            thumbnail_url=thumbnail_url,
+        )
 
-        if thumbnail_file:
-            await ctx.send(embed=embed, file=thumbnail_file)
+        # Create callbacks that capture current thumbnail_url for rebuilds
+        cog = self
+
+        def make_callbacks(current_thumbnail_url: Optional[str]) -> Tuple[
+            Callable[[discord.Interaction], Awaitable[None]],
+            Callable[[discord.Interaction], Awaitable[None]],
+            Callable[[discord.Interaction], Awaitable[None]],
+            Callable[[discord.Interaction], Awaitable[None]],
+        ]:
+            """Create callbacks with captured thumbnail URL for view rebuilds.
+
+            Returns:
+                Tuple of (on_play_pause, on_next, on_shuffle, on_loop) callbacks.
+            """
+
+            async def on_play_pause(interaction: discord.Interaction) -> None:
+                if cog.active_session and cog.active_session.voice_client:
+                    vc = cog.active_session.voice_client
+                    if vc.is_playing():
+                        cog._do_pause()
+                    elif vc.is_paused():
+                        await cog._do_resume()
+                # Rebuild state and view
+                new_state = cog._build_now_playing_state(current_thumbnail_url)
+                cbs = make_callbacks(current_thumbnail_url)
+                new_view = NowPlayingView(new_state, on_play_pause=cbs[0], on_next=cbs[1], on_shuffle=cbs[2], on_loop=cbs[3])
+                await interaction.response.edit_message(view=new_view)
+
+            async def on_next(interaction: discord.Interaction) -> None:
+                if not cog.playlist:
+                    await interaction.response.send_message("No playlist loaded.", ephemeral=True)
+                    return
+
+                await interaction.response.defer()
+
+                # Clear pause state before track change
+                cog._paused_at_position = None
+
+                # Skip using vc.stop() to trigger _on_track_end
+                if cog.active_session and cog.active_session.voice_client:
+                    vc = cog.active_session.voice_client
+                    if vc.is_playing() or vc.is_paused():
+                        vc.stop()
+                        await asyncio.sleep(0.5)
+                else:
+                    cog.current_index = (cog.current_index + 1) % len(cog.playlist)
+                    cog.track_started_at = time.time()
+
+                # Fetch new thumbnail
+                new_track = cog._get_current_track()
+                new_files: List[discord.File] = []
+                new_thumbnail_url: Optional[str] = None
+
+                if new_track:
+                    new_thumbnail_bytes = await get_best_thumbnail_bytes(new_track, cog.logger)
+                    if new_thumbnail_bytes:
+                        new_files.append(discord.File(io.BytesIO(new_thumbnail_bytes), filename="thumbnail.jpg"))
+                        new_thumbnail_url = "attachment://thumbnail.jpg"
+
+                new_state = cog._build_now_playing_state(new_thumbnail_url)
+                cbs = make_callbacks(new_thumbnail_url)
+                new_view = NowPlayingView(new_state, on_play_pause=cbs[0], on_next=cbs[1], on_shuffle=cbs[2], on_loop=cbs[3])
+                await interaction.edit_original_response(view=new_view, attachments=new_files)
+
+            async def on_shuffle(interaction: discord.Interaction) -> None:
+                if not cog.playlist:
+                    await interaction.response.send_message("No playlist to shuffle.", ephemeral=True)
+                    return
+                cog._apply_shuffle(preserve_current=True)
+                cog._clear_prefetch()
+                await interaction.response.send_message("🔀 Playlist shuffled!", ephemeral=True)
+
+            async def on_loop(interaction: discord.Interaction) -> None:
+                if cog.loop_mode == LoopMode.ALL:
+                    cog.loop_mode = LoopMode.ONE
+                elif cog.loop_mode == LoopMode.ONE:
+                    cog.loop_mode = LoopMode.OFF
+                else:
+                    cog.loop_mode = LoopMode.ALL
+                # Rebuild state and view
+                new_state = cog._build_now_playing_state(current_thumbnail_url)
+                cbs = make_callbacks(current_thumbnail_url)
+                new_view = NowPlayingView(new_state, on_play_pause=cbs[0], on_next=cbs[1], on_shuffle=cbs[2], on_loop=cbs[3])
+                await interaction.response.edit_message(view=new_view)
+
+            return (on_play_pause, on_next, on_shuffle, on_loop)
+
+        callbacks = make_callbacks(thumbnail_url)
+        view = NowPlayingView(state, on_play_pause=callbacks[0], on_next=callbacks[1], on_shuffle=callbacks[2], on_loop=callbacks[3])
+
+        if files:
+            await ctx.send(view=view, files=files)
         else:
-            await ctx.send(embed=embed)
+            await ctx.send(view=view)
+
+    def _build_now_playing_state(self, thumbnail_url: Optional[str] = None) -> NowPlayingState:
+        """Build current now playing state for view construction.
+
+        Args:
+            thumbnail_url: Thumbnail attachment URL.
+
+        Returns:
+            NowPlayingState with current player state.
+        """
+        track = self._get_current_track()
+
+        # Use _get_elapsed_seconds for accurate time tracking (handles pause state)
+        elapsed = int(self._get_elapsed_seconds())
+        elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
+        duration_str = f"{track.duration // 60}:{track.duration % 60:02d}" if track else "0:00"
+        progress = elapsed / track.duration if track and track.duration > 0 else 0.0
+
+        is_playing = False
+        is_paused = False
+        if self.active_session and self.active_session.voice_client:
+            vc = self.active_session.voice_client
+            is_playing = vc.is_playing()
+            is_paused = vc.is_paused()
+
+        return NowPlayingState(
+            track_title=track.title if track else "Unknown",
+            track_artist=track.artist if track else "Unknown",
+            track_url=track.url if track else "",
+            elapsed_str=elapsed_str,
+            duration_str=duration_str,
+            progress=progress,
+            loop_display=self.loop_mode.display,
+            is_playing=is_playing,
+            is_paused=is_paused,
+            in_voice=self.active_session is not None,
+            playlist_count=len(self.playlist),
+            thumbnail_url=thumbnail_url,
+        )
 
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
@@ -2515,6 +2805,8 @@ class Music(BaseCog):
     # - Use yt-dlp's --flat-playlist with related video extraction
     # - Consider user preference storage in DB
     # - Need to handle "autoplay off" to disable
+
+    # =========================================================================
 
 
 async def setup(bot: 'CoreBot') -> None:
