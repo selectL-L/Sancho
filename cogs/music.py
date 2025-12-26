@@ -617,14 +617,23 @@ class Music(BaseCog):
                 options=FFMPEG_OPTIONS['options']
             )
 
+            # Capture track duration for silent failure detection
+            track_duration = track.duration
+
             def after_playing(error: Optional[Exception]) -> None:
+                elapsed = time.time() - self._track_started_timestamp
                 if error:
-                    elapsed = time.time() - self._track_started_timestamp
                     if elapsed < 3.0:
                         self.logger.warning(f"Playback failed after {elapsed:.1f}s (likely stale URL): {error}")
                         self._retry_with_fresh_url = True
                     else:
                         self.logger.error(f"Playback error: {error}")
+                elif elapsed < 3.0 and track_duration > 10:
+                    # Silent failure: ffmpeg exited without error but track didn't play
+                    # This happens when ffmpeg can't connect (403 errors go to stderr, not discord.py)
+                    self.logger.warning(
+                        f"Playback ended suspiciously fast ({elapsed:.1f}s) for {track_duration}s track - likely 403/connection failure")
+                    self._retry_with_fresh_url = True
                 if self.active_session:
                     asyncio.run_coroutine_threadsafe(self._on_track_end(), self.bot.loop)
 
@@ -1227,6 +1236,9 @@ class Music(BaseCog):
                     options=FFMPEG_OPTIONS['options']
                 )
 
+            # Capture track duration for silent failure detection
+            track_duration = track.duration
+
             def after_playing(error: Optional[Exception]) -> None:
                 """Callback invoked by discord.py when the audio source finishes or errors.
 
@@ -1235,9 +1247,13 @@ class Music(BaseCog):
 
                 If playback failed within 3 seconds, it's likely a stale URL (403 error).
                 We set a flag to retry with a fresh URL instead of advancing.
+
+                Note: ffmpeg connection failures (403 etc.) don't propagate as errors -
+                they go to stderr and ffmpeg exits cleanly. We detect these by checking
+                if a long track "completed" suspiciously fast.
                 """
+                elapsed = time.time() - self._track_started_timestamp
                 if error:
-                    elapsed = time.time() - self._track_started_timestamp
                     if elapsed < 3.0:
                         # Failed too fast - probably a stale/expired URL
                         self.logger.warning(
@@ -1245,6 +1261,12 @@ class Music(BaseCog):
                         self._retry_with_fresh_url = True
                     else:
                         self.logger.error(f"Playback error: {error}")
+                elif elapsed < 3.0 and track_duration > 10:
+                    # Silent failure: ffmpeg exited without error but track didn't play
+                    # This happens when ffmpeg can't connect (403 errors go to stderr, not discord.py)
+                    self.logger.warning(
+                        f"Playback ended suspiciously fast ({elapsed:.1f}s) for {track_duration}s track - likely 403/connection failure")
+                    self._retry_with_fresh_url = True
                 if self.active_session:
                     asyncio.run_coroutine_threadsafe(
                         self._on_track_end(),
