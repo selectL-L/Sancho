@@ -4,11 +4,13 @@ This module contains reusable UI components (Views) for Discord interactions.
 It provides standard selection menus and button interfaces used across multiple cogs.
 """
 
+import io
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Dict, List, Optional, cast
+
+import asyncio
 import discord
 from discord import ui
-import asyncio
-from dataclasses import dataclass
-from typing import Optional, Dict, Callable, Awaitable, cast
 
 
 # =============================================================================
@@ -73,40 +75,80 @@ class NowPlayingState:
     thumbnail_url: Optional[str] = None
 
 
-# Type alias for button callbacks
-NowPlayingCallback = Callable[[discord.Interaction], Awaitable[None]]
+# Type aliases for NowPlayingView callbacks
+# Action callbacks: do the action, return nothing (or new thumbnail bytes for skip)
+PlayPauseAction = Callable[[], Awaitable[None]]
+ShuffleAction = Callable[[], Awaitable[None]]
+LoopAction = Callable[[], Awaitable[None]]
+# Skip returns optional new thumbnail bytes (None = no change or unavailable)
+SkipAction = Callable[[], Awaitable[Optional[bytes]]]
+# State getter: returns fresh state given a thumbnail URL
+StateGetter = Callable[[Optional[str]], NowPlayingState]
 
 
 class NowPlayingView(ui.LayoutView):
     """Components V2 now playing widget with interactive controls.
 
     This view displays current track information with a large thumbnail,
-    progress bar, and playback control buttons.
+    progress bar, and playback control buttons. It handles its own rebuilding
+    after button interactions.
+
+    The view accepts simple action callbacks that perform the action, plus a
+    state-getter that fetches fresh state. The view handles all UI rebuild
+    logic internally, keeping the caller's code clean.
+
+    Usage:
+        view = NowPlayingView(
+            state=initial_state,
+            get_state=lambda thumb_url: cog._build_now_playing_state(thumb_url),
+            on_play_pause=cog._np_do_play_pause,
+            on_skip=cog._np_do_skip,  # Returns new thumbnail bytes
+            on_shuffle=cog._np_do_shuffle,
+            on_loop=cog._np_do_loop,
+        )
+        await ctx.send(view=view, files=files)
     """
 
     def __init__(
         self,
         state: NowPlayingState,
-        on_play_pause: Optional[NowPlayingCallback] = None,
-        on_next: Optional[NowPlayingCallback] = None,
-        on_shuffle: Optional[NowPlayingCallback] = None,
-        on_loop: Optional[NowPlayingCallback] = None,
+        get_state: StateGetter,
+        on_play_pause: Optional[PlayPauseAction] = None,
+        on_skip: Optional[SkipAction] = None,
+        on_shuffle: Optional[ShuffleAction] = None,
+        on_loop: Optional[LoopAction] = None,
         timeout: float = 300.0,
     ):
         """Initialize the now playing view.
 
         Args:
-            state: Current state of the player.
-            on_play_pause: Callback for play/pause button.
-            on_next: Callback for next track button.
-            on_shuffle: Callback for shuffle button.
-            on_loop: Callback for loop mode button.
+            state: Initial state of the player.
+            get_state: Callback to fetch fresh state. Accepts thumbnail URL,
+                returns NowPlayingState.
+            on_play_pause: Action callback for play/pause button.
+            on_skip: Action callback for skip button. Returns new thumbnail
+                bytes if track changed, None otherwise.
+            on_shuffle: Action callback for shuffle button.
+            on_loop: Action callback for loop mode toggle.
             timeout: View timeout in seconds.
         """
         super().__init__(timeout=timeout)
         self.state = state
+        self._get_state = get_state
+        self._on_play_pause = on_play_pause
+        self._on_skip = on_skip
+        self._on_shuffle = on_shuffle
+        self._on_loop = on_loop
+        self._thumbnail_url = state.thumbnail_url
 
-        # Build the view
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        """Build or rebuild the UI from current state."""
+        # Clear existing items
+        self.clear_items()
+
+        state = self.state
         container = ui.Container(accent_colour=discord.Colour.purple())
 
         # Thumbnail
@@ -152,22 +194,18 @@ class NowPlayingView(ui.LayoutView):
             play_emoji = "▶️" if not state.in_voice else "⏸️"
 
         play_pause_btn = ui.Button(style=discord.ButtonStyle.primary, emoji=play_emoji, custom_id="np_playpause")
-        next_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="⏭️", custom_id="np_next")
+        skip_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="⏭️", custom_id="np_skip")
         shuffle_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="🔀", custom_id="np_shuffle")
         loop_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="🔁", custom_id="np_loop")
 
-        # Assign callbacks (type: ignore for discord.py dynamic callback signature)
-        if on_play_pause:
-            play_pause_btn.callback = on_play_pause  # type: ignore[method-assign]
-        if on_next:
-            next_btn.callback = on_next  # type: ignore[method-assign]
-        if on_shuffle:
-            shuffle_btn.callback = on_shuffle  # type: ignore[method-assign]
-        if on_loop:
-            loop_btn.callback = on_loop  # type: ignore[method-assign]
+        # Bind callbacks to view methods
+        play_pause_btn.callback = self._handle_play_pause  # type: ignore[method-assign]
+        skip_btn.callback = self._handle_skip  # type: ignore[method-assign]
+        shuffle_btn.callback = self._handle_shuffle  # type: ignore[method-assign]
+        loop_btn.callback = self._handle_loop  # type: ignore[method-assign]
 
         action_row.add_item(play_pause_btn)
-        action_row.add_item(next_btn)
+        action_row.add_item(skip_btn)
         action_row.add_item(shuffle_btn)
         action_row.add_item(loop_btn)
 
@@ -181,6 +219,60 @@ class NowPlayingView(ui.LayoutView):
         container.add_item(ui.TextDisplay(footer))
 
         self.add_item(container)
+
+    async def _refresh_and_edit(self, interaction: discord.Interaction, new_files: Optional[List[discord.File]] = None) -> None:
+        """Refresh state, rebuild UI, and edit the message.
+
+        Args:
+            interaction: The button interaction.
+            new_files: Optional new attachments (e.g., new thumbnail).
+        """
+        self.state = self._get_state(self._thumbnail_url)
+        self._build_ui()
+
+        if new_files:
+            await interaction.edit_original_response(view=self, attachments=new_files)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    async def _handle_play_pause(self, interaction: discord.Interaction) -> None:
+        """Handle play/pause button click."""
+        if self._on_play_pause:
+            await self._on_play_pause()
+        await self._refresh_and_edit(interaction)
+
+    async def _handle_skip(self, interaction: discord.Interaction) -> None:
+        """Handle skip button click."""
+        if not self._on_skip:
+            await interaction.response.send_message("Skip not available.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        new_thumbnail_bytes = await self._on_skip()
+
+        # Update thumbnail if new one provided
+        new_files: List[discord.File] = []
+        if new_thumbnail_bytes:
+            new_files.append(discord.File(io.BytesIO(new_thumbnail_bytes), filename="thumbnail.jpg"))
+            self._thumbnail_url = "attachment://thumbnail.jpg"
+
+        self.state = self._get_state(self._thumbnail_url)
+        self._build_ui()
+        await interaction.edit_original_response(view=self, attachments=new_files)
+
+    async def _handle_shuffle(self, interaction: discord.Interaction) -> None:
+        """Handle shuffle button click."""
+        if self._on_shuffle:
+            await self._on_shuffle()
+            await interaction.response.send_message("🔀 Playlist shuffled!", ephemeral=True)
+        else:
+            await interaction.response.send_message("Shuffle not available.", ephemeral=True)
+
+    async def _handle_loop(self, interaction: discord.Interaction) -> None:
+        """Handle loop button click."""
+        if self._on_loop:
+            await self._on_loop()
+        await self._refresh_and_edit(interaction)
 
 
 # =============================================================================
