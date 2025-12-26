@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast, Tuple
 from urllib.parse import quote_plus
 
 import discord
@@ -285,6 +285,112 @@ class ActiveSession:
     voice_client: discord.VoiceClient
     started_at: float = field(default_factory=time.time)
     waiting_for_users: bool = False
+
+
+@dataclass
+class PlaybackState:
+    """Mutable state for track playback within a session.
+
+    Groups variables that track what's currently playing, timing info,
+    and pause state. Reset when session ends.
+    """
+    current_audio_url: Optional[str] = None  # Cached audio URL for current track
+    current_audio_track_url: Optional[str] = None  # YouTube URL this audio URL is for
+    track_started_timestamp: float = 0.0  # When FFmpeg started (for failure detection)
+    paused_at_position: Optional[float] = None  # Seek position when paused, None if not paused
+
+    def clear(self) -> None:
+        """Reset all playback state."""
+        self.current_audio_url = None
+        self.current_audio_track_url = None
+        self.track_started_timestamp = 0.0
+        self.paused_at_position = None
+
+
+@dataclass
+class PrefetchState:
+    """State for pre-buffering the next track's audio URL.
+
+    Enables smoother transitions by fetching the next track's URL
+    while the current track is still playing.
+    """
+    url: Optional[str] = None  # Pre-fetched audio URL
+    track_url: Optional[str] = None  # YouTube URL this prefetch is for
+    task: Optional[asyncio.Task[None]] = None  # Background prefetch task
+
+    def clear(self) -> None:
+        """Reset prefetch state (does not cancel task)."""
+        self.url = None
+        self.track_url = None
+        # Note: caller should cancel task if needed before calling clear()
+
+    def cancel_task(self) -> None:
+        """Cancel prefetch task if running."""
+        if self.task and not self.task.done():
+            self.task.cancel()
+        self.task = None
+
+
+@dataclass
+class RetryState:
+    """Tracks retry attempts for stale URL recovery.
+
+    When FFmpeg fails quickly (<3s), it's likely due to an expired URL.
+    We retry once with a fresh URL before giving up on the track.
+    """
+    pending: bool = False  # True if retry was requested
+    count: int = 0  # Number of retries attempted for current track
+
+    def request_retry(self) -> None:
+        """Signal that a retry should be attempted."""
+        self.pending = True
+
+    def consume_retry(self) -> bool:
+        """Consume retry request, returns True if this is the first retry.
+
+        Returns:
+            True if retry should proceed (first attempt), False if exhausted.
+        """
+        if not self.pending:
+            return False
+        self.pending = False
+        self.count += 1
+        return self.count <= 1  # Allow only 1 retry
+
+    def reset(self) -> None:
+        """Reset for a new track."""
+        self.pending = False
+        self.count = 0
+
+
+@dataclass
+class AmbienceState:
+    """Tracks playlist changes requested by the ambience system.
+
+    The ambience system runs independently and signals playlist changes
+    via callbacks. These are queued here for the main loop to handle.
+    """
+    current_playlist_url: Optional[str] = None  # Currently active playlist
+    pending_playlist_url: Optional[str] = None  # Requested new playlist
+    pending_switch: bool = False  # True if a switch is pending
+
+    def request_switch(self, playlist_url: Optional[str]) -> None:
+        """Queue a playlist switch request."""
+        self.pending_playlist_url = playlist_url
+        self.pending_switch = True
+
+    def consume_switch(self) -> Tuple[bool, Optional[str]]:
+        """Consume pending switch, returns (had_switch, new_url)."""
+        if not self.pending_switch:
+            return False, None
+        self.pending_switch = False
+        url = self.pending_playlist_url
+        self.pending_playlist_url = None
+        return True, url
+
+    def confirm_switch(self, playlist_url: Optional[str]) -> None:
+        """Confirm that a switch has completed."""
+        self.current_playlist_url = playlist_url
 
 
 # ==========================================================================
@@ -728,26 +834,14 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         return None, False, thumbnail_url, needs_crop
 
     except Exception as e:
-        error_str = str(e).lower()
-        # Check for unavailability indicators in the error message
-        unavailable_indicators = [
-            'video unavailable', 'this video is unavailable',
-            'video is private', 'private video',
-            'video has been removed', 'been removed',
-            'this video is no longer available',
-            'sign in to confirm your age',  # Age-restricted without workaround
-            'join this channel to get access',  # Members-only
-            'this video requires payment',  # Paid content
-            'copyright claim', 'blocked',
-        ]
-        is_unavailable = any(indicator in error_str for indicator in unavailable_indicators)
+        unavailable = is_video_unavailable(e)
 
-        if is_unavailable:
+        if unavailable:
             logger.warning(f"Video unavailable (will be removed): {track.title} - {e}")
         else:
             logger.error(f"Error getting audio URL for {track.title}: {e}")
 
-        return None, is_unavailable, None, False
+        return None, unavailable, None, False
 
 
 async def _probe_thumbnail_dimensions(url: str, logger: Any) -> Optional[tuple[int, int]]:
@@ -1312,19 +1406,8 @@ async def fetch_url_info(
         return tracks, None, None
 
     except Exception as e:
-        error_str = str(e).lower()
-        # User-friendly error messages
-        if 'video unavailable' in error_str or 'unavailable' in error_str:
-            return [], "This video is unavailable. It may be private, deleted, or region-locked.", None
-        elif 'private video' in error_str:
-            return [], "This video is private.", None
-        elif 'sign in' in error_str:
-            return [], "This video is age-restricted and cannot be played.", None
-        elif 'copyright' in error_str or 'blocked' in error_str:
-            return [], "This video is blocked due to copyright.", None
-        else:
-            logger.error(f"Error fetching URL info: {e}", exc_info=True)
-            return [], f"Could not access that URL: {e}", None
+        logger.error(f"Error fetching URL info: {e}", exc_info=True)
+        return [], format_youtube_error(e), None
 
 
 def extract_video_id(url: str) -> Optional[str]:
@@ -1656,7 +1739,6 @@ async def download_track_as_mp3(
         )
 
     except Exception as e:
-        error_str = str(e).lower()
         logger.error(f"[Download] Error: {e}", exc_info=True)
 
         # Cleanup any temp files
@@ -1667,17 +1749,7 @@ async def download_track_as_mp3(
                 except Exception:
                     pass
 
-        # User-friendly error messages
-        if 'video unavailable' in error_str or 'unavailable' in error_str:
-            return DownloadResult(success=False, error_message="Video is unavailable.")
-        elif 'private video' in error_str:
-            return DownloadResult(success=False, error_message="Video is private.")
-        elif 'sign in' in error_str:
-            return DownloadResult(success=False, error_message="Video is age-restricted.")
-        elif 'copyright' in error_str or 'blocked' in error_str:
-            return DownloadResult(success=False, error_message="Video is blocked due to copyright.")
-        else:
-            return DownloadResult(success=False, error_message=str(e))
+        return DownloadResult(success=False, error_message=format_youtube_error(e))
 
 
 async def _embed_thumbnail_in_mp3(
@@ -1781,592 +1853,61 @@ async def get_track_info_for_download(url: str, logger: Any) -> Optional[Dict[st
 
 
 # ==========================================================================
-# LOCAL MUSIC CACHE SYSTEM
+# YOUTUBE ERROR HANDLING
 # ==========================================================================
-# Maps playlist URLs to local folders containing cached MP3 files.
-# Structure:
-#   cache/music/library/
-#     manifest.json          - Index of all cached playlists
-#     <playlist_id>/         - Folder per playlist (hash of URL)
-#       <artist> - <title>.mp3
-#       ...
 
 
-@dataclass
-class CachedPlaylist:
-    """Represents a cached playlist in the local library."""
-    playlist_url: str
-    folder_name: str  # Hash-based folder name
-    display_name: str  # Human-readable name (from YouTube)
-    track_count: int
-    cached_count: int  # How many tracks are actually downloaded
-    last_updated: float  # Unix timestamp
-    tracks: List[Dict[str, Any]]  # Track metadata with local_path
+# Indicators that a video is permanently unavailable and should be removed
+UNAVAILABLE_INDICATORS = [
+    'video unavailable', 'this video is unavailable',
+    'video is private', 'private video',
+    'video has been removed', 'been removed',
+    'this video is no longer available',
+    'sign in to confirm your age',  # Age-restricted without workaround
+    'join this channel to get access',  # Members-only
+    'this video requires payment',  # Paid content
+    'copyright claim', 'blocked',
+]
 
 
-class LocalMusicCache:
-    """Manages the local cache of downloaded music for ambient playlists.
+def is_video_unavailable(error: Exception) -> bool:
+    """Checks if an error indicates a video is permanently unavailable.
 
-    The cache maps playlist URLs to local folders. Each unique playlist URL
-    gets a deterministic folder name (hash of URL), so the same playlist
-    referenced multiple times in ambience.toml only needs to be downloaded once.
+    Args:
+        error: The exception to check.
 
-    Manifest structure (manifest.json):
-        {
-            "version": 1,
-            "playlists": {
-                "<folder_name>": {
-                    "playlist_url": "...",
-                    "display_name": "...",
-                    "track_count": N,
-                    "cached_count": N,
-                    "last_updated": timestamp,
-                    "tracks": [...]
-                }
-            }
-        }
+    Returns:
+        True if the video is permanently unavailable (should be removed).
     """
-
-    MANIFEST_VERSION = 1
-
-    def __init__(self, base_path: str, logger: Any):
-        """Initialize the local music cache.
-
-        Args:
-            base_path: Base path for music cache (config.MUSIC_CACHE_PATH).
-            logger: Logger instance for messages.
-        """
-        self.library_path = os.path.join(base_path, 'library')
-        self.manifest_path = os.path.join(self.library_path, 'manifest.json')
-        self.logger = logger
-        self._manifest: Optional[Dict[str, Any]] = None
-
-    def _ensure_library_exists(self) -> None:
-        """Creates the library directory if it doesn't exist."""
-        os.makedirs(self.library_path, exist_ok=True)
-
-    def _load_manifest(self) -> Dict[str, Any]:
-        """Loads or creates the manifest file."""
-        if self._manifest is not None:
-            return self._manifest
-
-        self._ensure_library_exists()
-
-        if os.path.exists(self.manifest_path):
-            try:
-                with open(self.manifest_path, 'r', encoding='utf-8') as f:
-                    self._manifest = json_module.load(f)
-                    # Version migration could happen here
-                    if self._manifest is not None:
-                        return self._manifest
-            except (json_module.JSONDecodeError, IOError) as e:
-                self.logger.warning(f"[Cache] Manifest corrupted, recreating: {e}")
-
-        # Create empty manifest
-        self._manifest = {
-            'version': self.MANIFEST_VERSION,
-            'playlists': {}
-        }
-        return self._manifest
-
-    def _save_manifest(self) -> None:
-        """Saves the manifest to disk."""
-        self._ensure_library_exists()
-        try:
-            with open(self.manifest_path, 'w', encoding='utf-8') as f:
-                json_module.dump(self._manifest, f, indent=2, ensure_ascii=False)
-        except IOError as e:
-            self.logger.error(f"[Cache] Failed to save manifest: {e}")
-
-    @staticmethod
-    def _url_to_folder_name(playlist_url: str) -> str:
-        """Generates a deterministic folder name from a playlist URL.
-
-        Uses MD5 hash truncated to 12 chars for brevity while maintaining
-        uniqueness for practical purposes. Note: MD5 is used for deterministic
-        naming, not for security purposes.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-
-        Returns:
-            A 12-character hex string folder name.
-        """
-        return hashlib.md5(playlist_url.encode()).hexdigest()[:12]  # noqa: S324
-
-    def get_playlist_folder(self, playlist_url: str) -> str:
-        """Gets the folder path for a playlist (creates if needed).
-
-        Args:
-            playlist_url: YouTube playlist URL.
-
-        Returns:
-            Absolute path to the playlist's cache folder.
-        """
-        folder_name = self._url_to_folder_name(playlist_url)
-        folder_path = os.path.join(self.library_path, folder_name)
-        os.makedirs(folder_path, exist_ok=True)
-        return folder_path
-
-    def get_cached_playlist(self, playlist_url: str) -> Optional[CachedPlaylist]:
-        """Gets cached playlist info if it exists.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-
-        Returns:
-            CachedPlaylist if found, None otherwise.
-        """
-        manifest = self._load_manifest()
-        folder_name = self._url_to_folder_name(playlist_url)
-        playlist_data = manifest.get('playlists', {}).get(folder_name)
-
-        if not playlist_data:
-            return None
-
-        return CachedPlaylist(
-            playlist_url=playlist_data['playlist_url'],
-            folder_name=folder_name,
-            display_name=playlist_data.get('display_name', 'Unknown Playlist'),
-            track_count=playlist_data.get('track_count', 0),
-            cached_count=playlist_data.get('cached_count', 0),
-            last_updated=playlist_data.get('last_updated', 0),
-            tracks=playlist_data.get('tracks', [])
-        )
-
-    def get_all_cached_playlists(self) -> List[CachedPlaylist]:
-        """Gets all cached playlists.
-
-        Returns:
-            List of CachedPlaylist objects.
-        """
-        manifest = self._load_manifest()
-        playlists = []
-
-        for folder_name, data in manifest.get('playlists', {}).items():
-            playlists.append(CachedPlaylist(
-                playlist_url=data['playlist_url'],
-                folder_name=folder_name,
-                display_name=data.get('display_name', 'Unknown Playlist'),
-                track_count=data.get('track_count', 0),
-                cached_count=data.get('cached_count', 0),
-                last_updated=data.get('last_updated', 0),
-                tracks=data.get('tracks', [])
-            ))
-
-        return playlists
-
-    def register_playlist(
-        self,
-        playlist_url: str,
-        display_name: str,
-        tracks: List[Track]
-    ) -> str:
-        """Registers a playlist in the cache (without downloading).
-
-        This creates the manifest entry and folder, but doesn't download
-        any tracks yet. Call cache_track() to download individual tracks.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-            display_name: Human-readable playlist name.
-            tracks: List of Track objects from the playlist.
-
-        Returns:
-            The folder path for this playlist's cache.
-        """
-        manifest = self._load_manifest()
-        folder_name = self._url_to_folder_name(playlist_url)
-        folder_path = self.get_playlist_folder(playlist_url)
-
-        # Build track list with local paths (not yet downloaded)
-        track_list = []
-        for track in tracks:
-            safe_name = sanitize_filename(f"{track.artist} - {track.title}", 180)
-            local_path = os.path.join(folder_path, f"{safe_name}.mp3")
-            track_data = track.to_dict()
-            track_data['local_path'] = local_path
-            track_list.append(track_data)
-
-        manifest['playlists'][folder_name] = {
-            'playlist_url': playlist_url,
-            'display_name': display_name,
-            'track_count': len(tracks),
-            'cached_count': sum(1 for t in track_list if os.path.exists(t['local_path'])),
-            'last_updated': time.time(),
-            'tracks': track_list
-        }
-
-        self._manifest = manifest
-        self._save_manifest()
-        self.logger.info(f"[Cache] Registered playlist: {display_name} ({len(tracks)} tracks)")
-
-        return folder_path
-
-    async def cache_track(
-        self,
-        track: Track,
-        playlist_url: str,
-        progress_callback: Optional[Callable[[str], Any]] = None
-    ) -> Optional[str]:
-        """Downloads and caches a single track.
-
-        Args:
-            track: The Track to download.
-            playlist_url: The playlist this track belongs to.
-            progress_callback: Optional async callback for progress updates.
-
-        Returns:
-            Local file path if successful, None on failure.
-        """
-        if not YTDLP_AVAILABLE or not MUTAGEN_AVAILABLE:
-            return None
-
-        folder_path = self.get_playlist_folder(playlist_url)
-        safe_name = sanitize_filename(f"{track.artist} - {track.title}", 180)
-        local_path = os.path.join(folder_path, f"{safe_name}.mp3")
-
-        # Already cached?
-        if os.path.exists(local_path):
-            self.logger.debug(f"[Cache] Already cached: {track.title}")
-            return local_path
-
-        if progress_callback:
-            await progress_callback(f"Downloading: {track.title}")
-
-        # Download the track
-        result = await download_track_as_mp3(
-            url=track.url,
-            output_dir=folder_path,
-            logger=self.logger,
-            custom_title=track.title,
-            custom_artist=track.artist,
-            embed_thumbnail=True
-        )
-
-        if result.success and result.file_path:
-            # Rename to our standardized name if different
-            if result.file_path != local_path:
-                try:
-                    if os.path.exists(local_path):
-                        os.remove(local_path)
-                    os.rename(result.file_path, local_path)
-                except OSError as e:
-                    self.logger.warning(f"[Cache] Could not rename file: {e}")
-                    local_path = result.file_path
-
-            # Update manifest with cached count
-            self._update_cached_count(playlist_url)
-
-            self.logger.info(f"[Cache] Cached: {track.title}")
-            return local_path
-
-        self.logger.warning(f"[Cache] Failed to cache: {track.title} - {result.error_message}")
-        return None
-
-    async def cache_playlist(
-        self,
-        playlist_url: str,
-        tracks: List[Track],
-        display_name: str,
-        progress_callback: Optional[Callable[[str, int, int], Any]] = None,
-        max_tracks: Optional[int] = None
-    ) -> int:
-        """Downloads and caches an entire playlist.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-            tracks: List of tracks to cache.
-            display_name: Human-readable playlist name.
-            progress_callback: Optional async callback(status, current, total).
-            max_tracks: Maximum tracks to download (None = all).
-
-        Returns:
-            Number of tracks successfully cached.
-        """
-        # Register the playlist first
-        self.register_playlist(playlist_url, display_name, tracks)
-
-        tracks_to_cache = tracks[:max_tracks] if max_tracks else tracks
-        cached_count = 0
-
-        for i, track in enumerate(tracks_to_cache):
-            if progress_callback:
-                await progress_callback(
-                    f"Caching: {track.title[:40]}...",
-                    i + 1,
-                    len(tracks_to_cache)
-                )
-
-            result = await self.cache_track(track, playlist_url)
-            if result:
-                track.local_path = result
-                cached_count += 1
-
-            # Small delay to avoid rate limiting
-            await asyncio.sleep(0.5)
-
-        self.logger.info(f"[Cache] Playlist cached: {cached_count}/{len(tracks_to_cache)} tracks")
-        return cached_count
-
-    def _update_cached_count(self, playlist_url: str) -> None:
-        """Updates the cached_count for a playlist in the manifest."""
-        manifest = self._load_manifest()
-        folder_name = self._url_to_folder_name(playlist_url)
-        playlist_data = manifest.get('playlists', {}).get(folder_name)
-
-        if playlist_data:
-            # Count actual files
-            folder_path = os.path.join(self.library_path, folder_name)
-            if os.path.exists(folder_path):
-                mp3_count = len([f for f in os.listdir(folder_path) if f.endswith('.mp3')])
-                playlist_data['cached_count'] = mp3_count
-                playlist_data['last_updated'] = time.time()
-                self._save_manifest()
-
-    def get_local_track(self, track: Track, playlist_url: str) -> Optional[str]:
-        """Gets the local path for a track if it's cached.
-
-        Args:
-            track: The track to look up.
-            playlist_url: The playlist this track belongs to.
-
-        Returns:
-            Local file path if cached and exists, None otherwise.
-        """
-        folder_path = self.get_playlist_folder(playlist_url)
-        safe_name = sanitize_filename(f"{track.artist} - {track.title}", 180)
-        local_path = os.path.join(folder_path, f"{safe_name}.mp3")
-
-        if os.path.exists(local_path):
-            return local_path
-        return None
-
-    def load_tracks_with_cache(self, playlist_url: str) -> List[Track]:
-        """Loads tracks from cache manifest with local_path set.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-
-        Returns:
-            List of Track objects with local_path populated if cached.
-        """
-        cached = self.get_cached_playlist(playlist_url)
-        if not cached:
-            return []
-
-        tracks = []
-        for track_data in cached.tracks:
-            track = Track.from_dict(track_data)
-            # Verify the file actually exists
-            if track.local_path and os.path.exists(track.local_path):
-                pass  # Keep local_path
-            else:
-                track.local_path = None  # File missing
-            tracks.append(track)
-
-        return tracks
-
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Gets statistics about the cache.
-
-        Returns:
-            Dict with total_playlists, total_tracks, cached_tracks, size_mb.
-        """
-        manifest = self._load_manifest()
-        playlists = manifest.get('playlists', {})
-
-        total_tracks = 0
-        cached_tracks = 0
-        total_size = 0
-
-        for folder_name, data in playlists.items():
-            total_tracks += data.get('track_count', 0)
-            folder_path = os.path.join(self.library_path, folder_name)
-            if os.path.exists(folder_path):
-                for f in os.listdir(folder_path):
-                    if f.endswith('.mp3'):
-                        cached_tracks += 1
-                        total_size += os.path.getsize(os.path.join(folder_path, f))
-
-        return {
-            'total_playlists': len(playlists),
-            'total_tracks': total_tracks,
-            'cached_tracks': cached_tracks,
-            'size_mb': total_size / (1024 * 1024)
-        }
-
-    def clear_playlist_cache(self, playlist_url: str) -> bool:
-        """Removes a playlist from the cache.
-
-        Args:
-            playlist_url: YouTube playlist URL to remove.
-
-        Returns:
-            True if removed, False if not found.
-        """
-        import shutil as shutil_mod
-
-        manifest = self._load_manifest()
-        folder_name = self._url_to_folder_name(playlist_url)
-
-        if folder_name not in manifest.get('playlists', {}):
-            return False
-
-        # Remove folder
-        folder_path = os.path.join(self.library_path, folder_name)
-        if os.path.exists(folder_path):
-            shutil_mod.rmtree(folder_path)
-
-        # Remove from manifest
-        del manifest['playlists'][folder_name]
-        self._manifest = manifest
-        self._save_manifest()
-
-        self.logger.info(f"[Cache] Cleared playlist cache: {folder_name}")
-        return True
-
-    def clear_all_cache(self) -> int:
-        """Removes all cached playlists.
-
-        Returns:
-            Number of playlists removed.
-        """
-        import shutil as shutil_mod
-
-        manifest = self._load_manifest()
-        count = len(manifest.get('playlists', {}))
-
-        # Remove all playlist folders
-        for folder_name in list(manifest.get('playlists', {}).keys()):
-            folder_path = os.path.join(self.library_path, folder_name)
-            if os.path.exists(folder_path):
-                shutil_mod.rmtree(folder_path)
-
-        # Reset manifest
-        self._manifest = {
-            'version': self.MANIFEST_VERSION,
-            'playlists': {}
-        }
-        self._save_manifest()
-
-        self.logger.info(f"[Cache] Cleared all cache: {count} playlists")
-        return count
-
-    def needs_refresh(self, playlist_url: str, max_age_hours: float = 24.0) -> bool:
-        """Checks if a cached playlist's metadata needs refreshing.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-            max_age_hours: Maximum age in hours before refresh is needed.
-
-        Returns:
-            True if playlist is not cached or is older than max_age_hours.
-        """
-        cached = self.get_cached_playlist(playlist_url)
-        if not cached:
-            return True
-
-        age_seconds = time.time() - cached.last_updated
-        max_age_seconds = max_age_hours * 3600
-        return age_seconds > max_age_seconds
-
-    def refresh_playlist_metadata(
-        self,
-        playlist_url: str,
-        tracks: List[Track],
-        display_name: Optional[str] = None
-    ) -> int:
-        """Refreshes playlist metadata while preserving existing cached files.
-
-        This updates the track list from fresh YouTube data while keeping
-        local_path mappings for any files that still exist on disk.
-
-        Args:
-            playlist_url: YouTube playlist URL.
-            tracks: Fresh list of tracks from YouTube.
-            display_name: Optional new display name.
-
-        Returns:
-            Number of tracks that have local files cached.
-        """
-        manifest = self._load_manifest()
-        folder_name = self._url_to_folder_name(playlist_url)
-        folder_path = os.path.join(self.library_path, folder_name)
-
-        # Get existing cached file paths for matching
-        existing_files: Dict[str, str] = {}
-        if os.path.exists(folder_path):
-            for filename in os.listdir(folder_path):
-                if filename.endswith('.mp3'):
-                    existing_files[filename] = os.path.join(folder_path, filename)
-
-        # Get existing display name if not provided
-        if not display_name:
-            existing_data = manifest.get('playlists', {}).get(folder_name)
-            if existing_data:
-                display_name = existing_data.get('display_name', 'Unknown Playlist')
-            else:
-                display_name = 'Unknown Playlist'
-
-        # Ensure folder exists
-        os.makedirs(folder_path, exist_ok=True)
-
-        # Build new track list with preserved local_path mappings
-        track_list = []
-        cached_count = 0
-        for track in tracks:
-            track_data = track.to_dict()
-
-            # Match by expected filename
-            safe_name = sanitize_filename(f"{track.artist} - {track.title}", 180)
-            expected_filename = f"{safe_name}.mp3"
-
-            if expected_filename in existing_files:
-                local_path = existing_files[expected_filename]
-                track_data['local_path'] = local_path
-                cached_count += 1
-            else:
-                track_data['local_path'] = os.path.join(folder_path, expected_filename)
-
-            track_list.append(track_data)
-
-        manifest['playlists'][folder_name] = {
-            'playlist_url': playlist_url,
-            'display_name': display_name,
-            'track_count': len(tracks),
-            'cached_count': cached_count,
-            'last_updated': time.time(),
-            'tracks': track_list
-        }
-
-        self._manifest = manifest
-        self._save_manifest()
-        self.logger.info(
-            f"[Cache] Refreshed playlist metadata: {display_name} "
-            f"({len(tracks)} tracks, {cached_count} cached)"
-        )
-
-        return cached_count
-
-    def get_stale_playlists(self, max_age_hours: float = 24.0) -> List[CachedPlaylist]:
-        """Gets all playlists that need metadata refresh.
-
-        Args:
-            max_age_hours: Maximum age in hours before considered stale.
-
-        Returns:
-            List of CachedPlaylist objects that need refresh.
-        """
-        stale = []
-        for cached in self.get_all_cached_playlists():
-            if self.needs_refresh(cached.playlist_url, max_age_hours):
-                stale.append(cached)
-        return stale
+    error_str = str(error).lower()
+    return any(indicator in error_str for indicator in UNAVAILABLE_INDICATORS)
+
+
+def format_youtube_error(error: Exception) -> str:
+    """Formats a YouTube error into a user-friendly message.
+
+    Args:
+        error: The exception to format.
+
+    Returns:
+        A user-friendly error message string.
+    """
+    error_str = str(error).lower()
+
+    if 'video unavailable' in error_str or 'unavailable' in error_str:
+        return "This video is unavailable. It may be private, deleted, or region-locked."
+    elif 'private video' in error_str:
+        return "This video is private."
+    elif 'sign in' in error_str:
+        return "This video is age-restricted and cannot be played."
+    elif 'copyright' in error_str or 'blocked' in error_str:
+        return "This video is blocked due to copyright."
+    else:
+        return f"Could not access that URL: {error}"
 
 
 # ==========================================================================
-# NEW MUSIC CACHE MANAGER (v2)
+# MUSIC CACHE MANAGER
 # ==========================================================================
 # Proactive caching system that:
 # - Refreshes ALL playlists from ambience.toml on startup and every 24 hours
@@ -2941,12 +2482,18 @@ class MusicCacheManager:
             new_locations = []
 
             for folder_hash in locations:
+                file_path = os.path.join(self.playlists_path, folder_hash, f"{video_id}.mp3")
+
+                # Skip if file doesn't actually exist on disk
+                if not os.path.exists(file_path):
+                    self.logger.debug(f"[CacheManager] File missing from manifest: {video_id} in {folder_hash}")
+                    continue
+
                 if video_id in current_video_ids and folder_hash in current_video_ids[video_id]:
                     # Still in this playlist
                     new_locations.append(folder_hash)
                 else:
                     # Removed from this playlist
-                    file_path = os.path.join(self.playlists_path, folder_hash, f"{video_id}.mp3")
                     if video_id in current_video_ids:
                         # Still in another playlist - just delete this copy
                         files_to_delete.append(file_path)

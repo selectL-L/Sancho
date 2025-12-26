@@ -44,3 +44,5 @@ PyNaCl
 # Testing dependencies (tests are included but these libraries are not required for normal operation).
 pytest
 pytest-asyncio
+pytest-mock
+pytest-cov
