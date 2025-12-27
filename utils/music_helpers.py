@@ -8,6 +8,8 @@ This module contains:
 - Text utilities (chunk_text)
 - yt-dlp wrapper functions for audio extraction and search
 - MP3 download with full metadata embedding
+- YouTube authentication (cookies/OAuth2) for 403 avoidance
+- 403 error tracking and alerting
 """
 
 from typing import Set
@@ -22,7 +24,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast, Tuple
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, cast, Tuple
 from urllib.parse import quote_plus
 
 import discord
@@ -81,6 +83,315 @@ YTDLP_OPTIONS = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
+
+
+# ==========================================================================
+# YOUTUBE AUTHENTICATION
+# ==========================================================================
+# Helps avoid 403 Forbidden errors on datacenter IPs.
+#
+# Priority: PO Token Plugin (auto) > Cookies (manual fallback)
+#
+# Setup options:
+# 1. PO Token Plugin (recommended): Install bgutil-ytdlp-pot-provider
+#    - Requires Node.js (>=18) on server for token generation
+#    - Fully automatic, no manual work needed
+# 2. Cookies (fallback): Export from browser using "Get cookies.txt" extension,
+#    upload via /ytauth command or place as youtube_cookies.txt in APP_PATH
+#
+# Note: OAuth2 is DEAD as of late 2024 - YouTube no longer supports it.
+
+
+def _check_pot_plugin_installed() -> bool:
+    """Check if the bgutil PO token plugin is installed via pip."""
+    try:
+        # Check via pip metadata (works for yt-dlp plugins that register via entry points)
+        from importlib.metadata import distributions
+        for dist in distributions():
+            if dist.metadata.get('Name', '').lower() == 'bgutil-ytdlp-pot-provider':
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _check_pot_server_running(port: int = 4416) -> bool:
+    """Check if the POT HTTP server is responding.
+
+    Args:
+        port: The port to check (default 4416).
+
+    Returns:
+        True if server is responding, False otherwise.
+    """
+    import socket
+    try:
+        # Quick TCP check first
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            result = s.connect_ex(('127.0.0.1', port))
+            return result == 0
+    except Exception:
+        return False
+
+
+def _check_pot_provider_script() -> bool:
+    """Check if the POT provider script exists (for setup detection)."""
+    import config
+    pot_script = getattr(config, 'POT_PROVIDER_PATH', None)
+    return pot_script is not None and os.path.isfile(pot_script)
+
+
+def _check_node_available() -> bool:
+    """Check if Node.js is available in PATH."""
+    return shutil.which('node') is not None
+
+
+def _check_pot_system_functional() -> Tuple[bool, Optional[str]]:
+    """Check if the PO token system can work.
+
+    Checks for: pip plugin installed, Node.js available, provider script exists,
+    and HTTP server responding.
+
+    Returns:
+        Tuple of (is_functional, error_message or status).
+    """
+    import config
+    pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+
+    # Check if server is already running (best case)
+    if _check_pot_server_running(pot_port):
+        return True, None
+
+    # Server not running - diagnose why
+    if not _check_pot_plugin_installed():
+        return False, "pip plugin not installed"
+
+    if not _check_node_available():
+        return False, "Node.js not found"
+
+    if not _check_pot_provider_script():
+        return False, "Provider script not built"
+
+    # Everything looks set up but server isn't running
+    return False, "Server not running (will start with bot)"
+
+
+class YouTubeAuthStatus:
+    """Tracks YouTube authentication state and 403 error rates."""
+
+    def __init__(self) -> None:
+        self.auth_method: Optional[str] = None  # 'pot_server', 'cookies', or None
+        self.auth_path: Optional[str] = None  # Path to cookie file if using cookies
+        self.po_token: Optional[str] = None  # Manual PO token (legacy, rarely needed)
+        self.cache_dir: Optional[str] = None  # yt-dlp cache directory
+        self.pot_plugin_installed: bool = False  # bgutil pip plugin installed?
+        self.pot_server_running: bool = False  # POT HTTP server responding?
+        self.pot_provider_ready: bool = False  # Script built and ready?
+        self.pot_plugin_error: Optional[str] = None  # Why plugin isn't working
+        self.last_check: float = 0.0  # Timestamp of last auth file check
+        self.check_interval: float = 300.0  # Re-check auth files every 5 minutes
+
+        # 403 tracking for alerting
+        self._403_timestamps: List[float] = []  # Recent 403 occurrences
+        self._403_window: float = 300.0  # 5-minute sliding window
+        self._403_threshold: int = 5  # Alert after 5 failures in window
+        self._last_alert: float = 0.0  # Prevent alert spam
+        self._alert_cooldown: float = 600.0  # 10 minutes between alerts
+
+    def record_403(self) -> bool:
+        """Records a 403 error and returns True if alert threshold reached.
+
+        Returns:
+            True if the 403 rate exceeds threshold and alert should be sent.
+        """
+        now = time.time()
+        self._403_timestamps.append(now)
+
+        # Prune old timestamps outside window
+        cutoff = now - self._403_window
+        self._403_timestamps = [t for t in self._403_timestamps if t > cutoff]
+
+        # Check if we should alert
+        if len(self._403_timestamps) >= self._403_threshold:
+            if now - self._last_alert > self._alert_cooldown:
+                self._last_alert = now
+                return True
+        return False
+
+    def get_403_rate(self) -> tuple[int, float]:
+        """Returns (count, window_seconds) of recent 403 errors."""
+        now = time.time()
+        cutoff = now - self._403_window
+        self._403_timestamps = [t for t in self._403_timestamps if t > cutoff]
+        return len(self._403_timestamps), self._403_window
+
+    def reset_403_tracking(self) -> None:
+        """Clears 403 history (e.g., after auth refresh)."""
+        self._403_timestamps.clear()
+
+
+# Global auth status tracker
+_youtube_auth = YouTubeAuthStatus()
+
+
+def get_youtube_auth_status() -> YouTubeAuthStatus:
+    """Returns the global YouTube auth status tracker."""
+    return _youtube_auth
+
+
+def _detect_youtube_auth() -> Dict[str, Any]:
+    """Detects available YouTube authentication and returns yt-dlp options.
+
+    Checks for PO token HTTP server first (auto-generates tokens), then cookie file.
+    Results are cached for 5 minutes to avoid excessive filesystem access.
+
+    Priority: PO Token Server > Cookies > No auth
+
+    Returns:
+        Dict of yt-dlp options to merge with YTDLP_OPTIONS.
+    """
+    # Import here to avoid circular dependency
+    import config
+
+    now = time.time()
+    pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+
+    # Get ytdlp cache directory and ensure it exists
+    ytdlp_cache = getattr(config, 'YTDLP_CACHE_PATH', None)
+    if ytdlp_cache:
+        os.makedirs(ytdlp_cache, exist_ok=True)
+        _youtube_auth.cache_dir = ytdlp_cache
+
+    # Always check POT system status (quick checks)
+    _youtube_auth.pot_plugin_installed = _check_pot_plugin_installed()
+    _youtube_auth.pot_server_running = _check_pot_server_running(pot_port)
+    _youtube_auth.pot_provider_ready = _check_pot_provider_script()
+
+    # Determine POT system error message
+    if _youtube_auth.pot_server_running:
+        _youtube_auth.pot_plugin_error = None  # Working!
+    elif not _youtube_auth.pot_plugin_installed:
+        _youtube_auth.pot_plugin_error = "pip plugin not installed"
+    elif not _check_node_available():
+        _youtube_auth.pot_plugin_error = "Node.js not found"
+    elif not _youtube_auth.pot_provider_ready:
+        _youtube_auth.pot_plugin_error = "Provider script not built"
+    else:
+        _youtube_auth.pot_plugin_error = "Server not running"
+
+    # Use cached result if recent enough (for cookie file checks)
+    if now - _youtube_auth.last_check < _youtube_auth.check_interval and _youtube_auth.auth_method is not None:
+        opts: Dict[str, Any] = {}
+        if ytdlp_cache:
+            opts['cachedir'] = ytdlp_cache
+        if _youtube_auth.auth_method == 'pot_server':
+            # Server handles everything automatically
+            return opts
+        elif _youtube_auth.auth_method == 'cookies' and _youtube_auth.auth_path:
+            opts['cookiefile'] = _youtube_auth.auth_path
+            if _youtube_auth.po_token:
+                opts['extractor_args'] = {'youtube': {'po_token': [f'web+{_youtube_auth.po_token}']}}
+            return opts
+        return opts if ytdlp_cache else {}
+
+    _youtube_auth.last_check = now
+    auth_opts: Dict[str, Any] = {}
+
+    # Always set cache directory if configured
+    if ytdlp_cache:
+        auth_opts['cachedir'] = ytdlp_cache
+
+    # Check for manual PO token file (legacy, used with cookies)
+    po_token_path = getattr(config, 'YOUTUBE_PO_TOKEN_PATH', None)
+    if po_token_path and os.path.isfile(po_token_path):
+        try:
+            with open(po_token_path, 'r', encoding='utf-8') as f:
+                po_token = f.read().strip()
+                if po_token:
+                    _youtube_auth.po_token = po_token
+                    logging.getLogger('music_helpers').debug(f"YouTube auth: Loaded manual PO token from {po_token_path}")
+        except Exception as e:
+            logging.getLogger('music_helpers').warning(f"Failed to read PO token: {e}")
+            _youtube_auth.po_token = None
+    else:
+        _youtube_auth.po_token = None
+
+    # Priority 1: PO Token Server (if running)
+    # The server auto-generates tokens - no extra yt-dlp options needed, plugin connects automatically
+    if _youtube_auth.pot_server_running:
+        _youtube_auth.auth_method = 'pot_server'
+        _youtube_auth.auth_path = None
+        logging.getLogger('music_helpers').debug("YouTube auth: Using PO token server (auto-generation)")
+        return auth_opts
+
+    # Priority 2: Cookie file (fallback)
+    cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
+    if cookie_path and os.path.isfile(cookie_path):
+        _youtube_auth.auth_method = 'cookies'
+        _youtube_auth.auth_path = cookie_path
+        auth_opts['cookiefile'] = cookie_path
+        # Add manual PO token if available (helps with datacenter IPs)
+        if _youtube_auth.po_token:
+            auth_opts['extractor_args'] = {'youtube': {'po_token': [f'web+{_youtube_auth.po_token}']}}
+            logging.getLogger('music_helpers').debug("YouTube auth: Using cookies + manual PO token")
+        else:
+            logging.getLogger('music_helpers').debug(f"YouTube auth: Using cookies from {cookie_path}")
+        return auth_opts
+
+    # No auth available
+    _youtube_auth.auth_method = None
+    _youtube_auth.auth_path = None
+    logging.getLogger('music_helpers').debug("YouTube auth: No authentication configured")
+    return auth_opts
+
+
+def get_ytdlp_options(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Returns yt-dlp options with authentication merged in.
+
+    Args:
+        extra_opts: Additional options to merge (overrides base options).
+
+    Returns:
+        Complete yt-dlp options dict ready to use.
+    """
+    opts = {**YTDLP_OPTIONS}
+    auth_opts = _detect_youtube_auth()
+    opts.update(auth_opts)
+    if extra_opts:
+        opts.update(extra_opts)
+
+    # Log what auth method is being used for debugging
+    logger = logging.getLogger('music_helpers')
+    if _youtube_auth.auth_method == 'pot_server':
+        logger.debug(f"yt-dlp: Using POT server (pot_server_running={_youtube_auth.pot_server_running})")
+    elif _youtube_auth.auth_method == 'cookies':
+        logger.debug(f"yt-dlp: Using cookies from {_youtube_auth.auth_path}")
+    else:
+        logger.debug("yt-dlp: No auth method active")
+
+    return opts
+
+
+def is_403_error(error: Exception) -> bool:
+    """Checks if an exception indicates a 403 Forbidden error.
+
+    Args:
+        error: The exception to check.
+
+    Returns:
+        True if this is a 403/auth-related error.
+    """
+    error_str = str(error).lower()
+    indicators = [
+        '403', 'forbidden',
+        'sign in to confirm your age',
+        'video is age-restricted',
+        'confirm your age',
+        'login required',
+    ]
+    return any(ind in error_str for ind in indicators)
+
 
 # FFmpeg options for Discord audio streaming
 # Key flags explained:
@@ -296,6 +607,7 @@ class PlaybackState:
     """
     current_audio_url: Optional[str] = None  # Cached audio URL for current track
     current_audio_track_url: Optional[str] = None  # YouTube URL this audio URL is for
+    current_audio_headers: Optional[Dict[str, str]] = None  # HTTP headers for current URL
     track_started_timestamp: float = 0.0  # When FFmpeg started (for failure detection)
     paused_at_position: Optional[float] = None  # Seek position when paused, None if not paused
 
@@ -303,26 +615,93 @@ class PlaybackState:
         """Reset all playback state."""
         self.current_audio_url = None
         self.current_audio_track_url = None
+        self.current_audio_headers = None
         self.track_started_timestamp = 0.0
         self.paused_at_position = None
 
 
 @dataclass
 class PrefetchState:
-    """State for pre-buffering the next track's audio URL.
+    """State for pre-buffering the next track in the playlist.
 
-    Enables smoother transitions by fetching the next track's URL
-    while the current track is still playing.
+    Enables smooth transitions by fetching the next track's audio URL and
+    metadata while the current track is still playing. When the track ends,
+    we already have everything ready for instant playback.
+
+    DESIGN PRINCIPLES:
+    1. Keyed by playlist index, not URL - index determines "next track"
+    2. Stores the index we prefetched FOR, so we know if it's still valid
+    3. Tracks fetch timestamp - YouTube URLs expire (~6 hours)
+    4. Stores complete metadata for instant display (audio, headers, thumbnail)
+
+    INVALIDATION RULES:
+    - Prefetch is valid if target_index still equals (current_index + 1) % len
+    - Playlist mutations only invalidate if they affect the target index
+    - Retry logic does NOT invalidate (we're replaying current, not next)
+    - Skip/jump always invalidates (current_index changed)
+
+    The is_valid_for() method encapsulates all validation logic.
     """
-    url: Optional[str] = None  # Pre-fetched audio URL
-    track_url: Optional[str] = None  # YouTube URL this prefetch is for
+    # What we prefetched
+    audio_url: Optional[str] = None  # Pre-fetched streaming URL
+    http_headers: Optional[Dict[str, str]] = None  # HTTP headers for the URL
+    thumbnail_bytes: Optional[bytes] = None  # Pre-loaded thumbnail image
+
+    # How to identify what this prefetch is for
+    target_index: Optional[int] = None  # Playlist index we prefetched
+    target_video_id: Optional[str] = None  # Video ID for extra validation
+
+    # Metadata
+    fetched_at: float = 0.0  # Timestamp when fetched (for expiration check)
     task: Optional[asyncio.Task[None]] = None  # Background prefetch task
 
+    # URL expiration (YouTube streaming URLs expire after ~6 hours)
+    URL_EXPIRY_SECONDS: ClassVar[float] = 5 * 60 * 60  # 5 hours to be safe
+
+    def is_valid_for(self, playlist_index: int, playlist_len: int,
+                     current_index: int, video_id: Optional[str] = None) -> bool:
+        """Check if this prefetch is valid for advancing to the given index.
+
+        Args:
+            playlist_index: The index we want to play next.
+            playlist_len: Current playlist length.
+            current_index: Current playing index.
+            video_id: Optional video ID to verify track identity.
+
+        Returns:
+            True if the prefetch can be used, False if it should be discarded.
+        """
+        # No prefetch data
+        if self.audio_url is None or self.target_index is None:
+            return False
+
+        # Index mismatch - playlist was mutated
+        expected_next = (current_index + 1) % playlist_len if playlist_len > 0 else None
+        if self.target_index != expected_next or self.target_index != playlist_index:
+            return False
+
+        # Video ID mismatch - track at that index changed
+        if video_id is not None and self.target_video_id is not None:
+            if self.target_video_id != video_id:
+                return False
+
+        # URL expired
+        if time.time() - self.fetched_at > self.URL_EXPIRY_SECONDS:
+            return False
+
+        return True
+
     def clear(self) -> None:
-        """Reset prefetch state (does not cancel task)."""
-        self.url = None
-        self.track_url = None
-        # Note: caller should cancel task if needed before calling clear()
+        """Reset prefetch state (does not cancel task).
+
+        Call cancel_task() first if you need to stop an in-progress fetch.
+        """
+        self.audio_url = None
+        self.http_headers = None
+        self.thumbnail_bytes = None
+        self.target_index = None
+        self.target_video_id = None
+        self.fetched_at = 0.0
 
     def cancel_task(self) -> None:
         """Cancel prefetch task if running."""
@@ -330,37 +709,154 @@ class PrefetchState:
             self.task.cancel()
         self.task = None
 
+    def invalidate_if_affected(self, affected_indices: set[int], new_playlist_len: int) -> bool:
+        """Invalidate prefetch if any affected index matches our target.
+
+        Used by playlist mutation methods to conditionally invalidate.
+
+        Args:
+            affected_indices: Set of playlist indices that were modified.
+            new_playlist_len: Playlist length after the mutation.
+
+        Returns:
+            True if prefetch was invalidated, False if still valid.
+        """
+        if self.target_index is None:
+            return False  # Nothing to invalidate
+
+        # If our target index was directly affected, invalidate
+        if self.target_index in affected_indices:
+            self.cancel_task()
+            self.clear()
+            return True
+
+        # If target index is now out of bounds, invalidate
+        if self.target_index >= new_playlist_len:
+            self.cancel_task()
+            self.clear()
+            return True
+
+        return False
+
 
 @dataclass
 class RetryState:
-    """Tracks retry attempts for stale URL recovery.
+    """Tracks retry attempts across direct and residential proxy phases.
 
-    When FFmpeg fails quickly (<3s), it's likely due to an expired URL.
-    We retry once with a fresh URL before giving up on the track.
+    When FFmpeg fails quickly (<3s), it's likely due to an expired URL or 403 block.
+    We try direct streaming first, then fall back to residential proxy downloads.
+
+    Phase 1 - Direct: 2 attempts with fresh URLs (datacenter IP)
+    Phase 2 - Residential: 3 attempts via residential proxy (different IPs)
+
+    SAFEGUARDS against runaway proxy usage:
+    - Separate counters for each phase with hard caps
+    - Rate limiting between residential attempts (2s minimum)
+    - Phase tracking prevents loops back to direct
+    - residential_notified flag ensures user is only warned once per track
+    - ABSOLUTE_MAX_ATTEMPTS paranoid safeguard against any theoretical infinite loop
     """
+    # Class-level constants (not instance fields)
+    DIRECT_MAX: int = 2  # Max direct streaming attempts
+    RESIDENTIAL_MAX: int = 3  # Max residential proxy attempts
+    RESIDENTIAL_MIN_DELAY: float = 2.0  # Minimum seconds between residential attempts
+    # Paranoid safeguard: absolute maximum attempts regardless of phase logic bugs
+    # This should NEVER be hit if the phase logic is correct, but prevents infinite loops
+    ABSOLUTE_MAX_ATTEMPTS: int = 10
+
+    # Instance fields
+    is_residential_phase: bool = False  # True when in residential phase
+    direct_count: int = 0  # Direct attempts made
+    residential_count: int = 0  # Residential attempts made
     pending: bool = False  # True if retry was requested
-    count: int = 0  # Number of retries attempted for current track
+    last_residential_attempt: float = 0.0  # Timestamp of last residential attempt
+    residential_notified: bool = False  # True if user was told about proxy usage
 
     def request_retry(self) -> None:
         """Signal that a retry should be attempted."""
         self.pending = True
 
-    def consume_retry(self) -> bool:
-        """Consume retry request, returns True if this is the first retry.
+    def get_next_strategy(self) -> Optional[Tuple[bool, int]]:
+        """Get next retry strategy to try.
 
         Returns:
-            True if retry should proceed (first attempt), False if exhausted.
+            Tuple of (is_residential, attempt_number) or None if all attempts exhausted.
+            is_residential=False means direct streaming, True means use residential proxy.
         """
         if not self.pending:
-            return False
+            return None
         self.pending = False
-        self.count += 1
-        return self.count <= 1  # Allow only 1 retry
+
+        # PARANOID SAFEGUARD: Absolute cap on total attempts regardless of phase logic
+        # This should never trigger if the phase logic is correct, but prevents
+        # infinite loops if there's a bug in the state machine
+        if self.total_attempts >= self.ABSOLUTE_MAX_ATTEMPTS:
+            return None
+
+        # Phase 1: Direct streaming
+        if not self.is_residential_phase:
+            if self.direct_count < self.DIRECT_MAX:
+                self.direct_count += 1
+                return (False, self.direct_count)
+            else:
+                # Transition to residential phase
+                self.is_residential_phase = True
+
+        # Phase 2: Residential proxy
+        if self.is_residential_phase:
+            if self.residential_count < self.RESIDENTIAL_MAX:
+                self.residential_count += 1
+                self.last_residential_attempt = time.time()
+                return (True, self.residential_count)
+
+        return None
+
+    def consume_retry(self) -> bool:
+        """Legacy method for backwards compatibility.
+
+        Returns:
+            True if any retry strategy is available, False if exhausted.
+        """
+        return self.get_next_strategy() is not None
+
+    @property
+    def total_attempts(self) -> int:
+        """Total attempts across both phases."""
+        return self.direct_count + self.residential_count
+
+    @property
+    def is_exhausted(self) -> bool:
+        """True if all retry attempts are exhausted."""
+        return (self.direct_count >= self.DIRECT_MAX and
+                self.residential_count >= self.RESIDENTIAL_MAX)
+
+    @property
+    def needs_residential_delay(self) -> float:
+        """Returns seconds to wait before next residential attempt, or 0.
+
+        Used for rate limiting to avoid hammering the proxy.
+        """
+        if not self.is_residential_phase:
+            return 0.0
+        elapsed = time.time() - self.last_residential_attempt
+        if elapsed < self.RESIDENTIAL_MIN_DELAY:
+            return self.RESIDENTIAL_MIN_DELAY - elapsed
+        return 0.0
 
     def reset(self) -> None:
-        """Reset for a new track."""
+        """Reset for a new track (call only after confirmed successful playback).
+
+        Note: last_residential_attempt is intentionally NOT reset here.
+        This preserves rate limiting across tracks - if we just finished a
+        residential download, we don't want to immediately hammer the proxy
+        for the next track if it also needs residential fallback.
+        """
+        self.is_residential_phase = False
+        self.direct_count = 0
+        self.residential_count = 0
         self.pending = False
-        self.count = 0
+        self.residential_notified = False
+        # last_residential_attempt is preserved for cross-track rate limiting
 
 
 @dataclass
@@ -763,11 +1259,162 @@ class GeniusScraper:
 
 
 # ==========================================================================
+# RESIDENTIAL PROXY FUNCTIONS
+# ==========================================================================
+# Used when direct YouTube streaming fails with 403 errors.
+# Downloads full tracks via residential proxy, caches locally.
+# Cost: ~$4/GB (Decodo PAYG), ~$0.012-0.02 per song.
+
+
+def get_residential_proxy_url() -> Optional[str]:
+    """Build residential proxy URL from config.
+
+    Returns:
+        Proxy URL string in format http://user:pass@host:port, or None if not configured.
+    """
+    import config
+
+    user = getattr(config, 'RESIDENTIAL_PROXY_USER', '')
+    password = getattr(config, 'RESIDENTIAL_PROXY_PASSWORD', '')
+    host = getattr(config, 'RESIDENTIAL_PROXY_HOST', 'gate.decodo.com')
+    port = getattr(config, 'RESIDENTIAL_PROXY_PORT', 7000)
+
+    if not user or not password:
+        return None
+
+    return f"http://{user}:{password}@{host}:{port}"
+
+
+def get_residential_cache_path(video_id: str) -> str:
+    """Get the cache path for a residentially-downloaded track.
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        Absolute path to the cache file location (without extension).
+    """
+    import config
+    cache_dir = getattr(config, 'RESIDENTIAL_CACHE_PATH',
+                        os.path.join(config.MUSIC_CACHE_PATH, 'residential'))
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, video_id)
+
+
+def check_residential_cache(video_id: str) -> Optional[str]:
+    """Check if a track exists in the residential cache.
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        Path to cached file if exists, None otherwise.
+    """
+    import config
+    cache_dir = getattr(config, 'RESIDENTIAL_CACHE_PATH',
+                        os.path.join(config.MUSIC_CACHE_PATH, 'residential'))
+
+    # Check for any audio format
+    for ext in ['.webm', '.opus', '.m4a', '.mp3', '.ogg']:
+        path = os.path.join(cache_dir, f"{video_id}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+async def download_via_residential_proxy(
+    track: 'Track',
+    logger: Any,
+    timeout: float = 120.0
+) -> Tuple[bool, Optional[str], int, Optional[str]]:
+    """Download a track via residential proxy and cache it.
+
+    Downloads the full audio file through a residential proxy to bypass
+    YouTube's IP-based blocks. The file is saved to the residential cache.
+
+    Args:
+        track: Track to download.
+        logger: Logger instance.
+        timeout: Maximum download time in seconds.
+
+    Returns:
+        Tuple of (success, error_message, bytes_downloaded, cached_file_path).
+
+    SAFEGUARDS:
+    - Timeout prevents hanging downloads
+    - Returns byte count for cost tracking
+    - Does NOT retry internally (caller handles retries)
+    """
+    proxy_url = get_residential_proxy_url()
+    if not proxy_url:
+        return False, "Residential proxy not configured", 0, None
+
+    if not YTDLP_AVAILABLE:
+        return False, "yt-dlp not available", 0, None
+
+    if not track.video_id:
+        return False, "Track has no video ID", 0, None
+
+    import config
+
+    output_base = get_residential_cache_path(track.video_id)
+
+    # Start with full yt-dlp options (includes PO token, cookies, etc.)
+    # Then add proxy-specific overrides
+    ydl_opts = get_ytdlp_options({
+        'proxy': proxy_url,
+        'outtmpl': output_base + '.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'ignoreerrors': False,  # We want errors to surface for retry logic
+    })
+
+    try:
+        logger.info(f"[Residential] Downloading via proxy: {track.title}")
+
+        def do_download() -> Dict[str, Any]:
+            with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
+                return ydl.extract_info(track.url, download=True)  # type: ignore
+
+        await asyncio.wait_for(
+            asyncio.to_thread(do_download),
+            timeout=timeout
+        )
+
+        # Find the downloaded file (extension may vary)
+        cached_path = check_residential_cache(track.video_id)
+        if cached_path:
+            file_size = os.path.getsize(cached_path)
+            cost_per_gb = getattr(config, 'RESIDENTIAL_PROXY_COST_PER_GB', 4.0)
+            cost = (file_size / (1024 ** 3)) * cost_per_gb
+            logger.info(
+                f"[Residential] Downloaded '{track.title}' - "
+                f"{file_size / (1024*1024):.2f} MB (~${cost:.4f})"
+            )
+            return True, None, file_size, cached_path
+
+        return False, "Download completed but file not found", 0, None
+
+    except asyncio.TimeoutError:
+        logger.warning(f"[Residential] Timeout downloading: {track.title}")
+        return False, f"Download timed out after {timeout}s", 0, None
+    except Exception as e:
+        error_msg = str(e)
+        # Check for 403 in proxy download too
+        if '403' in error_msg:
+            logger.warning(f"[Residential] 403 error even via proxy: {track.title}")
+        else:
+            logger.error(f"[Residential] Error downloading {track.title}: {e}")
+        return False, error_msg, 0, None
+
+
+# ==========================================================================
 # YT-DLP WRAPPER FUNCTIONS
 # ==========================================================================
 
 
-async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], bool, Optional[str], bool]:
+async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], bool, Optional[str], bool, Optional[Dict[str, str]]]:
     """Gets the actual streamable audio URL for a track.
 
     Args:
@@ -775,17 +1422,19 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         logger: Logger instance for debug/error messages.
 
     Returns:
-        A tuple of (url, is_unavailable, thumbnail, needs_crop) where:
+        A tuple of (url, is_unavailable, thumbnail, needs_crop, http_headers) where:
         - url: The streamable URL, or None if failed
         - is_unavailable: True if the video is permanently unavailable and should be removed
         - thumbnail: Best thumbnail URL found, or None
         - needs_crop: True if thumbnail needs center-cropping to extract album art
+        - http_headers: Dict of HTTP headers needed to fetch the URL, or None
     """
     if not yt_dlp:
-        return None, False, None, False
+        return None, False, None, False, None
 
     try:
-        ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': False}
+        ydl_opts = get_ytdlp_options({'extract_flat': False})
+        logger.debug(f"Extracting audio URL for: {track.title} ({track.url})")
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
@@ -794,10 +1443,15 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         info = await asyncio.to_thread(extract)
 
         if not info:
-            return None, True, None, False  # No info usually means unavailable
+            logger.warning(f"No info returned for {track.title}")
+            return None, True, None, False, None  # No info usually means unavailable
 
         # Extract best thumbnail - prefer square (for album art)
         thumbnail_url, needs_crop = await _extract_best_thumbnail(info, logger)
+
+        # Extract HTTP headers from info (needed for FFmpeg to fetch the URL)
+        # yt-dlp stores these at the top level, formats may override
+        http_headers = info.get('http_headers', {})
 
         formats = info.get('formats', [])
 
@@ -810,7 +1464,9 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
         if audio_only:
             # Prefer higher audio bitrate among audio-only formats
             best = max(audio_only, key=lambda f: f.get('abr') or f.get('tbr') or 0)
-            return best.get('url'), False, thumbnail_url, needs_crop
+            # Format may have its own headers that override
+            fmt_headers = best.get('http_headers', http_headers)
+            return best.get('url'), False, thumbnail_url, needs_crop, fmt_headers or None
 
         # Priority 2: Video+audio combined formats (muxed)
         # Less efficient but necessary for some videos that lack audio-only streams
@@ -822,26 +1478,32 @@ async def get_audio_url(track: 'Track', logger: Any) -> tuple[Optional[str], boo
             # Prefer by audio bitrate, then lowest video bitrate (less bandwidth waste)
             best = max(combined, key=lambda f: (f.get('abr') or 0, -(f.get('vbr') or f.get('tbr') or 0)))
             logger.debug(f"Using combined format for {track.title} (no audio-only available)")
-            return best.get('url'), False, thumbnail_url, needs_crop
+            fmt_headers = best.get('http_headers', http_headers)
+            return best.get('url'), False, thumbnail_url, needs_crop, fmt_headers or None
 
         # Priority 3: Direct URL fallback (rare, usually livestreams or direct file links)
         if info.get('url'):
             logger.debug(f"Using direct URL fallback for {track.title}")
-            return info.get('url'), False, thumbnail_url, needs_crop
+            return info.get('url'), False, thumbnail_url, needs_crop, http_headers or None
 
         # No usable format found
         logger.warning(f"No playable format found for {track.title}")
-        return None, False, thumbnail_url, needs_crop
+        return None, False, thumbnail_url, needs_crop, None
 
     except Exception as e:
         unavailable = is_video_unavailable(e)
+
+        # Track 403 errors for alerting
+        if is_403_error(e):
+            _youtube_auth.record_403()
+            logger.warning(f"403 error for {track.title}: {e}")
 
         if unavailable:
             logger.warning(f"Video unavailable (will be removed): {track.title} - {e}")
         else:
             logger.error(f"Error getting audio URL for {track.title}: {e}")
 
-        return None, unavailable, None, False
+        return None, unavailable, None, False, None
 
 
 async def _probe_thumbnail_dimensions(url: str, logger: Any) -> Optional[tuple[int, int]]:
@@ -1148,11 +1810,10 @@ async def search_youtube(query: str, max_results: int, logger: Any) -> List['Tra
     logger.debug(f"[Search] Starting search for: '{query}' (max_results={max_results})")
 
     try:
-        ydl_opts = {
-            **YTDLP_OPTIONS,
+        ydl_opts = get_ytdlp_options({
             'extract_flat': 'in_playlist',  # Only flatten playlist entries, not search
             'noplaylist': True,  # We want individual videos from search
-        }
+        })
 
         # Prefix with ytsearch to explicitly trigger YouTube search
         search_query = f"ytsearch{max_results}:{query}"
@@ -1194,7 +1855,8 @@ async def search_youtube(query: str, max_results: int, logger: Any) -> List['Tra
                 url=entry.get('webpage_url') or entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}",
                 duration=int(entry.get('duration', 180) or 180),
                 thumbnail=entry.get('thumbnail'),
-                user_added=True  # Search results are always user-added
+                user_added=True,  # Search results are always user-added
+                video_id=entry.get('id')  # Extract video ID for residential proxy fallback
             )
             tracks.append(track)
 
@@ -1327,11 +1989,10 @@ async def fetch_url_info(
         else:
             playlist_limit = None
 
-        ydl_opts = {
-            **YTDLP_OPTIONS,
+        ydl_opts = get_ytdlp_options({
             'extract_flat': 'in_playlist' if is_playlist else False,
             'noplaylist': not is_playlist,  # Only extract playlist if pure playlist URL
-        }
+        })
 
         # Add playlist limit
         if playlist_limit:
@@ -1453,7 +2114,7 @@ async def fetch_playlist_metadata(playlist_url: str, logger: Any) -> List['Track
         return []
 
     try:
-        ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': 'in_playlist'}
+        ydl_opts = get_ytdlp_options({'extract_flat': 'in_playlist'})
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
@@ -1822,11 +2483,10 @@ async def get_track_info_for_download(url: str, logger: Any) -> Optional[Dict[st
         return None
 
     try:
-        ydl_opts = {
-            **YTDLP_OPTIONS,
+        ydl_opts = get_ytdlp_options({
             'extract_flat': False,
             'skip_download': True,
-        }
+        })
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]

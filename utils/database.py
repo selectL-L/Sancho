@@ -154,6 +154,13 @@ class DatabaseManager:
                         user_id INTEGER PRIMARY KEY,
                         best_chain INTEGER NOT NULL DEFAULT 0,
                         achieved_at INTEGER NOT NULL DEFAULT 0
+                    )''',
+                "proxy_usage": '''CREATE TABLE IF NOT EXISTS proxy_usage (
+                        id INTEGER PRIMARY KEY,
+                        year_month TEXT NOT NULL UNIQUE,
+                        track_count INTEGER NOT NULL DEFAULT 0,
+                        bytes_used INTEGER NOT NULL DEFAULT 0,
+                        last_updated INTEGER NOT NULL
                     )'''
             }
 
@@ -186,7 +193,8 @@ class DatabaseManager:
                 "guild_settings": {"guild_id", "key", "value"},
                 "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
                 "bod_usage": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id"},
-                "bod_leaderboard": {"user_id", "best_chain", "achieved_at"}
+                "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
+                "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"}
             }
 
             schema_issues = []
@@ -457,6 +465,104 @@ class DatabaseManager:
     # MATH COG METHODS
     # (No database operations required for this cog yet.)
     # ==========================================================================
+
+    # ==========================================================================
+    # MUSIC COG METHODS
+    # Methods for proxy usage tracking (residential proxy fallback).
+    # ==========================================================================
+
+    async def increment_proxy_usage(self, bytes_downloaded: int) -> None:
+        """Increment proxy usage for the current month.
+
+        Adds to the running total of bytes used and increments track count.
+        Creates a new row if this is the first usage this month.
+
+        Used By: cogs/music.py (residential proxy fallback)
+
+        Args:
+            bytes_downloaded (int): Number of bytes downloaded via proxy.
+        """
+        year_month = time.strftime('%Y-%m')
+        current_time = int(time.time())
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Try to update existing row first
+            cursor = await db.execute(
+                """UPDATE proxy_usage
+                   SET track_count = track_count + 1,
+                       bytes_used = bytes_used + ?,
+                       last_updated = ?
+                   WHERE year_month = ?""",
+                (bytes_downloaded, current_time, year_month)
+            )
+            if cursor.rowcount == 0:
+                # No existing row, insert new one
+                await db.execute(
+                    """INSERT INTO proxy_usage (year_month, track_count, bytes_used, last_updated)
+                       VALUES (?, 1, ?, ?)""",
+                    (year_month, bytes_downloaded, current_time)
+                )
+            await db.commit()
+            logger.debug(f"Proxy usage updated: +{bytes_downloaded} bytes for {year_month}")
+
+    async def get_proxy_usage(self, year_month: Optional[str] = None) -> Dict[str, Any]:
+        """Get proxy usage stats for a specific month.
+
+        Used By: cogs/music.py (cost tracking), cogs/admin.py (usage reports)
+
+        Args:
+            year_month (str, optional): Month in 'YYYY-MM' format. Defaults to current month.
+
+        Returns:
+            Dict with keys: year_month, track_count, bytes_used, last_updated, estimated_cost_usd.
+            Returns zeros if no usage recorded for that month.
+        """
+        if year_month is None:
+            year_month = time.strftime('%Y-%m')
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM proxy_usage WHERE year_month = ?",
+                (year_month,)
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                result = dict(row)
+                # Add estimated cost (Decodo: $4/GB)
+                result['estimated_cost_usd'] = (result['bytes_used'] / (1024 ** 3)) * 4.0
+                return result
+            else:
+                return {
+                    'year_month': year_month,
+                    'track_count': 0,
+                    'bytes_used': 0,
+                    'last_updated': 0,
+                    'estimated_cost_usd': 0.0
+                }
+
+    async def get_all_proxy_usage(self) -> List[Dict[str, Any]]:
+        """Get all proxy usage records, ordered by month descending.
+
+        Used By: cogs/admin.py (monthly reports)
+
+        Returns:
+            List of usage records with estimated costs.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM proxy_usage ORDER BY year_month DESC"
+            )
+            rows = await cursor.fetchall()
+
+            results = []
+            for row in rows:
+                record = dict(row)
+                record['estimated_cost_usd'] = (record['bytes_used'] / (1024 ** 3)) * 4.0
+                results.append(record)
+            return results
 
     # ==========================================================================
     # REMINDERS COG METHODS

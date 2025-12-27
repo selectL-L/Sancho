@@ -4,8 +4,10 @@ This cog contains owner/admin-only commands for administrative tasks, such as
 viewing bot status and managing configurations.
 """
 
+import asyncio
 import logging
 import os
+import shutil
 import tempfile
 import time
 import typing
@@ -27,6 +29,7 @@ from utils.music_helpers import (
     MusicCacheManager,
     download_track_as_mp3,
     get_track_info_for_download,
+    get_youtube_auth_status,
 )
 from utils.views import PaginatorView, get_selection
 
@@ -1322,6 +1325,363 @@ class AdminCog(BaseCog):
             await status_msg.edit(content=f"❌ Refresh failed: {e}")
             # Make sure timer is restarted even on error
             cache_manager.start_refresh_timer()
+
+    @commands.hybrid_command(
+        name='musicstatus',
+        hidden=True,
+        description='Shows YouTube authentication status and recent error rates'
+    )
+    @commands.is_owner()
+    async def music_status(self, ctx: commands.Context) -> None:
+        """Shows diagnostic info about YouTube authentication and 403 error rates.
+
+        This helps identify if the PO token server is working or if cookies need refreshing.
+        Owner-only command for debugging music playback issues.
+        """
+        auth_status = get_youtube_auth_status()
+
+        # Force a fresh check of auth status
+        auth_status.last_check = 0
+
+        # Trigger detection to refresh all fields
+        from utils.music_helpers import _detect_youtube_auth
+        _detect_youtube_auth()
+
+        # Build status embed
+        embed = discord.Embed(
+            title="🎵 Music Status",
+            color=discord.Color.blue()
+        )
+
+        # PO Token Server status (most important)
+        if auth_status.pot_server_running:
+            server_text = "✅ Running (auto-generates tokens)"
+        elif auth_status.pot_provider_ready:
+            server_text = "⚠️ Ready but not running\n(restarts with bot)"
+        elif auth_status.pot_plugin_installed:
+            server_text = f"⚠️ Plugin installed\n`{auth_status.pot_plugin_error}`"
+        else:
+            server_text = "❌ Not set up"
+
+        embed.add_field(
+            name="PO Token Server",
+            value=server_text,
+            inline=False
+        )
+
+        # Active auth method
+        if auth_status.auth_method == 'pot_server':
+            auth_text = "✅ PO Token Server"
+        elif auth_status.auth_method == 'cookies':
+            auth_text = "✅ Cookies"
+            if auth_status.po_token:
+                auth_text += " + manual PO token"
+        else:
+            auth_text = "⚠️ None (403 errors likely)"
+
+        embed.add_field(
+            name="Active Auth",
+            value=auth_text,
+            inline=True
+        )
+
+        # Cookie file status (fallback option)
+        cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
+        if cookie_path and os.path.isfile(cookie_path):
+            file_age = time.time() - os.path.getmtime(cookie_path)
+            age_days = int(file_age / 86400)
+            if age_days > 30:
+                cookie_text = f"⚠️ Present ({age_days}d old)"
+            else:
+                cookie_text = f"✅ Present ({age_days}d old)"
+        else:
+            cookie_text = "❌ Not found"
+
+        embed.add_field(
+            name="Cookie Fallback",
+            value=cookie_text,
+            inline=True
+        )
+
+        # 403 error rate
+        count_403, window = auth_status.get_403_rate()
+        window_mins = int(window / 60)
+        if count_403 == 0:
+            error_text = "✅ No recent 403 errors"
+        elif count_403 < 3:
+            error_text = f"⚠️ {count_403} error(s) in last {window_mins}m"
+        else:
+            error_text = f"❌ {count_403} errors in last {window_mins}m"
+
+        embed.add_field(
+            name="403 Rate",
+            value=error_text,
+            inline=True
+        )
+
+        # yt-dlp availability
+        embed.add_field(
+            name="yt-dlp",
+            value="✅ Available" if YTDLP_AVAILABLE else "❌ Missing",
+            inline=True
+        )
+
+        # Get music cog for playback status
+        music_cog = self.bot.get_cog('Music')
+        active_session = getattr(music_cog, 'active_session', None) if music_cog else None
+        if active_session:
+            vc = active_session.voice_client
+            embed.add_field(
+                name="Playback",
+                value=f"🔊 {vc.channel.mention if vc else 'Active'}",
+                inline=True
+            )
+        else:
+            embed.add_field(
+                name="Playback",
+                value="💤 Idle",
+                inline=True
+            )
+
+        # Setup hints if server isn't working
+        if not auth_status.pot_server_running:
+            if not auth_status.pot_plugin_installed:
+                hint = (
+                    "**Setup PO Token Server:**\n"
+                    "```pip install bgutil-ytdlp-pot-provider```\n"
+                    "Then clone & build provider in `utils/pot_provider/`"
+                )
+            elif not auth_status.pot_provider_ready:
+                hint = (
+                    "**Build Provider Script:**\n"
+                    "```\ncd utils/pot_provider/server\n"
+                    "npm install && npx tsc\n```"
+                )
+            else:
+                hint = "**Server will start when bot restarts.**"
+            
+            if not auth_status.auth_method:
+                hint += "\n\n**Or upload cookies:** `/ytauth`"
+            
+            embed.add_field(
+                name="🔧 Setup",
+                value=hint,
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(
+        name='ytauth',
+        hidden=True,
+        description='Upload YouTube cookies for music playback authentication'
+    )
+    @commands.is_owner()
+    async def youtube_cookie_upload(self, ctx: commands.Context) -> None:
+        """Upload a cookies.txt file exported from your browser for YouTube auth.
+
+        This is a fallback method if the PO token plugin isn't working.
+        The cookie file should be in Netscape format (exported via browser extension).
+
+        Steps:
+        1. Use incognito mode in your browser
+        2. Log into a burner Google account on youtube.com
+        3. Use a cookie export extension (e.g., "Get cookies.txt LOCALLY")
+        4. Export cookies and upload the file here
+        """
+        # Check if they attached a file
+        if ctx.message.attachments:
+            # Process the attachment directly
+            attachment = ctx.message.attachments[0]
+            await self._process_cookie_upload(ctx, attachment)
+            return
+
+        # No attachment - prompt for upload
+        embed = discord.Embed(
+            title="🍪 YouTube Cookie Upload",
+            description="Upload a `cookies.txt` file to authenticate YouTube requests.",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="How to get cookies",
+            value=(
+                "1. Open **incognito/private** browser window\n"
+                "2. Go to [youtube.com](https://youtube.com) and sign in with a **burner** account\n"
+                "3. Install a cookie export extension:\n"
+                "   • Chrome: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)\n"
+                "   • Firefox: [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)\n"
+                "4. Export cookies for `youtube.com`\n"
+                "5. Reply to this message with the `.txt` file attached"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="⚠️ Security Note",
+            value=(
+                "• Use a **burner account**, not your main Google account\n"
+                "• Cookies grant full access to that account\n"
+                "• They expire after ~30 days typically"
+            ),
+            inline=False
+        )
+
+        # Check current status
+        auth_status = get_youtube_auth_status()
+        cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
+        if cookie_path and os.path.isfile(cookie_path):
+            file_age = time.time() - os.path.getmtime(cookie_path)
+            age_days = int(file_age / 86400)
+            embed.add_field(
+                name="Current Cookie",
+                value=f"✅ Present ({age_days} days old)",
+                inline=True
+            )
+        else:
+            embed.add_field(
+                name="Current Cookie",
+                value="❌ Not found",
+                inline=True
+            )
+
+        if auth_status.pot_server_running:
+            embed.set_footer(text="💡 PO token server is running - cookies are optional backup")
+
+        prompt_msg = await ctx.send(embed=embed)
+
+        # Wait for a reply with attachment
+        def check(m: discord.Message) -> bool:
+            return (
+                m.author.id == ctx.author.id
+                and m.channel.id == ctx.channel.id
+                and len(m.attachments) > 0
+            )
+
+        try:
+            reply = await self.bot.wait_for('message', check=check, timeout=120.0)
+            await self._process_cookie_upload(ctx, reply.attachments[0], prompt_msg)
+        except asyncio.TimeoutError:
+            embed.color = discord.Color.dark_grey()
+            embed.set_footer(text="⏰ Timed out waiting for file upload")
+            await prompt_msg.edit(embed=embed)
+
+    async def _process_cookie_upload(
+        self,
+        ctx: commands.Context,
+        attachment: discord.Attachment,
+        status_msg: Optional[discord.Message] = None
+    ) -> None:
+        """Process an uploaded cookie file.
+
+        Args:
+            ctx: Command context.
+            attachment: The uploaded file.
+            status_msg: Optional message to edit with result.
+        """
+        # Validate file
+        if not attachment.filename.endswith('.txt'):
+            msg = "❌ File must be a `.txt` file (Netscape cookie format)"
+            if status_msg:
+                await status_msg.edit(content=msg, embed=None)
+            else:
+                await ctx.send(msg)
+            return
+
+        if attachment.size > 100_000:  # 100KB should be way more than enough
+            msg = "❌ File too large. Cookie files are typically under 10KB."
+            if status_msg:
+                await status_msg.edit(content=msg, embed=None)
+            else:
+                await ctx.send(msg)
+            return
+
+        # Download and validate content
+        try:
+            content = await attachment.read()
+            text = content.decode('utf-8')
+        except Exception as e:
+            msg = f"❌ Failed to read file: {e}"
+            if status_msg:
+                await status_msg.edit(content=msg, embed=None)
+            else:
+                await ctx.send(msg)
+            return
+
+        # Basic validation - should contain youtube.com cookies
+        if 'youtube.com' not in text.lower() and '.youtube.com' not in text:
+            msg = "❌ File doesn't appear to contain YouTube cookies."
+            if status_msg:
+                await status_msg.edit(content=msg, embed=None)
+            else:
+                await ctx.send(msg)
+            return
+
+        # Save the cookie file
+        cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
+        if not cookie_path:
+            cookie_path = os.path.join(config.APP_PATH, 'youtube_cookies.txt')
+
+        try:
+            # Backup existing file if present
+            if os.path.isfile(cookie_path):
+                backup_path = cookie_path + '.backup'
+                shutil.copy2(cookie_path, backup_path)
+                self.logger.info(f"Backed up existing cookies to {backup_path}")
+
+            # Write new cookies
+            with open(cookie_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+
+            self.logger.info(f"Saved YouTube cookies to {cookie_path}")
+
+            # Reset auth detection cache
+            auth_status = get_youtube_auth_status()
+            auth_status.last_check = 0
+            auth_status.auth_method = None
+
+            # Force re-detection
+            from utils.music_helpers import _detect_youtube_auth
+            _detect_youtube_auth()
+
+            # Success message
+            embed = discord.Embed(
+                title="✅ Cookies Uploaded",
+                description="YouTube cookie file has been saved.",
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="Status",
+                value=f"Active auth: **{auth_status.auth_method or 'cookies'}**",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Next Steps",
+                value="Try playing a YouTube video to test.",
+                inline=False
+            )
+
+            if status_msg:
+                await status_msg.edit(content=None, embed=embed)
+            else:
+                await ctx.send(embed=embed)
+
+            # Try to delete the user's message with the attachment (contains cookies!)
+            try:
+                if ctx.message.attachments:
+                    await ctx.message.delete()
+            except discord.Forbidden:
+                pass  # Can't delete, not a big deal
+
+        except Exception as e:
+            self.logger.error(f"Failed to save cookies: {e}", exc_info=True)
+            msg = f"❌ Failed to save cookies: {e}"
+            if status_msg:
+                await status_msg.edit(content=msg, embed=None)
+            else:
+                await ctx.send(msg)
 
 
 async def setup(bot: CoreBot) -> None:

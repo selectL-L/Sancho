@@ -98,6 +98,12 @@ BACKUP_EXTENSION = ".backup"
 #   Keys: user_id (one entry per user)
 #   Note: Display names are fetched dynamically at render time, not stored.
 #
+# proxy_usage
+#   Purpose: Tracks residential proxy bandwidth usage for cost monitoring.
+#   Used by: cogs/music.py (residential proxy fallback for YouTube 403 errors)
+#   Keys: year_month (e.g., "2025-01") for monthly aggregation
+#   Note: Stores track_count, bytes_used, and estimated cost for billing awareness.
+#
 # ==================================================================================
 TABLE_SCHEMAS = {
     "skills": """
@@ -177,6 +183,15 @@ TABLE_SCHEMAS = {
             user_id INTEGER PRIMARY KEY,
             best_chain INTEGER NOT NULL DEFAULT 0,
             achieved_at INTEGER NOT NULL DEFAULT 0
+        )
+    """,
+    "proxy_usage": """
+        CREATE TABLE proxy_usage (
+            id INTEGER PRIMARY KEY,
+            year_month TEXT NOT NULL UNIQUE,
+            track_count INTEGER NOT NULL DEFAULT 0,
+            bytes_used INTEGER NOT NULL DEFAULT 0,
+            last_updated INTEGER NOT NULL
         )
     """
 }

@@ -6,11 +6,154 @@ It provides standard selection menus and button interfaces used across multiple 
 
 import io
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Awaitable, Callable, Dict, List, Optional, cast
 
 import asyncio
 import discord
 from discord import ui
+
+
+# =============================================================================
+# Track Failure View
+# =============================================================================
+
+class TrackFailureAction(Enum):
+    """Actions a user can take when a track fails to play."""
+    SKIP = auto()    # Skip but keep in playlist (might work later)
+    REMOVE = auto()  # Remove from playlist entirely
+    TIMEOUT = auto() # User didn't respond - defaults to REMOVE
+
+
+class TrackFailedView(discord.ui.View):
+    """View displayed when a track fails to play, giving users options.
+
+    This view presents Retry, Skip, and Remove buttons when a track can't
+    be played (e.g., 403 errors, region locks, unavailable videos).
+
+    The view is single-use - once a button is clicked, buttons are disabled
+    and the view stops.
+
+    Usage:
+        view = TrackFailedView(track_title, track_url)
+        message = await channel.send(embed=view.create_embed(), view=view)
+        await view.wait()
+        action = view.action  # TrackFailureAction.SKIP / REMOVE / TIMEOUT
+    """
+
+    def __init__(
+        self,
+        track_title: str,
+        track_url: str,
+        timeout: float = 60.0,
+    ):
+        """Initialize the track failed view.
+
+        Args:
+            track_title: Title of the failed track.
+            track_url: URL of the failed track.
+            timeout: View timeout in seconds (default 60s).
+        """
+        super().__init__(timeout=timeout)
+        self.track_title = track_title
+        self.track_url = track_url
+        self.action: TrackFailureAction = TrackFailureAction.TIMEOUT
+        self.message: Optional[discord.Message] = None
+
+    def create_embed(self) -> discord.Embed:
+        """Create the failure notification embed.
+
+        Returns:
+            Embed describing the failure and available actions.
+        """
+        # Truncate title if too long
+        display_title = self.track_title
+        if len(display_title) > 50:
+            display_title = display_title[:47] + "..."
+
+        embed = discord.Embed(
+            title="⚠️ Track Unavailable",
+            description=(
+                f"**[{display_title}]({self.track_url})**\n\n"
+                "This track couldn't be played after multiple attempts. "
+                "YouTube may be blocking playback, or the video is unavailable.\n\n"
+                "**What would you like to do?**"
+            ),
+            color=discord.Color.orange()
+        )
+
+        embed.add_field(
+            name="⏭️ Skip",
+            value="Skip for now, keep in playlist (might work later)",
+            inline=True
+        )
+        embed.add_field(
+            name="🗑️ Remove",
+            value="Remove from playlist entirely",
+            inline=True
+        )
+
+        embed.set_footer(text="Auto-removes in 60 seconds if no response")
+
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Allow anyone to interact - the music cog handles voice channel presence."""
+        # We don't restrict here because:
+        # 1. The failure view is sent to a text channel anyone can see
+        # 2. The music cog ensures the view is only shown when users are in VC
+        # 3. It's better UX to let anyone help when a song fails
+        return True
+
+    async def _disable_all_and_update(self, interaction: discord.Interaction, chosen_label: str) -> None:
+        """Disable all buttons and update the message to show what was chosen."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+                # Highlight the chosen action
+                if child.label and chosen_label in child.label:
+                    child.style = discord.ButtonStyle.success
+
+        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        if embed:
+            embed.set_footer(text=f"✅ Action taken: {chosen_label}")
+            embed.color = discord.Color.green()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Handle skip button click."""
+        self.action = TrackFailureAction.SKIP
+        await self._disable_all_and_update(interaction, "Skip")
+        self.stop()
+
+    @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Handle remove button click."""
+        self.action = TrackFailureAction.REMOVE
+        await self._disable_all_and_update(interaction, "Remove")
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """Handle view timeout - auto-remove after 60s to keep playlist clean."""
+        self.action = TrackFailureAction.TIMEOUT
+        if self.message:
+            try:
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+
+                embed = self.message.embeds[0] if self.message.embeds else None
+                if embed:
+                    embed.set_footer(text="⏱️ Timed out - removed from playlist")
+                    embed.color = discord.Color.greyple()
+                    await self.message.edit(embed=embed, view=self)
+                else:
+                    await self.message.edit(view=self)
+            except Exception:
+                pass  # Message may have been deleted
 
 
 # =============================================================================

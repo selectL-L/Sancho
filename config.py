@@ -75,7 +75,8 @@ def check_and_create_env_file() -> None:
         "DEV_GUILD": "",
         "BOT_NAME": "NoName",
         "CONTROL_PORT": "",
-        "AMBIENCE_ENABLED": "True"
+        "AMBIENCE_ENABLED": "True",
+        "RESIDENTIAL_PROXY_PASSWORD": ""
     }
 
     field_comments = {
@@ -87,7 +88,8 @@ def check_and_create_env_file() -> None:
         "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True.",
         "BOT_NAME": "# The name the bot calls itself in user-facing strings.",
         "CONTROL_PORT": "# (Optional) TCP port for remote control commands (e.g., 9999). Binds to localhost only.",
-        "AMBIENCE_ENABLED": "# (Optional) Enable ambience user-facing strings. True unless explicitly set to False."
+        "AMBIENCE_ENABLED": "# (Optional) Enable ambience user-facing strings. True unless explicitly set to False.",
+        "RESIDENTIAL_PROXY_PASSWORD": "# (Optional) Decodo residential proxy password for YouTube 403 fallback."
     }
 
     if not os.path.exists(ENV_PATH):
@@ -219,6 +221,33 @@ AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
 
 # Music Cog Configuration
 MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
+YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OAuth tokens, etc.)
+
+# PO Token Provider - HTTP server that generates proof-of-origin tokens for YouTube
+# This helps bypass 403 errors on datacenter IPs. The server is started/stopped with the bot.
+# One-time setup: clone repo to <venv>/utils/pot_provider, run npm install && npx tsc
+# Uses sys.prefix to find the venv directory (keeps JS code away from Python code)
+POT_PROVIDER_PATH = os.path.join(sys.prefix, 'utils', 'pot_provider', 'server', 'build', 'main.js')
+POT_PROVIDER_PORT = 4416  # Default port for the PO token HTTP server
+
+# YouTube Authentication (helps avoid 403 errors on datacenter IPs)
+# Priority: PO Token Plugin (auto) > Cookie file (manual fallback)
+# Cookie file: Netscape format exported from browser (e.g., via "Get cookies.txt" extension)
+# PO Token: Proof of Origin token for extra anti-bot bypass (optional, use with cookies)
+YOUTUBE_COOKIE_PATH = os.path.join(APP_PATH, 'youtube_cookies.txt')
+YOUTUBE_PO_TOKEN_PATH = os.path.join(APP_PATH, 'youtube_po_token.txt')
+
+# Residential Proxy Configuration (Decodo/Smartproxy)
+# Used as fallback when direct YouTube streaming fails with 403 errors.
+# YouTube embeds the requester's IP in audio URLs, so datacenter IPs often get blocked.
+# Residential proxies provide real ISP IPs that bypass these blocks.
+# Pricing: ~$4/GB (Decodo PAYG), ~$0.012-0.02 per song.
+RESIDENTIAL_PROXY_USER = 'spc9j6y8fw'  # Decodo username (from dashboard)
+RESIDENTIAL_PROXY_PASSWORD = os.getenv('RESIDENTIAL_PROXY_PASSWORD', '')
+RESIDENTIAL_PROXY_HOST = 'gb.decodo.com' # GB-only IPs (YouTube may treat UK residential better)
+RESIDENTIAL_PROXY_PORT = 30000  # GB geo-targeted port
+RESIDENTIAL_PROXY_COST_PER_GB = 4.00  # USD, for cost tracking
+RESIDENTIAL_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'residential')
 
 # Logging Configuration
 # These are default values that can be used by the logging setup function.
