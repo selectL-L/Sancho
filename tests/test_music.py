@@ -376,22 +376,34 @@ class TestPrefetchState:
     def test_default_values(self):
         """PrefetchState initializes with correct defaults."""
         state = PrefetchState()
-        assert state.url is None
-        assert state.track_url is None
+        assert state.audio_url is None
+        assert state.http_headers is None
+        assert state.thumbnail_bytes is None
+        assert state.target_index is None
+        assert state.target_video_id is None
+        assert state.fetched_at == 0.0
         assert state.task is None
 
-    def test_clear_resets_url_fields_but_not_task(self):
-        """clear() resets url fields but leaves task reference (caller manages)."""
+    def test_clear_resets_all_fields_but_not_task(self):
+        """clear() resets all fields but leaves task reference (caller manages)."""
         mock_task = MagicMock()
         state = PrefetchState(
-            url="https://prefetched.audio.url",
-            track_url="https://youtube.com/watch?v=xyz",
+            audio_url="https://prefetched.audio.url",
+            http_headers={"User-Agent": "test"},
+            thumbnail_bytes=b"fake_image",
+            target_index=5,
+            target_video_id="abc123",
+            fetched_at=12345.0,
             task=mock_task
         )
         state.clear()
 
-        assert state.url is None
-        assert state.track_url is None
+        assert state.audio_url is None
+        assert state.http_headers is None
+        assert state.thumbnail_bytes is None
+        assert state.target_index is None
+        assert state.target_video_id is None
+        assert state.fetched_at == 0.0
         # Task is NOT cleared by clear() - see docstring
         assert state.task is mock_task
 
@@ -423,15 +435,127 @@ class TestPrefetchState:
         state.cancel_task()  # Should not raise
         assert state.task is None
 
+    def test_is_valid_for_returns_false_when_no_audio_url(self):
+        """is_valid_for() returns False when no audio URL is cached."""
+        state = PrefetchState(target_index=5)
+        assert state.is_valid_for(5, 10, 4, "abc123") is False
+
+    def test_is_valid_for_returns_false_when_no_target_index(self):
+        """is_valid_for() returns False when no target index is set."""
+        state = PrefetchState(audio_url="https://example.com")
+        assert state.is_valid_for(5, 10, 4, "abc123") is False
+
+    def test_is_valid_for_returns_false_when_index_mismatch(self):
+        """is_valid_for() returns False when target index doesn't match expected next."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=3,  # Wrong - should be 5 (next from current=4)
+            target_video_id="abc123",
+            fetched_at=time.time()
+        )
+        assert state.is_valid_for(5, 10, 4, "abc123") is False
+
+    def test_is_valid_for_returns_false_when_video_id_mismatch(self):
+        """is_valid_for() returns False when video ID doesn't match."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=5,
+            target_video_id="different_id",
+            fetched_at=time.time()
+        )
+        assert state.is_valid_for(5, 10, 4, "abc123") is False
+
+    def test_is_valid_for_returns_false_when_expired(self):
+        """is_valid_for() returns False when URL has expired."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=5,
+            target_video_id="abc123",
+            fetched_at=time.time() - (6 * 60 * 60)  # 6 hours ago (expired)
+        )
+        assert state.is_valid_for(5, 10, 4, "abc123") is False
+
+    def test_is_valid_for_returns_true_when_all_valid(self):
+        """is_valid_for() returns True when all conditions are met."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=5,
+            target_video_id="abc123",
+            fetched_at=time.time()
+        )
+        # Current index 4, playlist len 10, next would be 5
+        assert state.is_valid_for(5, 10, 4, "abc123") is True
+
+    def test_is_valid_for_wraps_around_playlist(self):
+        """is_valid_for() handles playlist wraparound correctly."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=0,  # Wrapped around
+            target_video_id="abc123",
+            fetched_at=time.time()
+        )
+        # Current index 9, playlist len 10, next would be 0 (wraparound)
+        assert state.is_valid_for(0, 10, 9, "abc123") is True
+
+    def test_invalidate_if_affected_clears_when_target_affected(self):
+        """invalidate_if_affected() clears state when target index is affected."""
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=5,
+            target_video_id="abc123",
+            fetched_at=time.time(),
+            task=mock_task
+        )
+
+        result = state.invalidate_if_affected({5, 8}, 10)
+
+        assert result is True
+        assert state.audio_url is None
+        mock_task.cancel.assert_called_once()
+
+    def test_invalidate_if_affected_preserves_when_not_affected(self):
+        """invalidate_if_affected() preserves state when target not affected."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=5,
+            target_video_id="abc123",
+            fetched_at=time.time()
+        )
+
+        result = state.invalidate_if_affected({1, 3, 8}, 10)
+
+        assert result is False
+        assert state.audio_url == "https://example.com"
+
+    def test_invalidate_if_affected_clears_when_out_of_bounds(self):
+        """invalidate_if_affected() clears when target index is out of bounds."""
+        state = PrefetchState(
+            audio_url="https://example.com",
+            target_index=8,
+            target_video_id="abc123",
+            fetched_at=time.time()
+        )
+
+        # Playlist shrunk to 5 items, target_index 8 is now out of bounds
+        result = state.invalidate_if_affected(set(), 5)
+
+        assert result is True
+        assert state.audio_url is None
+
 
 class TestRetryState:
-    """Tests for the RetryState dataclass."""
+    """Tests for the RetryState dataclass (phase-aware retry system)."""
 
     def test_default_values(self):
         """RetryState initializes with correct defaults."""
         state = RetryState()
         assert state.pending is False
-        assert state.count == 0
+        assert state.direct_count == 0
+        assert state.residential_count == 0
+        assert state.is_residential_phase is False
+        assert state.total_attempts == 0
 
     def test_request_retry_sets_pending(self):
         """request_retry() sets pending to True."""
@@ -444,53 +568,137 @@ class TestRetryState:
         state = RetryState()
         assert state.consume_retry() is False
 
-    def test_consume_retry_first_attempt_succeeds(self):
-        """consume_retry() returns True on first retry attempt."""
+    def test_get_next_strategy_direct_phase(self):
+        """get_next_strategy() returns direct attempts first."""
         state = RetryState()
         state.request_retry()
-        assert state.consume_retry() is True
-        assert state.pending is False
-        assert state.count == 1
 
-    def test_consume_retry_second_attempt_fails(self):
-        """consume_retry() returns False on second retry attempt (limit is 1)."""
+        # First attempt should be direct
+        result = state.get_next_strategy()
+        assert result == (False, 1)  # (is_residential=False, attempt=1)
+        assert state.direct_count == 1
+        assert state.is_residential_phase is False
+
+        # Second direct attempt
+        state.request_retry()
+        result = state.get_next_strategy()
+        assert result == (False, 2)  # (is_residential=False, attempt=2)
+        assert state.direct_count == 2
+
+    def test_get_next_strategy_transitions_to_residential(self):
+        """get_next_strategy() transitions to residential after direct exhausted."""
         state = RetryState()
 
-        # First retry
-        state.request_retry()
-        assert state.consume_retry() is True
+        # Exhaust direct attempts (2 by default)
+        for _ in range(state.DIRECT_MAX):
+            state.request_retry()
+            state.get_next_strategy()
 
-        # Second retry should be denied
+        # Next attempt should be residential
         state.request_retry()
-        assert state.consume_retry() is False
-        assert state.count == 2
+        result = state.get_next_strategy()
+        assert result == (True, 1)  # (is_residential=True, attempt=1)
+        assert state.is_residential_phase is True
+        assert state.residential_count == 1
+
+    def test_get_next_strategy_exhausts_all_attempts(self):
+        """get_next_strategy() returns None when all attempts exhausted."""
+        state = RetryState()
+
+        # Exhaust all attempts (2 direct + 3 residential = 5 total)
+        total = state.DIRECT_MAX + state.RESIDENTIAL_MAX
+        for i in range(total):
+            state.request_retry()
+            result = state.get_next_strategy()
+            assert result is not None, f"Attempt {i+1} should succeed"
+
+        # Next request should be denied
+        state.request_retry()
+        result = state.get_next_strategy()
+        assert result is None
+        assert state.is_exhausted is True
+        assert state.total_attempts == total
 
     def test_reset_clears_state(self):
-        """reset() clears both pending and count."""
+        """reset() clears all counters and phase state."""
         state = RetryState()
         state.request_retry()
-        state.consume_retry()
+        state.get_next_strategy()
         state.request_retry()
 
         state.reset()
 
         assert state.pending is False
-        assert state.count == 0
+        assert state.direct_count == 0
+        assert state.residential_count == 0
+        assert state.is_residential_phase is False
+        assert state.residential_notified is False
 
     def test_reset_allows_retry_again(self):
         """After reset(), retries are allowed again."""
         state = RetryState()
 
-        # Exhaust retries
-        state.request_retry()
-        state.consume_retry()
-        state.request_retry()
-        state.consume_retry()
+        # Exhaust all retries
+        total = state.DIRECT_MAX + state.RESIDENTIAL_MAX
+        for _ in range(total):
+            state.request_retry()
+            state.get_next_strategy()
+
+        assert state.is_exhausted is True
 
         # Reset and try again
         state.reset()
         state.request_retry()
+        result = state.get_next_strategy()
+        assert result == (False, 1)  # Back to direct phase
+        assert state.is_exhausted is False
+
+    def test_consume_retry_backwards_compatible(self):
+        """consume_retry() works for backwards compatibility."""
+        state = RetryState()
+        state.request_retry()
         assert state.consume_retry() is True
+        assert state.direct_count == 1
+
+    def test_absolute_max_attempts_safeguard(self):
+        """ABSOLUTE_MAX_ATTEMPTS prevents theoretical infinite loops."""
+        state = RetryState()
+
+        # The paranoid safeguard should cap at ABSOLUTE_MAX_ATTEMPTS even if
+        # somehow the phase logic were to malfunction
+        assert state.ABSOLUTE_MAX_ATTEMPTS == 10  # Verify constant
+
+        # Normal operation should never hit this - the sum of DIRECT_MAX and
+        # RESIDENTIAL_MAX is less than ABSOLUTE_MAX_ATTEMPTS
+        assert state.DIRECT_MAX + state.RESIDENTIAL_MAX < state.ABSOLUTE_MAX_ATTEMPTS
+
+    def test_absolute_max_prevents_runaway(self):
+        """Even with corrupted state, ABSOLUTE_MAX_ATTEMPTS stops retries."""
+        state = RetryState()
+
+        # Simulate corrupted state where counters don't stop (should never happen)
+        # Manually set counters beyond normal limits to test the safeguard
+        state.direct_count = 5
+        state.residential_count = 5
+        state.is_residential_phase = True
+        # total_attempts is now 10, equal to ABSOLUTE_MAX_ATTEMPTS
+
+        state.request_retry()
+        result = state.get_next_strategy()
+
+        # The absolute cap should prevent any more attempts
+        assert result is None
+
+    def test_residential_notified_flag(self):
+        """residential_notified flag persists until reset."""
+        state = RetryState()
+        assert state.residential_notified is False
+
+        state.residential_notified = True
+        assert state.residential_notified is True
+
+        state.reset()
+        assert state.residential_notified is False
 
 
 class TestAmbienceState:
@@ -1659,18 +1867,19 @@ class TestClearPrefetch:
     """Tests for _clear_prefetch method."""
 
     def test_cancels_task_and_clears_state(self, music_cog):
-        """Cancels prefetch task and clears URLs."""
+        """Cancels prefetch task and clears all state."""
         mock_task = MagicMock()
         mock_task.done.return_value = False
-        music_cog._prefetch.url = "https://audio.url"
-        music_cog._prefetch.track_url = "https://youtube.com/watch?v=abc"
+        music_cog._prefetch.audio_url = "https://audio.url"
+        music_cog._prefetch.target_index = 5
+        music_cog._prefetch.target_video_id = "abc123"
         music_cog._prefetch.task = mock_task
 
         music_cog._clear_prefetch()
 
         mock_task.cancel.assert_called_once()
-        assert music_cog._prefetch.url is None
-        assert music_cog._prefetch.track_url is None
+        assert music_cog._prefetch.audio_url is None
+        assert music_cog._prefetch.target_index is None
         assert music_cog._prefetch.task is None
 
 
@@ -1681,14 +1890,15 @@ class TestClearAudioCaches:
         """Clears both prefetch and current playback caches."""
         mock_task = MagicMock()
         mock_task.done.return_value = False
-        music_cog._prefetch.url = "https://prefetch.url"
+        music_cog._prefetch.audio_url = "https://prefetch.url"
+        music_cog._prefetch.target_index = 3
         music_cog._prefetch.task = mock_task
         music_cog._playback.current_audio_url = "https://current.url"
         music_cog._playback.current_audio_track_url = "https://youtube.com/watch?v=xyz"
 
         music_cog._clear_audio_caches()
 
-        assert music_cog._prefetch.url is None
+        assert music_cog._prefetch.audio_url is None
         assert music_cog._playback.current_audio_url is None
         assert music_cog._playback.current_audio_track_url is None
 
@@ -1942,7 +2152,8 @@ class TestShuffleNlp:
         music_cog.playlist = [create_track(title=f"Track {i}") for i in range(20)]
         music_cog.current_index = 5
         original_current = music_cog.playlist[5]
-        music_cog._prefetch.url = "https://prefetched.url"
+        music_cog._prefetch.audio_url = "https://prefetched.url"
+        music_cog._prefetch.target_index = 6
 
         await music_cog.shuffle_nlp(ctx, "shuffle")
 
@@ -1950,7 +2161,7 @@ class TestShuffleNlp:
         assert music_cog.playlist[0] == original_current
         assert music_cog.current_index == 0
         # Prefetch should be cleared
-        assert music_cog._prefetch.url is None
+        assert music_cog._prefetch.audio_url is None
         ctx.send.assert_called_once()
         assert "shuffled" in ctx.send.call_args[0][0].lower()
 
