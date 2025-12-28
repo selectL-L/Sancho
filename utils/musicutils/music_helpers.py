@@ -914,13 +914,20 @@ async def fetch_url_info(
                 if not entry:  # Skip unavailable videos
                     continue
 
+                # Get video ID from entry or extract from URL
+                video_id = entry.get('id')
+                video_url = entry.get('url') or f"https://www.youtube.com/watch?v={video_id or ''}"
+                if not video_id:
+                    video_id = extract_video_id(video_url)
+
                 track = Track(
                     title=entry.get('title', 'Unknown Title'),
                     artist=entry.get('uploader', entry.get('channel', 'Unknown Artist')),
-                    url=entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}",
+                    url=video_url,
                     duration=int(entry.get('duration', 180) or 180),
                     thumbnail=entry.get('thumbnail'),
-                    user_added=True
+                    user_added=True,
+                    video_id=video_id
                 )
                 tracks.append(track)
 
@@ -942,13 +949,20 @@ async def fetch_url_info(
 
         else:
             # Single video
+            # Get video ID from info or extract from URL
+            video_id = info.get('id')
+            video_url = info.get('webpage_url', url)
+            if not video_id:
+                video_id = extract_video_id(video_url)
+
             track = Track(
                 title=info.get('title', 'Unknown Title'),
                 artist=info.get('uploader', info.get('channel', 'Unknown Artist')),
-                url=info.get('webpage_url', url),
+                url=video_url,
                 duration=int(info.get('duration', 180) or 180),
                 thumbnail=info.get('thumbnail'),
-                user_added=True
+                user_added=True,
+                video_id=video_id
             )
             tracks.append(track)
 
