@@ -244,10 +244,11 @@ YOUTUBE_PO_TOKEN_PATH = os.path.join(APP_PATH, 'youtube_po_token.txt')
 # Pricing: ~$4/GB (Decodo PAYG), ~$0.012-0.02 per song.
 RESIDENTIAL_PROXY_USER = 'spc9j6y8fw'  # Decodo username (from dashboard)
 RESIDENTIAL_PROXY_PASSWORD = os.getenv('RESIDENTIAL_PROXY_PASSWORD', '')
-RESIDENTIAL_PROXY_HOST = 'gb.decodo.com' # GB-only IPs (YouTube may treat UK residential better)
+RESIDENTIAL_PROXY_HOST = 'gb.decodo.com' # GB-only IPs (YouTube may (Does!) treat UK residential better)
 RESIDENTIAL_PROXY_PORT = 30000  # GB geo-targeted port
 RESIDENTIAL_PROXY_COST_PER_GB = 4.00  # USD, for cost tracking
-RESIDENTIAL_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'residential')
+# NOTE: Residential cache path is now managed by MusicCacheManager (cache_root/residential/).
+# This comment is kept for reference but not used by the codebase.
 
 # Logging Configuration
 # These are default values that can be used by the logging setup function.

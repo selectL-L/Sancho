@@ -12,7 +12,7 @@ import tempfile
 import time
 import typing
 from datetime import timedelta
-from typing import List, Optional
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -22,7 +22,7 @@ import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 from utils.extensions import discover_cogs
-from utils.music_helpers import (
+from utils.musicutils import (
     MUTAGEN_AVAILABLE,
     YTDLP_AVAILABLE,
     DownloadResult,
@@ -31,99 +31,7 @@ from utils.music_helpers import (
     get_track_info_for_download,
     get_youtube_auth_status,
 )
-from utils.views import PaginatorView, get_selection
-
-
-class DashboardView(discord.ui.View):
-    """The main dashboard view for the admin report."""
-
-    def __init__(
-        self,
-        ctx: commands.Context,
-        skill_pages: List[discord.Embed],
-        reminder_pages: List[discord.Embed],
-        report_file_callback,
-        dump_db_callback,
-        dashboard_embed: Optional[discord.Embed] = None
-    ):
-        super().__init__(timeout=120.0)
-        self.ctx = ctx
-        self.skill_pages = skill_pages
-        self.reminder_pages = reminder_pages
-        self.report_file_callback = report_file_callback
-        self.dump_db_callback = dump_db_callback
-        self.dashboard_embed = dashboard_embed
-        self.message: Optional[discord.Message] = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("This dashboard is not for you.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="📜 View Skills", style=discord.ButtonStyle.primary)
-    async def view_skills(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.skill_pages:
-            await interaction.response.send_message("No skills found in database.", ephemeral=True)
-            return
-
-        view = PaginatorView(self.ctx, self.skill_pages)
-        # Add a "Back to Dashboard" button to the paginator
-        back_button = discord.ui.Button(
-            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
-
-        async def back_callback(interaction: discord.Interaction):
-            if self.dashboard_embed:
-                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
-            view.stop()
-
-        back_button.callback = back_callback
-        view.add_item(back_button)
-
-        await interaction.response.edit_message(embed=self.skill_pages[0], view=view)
-        view.message = interaction.message
-
-    @discord.ui.button(label="⏰ View Reminders", style=discord.ButtonStyle.primary)
-    async def view_reminders(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.reminder_pages:
-            await interaction.response.send_message("No reminders found in database.", ephemeral=True)
-            return
-
-        view = PaginatorView(self.ctx, self.reminder_pages)
-        # Add a "Back to Dashboard" button to the paginator
-        back_button = discord.ui.Button(
-            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
-
-        async def back_callback(interaction: discord.Interaction):
-            if self.dashboard_embed:
-                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
-            view.stop()
-
-        back_button.callback = back_callback
-        view.add_item(back_button)
-
-        await interaction.response.edit_message(embed=self.reminder_pages[0], view=view)
-        view.message = interaction.message
-
-    @discord.ui.button(label="💾 Export to File", style=discord.ButtonStyle.secondary)
-    async def export_file(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.report_file_callback(self.ctx)
-
-    @discord.ui.button(label="🗄️ Dump Database", style=discord.ButtonStyle.danger)
-    async def dump_database(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.dump_db_callback(self.ctx)
-
-    async def on_timeout(self):
-        if self.message:
-            try:
-                for child in self.children:
-                    if hasattr(child, 'disabled'):
-                        setattr(child, 'disabled', True)
-                await self.message.edit(view=self)
-            except Exception:
-                pass
+from utils.views import get_selection, show_dashboard
 
 
 class AdminCog(BaseCog):
@@ -540,11 +448,15 @@ class AdminCog(BaseCog):
             dashboard_embed.add_field(
                 name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
-            # 6. Launch View
-            view = DashboardView(ctx, skill_pages, reminder_pages,
-                                 export_callback, dump_db_callback, dashboard_embed)
-            sent_msg = await ctx.send(embed=dashboard_embed, view=view)
-            view.message = sent_msg
+            # 6. Launch Dashboard
+            await show_dashboard(
+                ctx=ctx,
+                skill_pages=skill_pages,
+                reminder_pages=reminder_pages,
+                report_file_callback=export_callback,
+                dump_db_callback=dump_db_callback,
+                dashboard_embed=dashboard_embed
+            )
 
         except Exception as e:
             logging.error("Error generating dashboard:", exc_info=True)
@@ -1186,6 +1098,19 @@ class AdminCog(BaseCog):
             inline=True
         )
 
+        # Residential proxy cache stats
+        residential_stats = cache_manager.get_residential_stats()
+        if residential_stats['file_count'] > 0:
+            embed.add_field(
+                name="Residential Cache",
+                value=(
+                    f"**Files:** {residential_stats['file_count']}\n"
+                    f"**Size:** {residential_stats['size_mb']:.1f} MB\n"
+                    f"**Est. Cost:** ${residential_stats['estimated_cost']:.2f}"
+                ),
+                inline=True
+            )
+
         download_pct = (stats['downloaded_tracks'] / stats['total_tracks'] * 100) if stats['total_tracks'] > 0 else 0
         embed.set_footer(text=f"Download progress: {download_pct:.0f}% | Cache location: {config.MUSIC_CACHE_PATH}")
         await ctx.send(embed=embed)
@@ -1344,7 +1269,7 @@ class AdminCog(BaseCog):
         auth_status.last_check = 0
 
         # Trigger detection to refresh all fields
-        from utils.music_helpers import _detect_youtube_auth
+        from utils.musicutils.music_auth import _detect_youtube_auth
         _detect_youtube_auth()
 
         # Build status embed
@@ -1641,7 +1566,7 @@ class AdminCog(BaseCog):
             auth_status.auth_method = None
 
             # Force re-detection
-            from utils.music_helpers import _detect_youtube_auth
+            from utils.musicutils.music_auth import _detect_youtube_auth
             _detect_youtube_auth()
 
             # Success message

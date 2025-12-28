@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import asyncio
 import time
 
-from utils.music_helpers import (
+from utils.musicutils import (
     chunk_text,
     detect_mix_in_url,
     sanitize_filename,
@@ -25,8 +25,8 @@ from utils.music_helpers import (
     format_youtube_error,
     MusicCacheManager,
     Track,
-    UNAVAILABLE_INDICATORS,
 )
+from utils.musicutils.music_helpers import UNAVAILABLE_INDICATORS
 
 
 # =============================================================================

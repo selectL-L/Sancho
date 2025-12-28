@@ -15,13 +15,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from discord.ext import commands
 
-from utils.music_helpers import (
+from utils.musicutils import (
     AmbienceState,
+    AudioFetcher,
+    FetchContext,
     LoopMode,
     PlaybackState,
     PrefetchState,
-    RetryState,
     Track,
+    TrackFetchState,
     extract_video_id,
 )
 
@@ -545,160 +547,279 @@ class TestPrefetchState:
         assert state.audio_url is None
 
 
-class TestRetryState:
-    """Tests for the RetryState dataclass (phase-aware retry system)."""
+class TestTrackFetchState:
+    """Tests for the TrackFetchState dataclass."""
 
     def test_default_values(self):
-        """RetryState initializes with correct defaults."""
-        state = RetryState()
-        assert state.pending is False
-        assert state.direct_count == 0
-        assert state.residential_count == 0
-        assert state.is_residential_phase is False
-        assert state.total_attempts == 0
+        """TrackFetchState initializes with correct defaults."""
+        state = TrackFetchState(video_id="abc123")
+        assert state.video_id == "abc123"
+        assert state.direct_attempts == 0
+        assert state.auth_failed is False
+        assert state.residential_attempts == 0
 
-    def test_request_retry_sets_pending(self):
-        """request_retry() sets pending to True."""
-        state = RetryState()
-        state.request_retry()
-        assert state.pending is True
 
-    def test_consume_retry_returns_false_if_not_pending(self):
-        """consume_retry() returns False if no retry was requested."""
-        state = RetryState()
-        assert state.consume_retry() is False
+class TestFetchContext:
+    """Tests for the FetchContext enum."""
 
-    def test_get_next_strategy_direct_phase(self):
-        """get_next_strategy() returns direct attempts first."""
-        state = RetryState()
-        state.request_retry()
+    def test_values(self):
+        """FetchContext has three values."""
+        assert FetchContext.PREFETCH.value == "prefetch"
+        assert FetchContext.LIVE.value == "live"
+        assert FetchContext.RETRY.value == "retry"
 
-        # First attempt should be direct
-        result = state.get_next_strategy()
-        assert result == (False, 1)  # (is_residential=False, attempt=1)
-        assert state.direct_count == 1
-        assert state.is_residential_phase is False
 
-        # Second direct attempt
-        state.request_retry()
-        result = state.get_next_strategy()
-        assert result == (False, 2)  # (is_residential=False, attempt=2)
-        assert state.direct_count == 2
+class TestAudioFetcher:
+    """Tests for the AudioFetcher class (Phase 12 - context-aware fetching).
 
-    def test_get_next_strategy_transitions_to_residential(self):
-        """get_next_strategy() transitions to residential after direct exhausted."""
-        state = RetryState()
+    AudioFetcher owns retry strategy, cog owns buffer storage:
+    - PREFETCH: Conservative - stops at direct failure
+    - LIVE: Aggressive - full retry including residential
+    - RETRY: Aggressive - FFmpeg failed, need fresh URL
+    """
 
-        # Exhaust direct attempts (2 by default)
-        for _ in range(state.DIRECT_MAX):
-            state.request_retry()
-            state.get_next_strategy()
+    def test_default_values(self):
+        """AudioFetcher initializes with correct defaults."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-        # Next attempt should be residential
-        state.request_retry()
-        result = state.get_next_strategy()
-        assert result == (True, 1)  # (is_residential=True, attempt=1)
-        assert state.is_residential_phase is True
-        assert state.residential_count == 1
+        assert fetcher._track_states == {}
+        assert fetcher._last_residential_time == 0.0
+        assert fetcher.DIRECT_MAX == 2
+        assert fetcher.RESIDENTIAL_MAX == 3
 
-    def test_get_next_strategy_exhausts_all_attempts(self):
-        """get_next_strategy() returns None when all attempts exhausted."""
-        state = RetryState()
+    def test_get_state_creates_new(self):
+        """_get_state() creates new TrackFetchState for unknown track."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-        # Exhaust all attempts (2 direct + 3 residential = 5 total)
-        total = state.DIRECT_MAX + state.RESIDENTIAL_MAX
-        for i in range(total):
-            state.request_retry()
-            result = state.get_next_strategy()
-            assert result is not None, f"Attempt {i+1} should succeed"
+        state = fetcher._get_state("abc123")
 
-        # Next request should be denied
-        state.request_retry()
-        result = state.get_next_strategy()
-        assert result is None
-        assert state.is_exhausted is True
-        assert state.total_attempts == total
+        assert state.video_id == "abc123"
+        assert state.direct_attempts == 0
+        assert "abc123" in fetcher._track_states
 
-    def test_reset_clears_state(self):
-        """reset() clears all counters and phase state."""
-        state = RetryState()
-        state.request_retry()
-        state.get_next_strategy()
-        state.request_retry()
+    def test_get_state_returns_existing(self):
+        """_get_state() returns existing state for known track."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-        state.reset()
+        # Create state and modify it
+        state1 = fetcher._get_state("abc123")
+        state1.direct_attempts = 2
 
-        assert state.pending is False
-        assert state.direct_count == 0
-        assert state.residential_count == 0
-        assert state.is_residential_phase is False
-        assert state.residential_notified is False
+        # Get same state again
+        state2 = fetcher._get_state("abc123")
+        assert state2.direct_attempts == 2
+        assert state1 is state2
 
-    def test_reset_allows_retry_again(self):
-        """After reset(), retries are allowed again."""
-        state = RetryState()
+    def test_clear_state_specific_track(self):
+        """clear_state(video_id) clears only that track's state."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-        # Exhaust all retries
-        total = state.DIRECT_MAX + state.RESIDENTIAL_MAX
-        for _ in range(total):
-            state.request_retry()
-            state.get_next_strategy()
+        fetcher._get_state("abc123").direct_attempts = 2
+        fetcher._get_state("xyz789").direct_attempts = 1
 
-        assert state.is_exhausted is True
+        fetcher.clear_state("abc123")
 
-        # Reset and try again
-        state.reset()
-        state.request_retry()
-        result = state.get_next_strategy()
-        assert result == (False, 1)  # Back to direct phase
-        assert state.is_exhausted is False
+        assert "abc123" not in fetcher._track_states
+        assert "xyz789" in fetcher._track_states
+        assert fetcher._track_states["xyz789"].direct_attempts == 1
 
-    def test_consume_retry_backwards_compatible(self):
-        """consume_retry() works for backwards compatibility."""
-        state = RetryState()
-        state.request_retry()
-        assert state.consume_retry() is True
-        assert state.direct_count == 1
+    def test_clear_state_all_tracks(self):
+        """clear_state(None) clears all track states."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-    def test_absolute_max_attempts_safeguard(self):
-        """ABSOLUTE_MAX_ATTEMPTS prevents theoretical infinite loops."""
-        state = RetryState()
+        fetcher._get_state("abc123").direct_attempts = 2
+        fetcher._get_state("xyz789").direct_attempts = 1
 
-        # The paranoid safeguard should cap at ABSOLUTE_MAX_ATTEMPTS even if
-        # somehow the phase logic were to malfunction
-        assert state.ABSOLUTE_MAX_ATTEMPTS == 10  # Verify constant
+        fetcher.clear_state()
 
-        # Normal operation should never hit this - the sum of DIRECT_MAX and
-        # RESIDENTIAL_MAX is less than ABSOLUTE_MAX_ATTEMPTS
-        assert state.DIRECT_MAX + state.RESIDENTIAL_MAX < state.ABSOLUTE_MAX_ATTEMPTS
+        assert fetcher._track_states == {}
 
-    def test_absolute_max_prevents_runaway(self):
-        """Even with corrupted state, ABSOLUTE_MAX_ATTEMPTS stops retries."""
-        state = RetryState()
+    def test_reset_is_alias_for_clear_state(self):
+        """reset() is an alias for clear_state()."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-        # Simulate corrupted state where counters don't stop (should never happen)
-        # Manually set counters beyond normal limits to test the safeguard
-        state.direct_count = 5
-        state.residential_count = 5
-        state.is_residential_phase = True
-        # total_attempts is now 10, equal to ABSOLUTE_MAX_ATTEMPTS
+        fetcher._get_state("abc123").direct_attempts = 2
+        fetcher.reset()
 
-        state.request_retry()
-        result = state.get_next_strategy()
+        assert fetcher._track_states == {}
 
-        # The absolute cap should prevent any more attempts
-        assert result is None
+    def test_clear_state_preserves_rate_limit_time(self):
+        """clear_state() preserves residential rate limit time."""
+        mock_cache = MagicMock()
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
 
-    def test_residential_notified_flag(self):
-        """residential_notified flag persists until reset."""
-        state = RetryState()
-        assert state.residential_notified is False
+        fetcher._last_residential_time = 12345.0
+        fetcher._get_state("abc123").direct_attempts = 2
 
-        state.residential_notified = True
-        assert state.residential_notified is True
+        fetcher.clear_state()
 
-        state.reset()
-        assert state.residential_notified is False
+        assert fetcher._last_residential_time == 12345.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_prefetch_uses_residential_cache(self):
+        """PREFETCH returns cached file if in residential cache."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = "/cache/residential/abc123.mp3"
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track = Track(
+            title="Test Song",
+            artist="Test Artist",
+            url="https://youtube.com/watch?v=abc123",
+            duration=180,
+            video_id="abc123"
+        )
+
+        result = await fetcher.fetch(track, FetchContext.PREFETCH)
+
+        assert result.success is True
+        assert result.local_path == "/cache/residential/abc123.mp3"
+        mock_cache.check_residential.assert_called_once_with("abc123")
+
+    @pytest.mark.asyncio
+    async def test_fetch_prefetch_tries_direct(self):
+        """PREFETCH tries yt-dlp when no cache."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = None
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track = Track(
+            title="Test Song",
+            artist="Test Artist",
+            url="https://youtube.com/watch?v=abc123",
+            duration=180,
+            video_id="abc123"
+        )
+
+        with patch('utils.musicutils.music_auth.get_audio_url', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = ("https://stream.url", False, None, False, None)
+            result = await fetcher.fetch(track, FetchContext.PREFETCH)
+
+        assert result.success is True
+        assert result.url == "https://stream.url"
+
+        # Check state was tracked
+        state = fetcher._track_states["abc123"]
+        assert state.direct_attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_prefetch_stops_on_auth_failure(self):
+        """PREFETCH stops and returns failure on 403 (doesn't escalate to residential)."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = None
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track = Track(
+            title="Test Song",
+            artist="Test Artist",
+            url="https://youtube.com/watch?v=abc123",
+            duration=180,
+            video_id="abc123"
+        )
+
+        with patch('utils.musicutils.music_auth.get_audio_url', new_callable=AsyncMock) as mock_get:
+            # Simulate 403 error: url=None, is_unavailable=False means auth failure
+            mock_get.return_value = (None, False, None, False, None)
+            result = await fetcher.fetch(track, FetchContext.PREFETCH)
+
+        assert result.success is False
+        assert result.is_auth_failure is True
+        # Should NOT have tried residential
+        mock_cache.download_residential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_live_escalates_to_residential(self):
+        """LIVE escalates to residential after auth failure."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = None
+        # download_residential returns (success, error_msg, bytes_downloaded, cached_path)
+        mock_cache.download_residential = AsyncMock(return_value=(True, None, 5000, "/cache/res/abc.mp3"))
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track = Track(
+            title="Test Song",
+            artist="Test Artist",
+            url="https://youtube.com/watch?v=abc123",
+            duration=180,
+            video_id="abc123"
+        )
+
+        with patch('utils.musicutils.music_auth.get_audio_url', new_callable=AsyncMock) as mock_get:
+            # Direct attempts fail with 403 (is_unavailable=False means auth failure)
+            mock_get.return_value = (None, False, None, False, None)
+            with patch('utils.musicutils.music_auth.get_residential_proxy_url', return_value="http://proxy.example"):
+                result = await fetcher.fetch(track, FetchContext.LIVE)
+
+        assert result.success is True
+        assert result.local_path == "/cache/res/abc.mp3"
+        assert result.residential_used is True
+        assert result.residential_bytes == 5000
+
+    @pytest.mark.asyncio
+    async def test_fetch_retry_continues_from_previous_state(self):
+        """RETRY uses existing state from previous attempts."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = None
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track = Track(
+            title="Test Song",
+            artist="Test Artist",
+            url="https://youtube.com/watch?v=abc123",
+            duration=180,
+            video_id="abc123"
+        )
+
+        # Simulate prior PREFETCH that failed with auth
+        state = fetcher._get_state("abc123")
+        state.direct_attempts = 1
+        state.auth_failed = True
+
+        with patch('utils.musicutils.music_auth.get_audio_url', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = ("https://stream.url", False, None, False, None)
+            result = await fetcher.fetch(track, FetchContext.RETRY)
+
+        # Should try one more direct attempt since we have budget
+        assert result.success is True
+        assert fetcher._track_states["abc123"].direct_attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_fetch_tracks_separate_state_per_video(self):
+        """AudioFetcher tracks state separately per video_id."""
+        mock_cache = MagicMock()
+        mock_cache.check_residential.return_value = None
+        mock_logger = MagicMock()
+        fetcher = AudioFetcher(mock_cache, mock_logger)
+
+        track1 = Track(title="Song 1", artist="A", url="https://yt/v=abc", duration=100, video_id="abc")
+        track2 = Track(title="Song 2", artist="B", url="https://yt/v=xyz", duration=100, video_id="xyz")
+
+        with patch('utils.musicutils.music_auth.get_audio_url', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = ("https://stream.url", False, None, False, None)
+
+            await fetcher.fetch(track1, FetchContext.LIVE)
+            await fetcher.fetch(track2, FetchContext.LIVE)
+
+        assert fetcher._track_states["abc"].direct_attempts == 1
+        assert fetcher._track_states["xyz"].direct_attempts == 1
 
 
 class TestAmbienceState:
@@ -1595,272 +1716,137 @@ class TestGetElapsedSeconds:
 class TestDoPause:
     """Tests for _do_pause method."""
 
-    def test_returns_false_without_session(self, music_cog):
-        """Returns False when no active session."""
-        music_cog.active_session = None
+    def test_returns_false_without_player(self, music_cog):
+        """Returns False when no ManagedPlayer."""
+        music_cog._player = None
         assert music_cog._do_pause() is False
 
-    def test_returns_false_without_voice_client(self, music_cog):
-        """Returns False when session has no voice client."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = None
-        assert music_cog._do_pause() is False
-
-    def test_returns_false_when_not_playing(self, music_cog):
-        """Returns False when voice client is not playing."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = False
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+    def test_returns_false_when_pause_fails(self, music_cog):
+        """Returns False when player.pause() returns False."""
+        mock_player = MagicMock()
+        mock_player.pause.return_value = False
+        music_cog._player = mock_player
 
         assert music_cog._do_pause() is False
 
     def test_pauses_and_captures_position(self, music_cog):
-        """Pauses playback and captures position."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
-        music_cog.track_started_at = time.time() - 60.0  # 60 seconds in
+        """Pauses playback and captures position via ManagedPlayer."""
+        mock_player = MagicMock()
+        mock_player.pause.return_value = True
+        mock_player.position = 60.0  # Position from player
+        music_cog._player = mock_player
 
         result = music_cog._do_pause()
 
         assert result is True
-        mock_vc.pause.assert_called_once()
-        assert music_cog._playback.paused_at_position is not None
-        assert 59.0 < music_cog._playback.paused_at_position < 61.0
+        mock_player.pause.assert_called_once()
+        assert music_cog._playback.paused_at_position == 60.0
 
 
 class TestDoSkip:
-    """Tests for _do_skip method."""
+    """Tests for _do_skip method (async, uses ManagedPlayer)."""
 
-    def test_returns_false_without_session(self, music_cog):
-        """Returns False when no active session."""
-        music_cog.active_session = None
-        assert music_cog._do_skip() is False
+    @pytest.mark.asyncio
+    async def test_returns_false_without_player(self, music_cog):
+        """Returns False when no ManagedPlayer."""
+        music_cog._player = None
+        assert await music_cog._do_skip() is False
 
-    def test_returns_false_when_not_playing_or_paused(self, music_cog):
-        """Returns False when voice client is idle."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = False
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+    @pytest.mark.asyncio
+    async def test_returns_false_when_not_playing_or_paused(self, music_cog):
+        """Returns False when player is idle."""
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
-        assert music_cog._do_skip() is False
+        assert await music_cog._do_skip() is False
 
-    def test_returns_false_with_empty_playlist(self, music_cog):
+    @pytest.mark.asyncio
+    async def test_returns_false_with_empty_playlist(self, music_cog):
         """Returns False when playlist is empty."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        music_cog._player = mock_player
         music_cog.playlist = []
 
-        assert music_cog._do_skip() is False
+        assert await music_cog._do_skip() is False
 
-    def test_advances_index_and_stops(self, music_cog):
+    @pytest.mark.asyncio
+    async def test_advances_index_and_stops(self, music_cog, mocker):
         """Advances index and stops current playback."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         tracks = [create_track(video_id=f"vid{i}") for i in range(5)]
         music_cog.playlist = tracks
         music_cog.current_index = 1
         music_cog.loop_mode = LoopMode.ALL
 
-        result = music_cog._do_skip()
+        # Mock _play_current_track to avoid actual playback
+        mocker.patch.object(music_cog, '_play_current_track', new_callable=AsyncMock)
+
+        result = await music_cog._do_skip()
 
         assert result is True
         assert music_cog.current_index == 2
-        mock_vc.stop.assert_called_once()
-        assert music_cog._suppress_next_track_end is True
+        mock_player.stop.assert_called_once()
 
-    def test_skip_ignores_loop_one(self, music_cog):
+    @pytest.mark.asyncio
+    async def test_skip_ignores_loop_one(self, music_cog, mocker):
         """Skip advances even in LOOP_ONE mode (unlike natural track end)."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         tracks = [create_track(video_id=f"vid{i}") for i in range(5)]
         music_cog.playlist = tracks
         music_cog.current_index = 2
         music_cog.loop_mode = LoopMode.ONE
 
-        music_cog._do_skip()
+        mocker.patch.object(music_cog, '_play_current_track', new_callable=AsyncMock)
+
+        await music_cog._do_skip()
 
         assert music_cog.current_index == 3  # Advanced, not stuck on 2
 
-    def test_skip_wraps_at_end_with_loop_all(self, music_cog):
+    @pytest.mark.asyncio
+    async def test_skip_wraps_at_end_with_loop_all(self, music_cog, mocker):
         """Wraps to 0 at end of playlist with LOOP_ALL."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         tracks = [create_track(video_id=f"vid{i}") for i in range(5)]
         music_cog.playlist = tracks
         music_cog.current_index = 4  # Last track
         music_cog.loop_mode = LoopMode.ALL
 
-        music_cog._do_skip()
+        mocker.patch.object(music_cog, '_play_current_track', new_callable=AsyncMock)
+
+        await music_cog._do_skip()
 
         assert music_cog.current_index == 0
 
-    def test_skip_wraps_at_end_with_loop_off(self, music_cog):
+    @pytest.mark.asyncio
+    async def test_skip_wraps_at_end_with_loop_off(self, music_cog, mocker):
         """Wraps to 0 at end even with LOOP_OFF (but doesn't auto-play)."""
-        mock_vc = MagicMock(spec=discord.VoiceClient)
-        mock_vc.is_playing.return_value = True
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         tracks = [create_track(video_id=f"vid{i}") for i in range(5)]
         music_cog.playlist = tracks
         music_cog.current_index = 4
         music_cog.loop_mode = LoopMode.OFF
 
-        music_cog._do_skip()
+        mocker.patch.object(music_cog, '_play_current_track', new_callable=AsyncMock)
+
+        await music_cog._do_skip()
 
         assert music_cog.current_index == 0
 
-
-class TestUserInVoiceWithBot:
-    """Tests for _user_in_voice_with_bot method."""
-
-    def test_returns_false_without_session(self, music_cog):
-        """Returns False when no active session."""
-        music_cog.active_session = None
-        ctx = MagicMock()
-        assert music_cog._user_in_voice_with_bot(ctx) is False
-
-    def test_owner_bypasses_check(self, music_cog):
-        """Bot owner bypasses the VC check."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 99999
-
-        ctx = MagicMock()
-        ctx.author.id = 99999  # Owner
-
-        assert music_cog._user_in_voice_with_bot(ctx) is True
-
-    def test_returns_false_if_author_not_in_voice(self, music_cog):
-        """Returns False if author has no voice state."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = None
-
-        assert music_cog._user_in_voice_with_bot(ctx) is False
-
-    def test_returns_false_if_in_different_channel(self, music_cog):
-        """Returns False if author is in a different voice channel."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = MagicMock()
-        ctx.author.voice.channel = MagicMock()
-        ctx.author.voice.channel.id = 99999  # Different channel
-
-        assert music_cog._user_in_voice_with_bot(ctx) is False
-
-    def test_returns_true_if_in_same_channel(self, music_cog):
-        """Returns True if author is in the same voice channel as bot."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = MagicMock()
-        ctx.author.voice.channel = MagicMock()
-        ctx.author.voice.channel.id = 12345  # Same channel
-
-        assert music_cog._user_in_voice_with_bot(ctx) is True
-
-    def test_returns_false_when_author_has_no_voice_attr(self, music_cog):
-        """Returns False when author object has no voice attribute."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        del ctx.author.voice  # Remove voice attribute
-
-        assert music_cog._user_in_voice_with_bot(ctx) is False
-
-    def test_returns_false_when_voice_channel_is_none(self, music_cog):
-        """Returns False when author's voice.channel is None."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = MagicMock()
-        ctx.author.voice.channel = None
-
-        assert music_cog._user_in_voice_with_bot(ctx) is False
-
-
-class TestRequireUserInVC:
-    """Tests for _require_user_in_vc async method."""
-
-    @pytest.mark.asyncio
-    async def test_returns_false_and_sends_message_without_session(self, music_cog):
-        """Returns False and sends message when no session."""
-        music_cog.active_session = None
-        ctx = MagicMock()
-        ctx.send = AsyncMock()
-
-        result = await music_cog._require_user_in_vc(ctx)
-
-        assert result is False
-        ctx.send.assert_called_once()
-        assert "not playing" in ctx.send.call_args[0][0].lower()
-
-    @pytest.mark.asyncio
-    async def test_returns_false_and_sends_message_if_not_in_vc(self, music_cog):
-        """Returns False and sends message when user not in VC with bot."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = None
-        ctx.send = AsyncMock()
-
-        result = await music_cog._require_user_in_vc(ctx)
-
-        assert result is False
-        ctx.send.assert_called_once()
-        assert "voice channel" in ctx.send.call_args[0][0].lower()
-
-    @pytest.mark.asyncio
-    async def test_returns_true_when_user_in_vc(self, music_cog):
-        """Returns True when user is in VC with bot."""
-        music_cog.active_session = MagicMock()
-        music_cog.active_session.channel_id = 12345
-        music_cog.bot.owner_id = 11111
-
-        ctx = MagicMock()
-        ctx.author.id = 22222
-        ctx.author.voice = MagicMock()
-        ctx.author.voice.channel = MagicMock()
-        ctx.author.voice.channel.id = 12345
-        ctx.send = AsyncMock()
-
-        result = await music_cog._require_user_in_vc(ctx)
-
-        assert result is True
-        ctx.send.assert_not_called()
 
 
 class TestClearPrefetch:
@@ -1903,8 +1889,8 @@ class TestClearAudioCaches:
         assert music_cog._playback.current_audio_track_url is None
 
 
-class TestBuildNowPlayingState:
-    """Tests for _build_now_playing_state method."""
+class TestGetNowPlayingState:
+    """Tests for get_now_playing_state method."""
 
     def test_builds_state_with_track(self, music_cog):
         """Builds state from current track and player state."""
@@ -1920,8 +1906,9 @@ class TestBuildNowPlayingState:
         music_cog.track_started_at = time.time() - 65  # 65 seconds in
         music_cog._playback.paused_at_position = None
         music_cog.active_session = None
+        music_cog._player = None  # No player = not playing
 
-        state = music_cog._build_now_playing_state(thumbnail_url="https://thumb.url")
+        state = music_cog.get_now_playing_state(thumbnail_url="https://thumb.url")
 
         assert state.track_title == "Test Song"
         assert state.track_artist == "Test Artist"
@@ -1944,13 +1931,13 @@ class TestBuildNowPlayingState:
         music_cog.loop_mode = LoopMode.ONE
         music_cog.track_started_at = time.time() - 30
 
-        mock_vc = MagicMock()
-        mock_vc.is_playing.return_value = True
-        mock_vc.is_paused.return_value = False
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
 
-        state = music_cog._build_now_playing_state()
+        state = music_cog.get_now_playing_state()
 
         assert state.is_playing is True
         assert state.is_paused is False
@@ -1965,13 +1952,13 @@ class TestBuildNowPlayingState:
         music_cog.loop_mode = LoopMode.OFF
         music_cog._playback.paused_at_position = 120.0  # Paused at 2:00
 
-        mock_vc = MagicMock()
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = True
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = True
+        music_cog._player = mock_player
         music_cog.active_session = MagicMock()
-        music_cog.active_session.voice_client = mock_vc
 
-        state = music_cog._build_now_playing_state()
+        state = music_cog.get_now_playing_state()
 
         assert state.is_playing is False
         assert state.is_paused is True
@@ -1982,8 +1969,9 @@ class TestBuildNowPlayingState:
         """Handles empty playlist gracefully."""
         music_cog.playlist = []
         music_cog.active_session = None
+        music_cog._player = None
 
-        state = music_cog._build_now_playing_state()
+        state = music_cog.get_now_playing_state()
 
         assert state.track_title == "Unknown"
         assert state.track_artist == "Unknown"
@@ -2144,7 +2132,7 @@ class TestShuffleNlp:
 
     @pytest.mark.asyncio
     async def test_shuffles_playlist(self, music_cog):
-        """Shuffles playlist and clears prefetch."""
+        """Shuffles playlist."""
         ctx = create_voice_ctx()
         setup_active_session(music_cog)
 
@@ -2152,16 +2140,12 @@ class TestShuffleNlp:
         music_cog.playlist = [create_track(title=f"Track {i}") for i in range(20)]
         music_cog.current_index = 5
         original_current = music_cog.playlist[5]
-        music_cog._prefetch.audio_url = "https://prefetched.url"
-        music_cog._prefetch.target_index = 6
 
         await music_cog.shuffle_nlp(ctx, "shuffle")
 
         # Current track should be at index 0
         assert music_cog.playlist[0] == original_current
         assert music_cog.current_index == 0
-        # Prefetch should be cleared
-        assert music_cog._prefetch.audio_url is None
         ctx.send.assert_called_once()
         assert "shuffled" in ctx.send.call_args[0][0].lower()
 
@@ -2221,31 +2205,43 @@ class TestSkipNlp:
     """Tests for skip_nlp NLP handler."""
 
     @pytest.mark.asyncio
-    async def test_skips_when_playing(self, music_cog):
+    async def test_skips_when_playing(self, music_cog, mocker):
         """Skips track when playing."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = True
-        mock_vc.is_paused.return_value = False
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
         music_cog.playlist = [create_track() for _ in range(5)]
         music_cog.current_index = 0
         music_cog.loop_mode = LoopMode.OFF
 
+        # Mock _do_skip to return True (skip successful)
+        mocker.patch.object(music_cog, '_do_skip', new_callable=AsyncMock, return_value=True)
+
         await music_cog.skip_nlp(ctx, "skip")
 
-        mock_vc.stop.assert_called_once()
+        music_cog._do_skip.assert_called_once()
         assert "skipped" in ctx.send.call_args[0][0].lower()
 
     @pytest.mark.asyncio
-    async def test_message_when_not_playing(self, music_cog):
+    async def test_message_when_not_playing(self, music_cog, mocker):
         """Shows message when nothing is playing."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = False
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
         music_cog.playlist = [create_track()]
+
+        # Mock _do_skip to return False (nothing to skip)
+        mocker.patch.object(music_cog, '_do_skip', new_callable=AsyncMock, return_value=False)
 
         await music_cog.skip_nlp(ctx, "skip")
 
@@ -2256,29 +2252,38 @@ class TestPauseNlp:
     """Tests for pause_nlp NLP handler."""
 
     @pytest.mark.asyncio
-    async def test_pauses_when_playing(self, music_cog):
+    async def test_pauses_when_playing(self, music_cog, mocker):
         """Pauses playback when playing."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = True
-        mock_vc.is_paused.return_value = False
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
         music_cog.track_started_at = time.time() - 30
+
+        # Mock _do_pause to return True (pause successful)
+        mocker.patch.object(music_cog, '_do_pause', return_value=True)
 
         await music_cog.pause_nlp(ctx, "pause")
 
-        mock_vc.pause.assert_called_once()
+        music_cog._do_pause.assert_called_once()
         assert "paused" in ctx.send.call_args[0][0].lower()
 
     @pytest.mark.asyncio
     async def test_message_when_already_paused(self, music_cog):
         """Shows message when already paused."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = True
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = True
+        music_cog._player = mock_player
 
         await music_cog.pause_nlp(ctx, "pause")
 
-        mock_vc.pause.assert_not_called()
         assert "already paused" in ctx.send.call_args[0][0].lower()
 
 
@@ -2289,9 +2294,12 @@ class TestResumeNlp:
     async def test_resumes_when_paused(self, music_cog, mocker):
         """Resumes playback when paused."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = True
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = True
+        music_cog._player = mock_player
 
         # Mock _do_resume to return True
         mocker.patch.object(music_cog, '_do_resume', new_callable=AsyncMock, return_value=True)
@@ -2305,9 +2313,12 @@ class TestResumeNlp:
     async def test_message_when_already_playing(self, music_cog):
         """Shows message when already playing."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = True
-        mock_vc.is_paused.return_value = False
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
         await music_cog.resume_nlp(ctx, "resume")
 
@@ -2317,9 +2328,12 @@ class TestResumeNlp:
     async def test_message_when_nothing_to_resume(self, music_cog):
         """Shows message when nothing to resume."""
         ctx = create_voice_ctx()
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = False
+        setup_active_session(music_cog)
+
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
         await music_cog.resume_nlp(ctx, "resume")
 
@@ -2358,9 +2372,11 @@ class TestPlayNlp:
         ctx.guild = MagicMock()
         ctx.guild.id = 11111
 
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_playing.return_value = False
-        mock_vc.is_paused.return_value = True
+        setup_active_session(music_cog)
+        mock_player = MagicMock()
+        mock_player.is_playing = False
+        mock_player.is_paused = True
+        music_cog._player = mock_player
 
         mocker.patch.object(music_cog, '_do_resume', new_callable=AsyncMock, return_value=True)
 
@@ -2373,6 +2389,7 @@ class TestPlayNlp:
         """Shows message when no active session and no query."""
         ctx = create_voice_ctx()
         music_cog.active_session = None
+        music_cog._player = None
 
         await music_cog.play_nlp(ctx, "play ")  # Empty query
 
@@ -2517,37 +2534,40 @@ class TestDoJump:
 
     @pytest.mark.asyncio
     async def test_valid_position_updates_index(self, music_cog, mocker):
-        """Updates current_index and clears audio caches."""
+        """Updates current_index and clears current track cache."""
         ctx = create_voice_ctx()
         music_cog.playlist = [create_track(title=f"Track {i}") for i in range(5)]
         music_cog.current_index = 0
 
-        mock_clear_audio = mocker.patch.object(music_cog, '_clear_audio_caches')
+        mock_clear_cache = mocker.patch.object(music_cog, '_clear_current_track_cache')
 
         await music_cog._do_jump(ctx, 3)
 
         assert music_cog.current_index == 2  # 1-indexed to 0-indexed
-        mock_clear_audio.assert_called_once()
+        mock_clear_cache.assert_called_once()
         # Should send confirmation
         ctx.send.assert_called_once()
         assert "jumped to" in ctx.send.call_args[0][0].lower()
 
     @pytest.mark.asyncio
-    async def test_while_playing_stops_and_sets_suppress_flag(self, music_cog, mocker):
-        """When playing, sets suppress flag and stops playback."""
+    async def test_while_playing_stops_player(self, music_cog, mocker):
+        """When playing, stops player and starts new track."""
         ctx = create_voice_ctx()
         music_cog.playlist = [create_track(title=f"Track {i}") for i in range(5)]
         setup_active_session(music_cog)
 
-        mock_vc = music_cog.active_session.voice_client
-        mock_vc.is_playing.return_value = True
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
-        mocker.patch.object(music_cog, '_clear_audio_caches')
+        mocker.patch.object(music_cog, '_clear_current_track_cache')
+        mocker.patch.object(music_cog, '_play_current_track', new_callable=AsyncMock)
 
         await music_cog._do_jump(ctx, 3)
 
-        assert music_cog._suppress_next_track_end is True
-        mock_vc.stop.assert_called_once()
+        mock_player.stop.assert_called_once()
+        music_cog._play_current_track.assert_called_once()
 
 
 class TestDoRemove:
@@ -2749,12 +2769,12 @@ class TestDoMove:
 
 
 class TestDoResume:
-    """Tests for _do_resume internal implementation."""
+    """Tests for _do_resume internal implementation (async, uses ManagedPlayer)."""
 
     @pytest.mark.asyncio
-    async def test_no_session_returns_false(self, music_cog):
-        """Returns False when no active session."""
-        music_cog.active_session = None
+    async def test_no_player_returns_false(self, music_cog):
+        """Returns False when no ManagedPlayer."""
+        music_cog._player = None
 
         result = await music_cog._do_resume()
 
@@ -2763,89 +2783,44 @@ class TestDoResume:
     @pytest.mark.asyncio
     async def test_not_paused_returns_false(self, music_cog):
         """Returns False when not paused."""
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = False
+        mock_player = MagicMock()
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
         result = await music_cog._do_resume()
 
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_fallback_resume_when_no_paused_position(self, music_cog):
-        """Falls back to simple vc.resume() when paused_at_position is None."""
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = True
-        music_cog._playback.paused_at_position = None
+    async def test_resumes_when_paused(self, music_cog):
+        """Resumes playback via ManagedPlayer seek and resume."""
+        mock_player = MagicMock()
+        mock_player.is_paused = True
+        mock_player.position = 30.0  # Current position
+        music_cog._player = mock_player
 
         result = await music_cog._do_resume()
 
         assert result is True
-        mock_vc.resume.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_fallback_resume_when_no_track(self, music_cog):
-        """Falls back to simple vc.resume() when no current track."""
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = True
-        music_cog._playback.paused_at_position = 30.0
-        music_cog.playlist = []
-
-        result = await music_cog._do_resume()
-
-        assert result is True
-        mock_vc.resume.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_seek_resume_with_cached_track(self, music_cog, mocker, tmp_path):
-        """Creates new FFmpeg source with seek when track is cached."""
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = True
-
-        # Create a temp file to simulate cached track
-        cache_file = tmp_path / "test.mp3"
-        cache_file.write_text("fake audio")
-
-        track = create_track(title="Cached Track")
-        track.local_path = str(cache_file)
-        music_cog.playlist = [track]
-        music_cog.current_index = 0
-        music_cog._playback.paused_at_position = 30.0
-
-        # Mock FFmpegPCMAudio to avoid actual ffmpeg
-        mock_ffmpeg = mocker.patch('cogs.music.discord.FFmpegPCMAudio')
-        mocker.patch('cogs.music.get_ffmpeg_path', return_value='ffmpeg')
-
-        result = await music_cog._do_resume()
-
-        assert result is True
-        mock_ffmpeg.assert_called_once()
-        mock_vc.play.assert_called_once()
-        # Paused position should be cleared
+        # Should seek to rewound position (30 - 1 = 29)
+        mock_player.seek.assert_called_once_with(29.0)
+        mock_player.resume.assert_called_once()
         assert music_cog._playback.paused_at_position is None
 
     @pytest.mark.asyncio
-    async def test_seek_uses_cached_audio_url(self, music_cog, mocker):
-        """Uses cached audio URL if available."""
-        mock_vc = setup_active_session(music_cog)
-        mock_vc.is_paused.return_value = True
-
-        track = create_track()
-        music_cog.playlist = [track]
-        music_cog.current_index = 0
-        music_cog._playback.paused_at_position = 30.0
-        music_cog._playback.current_audio_track_url = track.url
-        music_cog._playback.current_audio_url = "https://cached.audio.url"
-
-        mock_ffmpeg = mocker.patch('cogs.music.discord.FFmpegPCMAudio')
-        mocker.patch('cogs.music.get_ffmpeg_path', return_value='ffmpeg')
+    async def test_resume_seek_clamps_to_zero(self, music_cog):
+        """Seek position is clamped to 0 when near start."""
+        mock_player = MagicMock()
+        mock_player.is_paused = True
+        mock_player.position = 0.5  # Less than 1 second in
+        music_cog._player = mock_player
 
         result = await music_cog._do_resume()
 
         assert result is True
-        # Should use cached URL, not fetch new one
-        mock_ffmpeg.assert_called_once()
-        call_args = mock_ffmpeg.call_args
-        assert call_args[0][0] == "https://cached.audio.url"
+        # Should clamp to 0 instead of negative
+        mock_player.seek.assert_called_once_with(0.0)
+        mock_player.resume.assert_called_once()
 
 
 class TestDoQueue:
@@ -3207,7 +3182,7 @@ class TestDoListenAlong:
 # ActiveSession Dataclass Tests
 # =============================================================================
 
-from utils.music_helpers import ActiveSession, LyricsResult
+from utils.musicutils import ActiveSession, LyricsResult
 
 
 class TestActiveSession:
@@ -3219,7 +3194,8 @@ class TestActiveSession:
         session = ActiveSession(
             guild_id=123,
             channel_id=456,
-            voice_client=voice_client
+            voice_client=voice_client,
+            origin_channel_id=456
         )
         assert session.guild_id == 123
         assert session.channel_id == 456
@@ -3232,7 +3208,8 @@ class TestActiveSession:
         session = ActiveSession(
             guild_id=1,
             channel_id=2,
-            voice_client=MagicMock()
+            voice_client=MagicMock(),
+            origin_channel_id=2
         )
         after = time.time()
         assert before <= session.started_at <= after
@@ -3242,7 +3219,8 @@ class TestActiveSession:
         session = ActiveSession(
             guild_id=1,
             channel_id=2,
-            voice_client=MagicMock()
+            voice_client=MagicMock(),
+            origin_channel_id=2
         )
         assert session.waiting_for_users is False
 
@@ -3252,6 +3230,7 @@ class TestActiveSession:
             guild_id=1,
             channel_id=2,
             voice_client=MagicMock(),
+            origin_channel_id=2,
             waiting_for_users=True
         )
         assert session.waiting_for_users is True
