@@ -2,16 +2,28 @@
 
 This module contains reusable UI components (Views) for Discord interactions.
 It provides standard selection menus and button interfaces used across multiple cogs.
+
+Design Philosophy:
+    If a user is clicking something, that logic belongs here. Cogs should call
+    `await views.show_something(ctx, ...)` and receive a result back, without
+    managing view lifecycle, callbacks, or Discord API details.
+
+Exports:
+    - Wrapper functions (preferred API): get_selection(), show_track_failed(),
+      show_now_playing(), show_dashboard(), launch_modal()
+    - Types: TrackFailureAction, NowPlayingState, MusicPlayerProtocol
+    - View classes (for advanced use): PaginatorView, etc.
 """
 
 import io
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Awaitable, Callable, Dict, List, Optional, cast
+from typing import Awaitable, Callable, Dict, List, Optional, Protocol, cast
 
 import asyncio
 import discord
 from discord import ui
+from discord.ext import commands
 
 
 # =============================================================================
@@ -154,6 +166,40 @@ class TrackFailedView(discord.ui.View):
                     await self.message.edit(view=self)
             except Exception:
                 pass  # Message may have been deleted
+
+
+async def show_track_failed(
+    channel: discord.abc.Messageable,
+    track_title: str,
+    track_url: str,
+    timeout: float = 60.0
+) -> TrackFailureAction:
+    """Show a track failure dialog and return the user's choice.
+
+    This is the preferred API for handling track failures. It creates the view,
+    sends the message, waits for interaction, and handles cleanup automatically.
+
+    Args:
+        channel: The channel to send the failure message to.
+        track_title: Title of the failed track.
+        track_url: URL of the failed track.
+        timeout: How long to wait for response (default 60s).
+
+    Returns:
+        TrackFailureAction indicating what the user chose (SKIP, REMOVE, or TIMEOUT).
+    """
+    view = TrackFailedView(
+        track_title=track_title,
+        track_url=track_url,
+        timeout=timeout
+    )
+
+    embed = view.create_embed()
+    message = await channel.send(embed=embed, view=view)
+    view.message = message
+
+    await view.wait()
+    return view.action
 
 
 # =============================================================================
@@ -419,6 +465,109 @@ class NowPlayingView(ui.LayoutView):
 
 
 # =============================================================================
+# Music Player Protocol & Wrapper
+# =============================================================================
+
+class MusicPlayerProtocol(Protocol):
+    """Protocol defining what show_now_playing() needs from a music controller.
+
+    Any object implementing these methods can be passed to show_now_playing().
+    This keeps views.py decoupled from the music cog's internals.
+    """
+
+    def get_now_playing_state(self, thumbnail_url: Optional[str] = None) -> NowPlayingState:
+        """Build and return current player state.
+
+        Args:
+            thumbnail_url: Optional thumbnail attachment URL.
+
+        Returns:
+            NowPlayingState with current track info and playback status.
+        """
+        ...
+
+    async def toggle_playback(self) -> None:
+        """Toggle between play and pause states."""
+        ...
+
+    async def skip_track(self) -> Optional[bytes]:
+        """Skip to next track.
+
+        Returns:
+            New thumbnail bytes if track changed, None otherwise.
+        """
+        ...
+
+    async def shuffle_playlist(self) -> None:
+        """Shuffle the playlist, preserving current track position."""
+        ...
+
+    async def cycle_loop_mode(self) -> None:
+        """Cycle through loop modes (ALL -> ONE -> OFF -> ALL)."""
+        ...
+
+    async def get_current_thumbnail(self) -> Optional[bytes]:
+        """Fetch thumbnail bytes for the current track.
+
+        Returns:
+            Thumbnail image bytes, or None if unavailable.
+        """
+        ...
+
+
+async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -> None:
+    """Display an interactive now playing widget.
+
+    This is the preferred API for showing the now playing view. It handles
+    thumbnail fetching, file attachment management, view construction, and
+    sending - the cog just needs to implement MusicPlayerProtocol.
+
+    Args:
+        ctx: The command context.
+        player: Object implementing MusicPlayerProtocol (typically the Music cog).
+    """
+    # Fetch thumbnail
+    thumbnail_bytes = await player.get_current_thumbnail()
+    files: List[discord.File] = []
+    thumbnail_url: Optional[str] = None
+
+    if thumbnail_bytes:
+        files.append(discord.File(io.BytesIO(thumbnail_bytes), filename="thumbnail.jpg"))
+        thumbnail_url = "attachment://thumbnail.jpg"
+
+    # Build initial state
+    state = player.get_now_playing_state(thumbnail_url)
+
+    # Create action callbacks that delegate to player
+    async def do_play_pause() -> None:
+        await player.toggle_playback()
+
+    async def do_skip() -> Optional[bytes]:
+        return await player.skip_track()
+
+    async def do_shuffle() -> None:
+        await player.shuffle_playlist()
+
+    async def do_loop() -> None:
+        await player.cycle_loop_mode()
+
+    # Create view with callbacks
+    view = NowPlayingView(
+        state=state,
+        get_state=player.get_now_playing_state,
+        on_play_pause=do_play_pause,
+        on_skip=do_skip,
+        on_shuffle=do_shuffle,
+        on_loop=do_loop,
+    )
+
+    if files:
+        await ctx.send(view=view, files=files)
+    else:
+        await ctx.send(view=view)
+
+
+# =============================================================================
 # Selection View
 # =============================================================================
 
@@ -646,3 +795,171 @@ class PaginatorView(discord.ui.View):
                 await self.message.edit(view=self)
             except Exception:
                 pass
+
+
+# =============================================================================
+# Dashboard View (Admin)
+# =============================================================================
+
+# Type alias for dashboard callbacks
+DashboardCallback = Callable[[commands.Context], Awaitable[None]]
+
+
+class DashboardView(discord.ui.View):
+    """Interactive dashboard view with sub-pages and action buttons.
+
+    Provides a main dashboard with buttons to:
+    - View paginated skill entries
+    - View paginated reminder entries
+    - Export data to file
+    - Dump database
+
+    Each sub-view has a "Back to Dashboard" button to return to the main view.
+    """
+
+    def __init__(
+        self,
+        ctx: commands.Context,
+        skill_pages: List[discord.Embed],
+        reminder_pages: List[discord.Embed],
+        report_file_callback: DashboardCallback,
+        dump_db_callback: DashboardCallback,
+        dashboard_embed: Optional[discord.Embed] = None,
+        timeout: float = 120.0
+    ):
+        """Initialize the dashboard view.
+
+        Args:
+            ctx: The command context.
+            skill_pages: List of embeds for skill pagination.
+            reminder_pages: List of embeds for reminder pagination.
+            report_file_callback: Async callback to export report file.
+            dump_db_callback: Async callback to dump database.
+            dashboard_embed: The main dashboard embed to return to.
+            timeout: View timeout in seconds (default 120s).
+        """
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.skill_pages = skill_pages
+        self.reminder_pages = reminder_pages
+        self.report_file_callback = report_file_callback
+        self.dump_db_callback = dump_db_callback
+        self.dashboard_embed = dashboard_embed
+        self.message: Optional[discord.Message] = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Ensure only the command author can interact."""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This dashboard is not for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="📜 View Skills", style=discord.ButtonStyle.primary)
+    async def view_skills(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show paginated skill entries."""
+        if not self.skill_pages:
+            await interaction.response.send_message("No skills found in database.", ephemeral=True)
+            return
+
+        view = PaginatorView(self.ctx, self.skill_pages)
+        # Add a "Back to Dashboard" button to the paginator
+        back_button = discord.ui.Button(
+            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
+
+        async def back_callback(interaction: discord.Interaction):
+            if self.dashboard_embed:
+                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
+            view.stop()
+
+        back_button.callback = back_callback  # type: ignore[method-assign]
+        view.add_item(back_button)
+
+        await interaction.response.edit_message(embed=self.skill_pages[0], view=view)
+        view.message = interaction.message
+
+    @discord.ui.button(label="⏰ View Reminders", style=discord.ButtonStyle.primary)
+    async def view_reminders(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show paginated reminder entries."""
+        if not self.reminder_pages:
+            await interaction.response.send_message("No reminders found in database.", ephemeral=True)
+            return
+
+        view = PaginatorView(self.ctx, self.reminder_pages)
+        # Add a "Back to Dashboard" button to the paginator
+        back_button = discord.ui.Button(
+            label="↩ Back to Dashboard", style=discord.ButtonStyle.red, row=1)
+
+        async def back_callback(interaction: discord.Interaction):
+            if self.dashboard_embed:
+                await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
+            view.stop()
+
+        back_button.callback = back_callback  # type: ignore[method-assign]
+        view.add_item(back_button)
+
+        await interaction.response.edit_message(embed=self.reminder_pages[0], view=view)
+        view.message = interaction.message
+
+    @discord.ui.button(label="💾 Export to File", style=discord.ButtonStyle.secondary)
+    async def export_file(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Trigger the export callback."""
+        await interaction.response.defer()
+        await self.report_file_callback(self.ctx)
+
+    @discord.ui.button(label="🗄️ Dump Database", style=discord.ButtonStyle.danger)
+    async def dump_database(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Trigger the database dump callback."""
+        await interaction.response.defer()
+        await self.dump_db_callback(self.ctx)
+
+    async def on_timeout(self):
+        """Disable all buttons on timeout."""
+        if self.message:
+            try:
+                for child in self.children:
+                    if hasattr(child, 'disabled'):
+                        setattr(child, 'disabled', True)
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
+
+async def show_dashboard(
+    ctx: commands.Context,
+    skill_pages: List[discord.Embed],
+    reminder_pages: List[discord.Embed],
+    report_file_callback: DashboardCallback,
+    dump_db_callback: DashboardCallback,
+    dashboard_embed: discord.Embed,
+    timeout: float = 120.0
+) -> discord.Message:
+    """Display an interactive admin dashboard.
+
+    This is the preferred API for showing the admin dashboard. It handles
+    view construction, message sending, and lifecycle management.
+
+    Args:
+        ctx: The command context.
+        skill_pages: List of embeds for skill pagination.
+        reminder_pages: List of embeds for reminder pagination.
+        report_file_callback: Async function to call for file export.
+        dump_db_callback: Async function to call for database dump.
+        dashboard_embed: The main dashboard embed.
+        timeout: View timeout in seconds (default 120s).
+
+    Returns:
+        The sent message containing the dashboard.
+    """
+    view = DashboardView(
+        ctx=ctx,
+        skill_pages=skill_pages,
+        reminder_pages=reminder_pages,
+        report_file_callback=report_file_callback,
+        dump_db_callback=dump_db_callback,
+        dashboard_embed=dashboard_embed,
+        timeout=timeout
+    )
+
+    message = await ctx.send(embed=dashboard_embed, view=view)
+    view.message = message
+    return message

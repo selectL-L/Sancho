@@ -20,12 +20,12 @@ import pytest
 from discord.ext import commands
 
 from cogs.music import Music
-from utils.music_helpers import (
+from utils.musicutils import (
     ActiveSession,
+    AudioFetcher,
     LoopMode,
     PlaybackState,
     PrefetchState,
-    RetryState,
     Track,
 )
 
@@ -166,7 +166,7 @@ def music_cog(mock_bot):
         cog.active_session = None
         cog._playback = PlaybackState()
         cog._prefetch = PrefetchState()
-        cog._retry = RetryState()
+        cog._audio_fetcher = AudioFetcher(cog.cache_manager, cog.logger)
 
         # Mock db_manager for async calls
         cog.db_manager = MagicMock()
@@ -227,7 +227,8 @@ class TestMusicSessionIntegration:
             music_cog.active_session = ActiveSession(
                 guild_id=channel.guild.id,
                 channel_id=channel.id,
-                voice_client=mock_voice_client
+                voice_client=mock_voice_client,
+                origin_channel_id=channel.id
             )
 
         with patch.object(music_cog, '_start_session', side_effect=mock_start_session):
@@ -642,6 +643,7 @@ class TestMusicSessionIntegration:
         Tests pause/resume maintains correct state.
         """
         import time
+        from unittest.mock import MagicMock
 
         # Setup active session
         music_cog.playlist = create_ambient_playlist()
@@ -649,26 +651,31 @@ class TestMusicSessionIntegration:
         music_cog.active_session = ActiveSession(
             guild_id=888888,
             channel_id=777777,
-            voice_client=mock_voice_client
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
         )
         # Set track_started_at for pause position calculation
         music_cog.track_started_at = time.time() - 30  # 30 seconds into track
 
-        # Mock voice client state
-        mock_voice_client.is_playing.return_value = True
+        # Mock _player (ManagedPlayer) instead of voice_client
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        mock_player.pause.return_value = True
+        mock_player.position = 30.0
+        music_cog._player = mock_player
 
         # Pause
         result = music_cog._do_pause()
         assert result is True
-        mock_voice_client.pause.assert_called_once()
+        mock_player.pause.assert_called_once()
 
         # Update mock state
-        mock_voice_client.is_playing.return_value = False
-        mock_voice_client.is_paused.return_value = True
+        mock_player.is_playing = False
+        mock_player.is_paused = True
 
         # Resume
-        with patch.object(music_cog, '_play_current_track', new_callable=AsyncMock):
-            result = await music_cog._do_resume()
+        result = await music_cog._do_resume()
 
         assert result is True
 
@@ -685,6 +692,7 @@ class TestMusicSessionIntegration:
         """
         Tests that skip properly advances and stops current playback.
         """
+        from unittest.mock import MagicMock
 
         # Setup
         music_cog.playlist = create_ambient_playlist()
@@ -692,17 +700,23 @@ class TestMusicSessionIntegration:
         music_cog.active_session = ActiveSession(
             guild_id=888888,
             channel_id=777777,
-            voice_client=mock_voice_client
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
         )
 
-        mock_voice_client.is_playing.return_value = True
+        # Mock _player (ManagedPlayer)
+        mock_player = MagicMock()
+        mock_player.is_playing = True
+        mock_player.is_paused = False
+        music_cog._player = mock_player
 
-        # Skip
-        result = music_cog._do_skip()
+        # Mock _play_current_track to prevent actual playback
+        with patch.object(music_cog, '_play_current_track', new_callable=AsyncMock):
+            # Skip (now async)
+            result = await music_cog._do_skip()
 
         assert result is True
-        mock_voice_client.stop.assert_called_once()
+        mock_player.stop.assert_called_once()
 
-        # Index advanced (skip calls _advance_track internally via callback,
-        # but _do_skip just stops - let's verify the stop was called)
-        # The actual advance happens in _on_track_end callback
+        # Index advanced by _do_skip
+        assert music_cog.current_index == 2
