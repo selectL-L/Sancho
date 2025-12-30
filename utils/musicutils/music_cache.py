@@ -326,11 +326,6 @@ class MusicCacheManager:
         tracks = []
         for track_data in playlist_data.get('tracks', []):
             track = Track.from_dict(track_data)
-            # Populate local_path if downloaded
-            if track.video_id:
-                local_path = self.get_local_path(track.video_id, playlist_url)
-                if local_path:
-                    track.local_path = local_path
             tracks.append(track)
 
         return tracks
@@ -425,7 +420,7 @@ class MusicCacheManager:
             try:
                 shutil.copy2(existing_path, target_path)
                 await self._register_download(track.video_id, folder_hash)
-                self.logger.debug(f"[CacheManager] Copied {track.video_id} from existing location")
+                self.logger.info(f"[CacheManager] Copied {track.video_id} from existing location")
                 return target_path
             except IOError as e:
                 self.logger.warning(f"[CacheManager] Copy failed: {e}")
@@ -500,7 +495,7 @@ class MusicCacheManager:
         """
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
-            self.logger.debug("[CacheManager] Residential proxy not configured, cannot retry")
+            self.logger.info("[CacheManager] Residential proxy not configured, cannot retry")
             return None
 
         if not track.video_id:

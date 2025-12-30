@@ -453,22 +453,25 @@ class AudioFetcher:
             f"(direct={state.direct_attempts}, residential={state.residential_attempts})"
         )
 
-        # Always check residential cache first
+        # Check residential cache first (permanent, proxy-downloaded)
         cached = self.cache_manager.check_residential(track.video_id)
         if cached:
-            self.logger.debug(f"[AudioFetcher] Residential cache hit: {track.title}")
+            self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
             return AudioFetchResult(success=True, local_path=cached)
 
-        # Check track.local_path (ambient cache set by cog)
-        if track.local_path:
-            self.logger.debug(f"[AudioFetcher] Using track.local_path: {track.title}")
-            return AudioFetchResult(success=True, local_path=track.local_path)
+        # Check all ambient cache locations (playlists + orphaned)
+        # If we hit an orphanhed file, we can use it, but this isn't guranteed
+        # considering that orphanhed files have a limited lifetime.
+        any_cached = self.cache_manager.get_any_local_path(track.video_id)
+        if any_cached:
+            self.logger.info(f"[AudioFetcher] Ambient Cache hit: {track.title}")
+            return AudioFetchResult(success=True, local_path=any_cached)
 
         # Try direct if under limit
         if state.direct_attempts < self.DIRECT_MAX:
             state.direct_attempts += 1
-            self.logger.debug(
-                f"[AudioFetcher] Direct attempt {state.direct_attempts}/{self.DIRECT_MAX}: {track.title}"
+            self.logger.info(
+                f"[AudioFetcher] Direct fetch attempt {state.direct_attempts}/{self.DIRECT_MAX}: {track.title}"
             )
             result = await self._try_direct(track)
 
@@ -486,8 +489,8 @@ class AudioFetcher:
 
             # PREFETCH stops here on failure
             if context == FetchContext.PREFETCH:
-                self.logger.debug(
-                    "[AudioFetcher] PREFETCH mode - not escalating to residential"
+                self.logger.info(
+                    "[AudioFetcher] PREFETCH mode - stopping (will retry LIVE if played)"
                 )
                 return result
 
@@ -512,6 +515,7 @@ class AudioFetcher:
             )
 
             if url:
+                self.logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
                 return AudioFetchResult(
                     success=True,
                     url=url,
@@ -522,6 +526,10 @@ class AudioFetcher:
 
             # No URL but no exception - likely unavailable or extraction failed
             is_auth = not is_unavailable  # If not unavailable, assume auth issue
+            self.logger.info(
+                f"[AudioFetcher] Direct fetch failed: {track.title} "
+                f"(unavailable={is_unavailable}, auth_issue={is_auth})"
+            )
             return AudioFetchResult(
                 success=False,
                 is_unavailable=is_unavailable,
@@ -532,6 +540,10 @@ class AudioFetcher:
         except Exception as e:
             is_auth = is_403_error(e)
             is_gone = is_video_unavailable(e)
+            self.logger.info(
+                f"[AudioFetcher] Direct fetch exception: {track.title} "
+                f"(403={is_auth}, unavailable={is_gone}, error={str(e)[:100]})"
+            )
             return AudioFetchResult(
                 success=False,
                 is_auth_failure=is_auth,
@@ -585,6 +597,10 @@ class AudioFetcher:
         )
 
         if success and cached_path:
+            self.logger.info(
+                f"[AudioFetcher] Residential success: {track.title} "
+                f"({bytes_downloaded / 1024 / 1024:.2f} MB)"
+            )
             return AudioFetchResult(
                 success=True,
                 local_path=cached_path,
@@ -592,6 +608,9 @@ class AudioFetcher:
                 residential_bytes=bytes_downloaded,
             )
 
+        self.logger.info(
+            f"[AudioFetcher] Residential failed: {track.title} - {error_msg}"
+        )
         return AudioFetchResult(
             success=False,
             residential_used=True,

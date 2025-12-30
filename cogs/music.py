@@ -439,10 +439,6 @@ class Music(BaseCog):
                 # Start background download worker
                 await self.cache_manager.start_background_downloads()
 
-                # If we're currently playing from a playlist, refresh local paths
-                if self._ambience.current_playlist_url and self.playlist:
-                    self._populate_local_paths(self._ambience.current_playlist_url)
-
             # Start the 24-hour refresh timer
             self.cache_manager.start_refresh_timer()
 
@@ -530,34 +526,9 @@ class Music(BaseCog):
                 self.logger.info(f"Fetched {len(tracks)} tracks from YouTube.")
 
         if self.playlist:
-            # Populate local_path from downloaded files
-            self._populate_local_paths(playlist_url)
             # Shuffle for initial playback
             self._apply_shuffle()
             self._dedupe_playlist()
-
-    def _populate_local_paths(self, playlist_url: str) -> None:
-        """Populates local_path on tracks from downloaded cache.
-
-        Args:
-            playlist_url: The playlist URL to look up in cache.
-        """
-        if not self.playlist:
-            return
-
-        cached_count = 0
-        for track in self.playlist:
-            if track.video_id:
-                local_path = self.cache_manager.get_local_path(track.video_id, playlist_url)
-                if local_path:
-                    track.local_path = local_path
-                    cached_count += 1
-
-        if cached_count > 0:
-            self.logger.debug(
-                f"Populated {cached_count}/{len(self.playlist)} "
-                "tracks with local cache paths"
-            )
 
     async def _fetch_playlist(self) -> None:
         """Fetches playlist metadata from YouTube using yt-dlp.
@@ -758,7 +729,7 @@ class Music(BaseCog):
         if self._player.pause():
             # Store position for UI display
             self._playback.paused_at_position = self._player.position
-            self.logger.debug(f"Paused at position: {self._playback.paused_at_position:.1f}s")
+            self.logger.info(f"[Playback] Paused at position: {self._playback.paused_at_position:.1f}s")
             return True
         return False
 
@@ -787,7 +758,7 @@ class Music(BaseCog):
         self.track_started_at = time.time() - seek_position
         self._playback.paused_at_position = None
 
-        self.logger.debug(f"Resumed playback at position: {seek_position:.1f}s")
+        self.logger.info(f"[Playback] Resumed at position: {seek_position:.1f}s")
         return True
 
     def _dedupe_playlist(self) -> int:
@@ -1241,26 +1212,11 @@ class Music(BaseCog):
         self._next_prepared_track = next_track
 
         try:
-            self.logger.debug(
-                f"[Prefetch] Starting for: {next_track.title} ({next_track.url})"
+            self.logger.info(
+                f"[Prefetch] Starting for: {next_track.title}"
             )
 
-            # Priority 1: Ambient cache (cog has playlist context)
-            if self._ambience.current_playlist_url and next_track.video_id:
-                local_path = self.cache_manager.get_local_path(
-                    next_track.video_id,
-                    self._ambience.current_playlist_url
-                )
-                if local_path:
-                    self.logger.debug(f"[Prefetch] Ambient cache hit: {next_track.title}")
-                    self._next_prepared = AudioFetchResult(
-                        success=True,
-                        local_path=local_path
-                    )
-                    return
-
-            # Priority 2 & 3: Residential cache + YouTube (via AudioFetcher)
-            # AudioFetcher checks residential cache, then tries yt-dlp
+            # AudioFetcher handles all cache checks (residential + ambient)
             # PREFETCH context = conservative, stops at direct failure
             result = await self._audio_fetcher.fetch(next_track, FetchContext.PREFETCH)
 
@@ -1268,26 +1224,26 @@ class Music(BaseCog):
             if result.thumbnail and not next_track.thumbnail:
                 next_track.thumbnail = result.thumbnail
                 next_track.thumbnail_needs_crop = result.thumbnail_needs_crop
-                self.logger.debug(f"[Prefetch] Updated thumbnail (needs_crop={result.thumbnail_needs_crop})")
+                self.logger.info(f"[Prefetch] Updated thumbnail (needs_crop={result.thumbnail_needs_crop})")
 
             # Fetch thumbnail bytes for instant display (if URL succeeded)
             if result.success and result.url:
                 try:
                     result.thumbnail_bytes = await get_best_thumbnail_bytes(next_track, self.logger)
                     if result.thumbnail_bytes:
-                        self.logger.debug(f"[Prefetch] Got thumbnail: {len(result.thumbnail_bytes)} bytes")
+                        self.logger.info(f"[Prefetch] Got thumbnail: {len(result.thumbnail_bytes)} bytes")
                 except Exception as e:
-                    self.logger.debug(f"[Prefetch] Thumbnail fetch failed (non-fatal): {e}")
+                    self.logger.warning(f"[Prefetch] Thumbnail fetch failed (non-fatal): {e}")
 
             self._next_prepared = result
 
             if result.success:
-                self.logger.debug(
+                self.logger.info(
                     f"[Prefetch] Success: {next_track.title} | "
                     f"url={bool(result.url)}, local={bool(result.local_path)}"
                 )
             else:
-                self.logger.debug(
+                self.logger.info(
                     f"[Prefetch] Failed: {next_track.title} | "
                     f"auth_fail={result.is_auth_failure}, unavail={result.is_unavailable}"
                 )
@@ -1414,7 +1370,7 @@ class Music(BaseCog):
         if self._playback.current_audio_track_url == track.url and self._playback.current_audio_url:
             audio_source = self._playback.current_audio_url
             http_headers = self._playback.current_audio_headers
-            self.logger.debug(f"Using loop-replay cache for: {track.title}")
+            self.logger.info(f"[PlayTrack] Using loop-replay cache for: {track.title}")
 
         # -----------------------------------------------------------
         # Priority 2: Phase 12 prefetch buffer
@@ -1428,34 +1384,22 @@ class Music(BaseCog):
                     if self._next_prepared.local_path:
                         audio_source = self._next_prepared.local_path
                         is_local_file = True
-                        track.local_path = self._next_prepared.local_path
                     else:
                         audio_source = self._next_prepared.url
                         http_headers = self._next_prepared.http_headers
-                    self.logger.debug(f"Using prefetched result for: {track.title}")
+                    self.logger.info(f"[PlayTrack] Using prefetched result for: {track.title}")
                     self._clear_prefetch_v2()
 
                 elif self._next_prepared.is_auth_failure:
                     # Prefetch failed with auth - need LIVE fetch (will go residential)
-                    self.logger.debug(
-                        f"Prefetch auth-failed, calling LIVE fetch: {track.title}"
+                    self.logger.info(
+                        f"[PlayTrack] Prefetch auth-failed, calling LIVE fetch: {track.title}"
                     )
                     self._clear_prefetch_v2()
                     # Fall through to LIVE fetch below
 
         # -----------------------------------------------------------
-        # Priority 3: Ambient cache (cog has playlist context)
-        # -----------------------------------------------------------
-        if not audio_source and self._ambience.current_playlist_url and not track.user_added and track.video_id:
-            local_path = self.cache_manager.get_local_path(track.video_id, self._ambience.current_playlist_url)
-            if local_path:
-                audio_source = local_path
-                is_local_file = True
-                track.local_path = local_path
-                self.logger.debug(f"Found ambient cache: {track.title}")
-
-        # -----------------------------------------------------------
-        # Priority 4: AudioFetcher with LIVE context (full retry)
+        # Priority 3: AudioFetcher with LIVE context (full retry)
         # -----------------------------------------------------------
         if not audio_source:
             result = await self._audio_fetcher.fetch(track, FetchContext.LIVE)
@@ -1464,7 +1408,6 @@ class Music(BaseCog):
                 if result.local_path:
                     audio_source = result.local_path
                     is_local_file = True
-                    track.local_path = result.local_path
                 else:
                     audio_source = result.url
                     http_headers = result.http_headers
@@ -1717,7 +1660,7 @@ class Music(BaseCog):
                 self._audio_fetcher.reset()
                 return
 
-            self.logger.debug(f"[Retry] Track failed during FFmpeg playback: {track.title}")
+            self.logger.info(f"[Retry] Track failed during FFmpeg playback: {track.title}")
 
             # RETRY context: FFmpeg failed, get fresh URL (aggressive strategy)
             result = await self._audio_fetcher.fetch(track, FetchContext.RETRY)
@@ -1730,10 +1673,6 @@ class Music(BaseCog):
                         f"🔄 Hmm, having some trouble with **{track.title}**... "
                         f"Let me try another way!"
                     )
-
-                # Update track with local path if residential succeeded
-                if result.local_path:
-                    track.local_path = result.local_path
 
                 # Track bandwidth cost
                 if result.residential_bytes > 0 and self.db_manager:
