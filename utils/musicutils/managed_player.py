@@ -41,16 +41,6 @@ class TrackInfo(Protocol):
         """Track duration in seconds."""
         ...
 
-    @property
-    def is_cached(self) -> bool:
-        """Whether track has a local cache file."""
-        ...
-
-    @property
-    def local_path(self) -> Optional[str]:
-        """Path to local cache file, if cached."""
-        ...
-
 
 class PlayerState(enum.Enum):
     """Playback state machine states."""
@@ -228,7 +218,7 @@ class ManagedPlayer:
 
         self._source.pause()
         self._state = PlayerState.PAUSED
-        logger.debug(f"[ManagedPlayer] Paused at {self.position:.1f}s")
+        logger.info(f"[ManagedPlayer] Paused at {self.position:.1f}s")
         return True
 
     def resume(self) -> bool:
@@ -242,7 +232,7 @@ class ManagedPlayer:
 
         self._source.resume()
         self._state = PlayerState.PLAYING
-        logger.debug(f"[ManagedPlayer] Resumed at {self.position:.1f}s")
+        logger.info(f"[ManagedPlayer] Resumed at {self.position:.1f}s")
         return True
 
     def seek(self, position: float) -> bool:
@@ -260,7 +250,7 @@ class ManagedPlayer:
             return False
 
         self._source.seek(position)
-        logger.debug(f"[ManagedPlayer] Seeked to {position:.1f}s")
+        logger.info(f"[ManagedPlayer] Seeked to {position:.1f}s")
         return True
 
     def stop(self) -> None:
@@ -284,7 +274,7 @@ class ManagedPlayer:
 
         self._current_track = None
         self._state = PlayerState.STOPPED
-        logger.debug("[ManagedPlayer] Stopped")
+        logger.info("[ManagedPlayer] Stopped")
 
     def _after_callback(self, error: Optional[Exception], callback_generation: int) -> None:
         """Called by discord.py when the audio source is exhausted or errors.

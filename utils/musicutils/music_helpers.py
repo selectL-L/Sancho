@@ -497,19 +497,20 @@ async def _extract_best_thumbnail(info: Dict[str, Any], logger: Any) -> tuple[Op
 
     if square_thumbnails:
         best = max(square_thumbnails, key=lambda t: t.get('width', 0))
-        logger.debug(f"[Thumbnail] Found {len(square_thumbnails)} square thumbnails >= {MIN_SIZE}px, using: {best.get('width')}x{best.get('height')}")
+        logger.info(f"[Thumbnail] Selected square thumbnail: {best.get('width')}x{best.get('height')}")
         return best.get('url'), False  # Already square, no crop needed
 
     # No square thumbnail - return the largest one for cropping
     best = max(usable, key=lambda t: t.get('width', 0) * t.get('height', 0))
-    logger.debug(f"[Thumbnail] No square found, will crop largest: {best.get('width')}x{best.get('height')}")
+    logger.info(f"[Thumbnail] No square thumbnail available, cropping largest: {best.get('width')}x{best.get('height')}")
     return best.get('url'), True  # Needs cropping
 
 
 async def get_best_thumbnail_bytes(
     track: 'Track',
     logger: Any,
-    yt_info: Optional[Dict[str, Any]] = None
+    yt_info: Optional[Dict[str, Any]] = None,
+    cached_mp3_path: Optional[str] = None
 ) -> Optional[bytes]:
     """Gets the best thumbnail bytes for a track using unified logic.
 
@@ -522,19 +523,20 @@ async def get_best_thumbnail_bytes(
     All other thumbnail handling should go through this function.
 
     Args:
-        track: The Track object (may have local_path for cached file).
+        track: The Track object.
         logger: Logger for debug output.
         yt_info: Optional yt-dlp info dict (avoids re-fetching if already available).
+        cached_mp3_path: Optional path to cached MP3 file (for embedded thumbnail).
 
     Returns:
         JPEG image bytes, or None if no thumbnail available.
     """
     # Priority 1: Extract from cached MP3 (already has processed thumbnail)
-    if track.local_path and os.path.exists(track.local_path):
-        logger.debug(f"[Thumbnail] Checking cached MP3: {os.path.basename(track.local_path)}")
-        thumbnail_data = extract_mp3_thumbnail(track.local_path, logger)
+    if cached_mp3_path and os.path.exists(cached_mp3_path):
+        logger.debug(f"[Thumbnail] Checking cached MP3: {os.path.basename(cached_mp3_path)}")
+        thumbnail_data = extract_mp3_thumbnail(cached_mp3_path, logger)
         if thumbnail_data:
-            logger.debug("[Thumbnail] Using embedded thumbnail from cached MP3")
+            logger.info("[Thumbnail] Using embedded thumbnail from cached MP3")
             return thumbnail_data
 
     # Priority 2: Use _extract_best_thumbnail if we have yt_info
@@ -543,26 +545,26 @@ async def get_best_thumbnail_bytes(
         thumbnail_url, needs_crop = await _extract_best_thumbnail(yt_info, logger)
         if thumbnail_url:
             if needs_crop:
-                logger.debug(f"[Thumbnail] Cropping: {thumbnail_url[:60]}...")
+                logger.info(f"[Thumbnail] Cropping non square thumbnail: {thumbnail_url[:60]}...")
                 return await crop_thumbnail_to_square(thumbnail_url, logger)
             else:
                 # Square thumbnail - just download and convert to JPEG
-                logger.debug(f"[Thumbnail] Square thumbnail, converting to JPEG: {thumbnail_url[:60]}...")
+                logger.info(f"[Thumbnail] Using square thumbnail: {thumbnail_url[:60]}...")
                 return await crop_thumbnail_to_square(thumbnail_url, logger)  # Still use this for JPEG conversion
 
     # Priority 3: Use track's cached thumbnail URL (from flat extraction)
     if track.thumbnail:
-        logger.debug(f"[Thumbnail] Using track's thumbnail URL: {track.thumbnail[:60]}...")
+        logger.info(f"[Thumbnail] Using track's cached thumbnail URL: {track.thumbnail[:60]}...")
         # Always crop/convert YouTube thumbnails
         return await crop_thumbnail_to_square(track.thumbnail, logger)
 
     # Priority 4: Construct URL from video ID as last resort
     if track.video_id:
         fallback_url = f"https://img.youtube.com/vi/{track.video_id}/hqdefault.jpg"
-        logger.debug(f"[Thumbnail] Using constructed fallback URL: {fallback_url}")
+        logger.info(f"[Thumbnail] Using constructed fallback URL: {fallback_url}")
         return await crop_thumbnail_to_square(fallback_url, logger)
 
-    logger.debug("[Thumbnail] No thumbnail source available")
+    logger.info("[Thumbnail] No thumbnail source available")
     return None
 
 
@@ -601,7 +603,7 @@ async def get_audio_url(
         ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': False}
 
     try:
-        logger.debug(f"Extracting audio URL for: {track.title} ({track.url})")
+        logger.info(f"[Audio] Extracting URL for: {track.title}")
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
@@ -644,13 +646,13 @@ async def get_audio_url(
         if combined:
             # Prefer by audio bitrate, then lowest video bitrate (less bandwidth waste)
             best = max(combined, key=lambda f: (f.get('abr') or 0, -(f.get('vbr') or f.get('tbr') or 0)))
-            logger.debug(f"Using combined format for {track.title} (no audio-only available)")
+            logger.info(f"[Audio] Using combined format for {track.title} (no audio-only available)")
             fmt_headers = best.get('http_headers', http_headers)
             return best.get('url'), False, thumbnail_url, needs_crop, fmt_headers or None
 
         # Priority 3: Direct URL fallback (rare, usually livestreams or direct file links)
         if info.get('url'):
-            logger.debug(f"Using direct URL fallback for {track.title}")
+            logger.info(f"[Audio] Using direct URL fallback for {track.title}")
             return info.get('url'), False, thumbnail_url, needs_crop, http_headers or None
 
         # No usable format found
@@ -746,7 +748,7 @@ async def search_youtube(
             )
             tracks.append(track)
 
-        logger.debug(f"[Search] Returning {len(tracks)} tracks")
+        logger.info(f"[Search] Returning {len(tracks)} tracks for '{query}'")
         return tracks
 
     except Exception as e:
@@ -934,6 +936,8 @@ async def fetch_url_info(
             if not tracks:
                 return [], "The playlist is empty or all videos are unavailable.", None
 
+            logger.info(f"[URL] Fetched playlist with {len(tracks)} tracks")
+
             # Return warning if playlist was truncated
             warning = None
             if was_truncated:
@@ -965,6 +969,7 @@ async def fetch_url_info(
                 video_id=video_id
             )
             tracks.append(track)
+            logger.info(f"[URL] Fetched single video: {track.title}")
 
         return tracks, None, None
 
@@ -1033,6 +1038,7 @@ async def fetch_playlist_metadata(
             )
             tracks.append(track)
 
+        logger.info(f"[Playlist] Fetched {len(tracks)} tracks from playlist")
         return tracks
 
     except Exception as e:

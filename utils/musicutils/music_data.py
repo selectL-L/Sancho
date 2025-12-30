@@ -134,7 +134,6 @@ class Track:
     thumbnail: Optional[str] = None
     thumbnail_needs_crop: bool = False  # True if thumbnail needs center-crop to square
     user_added: bool = False  # True if added by user (not from ambient playlist)
-    local_path: Optional[str] = None  # Path to locally cached MP3 file
     video_id: Optional[str] = None  # YouTube video ID (extracted from URL)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -150,7 +149,6 @@ class Track:
             'duration': self.duration,
             'thumbnail': self.thumbnail,
             'thumbnail_needs_crop': self.thumbnail_needs_crop,
-            'local_path': self.local_path,
             'video_id': self.video_id
         }
 
@@ -164,14 +162,8 @@ class Track:
             duration=data['duration'],
             thumbnail=data.get('thumbnail'),
             thumbnail_needs_crop=data.get('thumbnail_needs_crop', False),
-            local_path=data.get('local_path'),
             video_id=data.get('video_id') or _extract_video_id(data['url'])
         )
-
-    @property
-    def is_cached(self) -> bool:
-        """Returns True if this track has a valid local cache file."""
-        return self.local_path is not None and os.path.exists(self.local_path)
 
 
 @dataclass
