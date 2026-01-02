@@ -24,10 +24,12 @@ except ImportError:
 try:
     from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, TRCK, TYER, TCON, COMM  # type: ignore[attr-defined]
     from mutagen.mp3 import MP3
+    from mutagen._util import MutagenError  # type: ignore[attr-defined]
     MUTAGEN_AVAILABLE = True
 except ImportError:
     APIC = ID3 = TALB = TIT2 = TPE1 = TRCK = TYER = TCON = COMM = None  # type: ignore[misc, assignment]
     MP3 = None  # type: ignore[misc, assignment]
+    MutagenError = Exception  # type: ignore[misc, assignment]
     MUTAGEN_AVAILABLE = False
 
 try:
@@ -1234,8 +1236,8 @@ async def download_track_as_mp3(
             # Create ID3 tag if it doesn't exist
             try:
                 audio.add_tags()
-            except Exception:
-                pass  # Tags already exist
+            except MutagenError:
+                pass  # Tags already exist - expected
 
             # Set metadata tags
             audio.tags.add(TIT2(encoding=3, text=final_title))  # type: ignore[misc]  # Title
@@ -1274,8 +1276,8 @@ async def download_track_as_mp3(
             if f.startswith(f'temp_{video_id}') and not f.endswith('.mp3'):
                 try:
                     os.remove(os.path.join(output_dir, f))
-                except Exception:
-                    pass
+                except OSError as e:
+                    logger.debug(f"Failed to cleanup temp file {f}: {e}")
 
         return DownloadResult(
             success=True,
@@ -1297,10 +1299,10 @@ async def download_track_as_mp3(
                     if f.startswith(f'temp_{video_id}'):
                         try:
                             os.remove(os.path.join(output_dir, f))
-                        except Exception:
-                            pass
-        except Exception:
-            pass  # Don't let cleanup errors mask the real error
+                        except OSError as cleanup_err:
+                            logger.debug(f"Failed to cleanup temp file {f} after error: {cleanup_err}")
+        except OSError as cleanup_err:
+            logger.debug(f"Error cleanup failed (masking original error): {cleanup_err}")
 
         return DownloadResult(success=False, error_message=format_youtube_error(e))
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
 from typing import TYPE_CHECKING, List, Optional
 from urllib.parse import quote_plus
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     pass  # Keep block for future type hints
 
 from .music_data import LyricsResult
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================================================
@@ -193,8 +196,8 @@ class LyricalNonsenseScraper:
                         result.lyrics_text = text
                         break
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Genius page scrape failed for {result.url}: {e}")
 
         return result
 
@@ -246,8 +249,8 @@ class LRCLIBProvider:
                     lyrics_text=lyrics
                 ))
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"LRCLIB search failed for '{query}': {e}")
 
         return results
 
@@ -323,8 +326,8 @@ class GeniusScraper:
                             has_translation=False
                         ))
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Genius search failed for '{query}': {e}")
 
         return results
 
@@ -396,7 +399,7 @@ class GeniusScraper:
             if lyrics_parts:
                 result.lyrics_text = '\n\n'.join(lyrics_parts)
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Genius lyrics fetch failed for {result.url}: {e}")
 
         return result

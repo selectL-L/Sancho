@@ -33,6 +33,8 @@ from .music_helpers import (
     is_video_unavailable,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # ==========================================================================
 # PO TOKEN SYSTEM CHECKS
@@ -48,7 +50,8 @@ def _check_pot_plugin_installed() -> bool:
             if dist.metadata.get('Name', '').lower() == 'bgutil-ytdlp-pot-provider':
                 return True
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug(f"PO token plugin check failed: {e}")
         return False
 
 
@@ -68,7 +71,8 @@ def _check_pot_server_running(port: int = 4416) -> bool:
             s.settimeout(0.5)
             result = s.connect_ex(('127.0.0.1', port))
             return result == 0
-    except Exception:
+    except (OSError, socket.error) as e:
+        logger.debug(f"POT server TCP check failed: {e}")
         return False
 
 
@@ -457,6 +461,7 @@ class AudioFetcher:
         cached = self.cache_manager.check_residential(track.video_id)
         if cached:
             self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
+            self.clear_state(track.video_id)  # Clean up - no retry state needed
             return AudioFetchResult(success=True, local_path=cached)
 
         # Check all ambient cache locations (playlists + orphaned)
@@ -465,6 +470,7 @@ class AudioFetcher:
         any_cached = self.cache_manager.get_any_local_path(track.video_id)
         if any_cached:
             self.logger.info(f"[AudioFetcher] Ambient Cache hit: {track.title}")
+            self.clear_state(track.video_id)  # Clean up - no retry state needed
             return AudioFetchResult(success=True, local_path=any_cached)
 
         # Try direct if under limit
@@ -476,6 +482,7 @@ class AudioFetcher:
             result = await self._try_direct(track)
 
             if result.success:
+                self.clear_state(track.video_id)  # Clean up - fetch succeeded
                 return result
 
             if result.is_auth_failure:
@@ -601,6 +608,7 @@ class AudioFetcher:
                 f"[AudioFetcher] Residential success: {track.title} "
                 f"({bytes_downloaded / 1024 / 1024:.2f} MB)"
             )
+            self.clear_state(track.video_id)  # Clean up - fetch succeeded
             return AudioFetchResult(
                 success=True,
                 local_path=cached_path,

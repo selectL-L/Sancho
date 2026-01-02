@@ -361,50 +361,50 @@ class AdminCog(BaseCog):
                         skill_aliases = await self.db_manager.db_fetchall("SELECT * FROM skill_aliases")
                         tables_to_export.append(
                             ("skill_aliases", [dict(row) for row in skill_aliases]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table skill_aliases not available for export: {e}")
 
                     try:
                         user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
                         tables_to_export.append(
                             ("user_settings", [dict(row) for row in user_settings]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table user_settings not available for export: {e}")
 
                     try:
                         bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
                         tables_to_export.append(
                             ("bot_settings", [dict(row) for row in bot_settings]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table bot_settings not available for export: {e}")
 
                     try:
                         guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
                         tables_to_export.append(
                             ("guild_settings", [dict(row) for row in guild_settings]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table guild_settings not available for export: {e}")
 
                     try:
                         starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
                         tables_to_export.append(
                             ("starboard_entries", [dict(row) for row in starboard_entries]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table starboard_entries not available for export: {e}")
 
                     try:
                         bod_usage = await self.db_manager.db_fetchall("SELECT * FROM bod_usage")
                         tables_to_export.append(
                             ("bod_usage", [dict(row) for row in bod_usage]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table bod_usage not available for export: {e}")
 
                     try:
                         bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
                         tables_to_export.append(
                             ("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"Table bod_leaderboard not available for export: {e}")
 
                     for table_name, data in tables_to_export:
                         json_data["tables"][table_name] = {
@@ -1160,7 +1160,7 @@ class AdminCog(BaseCog):
         try:
             reaction, _ = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
             if str(reaction.emoji) == "✅":
-                deleted = cache_manager.clear_orphaned()
+                deleted = await cache_manager.clear_orphaned()
                 await confirm_msg.edit(content=f"✅ Cleared {deleted} orphaned files.")
             else:
                 await confirm_msg.edit(content="❌ Clear cancelled.")
@@ -1204,7 +1204,7 @@ class AdminCog(BaseCog):
 
             # Reconcile downloads
             await status_msg.edit(content="🔄 **Reconciling downloads...**")
-            cache_manager.reconcile_downloads(playlists)
+            await cache_manager.reconcile_downloads(playlists)
 
             # Cleanup expired orphans
             expired = await cache_manager.cleanup_expired_orphans()

@@ -188,20 +188,18 @@ class MusicCacheManager:
         return self._manifest
 
     async def _save_manifest(self) -> None:
-        """Saves manifest.json to disk (with lock)."""
+        """Saves manifest.json to disk (with lock, non-blocking)."""
         async with self._manifest_lock:
             if self._manifest is None:
                 return
-            try:
-                temp_file = self.manifest_file + '.tmp'
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    json.dump(self._manifest, f, indent=2, ensure_ascii=False)
-                shutil.move(temp_file, self.manifest_file)
-            except IOError as e:
-                self.logger.error(f"[CacheManager] Failed to save manifest.json: {e}")
+            # Use to_thread to avoid blocking the event loop
+            await asyncio.to_thread(self._write_manifest_to_disk)
 
-    def _save_manifest_sync(self) -> None:
-        """Synchronous manifest save (for use in non-async contexts)."""
+    def _write_manifest_to_disk(self) -> None:
+        """Sync helper for _save_manifest. Writes manifest atomically.
+
+        Note: Only call from _save_manifest (via to_thread) to ensure lock protection.
+        """
         if self._manifest is None:
             return
         try:
@@ -663,7 +661,7 @@ class MusicCacheManager:
     # ORPHAN MANAGEMENT
     # =========================================================================
 
-    def reconcile_downloads(self, new_playlists: Dict[str, List[Track]]) -> None:
+    async def reconcile_downloads(self, new_playlists: Dict[str, List[Track]]) -> None:
         """Compares manifest against new playlist data.
 
         Handles:
@@ -743,7 +741,7 @@ class MusicCacheManager:
                 break  # Only unorphan once, copies will be made as needed
 
         self._manifest = manifest
-        self._save_manifest_sync()
+        await self._save_manifest()
         self.logger.info("[CacheManager] Reconciliation complete")
 
     def _orphan_track(self, video_id: str, from_hash: str, manifest: Dict[str, Any]) -> None:
@@ -846,7 +844,7 @@ class MusicCacheManager:
 
         return deleted
 
-    def clear_orphaned(self) -> int:
+    async def clear_orphaned(self) -> int:
         """Manually clears all orphaned files.
 
         Returns:
@@ -866,7 +864,7 @@ class MusicCacheManager:
                 self.logger.warning(f"[CacheManager] Could not delete orphan {video_id}: {e}")
 
         self._manifest = manifest
-        self._save_manifest_sync()
+        await self._save_manifest()
         self.logger.info(f"[CacheManager] Cleared {deleted} orphaned files")
         return deleted
 
@@ -896,7 +894,7 @@ class MusicCacheManager:
 
                 self.logger.info("[CacheManager] Scheduled refresh starting...")
                 playlists = await self.refresh_all_playlists()
-                self.reconcile_downloads(playlists)
+                await self.reconcile_downloads(playlists)
                 await self.cleanup_expired_orphans()
                 await self.queue_missing_downloads()
 

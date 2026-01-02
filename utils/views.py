@@ -16,6 +16,7 @@ Exports:
 """
 
 import io
+import logging
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol, cast
@@ -164,8 +165,10 @@ class TrackFailedView(discord.ui.View):
                     await self.message.edit(embed=embed, view=self)
                 else:
                     await self.message.edit(view=self)
-            except Exception:
-                pass  # Message may have been deleted
+            except discord.NotFound:
+                pass  # Message was deleted - expected
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"TrackFailedView timeout cleanup failed: {e}")
 
 
 async def show_track_failed(
@@ -651,8 +654,10 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
                 msg = msg_task.result()
                 result = msg.content.strip()
                 view.stop()
-            except Exception:
-                pass
+            except asyncio.CancelledError:
+                pass  # Task was cancelled - expected
+            except Exception as e:
+                logging.getLogger(__name__).debug(f"get_selection message result failed: {e}")
 
         for task in pending:
             task.cancel()
@@ -673,14 +678,18 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             view.add_item(b)
             try:
                 await message.edit(view=view)
-            except Exception:
-                pass
+            except discord.NotFound:
+                pass  # Message was deleted - expected
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"get_selection button update failed: {e}")
     else:
         # Timeout or invalid selection (not in options) -> Remove buttons
         try:
             await message.edit(view=None)
-        except Exception:
-            pass
+        except discord.NotFound:
+            pass  # Message was deleted - expected
+        except discord.HTTPException as e:
+            logging.getLogger(__name__).debug(f"get_selection timeout cleanup failed: {e}")
 
     return result
 
@@ -696,7 +705,8 @@ class FastConfirmModal(discord.ui.Modal):
         value = getattr(self.children[0], 'value', '')
         try:
             value = value.strip().lower()
-        except Exception:
+        except (AttributeError, TypeError) as e:
+            logging.getLogger(__name__).debug(f"FastConfirmModal value processing failed: {e}")
             value = ""
         if value == 'i understand the risks':
             await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits. This IS dangerous.', ephemeral=True)
@@ -734,8 +744,10 @@ class ModalLauncherView(discord.ui.View):
                     if hasattr(child, 'disabled'):
                         setattr(child, 'disabled', True)
                 await self.message.edit(view=self)
-            except Exception:
-                pass
+            except discord.NotFound:
+                pass  # Message was deleted - expected
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"ModalLauncherView timeout cleanup failed: {e}")
 
 
 async def launch_modal(ctx, modal: discord.ui.Modal):
@@ -793,8 +805,10 @@ class PaginatorView(discord.ui.View):
                     if hasattr(child, 'disabled'):
                         setattr(child, 'disabled', True)
                 await self.message.edit(view=self)
-            except Exception:
-                pass
+            except discord.NotFound:
+                pass  # Message was deleted - expected
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"PaginatorView timeout cleanup failed: {e}")
 
 
 # =============================================================================
@@ -920,8 +934,10 @@ class DashboardView(discord.ui.View):
                     if hasattr(child, 'disabled'):
                         setattr(child, 'disabled', True)
                 await self.message.edit(view=self)
-            except Exception:
-                pass
+            except discord.NotFound:
+                pass  # Message was deleted - expected
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"DashboardView timeout cleanup failed: {e}")
 
 
 async def show_dashboard(

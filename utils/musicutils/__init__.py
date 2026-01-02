@@ -21,7 +21,6 @@ from utils.musicutils.music_data import (
     LyricsResult,
     ActiveSession,
     PlaybackState,
-    PrefetchState,
     AmbienceState,
     DownloadResult,
     AudioUrlResult,
@@ -78,7 +77,6 @@ __all__ = [
     'LyricsResult',
     'ActiveSession',
     'PlaybackState',
-    'PrefetchState',
     'AmbienceState',
     'DownloadResult',
     'AudioUrlResult',
@@ -161,4 +159,11 @@ __all__ += [
     'ManagedPlayer',
     'PlayerState',
     'TrackInfo',
+]
+
+# Command handlers mixin (Phase 8 - NLP handler extraction)
+from utils.musicutils.commands import MusicCommandsMixin
+
+__all__ += [
+    'MusicCommandsMixin',
 ]

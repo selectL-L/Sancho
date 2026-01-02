@@ -5,19 +5,16 @@ meaningful behavior that needs testing:
 - LoopMode.next() - cycle logic
 - LoopMode.convert() - parsing
 - Track.to_dict() / from_dict() - serialization
-- PrefetchState.is_valid_for() - validation logic
-- PrefetchState.invalidate_if_affected() - conditional invalidation
 - AmbienceState.request_switch() / consume_switch() - state machine
 """
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 import pytest
 
 from utils.musicutils.music_data import (
     LoopMode,
     Track,
-    PrefetchState,
     AmbienceState,
     FetchContext,
 )
@@ -169,175 +166,6 @@ class TestTrackSerialization:
         track = Track.from_dict(data)
         assert track.thumbnail is None
         assert track.thumbnail_needs_crop is False
-
-
-class TestPrefetchStateIsValidFor:
-    """Tests for PrefetchState.is_valid_for() - critical validation logic."""
-
-    def test_no_audio_url(self):
-        """Invalid when audio_url is None."""
-        state = PrefetchState()
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0
-        ) is False
-
-    def test_no_target_index(self):
-        """Invalid when target_index is None."""
-        state = PrefetchState(audio_url="http://audio.url")
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0
-        ) is False
-
-    def test_valid_sequential_advance(self):
-        """Valid when advancing to next track sequentially."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            target_video_id="abc123",
-            fetched_at=time.time()
-        )
-        # current=0, next=1, playlist_len=5
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0, video_id="abc123"
-        ) is True
-
-    def test_valid_wrap_around(self):
-        """Valid when wrapping from last to first track."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=0,  # First track
-            fetched_at=time.time()
-        )
-        # current=4 (last), next=0 (wrap), playlist_len=5
-        assert state.is_valid_for(
-            playlist_index=0, playlist_len=5, current_index=4
-        ) is True
-
-    def test_invalid_index_mismatch(self):
-        """Invalid when target_index doesn't match expected next."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            fetched_at=time.time()
-        )
-        # Prefetch was for index 1, but now we want index 3
-        assert state.is_valid_for(
-            playlist_index=3, playlist_len=5, current_index=2
-        ) is False
-
-    def test_invalid_video_id_mismatch(self):
-        """Invalid when video_id at index changed (playlist mutated)."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            target_video_id="original_video",
-            fetched_at=time.time()
-        )
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0,
-            video_id="different_video"
-        ) is False
-
-    def test_expired_url(self):
-        """Invalid when URL has expired (>5 hours old)."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            fetched_at=time.time() - (6 * 60 * 60)  # 6 hours ago
-        )
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0
-        ) is False
-
-    def test_fresh_url_valid(self):
-        """Valid when URL is fresh (<5 hours old)."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            fetched_at=time.time() - (4 * 60 * 60)  # 4 hours ago
-        )
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0
-        ) is True
-
-    def test_video_id_none_skips_check(self):
-        """When video_id not provided, skip that check."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            target_video_id="stored_id",
-            fetched_at=time.time()
-        )
-        # No video_id passed - should skip the check
-        assert state.is_valid_for(
-            playlist_index=1, playlist_len=5, current_index=0, video_id=None
-        ) is True
-
-
-class TestPrefetchStateInvalidateIfAffected:
-    """Tests for PrefetchState.invalidate_if_affected()."""
-
-    def test_no_target_index(self):
-        """Does nothing when target_index is None."""
-        state = PrefetchState()
-        result = state.invalidate_if_affected({1, 2}, new_playlist_len=5)
-        assert result is False
-
-    def test_target_in_affected_set(self):
-        """Invalidates when target_index is in affected set."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=2,
-            fetched_at=time.time()
-        )
-        result = state.invalidate_if_affected({2, 3}, new_playlist_len=5)
-        assert result is True
-        assert state.audio_url is None
-        assert state.target_index is None
-
-    def test_target_not_in_affected_set(self):
-        """Does NOT invalidate when target_index is NOT affected."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=1,
-            fetched_at=time.time()
-        )
-        result = state.invalidate_if_affected({3, 4}, new_playlist_len=5)
-        assert result is False
-        assert state.audio_url == "http://audio.url"
-
-    def test_target_out_of_bounds(self):
-        """Invalidates when target_index >= new playlist length."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            target_index=5,  # Was valid, now out of bounds
-            fetched_at=time.time()
-        )
-        result = state.invalidate_if_affected({0}, new_playlist_len=3)
-        assert result is True
-        assert state.audio_url is None
-
-
-class TestPrefetchStateClear:
-    """Tests for PrefetchState.clear()."""
-
-    def test_clears_all_fields(self):
-        """clear() resets all data fields."""
-        state = PrefetchState(
-            audio_url="http://audio.url",
-            http_headers={"Authorization": "token"},
-            thumbnail_bytes=b"image_data",
-            target_index=3,
-            target_video_id="video123",
-            fetched_at=12345.0
-        )
-        state.clear()
-        assert state.audio_url is None
-        assert state.http_headers is None
-        assert state.thumbnail_bytes is None
-        assert state.target_index is None
-        assert state.target_video_id is None
-        assert state.fetched_at == 0.0
 
 
 class TestAmbienceStateSwitch:

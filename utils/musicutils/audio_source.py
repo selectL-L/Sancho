@@ -147,11 +147,12 @@ class SeekableAudioSource(discord.AudioSource):
             try:
                 self._process.terminate()
                 self._process.wait(timeout=1.0)
-            except Exception:
+            except (OSError, subprocess.TimeoutExpired) as e:
+                logger.debug(f"FFmpeg terminate failed, killing: {e}")
                 try:
                     self._process.kill()
-                except Exception:
-                    pass
+                except OSError as e:
+                    logger.debug(f"FFmpeg kill failed (likely already dead): {e}")
             self._process = None
 
     def read(self) -> bytes:
