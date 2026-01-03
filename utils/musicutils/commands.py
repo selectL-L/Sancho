@@ -90,6 +90,57 @@ if TYPE_CHECKING:
 # Type alias for NLP handler methods
 NlpHandler = Callable[['MusicCommandsMixin', commands.Context, str], Awaitable[None]]
 
+# Global per-user cooldown tracker for music commands
+# Structure: {user_id: {command_name: last_invocation_timestamp}}
+_music_cooldowns: Dict[int, Dict[str, float]] = {}
+MUSIC_COMMAND_COOLDOWN: float = 2.0  # seconds between same command
+
+
+def music_cooldown(func: NlpHandler) -> NlpHandler:
+    """Decorator that applies a per-user, per-command cooldown to music NLP handlers.
+
+    Each command has its own cooldown timer per user. If a user tries to invoke
+    the same command within MUSIC_COMMAND_COOLDOWN seconds, the request is silently
+    ignored to prevent spam.
+
+    Note: Bot owner bypasses cooldown for debugging purposes.
+
+    Usage:
+        @music_cooldown
+        async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
+            ...
+    """
+    @functools.wraps(func)
+    async def wrapper(self: 'MusicCommandsMixin', ctx: commands.Context, query: str) -> None:
+        # Bot owner bypasses cooldown
+        if ctx.author.id == self.bot.owner_id:
+            await func(self, ctx, query)
+            return
+
+        user_id = ctx.author.id
+        command_name = func.__name__
+
+        now = time.time()
+
+        # Initialize user's cooldown dict if needed
+        if user_id not in _music_cooldowns:
+            _music_cooldowns[user_id] = {}
+
+        user_cooldowns = _music_cooldowns[user_id]
+
+        # Check if command is on cooldown
+        if command_name in user_cooldowns:
+            elapsed = now - user_cooldowns[command_name]
+            if elapsed < MUSIC_COMMAND_COOLDOWN:
+                # Still on cooldown - silently ignore
+                return
+
+        # Update last invocation time and proceed
+        user_cooldowns[command_name] = now
+        await func(self, ctx, query)
+
+    return wrapper
+
 
 def requires_voice(func: NlpHandler) -> NlpHandler:
     """Decorator for NLP handlers that require the user to be in VC with the bot.
@@ -499,13 +550,15 @@ class MusicCommandsMixin:
                     lines.append(f"{track_num}. {star}{track.title} - {track.artist}")
 
             embed = discord.Embed(
-                title="🎶 Playlist",
                 description="\n".join(lines),
                 color=discord.Color.blue()
             )
 
+            # Structure: "🎵 Playlist" at top (author), then "Now Playing: ..." (title), then tracks
+            embed.set_author(name="🎶 Playlist")
+
             if current:
-                embed.set_author(name=f"Now Playing: {current.title} - {current.artist}")
+                embed.title = f"Now Playing: {current.title} - {current.artist}"
 
             embed.set_footer(
                 text=f"Page {page_num + 1}/{total_pages} • {total_tracks} tracks • "
@@ -918,10 +971,12 @@ class MusicCommandsMixin:
     # NLP HANDLERS
     # ==========================================================================
 
+    @music_cooldown
     async def listen_along_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for listen along requests."""
         await self._do_listen_along(ctx)
 
+    @music_cooldown
     @requires_voice
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
@@ -930,6 +985,7 @@ class MusicCommandsMixin:
         else:
             await ctx.send("Nothing is playing right now.")
 
+    @music_cooldown
     @requires_voice
     async def pause_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for pause requests."""
@@ -942,6 +998,7 @@ class MusicCommandsMixin:
         else:
             await ctx.send("Nothing is playing right now.")
 
+    @music_cooldown
     @requires_voice
     async def resume_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for resume requests."""
@@ -957,6 +1014,7 @@ class MusicCommandsMixin:
         else:
             await ctx.send("Nothing to resume. Type 'listen along' to start playback!")
 
+    @music_cooldown
     async def play_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for play/queue requests with a song/URL."""
         song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
@@ -986,6 +1044,7 @@ class MusicCommandsMixin:
 
         await self._do_play(ctx, song_query)
 
+    @music_cooldown
     async def now_playing_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for now playing requests."""
         from utils.views import NowPlayingView
@@ -1019,10 +1078,12 @@ class MusicCommandsMixin:
         else:
             await ctx.send(view=view)
 
+    @music_cooldown
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
         await self._do_queue(ctx)
 
+    @music_cooldown
     @requires_voice
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
@@ -1033,6 +1094,7 @@ class MusicCommandsMixin:
         self._apply_shuffle(preserve_current=True)
         await ctx.send("🔀 Playlist shuffled!")
 
+    @music_cooldown
     @requires_voice
     async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for jump requests."""
@@ -1046,6 +1108,7 @@ class MusicCommandsMixin:
                 "Usage: `jump 5` to jump to track #5"
             )
 
+    @music_cooldown
     async def loop_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for loop mode requests."""
         query_lower = query.lower()
@@ -1091,12 +1154,14 @@ class MusicCommandsMixin:
         else:
             await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
 
+    @music_cooldown
     @requires_voice
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests."""
         await self._end_session("Disconnected by user request.")
         await ctx.send("👋 Disconnected!")
 
+    @music_cooldown
     @requires_voice
     async def remove_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for removing tracks from the playlist."""
@@ -1106,6 +1171,7 @@ class MusicCommandsMixin:
         ).strip()
         await self._do_remove(ctx, clean_query)
 
+    @music_cooldown
     @requires_voice
     async def move_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for moving tracks in the playlist."""
@@ -1115,6 +1181,7 @@ class MusicCommandsMixin:
         ).strip()
         await self._do_move(ctx, clean_query)
 
+    @music_cooldown
     async def lyrics_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for lyrics search."""
         clean_query = re.sub(
@@ -1126,6 +1193,7 @@ class MusicCommandsMixin:
 
         await self._do_lyrics(ctx, clean_query if clean_query else None)
 
+    @music_cooldown
     @requires_voice
     async def clear_queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for clearing the queue."""

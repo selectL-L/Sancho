@@ -19,7 +19,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .music_data import Track
@@ -393,6 +393,11 @@ class AudioFetcher:
 
     The cog stores results and decides when to use them. AudioFetcher
     just executes the fetch with appropriate retry strategy.
+
+    Residential Callback:
+        Set `on_residential_attempt` to receive notification BEFORE residential
+        proxy is attempted. This allows the cog to notify users that an
+        alternative method is being tried. Signature: async def callback(track_title: str)
     """
     # Class-level constants
     DIRECT_MAX: ClassVar[int] = 2  # Max direct (yt-dlp) attempts
@@ -402,6 +407,10 @@ class AudioFetcher:
     # Instance fields
     cache_manager: Any = field(repr=False)  # MusicCacheManager
     logger: Any = field(repr=False)
+
+    # Optional callback fired BEFORE residential proxy attempt (not after)
+    # Signature: async def callback(track_title: str) -> None
+    on_residential_attempt: Optional[Callable[[str], Awaitable[None]]] = field(default=None, repr=False)
 
     # Per-track state (keyed by video_id)
     _track_states: Dict[str, TrackFetchState] = field(default_factory=dict, init=False)
@@ -437,6 +446,12 @@ class AudioFetcher:
     ) -> AudioFetchResult:
         """Get playable audio URL or path for a track.
 
+        Priority order (quality-first strategy):
+        1. Ambient cache - High quality local files (playlist downloads)
+        2. YouTube direct - Best quality streaming
+        3. Residential cache - Lower quality fallback (already downloaded)
+        4. Residential download - Last resort, costs bandwidth
+
         Args:
             track: Track to get audio for.
             context: PREFETCH (conservative), LIVE (aggressive), or RETRY (aggressive).
@@ -457,23 +472,23 @@ class AudioFetcher:
             f"(direct={state.direct_attempts}, residential={state.residential_attempts})"
         )
 
-        # Check residential cache first (permanent, proxy-downloaded)
-        cached = self.cache_manager.check_residential(track.video_id)
-        if cached:
-            self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
-            self.clear_state(track.video_id)  # Clean up - no retry state needed
-            return AudioFetchResult(success=True, local_path=cached)
-
-        # Check all ambient cache locations (playlists + orphaned)
-        # If we hit an orphanhed file, we can use it, but this isn't guranteed
-        # considering that orphanhed files have a limited lifetime.
+        # ---------------------------------------------------------------------
+        # Priority 1: Ambient cache (HIGH QUALITY)
+        # Check playlist downloads and orphaned files first - these are the
+        # best quality local files we have. Orphaned files have limited lifetime
+        # but are still usable while they exist.
+        # ---------------------------------------------------------------------
         any_cached = self.cache_manager.get_any_local_path(track.video_id)
         if any_cached:
-            self.logger.info(f"[AudioFetcher] Ambient Cache hit: {track.title}")
+            self.logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
             self.clear_state(track.video_id)  # Clean up - no retry state needed
             return AudioFetchResult(success=True, local_path=any_cached)
 
-        # Try direct if under limit
+        # ---------------------------------------------------------------------
+        # Priority 2: YouTube direct streaming (BEST QUALITY)
+        # Try to stream directly from YouTube - this gives the best audio
+        # quality without using local storage or proxy bandwidth.
+        # ---------------------------------------------------------------------
         if state.direct_attempts < self.DIRECT_MAX:
             state.direct_attempts += 1
             self.logger.info(
@@ -494,22 +509,47 @@ class AudioFetcher:
                         "[AudioFetcher] High 403 rate detected - check YouTube auth"
                     )
 
-            # PREFETCH stops here on failure
-            if context == FetchContext.PREFETCH:
-                self.logger.info(
-                    "[AudioFetcher] PREFETCH mode - stopping (will retry LIVE if played)"
-                )
-                return result
+        # ---------------------------------------------------------------------
+        # Priority 3: Residential cache (LOWER QUALITY FALLBACK)
+        # If direct failed, check if we have a residential-downloaded file.
+        # These are lower quality but instant - no download needed.
+        # Note: No "having trouble" message here - cache hit is instant,
+        # we don't want users expecting residential downloads to be fast.
+        # ---------------------------------------------------------------------
+        cached = self.cache_manager.check_residential(track.video_id)
+        if cached:
+            self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
+            self.clear_state(track.video_id)  # Clean up - no retry state needed
+            return AudioFetchResult(success=True, local_path=cached)
 
-        # LIVE/RETRY continue to residential
+        # ---------------------------------------------------------------------
+        # PREFETCH stops here - we've checked all local/free sources.
+        # Don't spend proxy bandwidth on speculative prefetching.
+        # ---------------------------------------------------------------------
+        if context == FetchContext.PREFETCH:
+            self.logger.info(
+                "[AudioFetcher] PREFETCH mode - no local cache, stopping (will retry LIVE if played)"
+            )
+            return AudioFetchResult(
+                success=False,
+                is_auth_failure=state.auth_failed,
+                error="No local cache available (PREFETCH mode)"
+            )
+
+        # ---------------------------------------------------------------------
+        # Priority 4: Residential proxy download (LAST RESORT)
+        # LIVE/RETRY contexts only. This costs proxy bandwidth, so we only
+        # do it when the track is actually being played, not for prefetch.
+        # The "having trouble" notification fires inside _try_residential().
+        # ---------------------------------------------------------------------
         if context in (FetchContext.LIVE, FetchContext.RETRY):
             return await self._try_residential(track, state)
 
-        # PREFETCH with direct exhausted - return failure
+        # Shouldn't reach here, but handle gracefully
         return AudioFetchResult(
             success=False,
             is_auth_failure=state.auth_failed,
-            error="Direct attempts exhausted (PREFETCH mode)"
+            error="All fetch methods exhausted"
         )
 
     async def _try_direct(self, track: 'Track') -> AudioFetchResult:
@@ -597,6 +637,13 @@ class AudioFetcher:
         self.logger.info(
             f"[AudioFetcher] Residential download {state.residential_attempts}/{self.RESIDENTIAL_MAX}: {track.title}"
         )
+
+        # Notify cog BEFORE attempting residential (so user sees "trying another way" BEFORE success/failure)
+        if self.on_residential_attempt and state.residential_attempts == 1:
+            try:
+                await self.on_residential_attempt(track.title)
+            except Exception as e:
+                self.logger.debug(f"[AudioFetcher] Residential callback error: {e}")
 
         # Download via cache_manager
         success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_residential(

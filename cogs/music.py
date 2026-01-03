@@ -21,6 +21,7 @@ Dependencies:
 """
 
 import asyncio
+import logging
 import os
 import random
 import time
@@ -125,7 +126,11 @@ class Music(MusicCommandsMixin, BaseCog):
         )
 
         # Audio fetcher for retry orchestration (replaces self._retry)
-        self._audio_fetcher = AudioFetcher(self.cache_manager, self.logger)
+        self._audio_fetcher = AudioFetcher(
+            self.cache_manager,
+            self.logger,
+            on_residential_attempt=self._on_residential_attempt
+        )
 
         # Track if we've notified the user about residential proxy for the current track
         self._residential_notified_this_track: bool = False
@@ -133,6 +138,22 @@ class Music(MusicCommandsMixin, BaseCog):
         # PO Token Provider server subprocess (started in cog_ready)
         self._pot_server_process: Optional[asyncio.subprocess.Process] = None
         self._pot_server_healthy: bool = False
+
+    async def _on_residential_attempt(self, track_title: str) -> None:
+        """Callback fired BEFORE residential proxy attempt starts.
+
+        Notifies the user that we're having trouble and trying an alternative,
+        BEFORE the alternative method succeeds or fails.
+
+        Args:
+            track_title: Title of the track being fetched.
+        """
+        if not self._residential_notified_this_track:
+            self._residential_notified_this_track = True
+            await self._send_system_message(
+                f"🔄 Hmm, having some trouble with **{track_title}**... "
+                f"Let me try another way!"
+            )
 
     def _on_playlist_change(self, playlist_url: Optional[str], description: Optional[str]) -> None:
         """Callback from ambience system when playlist should change.
@@ -1312,13 +1333,14 @@ class Music(MusicCommandsMixin, BaseCog):
         if not track:
             return
 
-        # Debug: trace who called this and with what index
-        import traceback
-        caller = traceback.extract_stack()[-2]
-        self.logger.debug(
-            f"[PlayTrack] Called from {caller.filename.split('/')[-1]}:{caller.lineno} "
-            f"({caller.name}), index={self.current_index}, track={track.title[:30]}"
-        )
+        # Debug: trace who called this and with what index (guarded - extract_stack is expensive)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            import traceback
+            caller = traceback.extract_stack()[-2]
+            self.logger.debug(
+                f"[PlayTrack] Called from {caller.filename.split('/')[-1]}:{caller.lineno} "
+                f"({caller.name}), index={self.current_index}, track={track.title[:30]}"
+            )
 
         if not self._player:
             self.logger.error("[PlayTrack] No player available!")
@@ -1378,13 +1400,8 @@ class Music(MusicCommandsMixin, BaseCog):
                     audio_source = result.url
                     http_headers = result.http_headers
 
-                # Notify if residential was used
-                if result.residential_used and not self._residential_notified_this_track:
-                    self._residential_notified_this_track = True
-                    await self._send_system_message(
-                        f"🔄 Hmm, having some trouble with **{track.title}**... "
-                        f"Let me try another way!"
-                    )
+                # Note: Residential notification now happens BEFORE the attempt via callback
+                # (see _on_residential_attempt), so we only need to track bandwidth cost here
 
                 # Track bandwidth cost
                 if result.residential_bytes > 0 and self.db_manager:
@@ -1636,13 +1653,8 @@ class Music(MusicCommandsMixin, BaseCog):
             result = await self._audio_fetcher.fetch(track, FetchContext.RETRY)
 
             if result.success:
-                # Notify user if residential was used for the first time
-                if result.residential_used and not self._residential_notified_this_track:
-                    self._residential_notified_this_track = True
-                    await self._send_system_message(
-                        f"🔄 Hmm, having some trouble with **{track.title}**... "
-                        f"Let me try another way!"
-                    )
+                # Note: Residential notification now happens BEFORE the attempt via callback
+                # (see _on_residential_attempt), so we only need to track bandwidth cost here
 
                 # Track bandwidth cost
                 if result.residential_bytes > 0 and self.db_manager:
