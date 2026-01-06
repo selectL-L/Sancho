@@ -33,6 +33,8 @@ from discord.ext import commands
 import config
 from utils import ambience
 from utils.ambience import (
+    MusicAmbience,
+    ensure_music_for_user,
     get_context_value,
     get_current_activity,
     get_current_playlist,
@@ -58,7 +60,6 @@ from utils.musicutils import (
     Track,
     fetch_playlist_metadata,
     fetch_url_info,
-    get_audio_url,
     get_best_thumbnail_bytes,
     search_youtube,
 )
@@ -175,6 +176,14 @@ class Music(MusicCommandsMixin, BaseCog):
             self.logger.info(
                 f"Ambience requested playlist change: {description}")
 
+    def _ensure_music_for_user(self) -> tuple[Optional[str], Optional[str]]:
+        """Ask ambience to start music if not already playing."""
+        return ensure_music_for_user()
+
+    def _get_listen_along_response(self) -> str:
+        """Get personality-aware response for listen-along."""
+        return MusicAmbience.get_listen_along_response()
+
     def _get_presence_for_activity(self) -> str:
         """Get a presence string for the current foreground activity.
 
@@ -212,7 +221,12 @@ class Music(MusicCommandsMixin, BaseCog):
             True if server started successfully, False otherwise.
         """
         pot_script = getattr(config, 'POT_PROVIDER_PATH', None)
-        pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+        pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
+
+        # If port not configured, POT system is disabled
+        if pot_port is None:
+            self.logger.debug("POT_PROVIDER_PORT not configured, skipping POT server")
+            return False
 
         if not pot_script or not os.path.isfile(pot_script):
             self.logger.debug(f"POT provider script not found at {pot_script}")
@@ -274,7 +288,10 @@ class Music(MusicCommandsMixin, BaseCog):
         Returns:
             True if server is healthy, False otherwise.
         """
-        pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+        pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
+        if pot_port is None:
+            return False
+
         try:
             import aiohttp
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.0)) as session:
@@ -1110,22 +1127,6 @@ class Music(MusicCommandsMixin, BaseCog):
     # VOICE PLAYBACK
     # ==========================================================================
 
-    async def _get_audio_url(self, track: Track) -> tuple[Optional[str], bool, Optional[str], bool, Optional[Dict[str, str]]]:
-        """Gets the actual streamable audio URL for a track.
-
-        Args:
-            track: The track to get the audio URL for.
-
-        Returns:
-            A tuple of (url, is_unavailable, thumbnail, needs_crop, http_headers) where:
-            - url: The streamable URL, or None if failed
-            - is_unavailable: True if the video is permanently unavailable and should be removed
-            - thumbnail: Best thumbnail URL found, or None
-            - needs_crop: True if thumbnail needs center-cropping to extract album art
-            - http_headers: Dict of HTTP headers needed to fetch the URL, or None
-        """
-        return await get_audio_url(track, self.logger)
-
     async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]:
         """Searches YouTube for tracks matching the query.
 
@@ -1862,7 +1863,6 @@ class Music(MusicCommandsMixin, BaseCog):
             if len(vc.channel.members) <= 1:
                 await self._end_session("Everyone left the voice channel.")
 
- 
     # ==========================================================================
     # TODO: FUTURE NLP HANDLERS
     # ==========================================================================

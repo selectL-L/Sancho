@@ -98,7 +98,11 @@ def _check_pot_system_functional() -> Tuple[bool, Optional[str]]:
         Tuple of (is_functional, error_message or status).
     """
     import config
-    pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+    pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
+
+    # If port not configured, POT system is disabled
+    if pot_port is None:
+        return False, "Port not configured"
 
     # Check if server is already running (best case)
     if _check_pot_server_running(pot_port):
@@ -206,7 +210,7 @@ def _detect_youtube_auth() -> Dict[str, Any]:
     import config
 
     now = time.time()
-    pot_port = getattr(config, 'POT_PROVIDER_PORT', 4416)
+    pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
 
     # Get ytdlp cache directory and ensure it exists
     ytdlp_cache = getattr(config, 'YTDLP_CACHE_PATH', None)
@@ -214,22 +218,30 @@ def _detect_youtube_auth() -> Dict[str, Any]:
         os.makedirs(ytdlp_cache, exist_ok=True)
         _youtube_auth.cache_dir = ytdlp_cache
 
-    # Always check POT system status (quick checks)
-    _youtube_auth.pot_plugin_installed = _check_pot_plugin_installed()
-    _youtube_auth.pot_server_running = _check_pot_server_running(pot_port)
-    _youtube_auth.pot_provider_ready = _check_pot_provider_script()
+    # Check POT system status only if port is configured
+    # If POT_PROVIDER_PORT is None/empty, the POT system is disabled
+    if pot_port is not None:
+        _youtube_auth.pot_plugin_installed = _check_pot_plugin_installed()
+        _youtube_auth.pot_server_running = _check_pot_server_running(pot_port)
+        _youtube_auth.pot_provider_ready = _check_pot_provider_script()
 
-    # Determine POT system error message
-    if _youtube_auth.pot_server_running:
-        _youtube_auth.pot_plugin_error = None  # Working!
-    elif not _youtube_auth.pot_plugin_installed:
-        _youtube_auth.pot_plugin_error = "pip plugin not installed"
-    elif not _check_node_available():
-        _youtube_auth.pot_plugin_error = "Node.js not found"
-    elif not _youtube_auth.pot_provider_ready:
-        _youtube_auth.pot_plugin_error = "Provider script not built"
+        # Determine POT system error message
+        if _youtube_auth.pot_server_running:
+            _youtube_auth.pot_plugin_error = None  # Working!
+        elif not _youtube_auth.pot_plugin_installed:
+            _youtube_auth.pot_plugin_error = "pip plugin not installed"
+        elif not _check_node_available():
+            _youtube_auth.pot_plugin_error = "Node.js not found"
+        elif not _youtube_auth.pot_provider_ready:
+            _youtube_auth.pot_plugin_error = "Provider script not built"
+        else:
+            _youtube_auth.pot_plugin_error = "Server not running"
     else:
-        _youtube_auth.pot_plugin_error = "Server not running"
+        # POT system not configured - skip all checks
+        _youtube_auth.pot_plugin_installed = False
+        _youtube_auth.pot_server_running = False
+        _youtube_auth.pot_provider_ready = False
+        _youtube_auth.pot_plugin_error = "Port not configured"
 
     # Use cached result if recent enough (for cookie file checks)
     if now - _youtube_auth.last_check < _youtube_auth.check_interval and _youtube_auth.auth_method is not None:
@@ -497,7 +509,15 @@ class AudioFetcher:
             result = await self._try_direct(track)
 
             if result.success:
-                self.clear_state(track.video_id)  # Clean up - fetch succeeded
+                # PREFETCH: Keep state - URL might go stale before playback
+                # LIVE/RETRY: Clear state - we're actually playing now
+                if context != FetchContext.PREFETCH:
+                    self.clear_state(track.video_id)
+                return result
+
+            # Unavailable video - no point checking cache or trying residential
+            if result.is_unavailable:
+                self.clear_state(track.video_id)
                 return result
 
             if result.is_auth_failure:
@@ -557,31 +577,29 @@ class AudioFetcher:
         ydl_opts = get_ytdlp_options({'extract_flat': False})
 
         try:
-            url, is_unavailable, thumbnail, needs_crop, headers = await get_audio_url(
-                track, self.logger, ydl_opts
-            )
+            result = await get_audio_url(track, self.logger, ydl_opts)
 
-            if url:
+            if result.success:
                 self.logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
                 return AudioFetchResult(
                     success=True,
-                    url=url,
-                    http_headers=headers,
-                    thumbnail=thumbnail,
-                    thumbnail_needs_crop=needs_crop,
+                    url=result.url,
+                    http_headers=result.http_headers,
+                    thumbnail=result.thumbnail,
+                    thumbnail_needs_crop=result.thumbnail_needs_crop,
                 )
 
             # No URL but no exception - likely unavailable or extraction failed
-            is_auth = not is_unavailable  # If not unavailable, assume auth issue
+            is_auth = not result.is_unavailable  # If not unavailable, assume auth issue
             self.logger.info(
                 f"[AudioFetcher] Direct fetch failed: {track.title} "
-                f"(unavailable={is_unavailable}, auth_issue={is_auth})"
+                f"(unavailable={result.is_unavailable}, auth_issue={is_auth})"
             )
             return AudioFetchResult(
                 success=False,
-                is_unavailable=is_unavailable,
+                is_unavailable=result.is_unavailable,
                 is_auth_failure=is_auth,
-                error="Failed to get audio URL"
+                error=result.error or "Failed to get audio URL"
             )
 
         except Exception as e:

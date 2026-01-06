@@ -1,18 +1,25 @@
 """config.py
 
-This module centralizes all configuration settings for the bot.
-It handles path definitions, loading environment variables (like the bot token),
-and defining static configurations such as the NLP command registry.
+Configuration hub for the bot.
+Handles the NLP registry, path definitions, and environment variable loading.
+See the info.env file for user-configurable settings;
+each field there has a descriptive comment explaining its purpose. The field_comments
+dict below is the canonical source for those descriptions.
+
+Structure:
+    1. Path Resolution     - PyInstaller-safe paths (APP_PATH, ASSETS_PATH, etc.)
+    2. Environment Setup   - info.env creation/migration and loading
+    3. Runtime Constants   - Derived values from env vars (DB_PATH, BOT_PREFIX, etc.)
+    4. NLP Command Registry - Natural language routing configuration
+
 """
 
 import logging
 import os
 import sys
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import dotenv_values, load_dotenv
-
-# Pathing
 
 
 def get_application_path() -> str:
@@ -66,40 +73,143 @@ def check_and_create_env_file() -> None:
     Raises:
         SystemExit: If the file cannot be created or updated.
     """
-    required_fields = {
+    # Fields are ordered by section for proper file generation.
+    # Default values: empty string = no default (user must fill or feature disabled).
+    required_fields: Dict[str, str] = {
+        # BOT IDENTITY
         "DISCORD_TOKEN": "",
         "BOT_PREFIX": "",
+        "BOT_NAME": "NoName",
         "OWNER_ID": "",
+        "AMBIENCE_ENABLED": "True",
+        # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID": "",
+        "CONTROL_PORT": "",
+        # DEBUGGING
         "DEV_MODE": "False",
         "DEV_GUILD": "",
-        "BOT_NAME": "NoName",
-        "CONTROL_PORT": "",
-        "AMBIENCE_ENABLED": "True",
-        "RESIDENTIAL_PROXY_PASSWORD": ""
+        # LOGGING
+        "LOG_RETENTION_COUNT": "10",
+        "LOG_MAX_MB": "5",
+        "RESOURCE_TRACK_INTERVAL": "15",
+        # MUSIC - YouTube Authentication
+        "POT_PROVIDER_PORT": "",
+        # MUSIC - Residential Proxy
+        "RESIDENTIAL_PROXY_USER": "",
+        "RESIDENTIAL_PROXY_PASSWORD": "",
+        "RESIDENTIAL_PROXY_HOST": "",
+        "RESIDENTIAL_PROXY_PORT": "",
     }
 
-    field_comments = {
-        "DISCORD_TOKEN": "# Discord Token for bot start up.",
-        "BOT_PREFIX": "# Bot Prefixes, ensure they're seperated with commas.",
-        "OWNER_ID": "# (Optional) Owner ID for owner specific commands.",
-        "SYSTEM_CHANNEL_ID": "# (Optional) Channel ID for system messages.",
-        "DEV_MODE": "# (Optional) Enable developer mode (bot only responds to OWNER_ID). Can be True or False.",
-        "DEV_GUILD": "# (Optional) Guild ID for testing app commands when DEV_MODE is True.",
-        "BOT_NAME": "# The name the bot calls itself in user-facing strings.",
-        "CONTROL_PORT": "# (Optional) TCP port for remote control commands (e.g., 9999). Binds to localhost only.",
-        "AMBIENCE_ENABLED": "# (Optional) Enable ambience user-facing strings. True unless explicitly set to False.",
-        "RESIDENTIAL_PROXY_PASSWORD": "# (Optional) Decodo residential proxy password for YouTube 403 fallback."
+    # Section headers are written before their first field.
+    section_headers: Dict[str, str] = {
+        "DISCORD_TOKEN": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  BOT IDENTITY\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "SYSTEM_CHANNEL_ID": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  SYSTEM COMMUNICATION\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "DEV_MODE": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  DEBUGGING\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "LOG_RETENTION_COUNT": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  LOGGING\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "POT_PROVIDER_PORT": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  MUSIC\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "\n"
+            "# --- YouTube Authentication ---\n"
+        ),
+        "RESIDENTIAL_PROXY_USER": (
+            "\n"
+            "# --- Residential Proxy ---\n"
+        ),
     }
+
+    # Field comments serve as documentation for BOTH the env file AND developers reading this code.
+    field_comments: Dict[str, str] = {
+        # BOT IDENTITY
+        "DISCORD_TOKEN":
+            "# (Required) Your bot's Discord token from the Developer Portal.",
+        "BOT_PREFIX":
+            "# (Required) Command prefixes, separated by pipes ( | ).",
+        "BOT_NAME":
+            "# (Required) The name the bot uses in user-facing messages.\n"
+            "# WARNING: 'NoName' is a placeholder. Please set a real name.",
+        "OWNER_ID":
+            "# (Optional) Your Discord user ID. Enables owner-only commands.\n"
+            "# If empty, owner commands are disabled.",
+        "AMBIENCE_ENABLED":
+            "# (Optional) Enable personality-driven responses (greetings, mood-based replies).\n"
+            "# Default: True. Set to False to disable without removing ambience.toml.",
+        # SYSTEM COMMUNICATION
+        "SYSTEM_CHANNEL_ID":
+            "# (Optional) Channel ID for bot status messages (startup, errors).\n"
+            "# If empty, system messages are not sent to Discord.",
+        "CONTROL_PORT":
+            "# (Optional) TCP port for remote control commands (exit, restart, reload).\n"
+            "# Binds to localhost only. If empty, TCP control is disabled.",
+        # DEBUGGING
+        "DEV_MODE":
+            "# (Optional) Developer mode restricts the bot to OWNER_ID only.\n"
+            "# Default: False. Set to True during development/testing.",
+        "DEV_GUILD":
+            "# (Optional) Guild ID for instant slash command sync during development.\n"
+            "# If empty, slash commands sync globally (can take up to an hour).",
+        # LOGGING
+        "LOG_RETENTION_COUNT":
+            "# (Optional) Number of completed log files to keep before cleanup.\n"
+            "# Default: 10. Current session log is not counted.",
+        "LOG_MAX_MB":
+            "# (Optional) Maximum size per log file in megabytes before rotation.\n"
+            "# Default: 5. Increase for verbose debugging sessions.",
+        "RESOURCE_TRACK_INTERVAL":
+            "# (Optional) Minutes between resource usage snapshots (CPU, memory).\n"
+            "# Default: 15. Lower values = more granular data, slightly more overhead.",
+        # MUSIC - YouTube Authentication
+        "POT_PROVIDER_PORT":
+            "# (Optional) Port for the Proof-of-Origin token provider server.\n"
+            "# This is external code (not ours). If installed, set to 4416.\n"
+            "# If empty, PO token authentication is disabled.",
+        # MUSIC - Residential Proxy
+        "RESIDENTIAL_PROXY_USER":
+            "# (Optional) Decodo/Smartproxy username for residential proxy fallback.\n"
+            "# ⚠️  ALL FOUR proxy fields must be set, or the feature is disabled.\n"
+            "# ⚠️  This feature costs real money (~$0.01-0.02 per song). Use wisely.",
+        "RESIDENTIAL_PROXY_PASSWORD":
+            "# Residential proxy password (from your Decodo dashboard).",
+        "RESIDENTIAL_PROXY_HOST":
+            "# Proxy hostname.",
+        "RESIDENTIAL_PROXY_PORT":
+            "# Proxy port.",
+    }
+
+    def write_env_file(values: Dict[str, str]) -> None:
+        """Write the env file with proper sections and comments."""
+        with open(ENV_PATH, 'w', encoding='utf-8') as f:
+            for key in required_fields:
+                # Write section header if this field starts a new section
+                if key in section_headers:
+                    f.write(f"\n{section_headers[key]}\n")
+                # Write field comment and value
+                f.write(f"{field_comments[key]}\n")
+                f.write(f"{key}={values.get(key, required_fields[key])}\n\n")
 
     if not os.path.exists(ENV_PATH):
         logging.warning(
             f"'{os.path.basename(ENV_PATH)}' not found. Creating a new one.")
         try:
-            with open(ENV_PATH, 'w') as f:
-                for key, default_val in required_fields.items():
-                    f.write(f"{field_comments[key]}\n")
-                    f.write(f"{key}={default_val}\n\n")
+            write_env_file(required_fields)
         except Exception as e:
             logging.critical(f"Failed to create {ENV_PATH}: {e}")
             sys.exit(f"Exiting: Failed to create {ENV_PATH}.")
@@ -107,7 +217,7 @@ def check_and_create_env_file() -> None:
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
-        print("\nPlease open this file and add your bot's DISCORD_TOKEN and BOT_PREFIX.")
+        print("\nPlease open this file and add your bot's DISCORD_TOKEN, BOT_PREFIX, and BOT_NAME.")
         print("The OWNER_ID is optional but recommended.")
         sys.exit("Exiting: Bot token and prefix not configured.")
 
@@ -123,17 +233,16 @@ def check_and_create_env_file() -> None:
             print(
                 f"Updating {os.path.basename(ENV_PATH)} with new configuration fields...")
 
-            # Prepare new content preserving existing values
-            new_content = []
-            for key in required_fields:
-                value = current_values.get(key, required_fields[key])
-                new_content.append(f"{field_comments[key]}\n")
-                new_content.append(f"{key}={value}\n\n")
+            # Merge existing values with defaults for missing keys
+            # Use `or` to coalesce None values from dotenv_values to defaults
+            merged_values: Dict[str, str] = {
+                key: current_values.get(key) or required_fields[key]
+                for key in required_fields
+            }
 
             try:
                 os.remove(ENV_PATH)
-                with open(ENV_PATH, 'w') as f:
-                    f.writelines(new_content)
+                write_env_file(merged_values)
                 print(f"Successfully updated {os.path.basename(ENV_PATH)}.")
             except Exception as e:
                 logging.critical(
@@ -151,18 +260,116 @@ check_and_create_env_file()
 # Load the environment variables from the .env file.
 load_dotenv(dotenv_path=ENV_PATH)
 
-# Environment Variables
+# =============================================================================
+# ENVIRONMENT VARIABLES - Core Identity
+# =============================================================================
 TOKEN = os.getenv('DISCORD_TOKEN')
 BOT_PREFIX_RAW = os.getenv('BOT_PREFIX')
 BOT_NAME = os.getenv('BOT_NAME')
 
-# Dependent Paths
-# These paths depend on the BOT_NAME environment variable.
-LOGS_DIR = os.path.join(APP_PATH, 'logs')
-LOG_RETENTION_COUNT = 10  # Keep 10 completed logs + current
-RESOURCE_TRACK_INTERVAL = 15  # Minutes between resource usage snapshots
+if not TOKEN or not BOT_PREFIX_RAW or not BOT_NAME:
+    print("DISCORD_TOKEN, BOT_PREFIX, and BOT_NAME must be set in info.env.")
+    sys.exit("Exiting: Missing or invalid required configuration.")
 
-# Database Path Discovery
+if BOT_NAME == "NoName":
+    print("WARNING: BOT_NAME is set to the default 'NoName'.")
+    print("Please update 'info.env' with your bot's actual name.")
+
+# Sort prefixes by length descending to ensure longer prefixes are matched first
+# (e.g., '.mayors' before '.m') and add a trailing space to act as a delimiter.
+BOT_PREFIX = sorted(
+    [p.strip() + ' ' for p in BOT_PREFIX_RAW.split('|')], key=len, reverse=True)
+
+raw_owner_id = os.getenv('OWNER_ID')
+OWNER_ID: Optional[int] = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
+
+raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
+AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - System Communication
+# =============================================================================
+raw_system_channel_id = os.getenv('SYSTEM_CHANNEL_ID')
+SYSTEM_CHANNEL_ID: Optional[int] = int(raw_system_channel_id) if raw_system_channel_id and raw_system_channel_id.isdigit() else None
+
+raw_control_port = os.getenv('CONTROL_PORT')
+CONTROL_PORT: Optional[int] = int(raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - Debugging
+# =============================================================================
+raw_dev_mode = os.getenv('DEV_MODE', 'False')
+DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
+
+raw_dev_guild = os.getenv('DEV_GUILD')
+DEV_GUILD: Optional[int] = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - Logging
+# =============================================================================
+raw_log_retention = os.getenv('LOG_RETENTION_COUNT', '10')
+LOG_RETENTION_COUNT = int(raw_log_retention) if raw_log_retention.isdigit() else 10
+
+raw_log_max_mb = os.getenv('LOG_MAX_MB', '5')
+LOG_MAX_MB = int(raw_log_max_mb) if raw_log_max_mb.isdigit() else 5
+LOG_MAX_BYTES = LOG_MAX_MB * 1024 * 1024  # Convert to bytes for logging module
+
+raw_resource_interval = os.getenv('RESOURCE_TRACK_INTERVAL', '15')
+RESOURCE_TRACK_INTERVAL = int(raw_resource_interval) if raw_resource_interval.isdigit() else 15
+
+LOG_LEVEL = logging.INFO
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(funcName)s:%(lineno)d] - %(message)s'
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - Music (YouTube Authentication)
+# =============================================================================
+# PO Token Provider - HTTP server that generates proof-of-origin tokens for YouTube.
+# This helps bypass 403 errors on datacenter IPs. The server is started/stopped with the bot.
+# One-time setup: clone repo to <venv>/utils/pot_provider, run npm install && npx tsc
+# Uses sys.prefix to find the venv directory (keeps JS code away from Python code).
+POT_PROVIDER_PATH = os.path.join(sys.prefix, 'utils', 'pot_provider', 'server', 'build', 'main.js')
+
+raw_pot_port = os.getenv('POT_PROVIDER_PORT')
+POT_PROVIDER_PORT: Optional[int] = int(raw_pot_port) if raw_pot_port and raw_pot_port.isdigit() else None
+
+# Cookie/token file paths (manual fallback authentication)
+YOUTUBE_COOKIE_PATH = os.path.join(APP_PATH, 'youtube_cookies.txt')
+YOUTUBE_PO_TOKEN_PATH = os.path.join(APP_PATH, 'youtube_po_token.txt')
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - Music (Residential Proxy)
+# =============================================================================
+# Used as fallback when direct YouTube streaming fails with 403 errors.
+# YouTube embeds the requester's IP in audio URLs, so datacenter IPs often get blocked.
+# Residential proxies provide real ISP IPs that bypass these blocks.
+# Pricing: ~$4/GB (Decodo PAYG), ~$0.012-0.02 per song.
+RESIDENTIAL_PROXY_USER = os.getenv('RESIDENTIAL_PROXY_USER', '')
+RESIDENTIAL_PROXY_PASSWORD = os.getenv('RESIDENTIAL_PROXY_PASSWORD', '')
+RESIDENTIAL_PROXY_HOST = os.getenv('RESIDENTIAL_PROXY_HOST', '')
+raw_proxy_port = os.getenv('RESIDENTIAL_PROXY_PORT', '')
+RESIDENTIAL_PROXY_PORT: Optional[int] = int(raw_proxy_port) if raw_proxy_port and raw_proxy_port.isdigit() else None
+RESIDENTIAL_PROXY_COST_PER_GB = 4.00  # USD, for cost tracking
+
+# Validate proxy configuration - ALL fields required or feature is disabled
+_proxy_fields = [RESIDENTIAL_PROXY_USER, RESIDENTIAL_PROXY_PASSWORD, RESIDENTIAL_PROXY_HOST, RESIDENTIAL_PROXY_PORT]
+_proxy_filled = [bool(f) for f in _proxy_fields]
+if any(_proxy_filled) and not all(_proxy_filled):
+    print("WARNING: Residential proxy configuration is incomplete.")
+    print("All four fields (USER, PASSWORD, HOST, PORT) must be set for the feature to work.")
+    print("Residential proxy fallback is DISABLED.")
+RESIDENTIAL_PROXY_ENABLED = all(_proxy_filled)
+
+# =============================================================================
+# DERIVED PATHS
+# =============================================================================
+LOGS_DIR = os.path.join(APP_PATH, 'logs')
+COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
+MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
+YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OAuth tokens, etc.)
+
+# =============================================================================
+# DATABASE PATH DISCOVERY
+# =============================================================================
 # We scan for an existing .db file to use, regardless of its name.
 # This strictly enforces a "Single Database" rule.
 found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
@@ -180,84 +387,9 @@ else:
     print("Please ensure only ONE .db file exists to prevent data fragmentation.")
     sys.exit("Exiting: Multiple databases found.")
 
-COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
-
-if not TOKEN or not BOT_PREFIX_RAW or not BOT_NAME:
-    print("DISCORD_TOKEN, BOT_PREFIX, and BOT_NAME must be set in info.env.")
-    sys.exit("Exiting: Missing or invalid required configuration.")
-
-if BOT_NAME == "NoName":
-    print("WARNING: BOT_NAME is set to the default 'NoName'.")
-    print("Please update 'info.env' with your bot's actual name.")
-
-# Sort prefixes by length descending to ensure longer prefixes are matched first
-# (e.g., '.mayors' before '.m') and add a trailing space to act as a delimiter.
-BOT_PREFIX = sorted(
-    [p.strip() + ' ' for p in BOT_PREFIX_RAW.split(',')], key=len, reverse=True)
-
-raw_owner_id = os.getenv('OWNER_ID')
-raw_system_channel_id = os.getenv('SYSTEM_CHANNEL_ID')
-OWNER_ID = int(
-    raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
-SYSTEM_CHANNEL_ID = int(
-    raw_system_channel_id) if raw_system_channel_id and raw_system_channel_id.isdigit() else None
-
-raw_dev_mode = os.getenv('DEV_MODE', 'False')
-DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
-
-raw_dev_guild = os.getenv('DEV_GUILD')
-DEV_GUILD = int(
-    raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
-
-raw_control_port = os.getenv('CONTROL_PORT')
-CONTROL_PORT = int(
-    raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
-
-# Ambience Configuration
-# When disabled, moods/activities still cycle internally but user-facing strings
-# (greetings, interrupts, etc.) are silenced. Music playlist selection is NOT affected.
-raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
-AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
-
-# Music Cog Configuration
-MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
-YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OAuth tokens, etc.)
-
-# PO Token Provider - HTTP server that generates proof-of-origin tokens for YouTube
-# This helps bypass 403 errors on datacenter IPs. The server is started/stopped with the bot.
-# One-time setup: clone repo to <venv>/utils/pot_provider, run npm install && npx tsc
-# Uses sys.prefix to find the venv directory (keeps JS code away from Python code)
-POT_PROVIDER_PATH = os.path.join(sys.prefix, 'utils', 'pot_provider', 'server', 'build', 'main.js')
-POT_PROVIDER_PORT = 4416  # Default port for the PO token HTTP server
-
-# YouTube Authentication (helps avoid 403 errors on datacenter IPs)
-# Priority: PO Token Plugin (auto) > Cookie file (manual fallback)
-# Cookie file: Netscape format exported from browser (e.g., via "Get cookies.txt" extension)
-# PO Token: Proof of Origin token for extra anti-bot bypass (optional, use with cookies)
-YOUTUBE_COOKIE_PATH = os.path.join(APP_PATH, 'youtube_cookies.txt')
-YOUTUBE_PO_TOKEN_PATH = os.path.join(APP_PATH, 'youtube_po_token.txt')
-
-# Residential Proxy Configuration (Decodo/Smartproxy)
-# Used as fallback when direct YouTube streaming fails with 403 errors.
-# YouTube embeds the requester's IP in audio URLs, so datacenter IPs often get blocked.
-# Residential proxies provide real ISP IPs that bypass these blocks.
-# Pricing: ~$4/GB (Decodo PAYG), ~$0.012-0.02 per song.
-RESIDENTIAL_PROXY_USER = 'spc9j6y8fw'  # Decodo username (from dashboard)
-RESIDENTIAL_PROXY_PASSWORD = os.getenv('RESIDENTIAL_PROXY_PASSWORD', '')
-RESIDENTIAL_PROXY_HOST = 'gb.decodo.com' # GB-only IPs (YouTube may (Does!) treat UK residential better)
-RESIDENTIAL_PROXY_PORT = 30000  # GB geo-targeted port
-RESIDENTIAL_PROXY_COST_PER_GB = 4.00  # USD, for cost tracking
-# NOTE: Residential cache path is now managed by MusicCacheManager (cache_root/residential/).
-# This comment is kept for reference but not used by the codebase.
-
-# Logging Configuration
-# These are default values that can be used by the logging setup function.
-LOG_LEVEL = logging.INFO
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(funcName)s:%(lineno)d] - %(message)s'
-LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-LOG_BACKUP_COUNT = 5
-
-# NLP Command Registry
+# =============================================================================
+# NLP COMMAND REGISTRY
+# =============================================================================
 # This is the central registry for all NLP-based commands. It is structured
 # as a list of "groups" (each group is a list of commands).
 #
@@ -330,6 +462,8 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     [
         # 8-Ball
         ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
+        # Yujin Quotes (for BOD fate system)
+        ((r'\b(yujin\s*)?quotes?\b',), 'Fun', 'yujin_quotes'),
         # BOD Leaderboard (must be checked before the general 'bod' command)
         ((r'\bbod\s.*(leaderboard|lb|scores|ranks)\b',), 'Fun', 'bod_leaderboard'),
         # BOD

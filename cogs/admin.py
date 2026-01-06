@@ -7,7 +7,9 @@ viewing bot status and managing configurations.
 import asyncio
 import logging
 import os
+import platform
 import shutil
+import sys
 import tempfile
 import time
 import typing
@@ -31,7 +33,7 @@ from utils.musicutils import (
     get_track_info_for_download,
     get_youtube_auth_status,
 )
-from utils.views import get_selection, show_dashboard
+from utils.views import get_selection, show_dashboard, show_status, StatusData, StatusHealth
 
 
 class AdminCog(BaseCog):
@@ -718,7 +720,13 @@ class AdminCog(BaseCog):
     async def status(self, ctx: commands.Context, mode: typing.Optional[str] = None) -> None:
         """Provides a comprehensive health and status check for the bot.
 
-        Includes latency, uptime, cog status, database health, and resource usage.
+        Displays an interactive paginated view with:
+        - Overview: Health checks, quick stats, current activity
+        - Performance: Latencies, resource usage, uptime
+        - Music: Auth status, playback info
+        - Storage: Cache and database stats
+        - System: Extensions, environment, bot identity
+
         Usage: .status [history]
 
         Args:
@@ -749,89 +757,272 @@ class AdminCog(BaseCog):
             os.remove(temp_path)
             return
 
-        # Send initial message.
-        start_time = time.monotonic()
-        message = await ctx.send("Checking status...")
-        end_time = time.monotonic()
+        # Send initial message
+        message = await ctx.send("📊 Gathering status data...")
 
-        # Gather metrics.
+        # Gather all data for status view
+        data = await self._gather_status_data(ctx, message)
+
+        # Delete the loading message and show the status view
+        await message.delete()
+        await show_status(ctx, data)
+        logging.info(f"Status command used by {ctx.author}.")
+
+    async def _gather_status_data(self, ctx: commands.Context, message: discord.Message) -> StatusData:
+        """Gather all data needed for the status view.
+
+        Args:
+            ctx: The command context.
+            message: The loading message (used for roundtrip timing).
+
+        Returns:
+            StatusData populated with all status information.
+        """
+        now = time.time()
+        snapshot_timestamp = int(now)
+
+        # =====================================================================
+        # PERFORMANCE METRICS
+        # =====================================================================
+
         # Latencies
+        start_time = time.monotonic()
+        await message.edit(content="📊 Measuring latencies...")
+        end_time = time.monotonic()
         roundtrip_latency = (end_time - start_time) * 1000
         gateway_latency = self.bot.latency * 1000
         db_latency = await self.db_manager.ping() if self.db_manager else -1
 
-        # Uptime & Start Time
+        # Resource usage
+        resource_tracker = getattr(self.bot, 'resource_tracker', None)
+        if resource_tracker:
+            usage = await resource_tracker.get_current_usage_async()
+            cpu_percent = usage['cpu']
+            ram_mb = usage['ram']
+        else:
+            cpu_percent = 0.0
+            ram_mb = 0.0
+
+        # =====================================================================
+        # UPTIME
+        # =====================================================================
+
         start_timestamp = int(self.bot.start_time)
-        uptime_delta = timedelta(seconds=time.time() - self.bot.start_time)
+        uptime_delta = timedelta(seconds=now - self.bot.start_time)
         days, remainder = divmod(uptime_delta.total_seconds(), 86400)
         hours, remainder = divmod(remainder, 3600)
         minutes, _seconds = divmod(remainder, 60)
         uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m"
 
-        # Cogs
-        loaded_cogs = self.bot.extensions.keys()
+        # =====================================================================
+        # EXTENSIONS
+        # =====================================================================
+
+        loaded_extensions = list(self.bot.extensions.keys())
+        loaded_cogs = [ext.replace('cogs.', '') for ext in loaded_extensions]
         total_cogs = len(discover_cogs(config.COGS_PATH))
-        cogs_status = f"{len(loaded_cogs)}/{total_cogs}"
 
-        # Resource Usage - Get LIVE values from resource tracker (async for accurate reading)
-        if resource_tracker:
-            usage = await resource_tracker.get_current_usage_async()
-            cpu_str = f"{usage['cpu']:.1f}%"
-            ram_str = f"{usage['ram']:.2f} MB"
-        else:
-            # Fallback if resource tracker is not available
-            cpu_str = "N/A"
-            ram_str = "N/A"
+        # Determine failed cogs by comparing discovered vs loaded
+        # discover_cogs returns module names like 'cogs.admin', so strip the prefix
+        discovered_cog_names = [mod.replace('cogs.', '') for mod in discover_cogs(config.COGS_PATH)]
+        failed_cogs = [name for name in discovered_cog_names if name not in loaded_cogs]
 
-        # Create status embed.
-        embed = discord.Embed(
-            title=f"{config.BOT_NAME}'s Status Report",
-            color=discord.Color.green() if gateway_latency < 200 else discord.Color.orange()
+        # =====================================================================
+        # MUSIC AUTH STATUS
+        # =====================================================================
+
+        auth_status = get_youtube_auth_status()
+        auth_method = auth_status.auth_method
+        pot_server_running = auth_status.pot_server_running
+        pot_plugin_error = auth_status.pot_plugin_error
+
+        # Cookie age
+        cookie_age_days: Optional[int] = None
+        cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
+        if cookie_path and os.path.isfile(cookie_path):
+            file_age = now - os.path.getmtime(cookie_path)
+            cookie_age_days = int(file_age / 86400)
+
+        # 403 error rate
+        error_403_count, error_403_window = auth_status.get_403_rate()
+        error_403_window_mins = int(error_403_window / 60)
+
+        # =====================================================================
+        # MUSIC PLAYBACK STATUS
+        # =====================================================================
+
+        music_cog = self.bot.get_cog('Music')
+        music_status = "idle"
+        music_channel: Optional[str] = None
+        music_track: Optional[str] = None
+        music_artist: Optional[str] = None
+        music_queue_count = 0
+
+        if music_cog:
+            active_session = getattr(music_cog, 'active_session', None)
+            if active_session:
+                vc = getattr(active_session, 'voice_client', None)
+                if vc and vc.channel:
+                    music_channel = vc.channel.name
+                    if vc.is_playing():
+                        music_status = "playing"
+                    elif vc.is_paused():
+                        music_status = "paused"
+                    else:
+                        music_status = "connected"
+
+            # Get current track info
+            current_track = getattr(music_cog, '_get_current_track', lambda: None)()
+            if current_track:
+                music_track = getattr(current_track, 'title', None)
+                music_artist = getattr(current_track, 'artist', None)
+
+            # Get queue count
+            playlist = getattr(music_cog, 'playlist', [])
+            music_queue_count = len(playlist)
+
+        # =====================================================================
+        # CACHE STATISTICS
+        # =====================================================================
+
+        cache_manager = self._get_music_cache_manager()
+        cache_playlists = 0
+        cache_tracks_total = 0
+        cache_tracks_downloaded = 0
+        cache_size_mb = 0.0
+        cache_orphaned_count = 0
+        cache_orphaned_mb = 0.0
+        cache_residential_count = 0
+        cache_residential_mb = 0.0
+        cache_residential_cost = 0.0
+        cache_last_refresh_ago: Optional[float] = None
+
+        if cache_manager:
+            stats = cache_manager.get_stats()
+            cache_playlists = stats.get('total_playlists', 0)
+            cache_tracks_total = stats.get('total_tracks', 0)
+            cache_tracks_downloaded = stats.get('downloaded_tracks', 0)
+            cache_size_mb = stats.get('size_mb', 0.0)
+            cache_orphaned_count = stats.get('orphaned_tracks', 0)
+            cache_orphaned_mb = stats.get('orphaned_size_mb', 0.0)
+            cache_last_refresh_ago = stats.get('last_refresh_ago')
+
+            residential_stats = cache_manager.get_residential_stats()
+            cache_residential_count = residential_stats.get('file_count', 0)
+            cache_residential_mb = residential_stats.get('size_mb', 0.0)
+            cache_residential_cost = residential_stats.get('estimated_cost', 0.0)
+
+        # =====================================================================
+        # DATABASE
+        # =====================================================================
+
+        db_size_mb = 0.0
+        if self.db_manager and hasattr(self.db_manager, 'db_path'):
+            db_path = self.db_manager.db_path
+            if os.path.isfile(db_path):
+                db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+
+        # =====================================================================
+        # NEXT REMINDER
+        # =====================================================================
+
+        next_reminder_time: Optional[int] = None
+        next_reminder_user: Optional[str] = None
+
+        if self.db_manager:
+            next_reminder = await self.db_manager.get_next_upcoming_reminder(int(now))
+            if next_reminder:
+                next_reminder_time = next_reminder.get('reminder_time')
+                user_id = next_reminder.get('user_id')
+                if user_id:
+                    user = self.bot.get_user(user_id)
+                    next_reminder_user = user.display_name if user else f"User {user_id}"
+
+        # =====================================================================
+        # SYSTEM INFO
+        # =====================================================================
+
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        discordpy_version = discord.__version__
+        platform_str = platform.system()
+        bot_name = config.BOT_NAME or "Unknown"
+        bot_id = self.bot.user.id if self.bot.user else 0
+        guild_count = len(self.bot.guilds)
+
+        # =====================================================================
+        # HEALTH CHECKS
+        # =====================================================================
+
+        health = StatusHealth(
+            gateway=gateway_latency < 500,
+            database=db_latency >= 0,
+            music_auth=auth_method is not None,
+            cache=cache_manager is not None,
+            extensions=len(failed_cogs) == 0,
+            ytdlp=YTDLP_AVAILABLE,
         )
-        if self.bot.user and self.bot.user.display_avatar:
-            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
 
-        embed.add_field(
-            name="Timings",
-            value=f"**Gateway:** `{gateway_latency:.2f}ms`\n"
-            f"**Roundtrip:** `{roundtrip_latency:.2f}ms`\n"
-            f"**Database:** `{db_latency:.2f}ms`",
-            inline=True
+        # =====================================================================
+        # BUILD STATUS DATA
+        # =====================================================================
+
+        return StatusData(
+            # Performance
+            gateway_latency=gateway_latency,
+            roundtrip_latency=roundtrip_latency,
+            db_latency=db_latency,
+            cpu_percent=cpu_percent,
+            ram_mb=ram_mb,
+            # Uptime
+            start_timestamp=start_timestamp,
+            uptime_str=uptime_str,
+            # Extensions
+            loaded_cogs=loaded_cogs,
+            total_cogs=total_cogs,
+            failed_cogs=failed_cogs,
+            # Health
+            health=health,
+            # Music Auth
+            auth_method=auth_method,
+            pot_server_running=pot_server_running,
+            pot_plugin_error=pot_plugin_error,
+            cookie_age_days=cookie_age_days,
+            error_403_count=error_403_count,
+            error_403_window_mins=error_403_window_mins,
+            ytdlp_available=YTDLP_AVAILABLE,
+            mutagen_available=MUTAGEN_AVAILABLE,
+            # Music Playback
+            music_status=music_status,
+            music_channel=music_channel,
+            music_track=music_track,
+            music_artist=music_artist,
+            music_queue_count=music_queue_count,
+            # Cache
+            cache_playlists=cache_playlists,
+            cache_tracks_total=cache_tracks_total,
+            cache_tracks_downloaded=cache_tracks_downloaded,
+            cache_size_mb=cache_size_mb,
+            cache_orphaned_count=cache_orphaned_count,
+            cache_orphaned_mb=cache_orphaned_mb,
+            cache_residential_count=cache_residential_count,
+            cache_residential_mb=cache_residential_mb,
+            cache_residential_cost=cache_residential_cost,
+            cache_last_refresh_ago=cache_last_refresh_ago,
+            # Database
+            db_size_mb=db_size_mb,
+            # Next Reminder
+            next_reminder_time=next_reminder_time,
+            next_reminder_user=next_reminder_user,
+            # System
+            python_version=python_version,
+            discordpy_version=discordpy_version,
+            platform=platform_str,
+            bot_name=bot_name,
+            bot_id=bot_id,
+            guild_count=guild_count,
+            # Snapshot
+            snapshot_timestamp=snapshot_timestamp,
         )
-
-        embed.add_field(
-            name="Status",
-            value=f"**Uptime:** `{uptime_str}`\n"
-            f"**Started:** <t:{start_timestamp}:f>\n"
-            f"**Cogs Loaded:** `{cogs_status}`",
-            inline=True
-        )
-
-        embed.add_field(
-            name="Resource Usage",
-            value=f"**CPU:** `{cpu_str}`\n"
-            f"**RAM:** `{ram_str}`",
-            inline=True
-        )
-
-        # Add a field for loaded cogs, formatted nicely
-        if loaded_cogs:
-            # Format cog names by removing 'cogs.' prefix and joining them
-            cog_list_str = ", ".join([cog.replace('cogs.', '')
-                                     for cog in sorted(loaded_cogs)])
-            embed.add_field(
-                name="Loaded Cogs",
-                value=f"```{cog_list_str}```",
-                inline=False
-            )
-
-        embed.set_footer(
-            text=f"Requested by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-        embed.timestamp = discord.utils.utcnow()
-
-        # Update message.
-        await message.edit(content=None, embed=embed)
-        logging.info(f"Status command used by {ctx.author}.")
 
     # ==========================================================================
     # MUSIC DOWNLOAD COMMAND
@@ -1033,89 +1224,6 @@ class AdminCog(BaseCog):
         return None
 
     @commands.hybrid_command(
-        name="cache-stats",
-        hidden=True,
-        description="Shows statistics about the music cache.",
-        help="Shows statistics about the music cache including downloads and orphans."
-    )
-    @commands.is_owner()
-    async def cache_stats(self, ctx: commands.Context) -> None:
-        """Shows statistics about the music cache.
-
-        Displays total playlists, tracks, downloaded tracks, orphaned tracks,
-        and disk usage.
-
-        Args:
-            ctx: The command context.
-        """
-        cache_manager = self._get_music_cache_manager()
-        if not cache_manager:
-            await ctx.send("❌ Music cog is not loaded.")
-            return
-
-        stats = cache_manager.get_stats()
-
-        embed = discord.Embed(
-            title="🎵 Music Cache Statistics",
-            color=discord.Color.blue()
-        )
-
-        # Format last refresh time
-        last_refresh_str = "Never"
-        if stats.get('last_refresh_ago'):
-            hours = stats['last_refresh_ago'] / 3600
-            if hours < 1:
-                last_refresh_str = f"{int(stats['last_refresh_ago'] / 60)} minutes ago"
-            elif hours < 24:
-                last_refresh_str = f"{hours:.1f} hours ago"
-            else:
-                last_refresh_str = f"{hours / 24:.1f} days ago"
-
-        embed.add_field(
-            name="Overview",
-            value=(
-                f"**Playlists:** {stats['total_playlists']}\n"
-                f"**Total Tracks:** {stats['total_tracks']}\n"
-                f"**Downloaded:** {stats['downloaded_tracks']}\n"
-                f"**Orphaned:** {stats['orphaned_tracks']}"
-            ),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Storage",
-            value=(
-                f"**Active:** {stats['size_mb']:.1f} MB\n"
-                f"**Orphaned:** {stats['orphaned_size_mb']:.1f} MB\n"
-                f"**Total:** {stats['size_mb'] + stats['orphaned_size_mb']:.1f} MB"
-            ),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Last Refresh",
-            value=last_refresh_str,
-            inline=True
-        )
-
-        # Residential proxy cache stats
-        residential_stats = cache_manager.get_residential_stats()
-        if residential_stats['file_count'] > 0:
-            embed.add_field(
-                name="Residential Cache",
-                value=(
-                    f"**Files:** {residential_stats['file_count']}\n"
-                    f"**Size:** {residential_stats['size_mb']:.1f} MB\n"
-                    f"**Est. Cost:** ${residential_stats['estimated_cost']:.2f}"
-                ),
-                inline=True
-            )
-
-        download_pct = (stats['downloaded_tracks'] / stats['total_tracks'] * 100) if stats['total_tracks'] > 0 else 0
-        embed.set_footer(text=f"Download progress: {download_pct:.0f}% | Cache location: {config.MUSIC_CACHE_PATH}")
-        await ctx.send(embed=embed)
-
-    @commands.hybrid_command(
         name="clear-orphaned",
         hidden=True,
         description="Clears all orphaned music files.",
@@ -1250,151 +1358,6 @@ class AdminCog(BaseCog):
             await status_msg.edit(content=f"❌ Refresh failed: {e}")
             # Make sure timer is restarted even on error
             cache_manager.start_refresh_timer()
-
-    @commands.hybrid_command(
-        name='musicstatus',
-        hidden=True,
-        description='Shows YouTube authentication status and recent error rates'
-    )
-    @commands.is_owner()
-    async def music_status(self, ctx: commands.Context) -> None:
-        """Shows diagnostic info about YouTube authentication and 403 error rates.
-
-        This helps identify if the PO token server is working or if cookies need refreshing.
-        Owner-only command for debugging music playback issues.
-        """
-        auth_status = get_youtube_auth_status()
-
-        # Force a fresh check of auth status
-        auth_status.last_check = 0
-
-        # Trigger detection to refresh all fields
-        from utils.musicutils.music_auth import _detect_youtube_auth
-        _detect_youtube_auth()
-
-        # Build status embed
-        embed = discord.Embed(
-            title="🎵 Music Status",
-            color=discord.Color.blue()
-        )
-
-        # PO Token Server status (most important)
-        if auth_status.pot_server_running:
-            server_text = "✅ Running (auto-generates tokens)"
-        elif auth_status.pot_provider_ready:
-            server_text = "⚠️ Ready but not running\n(restarts with bot)"
-        elif auth_status.pot_plugin_installed:
-            server_text = f"⚠️ Plugin installed\n`{auth_status.pot_plugin_error}`"
-        else:
-            server_text = "❌ Not set up"
-
-        embed.add_field(
-            name="PO Token Server",
-            value=server_text,
-            inline=False
-        )
-
-        # Active auth method
-        if auth_status.auth_method == 'pot_server':
-            auth_text = "✅ PO Token Server"
-        elif auth_status.auth_method == 'cookies':
-            auth_text = "✅ Cookies"
-            if auth_status.po_token:
-                auth_text += " + manual PO token"
-        else:
-            auth_text = "⚠️ None (403 errors likely)"
-
-        embed.add_field(
-            name="Active Auth",
-            value=auth_text,
-            inline=True
-        )
-
-        # Cookie file status (fallback option)
-        cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
-        if cookie_path and os.path.isfile(cookie_path):
-            file_age = time.time() - os.path.getmtime(cookie_path)
-            age_days = int(file_age / 86400)
-            if age_days > 30:
-                cookie_text = f"⚠️ Present ({age_days}d old)"
-            else:
-                cookie_text = f"✅ Present ({age_days}d old)"
-        else:
-            cookie_text = "❌ Not found"
-
-        embed.add_field(
-            name="Cookie Fallback",
-            value=cookie_text,
-            inline=True
-        )
-
-        # 403 error rate
-        count_403, window = auth_status.get_403_rate()
-        window_mins = int(window / 60)
-        if count_403 == 0:
-            error_text = "✅ No recent 403 errors"
-        elif count_403 < 3:
-            error_text = f"⚠️ {count_403} error(s) in last {window_mins}m"
-        else:
-            error_text = f"❌ {count_403} errors in last {window_mins}m"
-
-        embed.add_field(
-            name="403 Rate",
-            value=error_text,
-            inline=True
-        )
-
-        # yt-dlp availability
-        embed.add_field(
-            name="yt-dlp",
-            value="✅ Available" if YTDLP_AVAILABLE else "❌ Missing",
-            inline=True
-        )
-
-        # Get music cog for playback status
-        music_cog = self.bot.get_cog('Music')
-        active_session = getattr(music_cog, 'active_session', None) if music_cog else None
-        if active_session:
-            vc = active_session.voice_client
-            embed.add_field(
-                name="Playback",
-                value=f"🔊 {vc.channel.mention if vc else 'Active'}",
-                inline=True
-            )
-        else:
-            embed.add_field(
-                name="Playback",
-                value="💤 Idle",
-                inline=True
-            )
-
-        # Setup hints if server isn't working
-        if not auth_status.pot_server_running:
-            if not auth_status.pot_plugin_installed:
-                hint = (
-                    "**Setup PO Token Server:**\n"
-                    "```pip install bgutil-ytdlp-pot-provider```\n"
-                    "Then clone & build provider in `utils/pot_provider/`"
-                )
-            elif not auth_status.pot_provider_ready:
-                hint = (
-                    "**Build Provider Script:**\n"
-                    "```\ncd utils/pot_provider/server\n"
-                    "npm install && npx tsc\n```"
-                )
-            else:
-                hint = "**Server will start when bot restarts.**"
-            
-            if not auth_status.auth_method:
-                hint += "\n\n**Or upload cookies:** `/ytauth`"
-            
-            embed.add_field(
-                name="🔧 Setup",
-                value=hint,
-                inline=False
-            )
-
-        await ctx.send(embed=embed)
 
     @commands.hybrid_command(
         name='ytauth',
@@ -1607,6 +1570,143 @@ class AdminCog(BaseCog):
                 await status_msg.edit(content=msg, embed=None)
             else:
                 await ctx.send(msg)
+
+    # ==========================================================================
+    # BOD Fate System Commands
+    # ==========================================================================
+
+    @commands.hybrid_command(
+        name="bod_bless",
+        hidden=True,
+        description="Silently add fate to a user's BOD bank."
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        user="The user to bless.",
+        tier="Fate tier: LUCKY, BLESSED, or GUARANTEED.",
+        count="Amount of fate to add (default 1)."
+    )
+    async def bod_bless(
+        self,
+        ctx: commands.Context,
+        user: discord.Member,
+        tier: str,
+        count: int = 1
+    ) -> None:
+        """Silently add fate to a user's BOD bank.
+
+        Args:
+            ctx: The command context.
+            user: The target user.
+            tier: LUCKY, BLESSED, or GUARANTEED.
+            count: Amount to add.
+        """
+        tier_upper = tier.upper()
+        if tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
+            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
+            return
+
+        if count < 1:
+            await ctx.send("❌ Count must be at least 1.", ephemeral=True)
+            return
+
+        try:
+            await self.db_manager.add_bod_fate(user.id, tier_upper, count)
+            await ctx.send(f"✅ Added {count}x {tier_upper} fate to {user.display_name}.", ephemeral=True)
+            self.logger.info(f"Admin {ctx.author} blessed {user} with {count}x {tier_upper} fate.")
+        except Exception as e:
+            await ctx.send(f"❌ Failed to add fate: {e}", ephemeral=True)
+            self.logger.error(f"Failed to add fate: {e}", exc_info=True)
+
+    @commands.hybrid_command(
+        name="bod_fate",
+        hidden=True,
+        description="View a user's BOD fate bank."
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        user="The user to check (default: yourself)."
+    )
+    async def bod_fate(
+        self,
+        ctx: commands.Context,
+        user: Optional[discord.Member] = None
+    ) -> None:
+        """View a user's BOD fate bank.
+
+        Args:
+            ctx: The command context.
+            user: User to check, or self if None.
+        """
+        target = user or ctx.author
+        if not isinstance(target, discord.Member):
+            await ctx.send("❌ Could not resolve user.", ephemeral=True)
+            return
+
+        try:
+            fate = await self.db_manager.get_bod_fate(target.id)
+
+            embed = discord.Embed(
+                title=f"BOD Fate Bank: {target.display_name}",
+                color=discord.Color.purple()
+            )
+
+            fate_lines = [
+                f"⚡ **Guaranteed** (100%): {fate.get('guaranteed', 0)}",
+                f"🌟 **Blessed** (75%): {fate.get('blessed', 0)}",
+                f"✨ **Lucky** (50%): {fate.get('lucky', 0)}",
+            ]
+            embed.description = "\n".join(fate_lines)
+
+            total = sum(fate.values())
+            if total == 0:
+                embed.set_footer(text="No fate stored - rolls will be normal (25%)")
+            else:
+                embed.set_footer(text=f"Total fate charges: {total}")
+
+            await ctx.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Failed to get fate: {e}", ephemeral=True)
+            self.logger.error(f"Failed to get fate: {e}", exc_info=True)
+
+    @commands.hybrid_command(
+        name="bod_clear",
+        hidden=True,
+        description="Clear fate from a user's BOD bank."
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        user="The user to clear.",
+        tier="Specific tier to clear, or leave empty for all."
+    )
+    async def bod_clear(
+        self,
+        ctx: commands.Context,
+        user: discord.Member,
+        tier: Optional[str] = None
+    ) -> None:
+        """Clear fate from a user's BOD bank.
+
+        Args:
+            ctx: The command context.
+            user: The target user.
+            tier: Specific tier or None for all.
+        """
+        tier_upper = tier.upper() if tier else None
+        if tier_upper and tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
+            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
+            return
+
+        try:
+            await self.db_manager.clear_bod_fate(user.id, tier_upper)
+            if tier_upper:
+                await ctx.send(f"✅ Cleared {tier_upper} fate from {user.display_name}.", ephemeral=True)
+            else:
+                await ctx.send(f"✅ Cleared all fate from {user.display_name}.", ephemeral=True)
+            self.logger.info(f"Admin {ctx.author} cleared {'all' if not tier_upper else tier_upper} fate from {user}.")
+        except Exception as e:
+            await ctx.send(f"❌ Failed to clear fate: {e}", ephemeral=True)
+            self.logger.error(f"Failed to clear fate: {e}", exc_info=True)
 
 
 async def setup(bot: CoreBot) -> None:

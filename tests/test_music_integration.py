@@ -947,21 +947,26 @@ class TestPrefetchInvalidationOnMutation:
             assert music_cog._next_prepared is None
 
     @pytest.mark.asyncio
-    async def test_prefetch_cleared_at_end_of_playlist_loop_off(self, music_cog):
-        """At end of playlist with loop OFF, no next track means prefetch cleared."""
+    async def test_prefetch_valid_at_end_of_playlist_loop_off(self, music_cog):
+        """At end of playlist with loop OFF, prefetch still targets index 0.
+
+        Per design: _get_next_sequential_track always wraps around so the
+        prefetch is ready if user enables loop. It doesn't consider loop mode.
+        """
         music_cog.playlist = create_ambient_playlist()[:3]
         music_cog.current_index = 2  # Last track
         music_cog.loop_mode = LoopMode.OFF
 
-        # Prefetch exists but there's no next track
+        # Prefetch exists for index 0 (next sequential after index 2)
         music_cog._next_prepared = AudioFetchResult(success=True, url="https://prefetch.com")
-        music_cog._next_prepared_track = music_cog.playlist[0]  # Wrong - there is no next
+        music_cog._next_prepared_track = music_cog.playlist[0]  # Correct!
 
         # Act: Trigger refresh (simulating after some mutation)
         music_cog._refresh_prefetch_if_stale()
 
-        # Assert: Cleared because _get_next_track() returns None
-        assert music_cog._next_prepared is None
+        # Assert: Prefetch is still valid - index 0 is next sequential
+        assert music_cog._next_prepared is not None
+        assert music_cog._next_prepared.url == "https://prefetch.com"
 
 
 class TestPrefetchTaskLifecycle:

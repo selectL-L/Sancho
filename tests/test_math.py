@@ -848,37 +848,6 @@ class TestRollCommand:
 
 
 # =============================================================================
-# GET_ROLL_RESULT TESTS
-# =============================================================================
-
-
-class TestGetRollResult:
-    """Tests for the get_roll_result helper method."""
-
-    @pytest.mark.asyncio
-    async def test_get_roll_result_returns_integer(self, math_cog):
-        """Test that get_roll_result returns an integer."""
-        with patch('random.randint', return_value=15):
-            result = await math_cog.get_roll_result("1d20")
-            assert isinstance(result, int)
-            assert result == 15
-
-    @pytest.mark.asyncio
-    async def test_get_roll_result_with_modifier(self, math_cog):
-        """Test get_roll_result with arithmetic."""
-        with patch('random.randint', return_value=10):
-            result = await math_cog.get_roll_result("1d20+5")
-            assert result == 15
-
-    @pytest.mark.asyncio
-    async def test_get_roll_result_complex(self, math_cog):
-        """Test get_roll_result with complex expression."""
-        with patch('random.randint', side_effect=[3, 4]):
-            result = await math_cog.get_roll_result("2d6")
-            assert result == 7
-
-
-# =============================================================================
 # EVALUATE_ROLL TESTS
 # =============================================================================
 

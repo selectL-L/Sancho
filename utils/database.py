@@ -144,11 +144,14 @@ class DatabaseManager:
                         starboard_reply_id INTEGER,
                         original_channel_id INTEGER NOT NULL
                     )''',
-                "bod_usage": '''CREATE TABLE IF NOT EXISTS bod_usage (
+                "bod_players": '''CREATE TABLE IF NOT EXISTS bod_players (
                         user_id INTEGER PRIMARY KEY,
                         last_used_timestamp INTEGER NOT NULL DEFAULT 0,
                         current_chain INTEGER NOT NULL DEFAULT 0,
-                        last_channel_id INTEGER NOT NULL DEFAULT 0
+                        last_channel_id INTEGER NOT NULL DEFAULT 0,
+                        fate_lucky INTEGER NOT NULL DEFAULT 0,
+                        fate_blessed INTEGER NOT NULL DEFAULT 0,
+                        fate_guaranteed INTEGER NOT NULL DEFAULT 0
                     )''',
                 "bod_leaderboard": '''CREATE TABLE IF NOT EXISTS bod_leaderboard (
                         user_id INTEGER PRIMARY KEY,
@@ -192,13 +195,14 @@ class DatabaseManager:
                 "bot_settings": {"key", "value"},
                 "guild_settings": {"guild_id", "key", "value"},
                 "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
-                "bod_usage": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id"},
+                "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
                 "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"}
             }
 
             schema_issues = []
 
+            # Check for column mismatches in expected tables
             for table, expected_columns in expected_schema.items():
                 if table in existing_tables:
                     cursor = await db.execute(f"PRAGMA table_info({table});")
@@ -212,6 +216,13 @@ class DatabaseManager:
                         if extra_cols:
                             issue_parts.append(f"extra: {extra_cols}")
                         schema_issues.append(f"Table '{table}' mismatch ({', '.join(issue_parts)})")
+
+            # Check for orphaned tables (exist in DB but not in expected schema)
+            # Exclude sqlite internal tables
+            expected_table_names = set(expected_schema.keys())
+            orphaned_tables = existing_tables - expected_table_names - {"sqlite_sequence"}
+            if orphaned_tables:
+                schema_issues.append(f"Orphaned tables found: {orphaned_tables}")
 
             if schema_issues:
                 issue_summary = "; ".join(schema_issues)
@@ -336,8 +347,8 @@ class DatabaseManager:
     # Methods for the 'bod' (Boundary of Death) game mechanics.
     # ==========================================================================
 
-    async def get_bod_usage(self, user_id: int) -> Dict[str, Any]:
-        """Retrieves the last usage time, current chain, and last channel for a user's 'bod' command.
+    async def get_bod_player(self, user_id: int) -> Dict[str, Any]:
+        """Retrieves the BOD player data including fate bank.
 
         If the user is not in the table, it returns default values.
 
@@ -347,21 +358,27 @@ class DatabaseManager:
             user_id (int): The user's ID.
 
         Returns:
-            Dict[str, Any]: A dictionary containing usage data with keys:
-                            'last_used_timestamp', 'current_chain', 'last_channel_id'.
+            Dict[str, Any]: A dictionary containing player data with keys:
+                            'last_used_timestamp', 'current_chain', 'last_channel_id',
+                            'fate_lucky', 'fate_blessed', 'fate_guaranteed'.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT last_used_timestamp, current_chain, last_channel_id FROM bod_usage WHERE user_id = ?", (user_id,))
+            cursor = await db.execute(
+                "SELECT last_used_timestamp, current_chain, last_channel_id, fate_lucky, fate_blessed, fate_guaranteed "
+                "FROM bod_players WHERE user_id = ?", (user_id,)
+            )
             row = await cursor.fetchone()
             if row:
                 return dict(row)
-            return {'last_used_timestamp': 0, 'current_chain': 0, 'last_channel_id': 0}
+            return {'last_used_timestamp': 0, 'current_chain': 0, 'last_channel_id': 0,
+                    'fate_lucky': 0, 'fate_blessed': 0, 'fate_guaranteed': 0}
 
-    async def update_bod_usage(self, user_id: int, last_used_timestamp: int, current_chain: int, channel_id: Optional[int] = None) -> None:
-        """Updates or inserts a user's 'bod' command usage data.
+    async def update_bod_player(self, user_id: int, last_used_timestamp: int, current_chain: int, channel_id: Optional[int] = None) -> None:
+        """Updates or inserts a user's BOD player data.
 
         If channel_id is not provided, it remains unchanged.
+        Fate columns are preserved during updates.
 
         Used By: cogs/fun.py (bod command, _handle_bod_session_timeout, _cleanup_bod_chains)
 
@@ -374,14 +391,19 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             if channel_id is not None:
                 await db.execute(
-                    "INSERT OR REPLACE INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO bod_players (user_id, last_used_timestamp, current_chain, last_channel_id) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET "
+                    "last_used_timestamp = excluded.last_used_timestamp, "
+                    "current_chain = excluded.current_chain, "
+                    "last_channel_id = excluded.last_channel_id",
                     (user_id, last_used_timestamp, current_chain, channel_id)
                 )
             else:
                 # Ensure we don't overwrite last_channel_id with 0 if it's not passed.
                 await db.execute(
-                    "INSERT INTO bod_usage (user_id, last_used_timestamp, current_chain, last_channel_id) "
-                    "VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_usage WHERE user_id = ?)) "
+                    "INSERT INTO bod_players (user_id, last_used_timestamp, current_chain, last_channel_id) "
+                    "VALUES (?, ?, ?, (SELECT last_channel_id FROM bod_players WHERE user_id = ?)) "
                     "ON CONFLICT(user_id) DO UPDATE SET "
                     "last_used_timestamp = excluded.last_used_timestamp, current_chain = excluded.current_chain",
                     (user_id, last_used_timestamp, current_chain, user_id)
@@ -398,7 +420,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT user_id, last_channel_id, current_chain FROM bod_usage WHERE current_chain > 0")
+            cursor = await db.execute("SELECT user_id, last_channel_id, current_chain FROM bod_players WHERE current_chain > 0")
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -450,6 +472,117 @@ class DatabaseManager:
             )
             await db.commit()
             logger.info(f"New BOD leaderboard score for user {user_id}: {chain_length} at {achieved_at}.")
+
+    async def get_bod_fate(self, user_id: int) -> Dict[str, int]:
+        """Get a user's fate bank counts.
+
+        Used By: cogs/fun.py (bod command), cogs/admin.py (bod_fate command)
+
+        Args:
+            user_id (int): The Discord user ID.
+
+        Returns:
+            Dict with keys 'lucky', 'blessed', 'guaranteed' and their counts.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT fate_lucky, fate_blessed, fate_guaranteed FROM bod_players WHERE user_id = ?",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return {'lucky': row[0], 'blessed': row[1], 'guaranteed': row[2]}
+            return {'lucky': 0, 'blessed': 0, 'guaranteed': 0}
+
+    async def add_bod_fate(self, user_id: int, tier: str, count: int = 1) -> None:
+        """Add fate to a user's bank.
+
+        Used By: cogs/fun.py (quote triggers), cogs/admin.py (bod_bless command)
+
+        Args:
+            user_id (int): The Discord user ID.
+            tier (str): One of 'LUCKY', 'BLESSED', 'GUARANTEED'.
+            count (int): Amount to add (default 1).
+        """
+        tier_lower = tier.lower()
+        column = f"fate_{tier_lower}"
+        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+            raise ValueError(f"Invalid fate tier: {tier}")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Ensure user row exists, then increment
+            await db.execute(
+                f"INSERT INTO bod_players (user_id, {column}) VALUES (?, ?) "
+                f"ON CONFLICT(user_id) DO UPDATE SET {column} = {column} + ?",
+                (user_id, count, count)
+            )
+            await db.commit()
+            logger.debug(f"Added {count} {tier} fate to user {user_id}.")
+
+    async def consume_bod_fate(self, user_id: int, tier: str) -> bool:
+        """Consume one fate from a user's bank.
+
+        Used By: cogs/fun.py (bod command)
+
+        Args:
+            user_id (int): The Discord user ID.
+            tier (str): One of 'LUCKY', 'BLESSED', 'GUARANTEED'.
+
+        Returns:
+            True if fate was consumed, False if user had none of that tier.
+        """
+        tier_lower = tier.lower()
+        column = f"fate_{tier_lower}"
+        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+            raise ValueError(f"Invalid fate tier: {tier}")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Check current count
+            cursor = await db.execute(
+                f"SELECT {column} FROM bod_players WHERE user_id = ?",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            if not row or row[0] <= 0:
+                return False
+
+            # Decrement
+            await db.execute(
+                f"UPDATE bod_players SET {column} = {column} - 1 WHERE user_id = ?",
+                (user_id,)
+            )
+            await db.commit()
+            logger.debug(f"Consumed 1 {tier} fate from user {user_id}.")
+            return True
+
+    async def clear_bod_fate(self, user_id: int, tier: Optional[str] = None) -> None:
+        """Clear fate from a user's bank.
+
+        Used By: cogs/admin.py (bod_clear command)
+
+        Args:
+            user_id (int): The Discord user ID.
+            tier (Optional[str]): Specific tier to clear, or None for all tiers.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if tier is None:
+                # Clear all fate
+                await db.execute(
+                    "UPDATE bod_players SET fate_lucky = 0, fate_blessed = 0, fate_guaranteed = 0 "
+                    "WHERE user_id = ?",
+                    (user_id,)
+                )
+            else:
+                tier_lower = tier.lower()
+                column = f"fate_{tier_lower}"
+                if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+                    raise ValueError(f"Invalid fate tier: {tier}")
+                await db.execute(
+                    f"UPDATE bod_players SET {column} = 0 WHERE user_id = ?",
+                    (user_id,)
+                )
+            await db.commit()
+            logger.debug(f"Cleared {'all' if tier is None else tier} fate from user {user_id}.")
 
     # ==========================================================================
     # HELP COG METHODS

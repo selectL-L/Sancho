@@ -507,6 +507,71 @@ class Reminders(BaseCog):
 
         return score
 
+    def _is_complementary_pair(self, front: str, back: str, tz_str: str = 'UTC') -> bool:
+        """Determine if front + back form a complementary date+time pair.
+
+        Uses two reference times (morning and evening) to catch edge cases where
+        PREFER_DATES_FROM: future causes time-only expressions to resolve to the
+        same datetime as date expressions. Also handles boundary times (midnight,
+        noon) which dateparser resolves ambiguously.
+
+        Args:
+            front: The front time string (e.g., "on monday").
+            back: The back time string (e.g., "at 3pm").
+            tz_str: The timezone string for parsing.
+
+        Returns:
+            True if the pair is complementary (date+time), False otherwise.
+        """
+        front_lower = front.lower().strip()
+        back_lower = back.lower().strip()
+
+        # Two reference times to catch time-of-day edge cases
+        ref_morning = datetime(2025, 1, 8, 6, 0, 0)
+        ref_evening = datetime(2025, 1, 8, 22, 0, 0)
+
+        for ref in [ref_morning, ref_evening]:
+            settings: Dict[str, Any] = {
+                'PREFER_DATES_FROM': 'future',
+                'TIMEZONE': tz_str,
+                'RETURN_AS_TIMEZONE_AWARE': True,
+                'RELATIVE_BASE': ref
+            }
+
+            combined_dt = dateparser.parse(f"{front} {back}", languages=['en'], settings=cast(Any, settings))
+            front_dt = dateparser.parse(front, languages=['en'], settings=cast(Any, settings))
+            back_dt = dateparser.parse(back, languages=['en'], settings=cast(Any, settings))
+
+            if not all([combined_dt, front_dt, back_dt]):
+                continue
+
+            # Type narrowing: we've confirmed all are not None above
+            assert combined_dt is not None and front_dt is not None and back_dt is not None
+
+            front_diff = abs((combined_dt - front_dt).total_seconds())
+            back_diff = abs((combined_dt - back_dt).total_seconds())
+
+            # Boundary time keywords (dateparser resolves these to same datetime as relative dates)
+            boundary_times = ['midnight', 'noon', '12:00am', '12:00 am', '12:00pm', '12:00 pm']
+            back_is_boundary = any(w in back_lower for w in boundary_times)
+            front_is_boundary = any(w in front_lower for w in boundary_times)
+
+            # Date-only keywords (days of week, relative days)
+            date_words = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+                          'saturday', 'sunday', 'tomorrow', 'yesterday']
+            front_is_date = any(w in front_lower for w in date_words)
+            back_is_date = any(w in back_lower for w in date_words)
+
+            # Boundary time + date word = valid complementary pair
+            if (back_is_boundary and front_is_date) or (front_is_boundary and back_is_date):
+                return True
+
+            # Standard check: combined differs significantly from BOTH parts
+            if front_diff >= 60 and back_diff >= 60:
+                return True
+
+        return False
+
     def _format_recurrence_rule(self, rule_str: str) -> str:
         """Formats an rrule string into a human-readable format.
 
@@ -898,32 +963,15 @@ class Reminders(BaseCog):
             self.logger.info(f"Found split time: '{front_time_str}' AND '{back_time_str}'")
             combined_candidate = f"{front_time_str} {back_time_str}"
 
-            # Parse all three candidates to compare them.
-            dp_settings: Dict[str, str] = {'PREFER_DATES_FROM': 'future'}
-            front_only_dt = await asyncio.to_thread(
-                dateparser.parse, front_time_str, languages=['en'], settings=cast(Any, dp_settings)
+            # Use the complementary pair check which handles edge cases:
+            # - Two reference times (morning/evening) to catch PREFER_DATES_FROM artifacts
+            # - Boundary time keywords (midnight, noon) that dateparser handles ambiguously
+            # Note: UTC is used here because timezone doesn't affect the complementary detection logic.
+            use_combined = await asyncio.to_thread(
+                self._is_complementary_pair, front_time_str, back_time_str, 'UTC'
             )
-            back_only_dt = await asyncio.to_thread(
-                dateparser.parse, back_time_str, languages=['en'], settings=cast(Any, dp_settings)
-            )
-            combined_dt = await asyncio.to_thread(
-                dateparser.parse, combined_candidate, languages=['en'], settings=cast(Any, dp_settings)
-            )
-
-            # Determine if combined is valid AND meaningfully different from both individuals.
-            # "Meaningfully different" = more than 60 seconds difference.
-            use_combined = False
-            if combined_dt:
-                front_diff = abs((combined_dt - front_only_dt).total_seconds()) if front_only_dt else float('inf')
-                back_diff = abs((combined_dt - back_only_dt).total_seconds()) if back_only_dt else float('inf')
-
-                # Combined is valid only if it differs meaningfully from BOTH individual times.
-                if front_diff >= 60 and back_diff >= 60:
-                    use_combined = True
-                    self.logger.info(
-                        f"Combined time '{combined_candidate}' differs from both "
-                        f"(front_diff: {front_diff}s, back_diff: {back_diff}s). Using combined."
-                    )
+            if use_combined:
+                self.logger.info(f"Combined time '{combined_candidate}' is a valid complementary pair.")
 
             if use_combined:
                 final_time_string = combined_candidate
@@ -1044,6 +1092,12 @@ class Reminders(BaseCog):
 
         if reply_message_id:
             confirmation_message += "\nI'll also reply to the message you linked!"
+
+        # Warn if user hasn't set a timezone (defaulting to UTC may surprise them)
+        user_tz = await self.db_manager.get_user_timezone(ctx.author.id)
+        if not user_tz:
+            prefix = ctx.prefix.strip() if ctx.prefix else ""
+            confirmation_message += f"\n⚠️ **You haven't set a timezone!** Times default to UTC. Use `{prefix} set tz EST` (or your local zone) for accurate reminders."
 
         confirmation_message += "\nIs this correct? (`yes`, `edit`, `edit time`, `edit message`, `no`)"
 

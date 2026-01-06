@@ -391,23 +391,6 @@ class Math(BaseCog):
             await ctx.send(f"Error: {e}")
             self.logger.warning(f"Handled error in calculator for query '{query}': {e}")
 
-    async def get_roll_result(self, dice_notation: str) -> int:
-        """A simple utility to roll dice and get only the integer result back.
-
-        Args:
-            dice_notation (str): The dice notation string (e.g., "2d20").
-
-        Returns:
-            int: The sum of the roll.
-
-        Raises:
-            ValueError: If the notation is invalid.
-        """
-        lexer = DiceLexer(dice_notation)
-        parser = DiceParser(lexer)
-        result = await parser.parse()
-        return int(result)
-
     async def evaluate_roll(self, query: str) -> Dict[str, Any]:
         """Evaluates a dice roll query and returns the result and breakdown.
 

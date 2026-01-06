@@ -14,6 +14,10 @@ Modules:
 """
 
 # Data structures (Phase 2)
+from utils.musicutils.commands import MusicCommandsMixin
+from utils.musicutils.managed_player import ManagedPlayer, PlayerState, TrackInfo
+from utils.musicutils.audio_source import SeekableAudioSource
+from utils.musicutils.music_cache import MusicCacheManager
 from utils.musicutils.music_data import (
     FetchContext,
     LoopMode,
@@ -139,21 +143,18 @@ __all__ += [
 ]
 
 # Cache management (Phase 6)
-from utils.musicutils.music_cache import MusicCacheManager
 
 __all__ += [
     'MusicCacheManager',
 ]
 
 # Audio source (Phase 7)
-from utils.musicutils.audio_source import SeekableAudioSource
 
 __all__ += [
     'SeekableAudioSource',
 ]
 
 # Managed player (Phase 7)
-from utils.musicutils.managed_player import ManagedPlayer, PlayerState, TrackInfo
 
 __all__ += [
     'ManagedPlayer',
@@ -162,7 +163,6 @@ __all__ += [
 ]
 
 # Command handlers mixin (Phase 8 - NLP handler extraction)
-from utils.musicutils.commands import MusicCommandsMixin
 
 __all__ += [
     'MusicCommandsMixin',

@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 import psutil
 
+import config
+
 
 # Module-level listener reference for proper cleanup
 _queue_listener: Optional[QueueListener] = None
@@ -578,7 +580,7 @@ def setup_logging(
         # Create the actual file handler (runs in background thread via QueueListener)
         file_handler = RotatingFileHandler(
             log_file_path,
-            maxBytes=5*1024*1024,  # 5 MB per file
+            maxBytes=config.LOG_MAX_BYTES,
             backupCount=2,        # Keep 2 backup files
             encoding='utf-8'
         )

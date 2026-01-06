@@ -86,11 +86,12 @@ BACKUP_EXTENSION = ".backup"
 #   Keys: original_message_id (the source message being starred)
 #   Note: Links original message to its starboard copy for updates/removal.
 #
-# bod_usage
-#   Purpose: Tracks active "Boundary of Death" game sessions per user.
-#   Used by: cogs/fun.py (bod command)
-#   Keys: user_id (one active session per user)
-#   Note: Stores current chain progress and timeout tracking.
+# bod_players
+#   Purpose: Tracks BOD game sessions and fate bank per user.
+#   Used by: cogs/fun.py (bod command), cogs/admin.py (bod_bless, bod_fate, bod_clear)
+#   Keys: user_id (one row per user)
+#   Note: Stores chain progress, timeout tracking, and fate charges (lucky/blessed/guaranteed).
+#   Renamed from: bod_usage (added fate columns)
 #
 # bod_leaderboard
 #   Purpose: Persistent high scores for the "Boundary of Death" game.
@@ -170,12 +171,15 @@ TABLE_SCHEMAS = {
             original_channel_id INTEGER NOT NULL
         )
     """,
-    "bod_usage": """
-        CREATE TABLE bod_usage (
+    "bod_players": """
+        CREATE TABLE bod_players (
             user_id INTEGER PRIMARY KEY,
             last_used_timestamp INTEGER NOT NULL DEFAULT 0,
             current_chain INTEGER NOT NULL DEFAULT 0,
-            last_channel_id INTEGER NOT NULL DEFAULT 0
+            last_channel_id INTEGER NOT NULL DEFAULT 0,
+            fate_lucky INTEGER NOT NULL DEFAULT 0,
+            fate_blessed INTEGER NOT NULL DEFAULT 0,
+            fate_guaranteed INTEGER NOT NULL DEFAULT 0
         )
     """,
     "bod_leaderboard": """
@@ -239,6 +243,7 @@ TABLE_RENAMES = {
     "user_config":    "user_settings",    # Consistent naming with other *_settings tables
     "guild_config":   "guild_settings",   # Consistent naming with other *_settings tables
     "starboard":      "starboard_entries",  # Indicate this stores entry records, not config
+    "bod_usage":      "bod_players",      # Now tracks fate bank in addition to usage data
 }
 
 

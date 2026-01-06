@@ -9,7 +9,9 @@ import os
 import random
 import re
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
+import tomllib
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 import discord
@@ -18,9 +20,6 @@ from discord.ext import commands
 import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
-
-if TYPE_CHECKING:
-    from cogs.math import Math
 
 
 class Fun(BaseCog):
@@ -53,6 +52,42 @@ class Fun(BaseCog):
         }
         self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
         self.has_cleaned_up_chains = False
+        # BOD Fate System
+        self.bod_quote_triggers: Dict[int, List[Dict[str, Any]]] = {}
+        self.bod_quote_display: List[str] = []
+        self._load_bod_quotes()
+
+    def _load_bod_quotes(self) -> None:
+        """Load BOD quote triggers from TOML file.
+
+        Populates self.bod_quote_triggers and self.bod_quote_display.
+        Logs warning if file is missing or malformed.
+        """
+        quotes_path = os.path.join(config.ASSETS_PATH, 'bod_quotes.toml')
+        try:
+            with open(quotes_path, 'rb') as f:
+                data = tomllib.load(f)
+
+            # Load display quotes
+            self.bod_quote_display = data.get('quotes', {}).get('display', [])
+
+            # Load triggers - convert string keys to int
+            raw_triggers = data.get('triggers', {})
+            self.bod_quote_triggers = {}
+            for chain_pos, trigger_list in raw_triggers.items():
+                try:
+                    chain_int = int(chain_pos)
+                    self.bod_quote_triggers[chain_int] = trigger_list
+                except ValueError:
+                    self.logger.warning(f"Invalid chain position '{chain_pos}' in bod_quotes.toml - skipping")
+
+            self.logger.info(f"Loaded {len(self.bod_quote_display)} BOD quotes and {len(self.bod_quote_triggers)} trigger positions.")
+        except FileNotFoundError:
+            self.logger.warning("bod_quotes.toml not found. BOD fate triggers will be disabled.")
+        except tomllib.TOMLDecodeError as e:
+            self.logger.error(f"Failed to parse bod_quotes.toml: {e}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error loading bod_quotes.toml: {e}", exc_info=True)
 
     async def fun_command_handler(self, ctx: commands.Context, command: str) -> None:
         """A generic handler for "fun" commands that post content like images, text, or links.
@@ -114,6 +149,154 @@ class Fun(BaseCog):
         except FileNotFoundError:
             self.logger.error("8ball.txt not found. 8ball command will not work.")
             return ["I seem to have lost my magic 8-ball..."]
+
+    # ==========================================================================
+    # BOD Fate System Helpers
+    # ==========================================================================
+
+    async def _get_previous_message(
+        self,
+        channel: discord.TextChannel,
+        user: Union[discord.User, discord.Member],
+        before: discord.Message
+    ) -> Optional[str]:
+        """Get user's most recent message in channel before BOD command.
+
+        Only considers messages from the last 10 minutes.
+
+        Args:
+            channel: The channel to search.
+            user: The user whose message to find.
+            before: The BOD command message (search before this).
+
+        Returns:
+            Message content if found within 10 minutes, None otherwise.
+        """
+        ten_minutes_ago = datetime.now(timezone.utc) - __import__('datetime').timedelta(minutes=10)
+
+        try:
+            async for message in channel.history(limit=50, before=before):
+                if message.author.id == user.id:
+                    if message.created_at < ten_minutes_ago:
+                        # Message is too old
+                        return None
+                    return message.content
+        except discord.Forbidden:
+            self.logger.warning(f"Missing permissions to read history in channel {channel.id}")
+        except Exception as e:
+            self.logger.error(f"Error fetching previous message: {e}")
+
+        return None
+
+    async def _evaluate_quote_trigger(
+        self,
+        user_id: int,
+        channel: discord.TextChannel,
+        before_message: discord.Message,
+        current_chain: int
+    ) -> None:
+        """Check if user's previous message triggers quote fate.
+
+        If a match is found, adds fate to user's bank via database.
+
+        Args:
+            user_id: The Discord user ID.
+            channel: The channel context.
+            before_message: The BOD command message.
+            current_chain: User's current chain position.
+        """
+        # Get triggers for this chain position
+        triggers = self.bod_quote_triggers.get(current_chain, [])
+        if not triggers:
+            return
+
+        # Get user's previous message
+        previous_content = await self._get_previous_message(
+            channel,
+            before_message.author,
+            before_message
+        )
+        if not previous_content:
+            return
+
+        # Check against triggers
+        for trigger in triggers:
+            pattern = trigger.get('pattern', '')
+            tier = trigger.get('tier', 'LUCKY')
+            count = trigger.get('count', 1)
+
+            try:
+                if re.search(pattern, previous_content, re.IGNORECASE):
+                    db_manager = self.bot.db_manager
+                    if db_manager:
+                        await db_manager.add_bod_fate(user_id, tier, count)
+                        self.logger.info(
+                            f"BOD fate triggered for user {user_id}: {tier} x{count} "
+                            f"(chain {current_chain}, pattern '{pattern}')"
+                        )
+                    return  # Only first match counts
+            except re.error as e:
+                self.logger.warning(f"Invalid regex pattern in bod_quotes.toml: '{pattern}' - {e}")
+
+    async def _consume_fate_and_get_tier(self, user_id: int) -> str:
+        """Consume fate from bank, returning the tier used.
+
+        Checks tiers in order: GUARANTEED > BLESSED > LUCKY > NORMAL.
+
+        Args:
+            user_id: The Discord user ID.
+
+        Returns:
+            Tier string: 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
+        """
+        db_manager = self.bot.db_manager
+        if not db_manager:
+            return "NORMAL"
+
+        # Check in priority order
+        for tier in ('GUARANTEED', 'BLESSED', 'LUCKY'):
+            if await db_manager.consume_bod_fate(user_id, tier):
+                self.logger.info(f"Consumed {tier} fate for user {user_id}")
+                return tier
+
+        return "NORMAL"
+
+    def _fate_roll(self, tier: str) -> int:
+        """Roll 1d4 with modified probability based on tier.
+
+        Args:
+            tier: One of 'GUARANTEED', 'BLESSED', 'LUCKY', 'NORMAL'.
+
+        Returns:
+            Roll result 1-4.
+        """
+        if tier == "GUARANTEED":
+            return 4
+        elif tier == "BLESSED":
+            # 75% chance of success
+            return 4 if random.random() < 0.75 else random.randint(1, 3)
+        elif tier == "LUCKY":
+            # 50% chance of success
+            return 4 if random.random() < 0.50 else random.randint(1, 3)
+        else:
+            # NORMAL - standard 25% chance
+            return random.randint(1, 4)
+
+    def _get_fate_flavor(self, tier: str) -> str:
+        """Get flavor text prefix for a fate tier.
+
+        Args:
+            tier: The fate tier that was consumed.
+
+        Returns:
+            Flavor text string, or empty string for NORMAL.
+        """
+        flavors = {
+            'LUCKY': "✨ *Favoured by fate...* ",
+            'BLESSED': "🌟 *Fabled by fate...* ",
+            'GUARANTEED': "⚡ *Divine intervention...* ",
+        }
+        return flavors.get(tier, "")
 
     async def _resolve_user_display_name(self, user_id: int, guild: Optional[discord.Guild] = None) -> str:
         """Resolve a user ID to a display name with exponential backoff for API calls.
@@ -198,8 +381,8 @@ class Fun(BaseCog):
                 self.logger.error(f"BOD session timeout: DatabaseManager not found for user {user_id}.")
                 return
 
-            usage_data = await db_manager.get_bod_usage(user_id)
-            current_chain = usage_data.get('current_chain', 0)
+            player_data = await db_manager.get_bod_player(user_id)
+            current_chain = player_data.get('current_chain', 0)
 
             # If the user is no longer in a chain, their session ended naturally (by failing a roll).
             if current_chain == 0:
@@ -218,7 +401,7 @@ class Fun(BaseCog):
                 reply_message += f" Your personal best remains {user_best}."
 
             # Reset chain, start the 12-hour cooldown from now.
-            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id)
+            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             if channel and isinstance(channel, discord.TextChannel):
                 await channel.send(f"<@{user_id}>, {reply_message}")
@@ -245,6 +428,11 @@ class Fun(BaseCog):
         This command has a 12-hour cooldown. Once off cooldown, the user has a
         20-minute session to build their chain.
 
+        The Fate System can modify roll probabilities:
+        - LUCKY: 50% chance of rolling 4
+        - BLESSED: 75% chance of rolling 4
+        - GUARANTEED: 100% chance of rolling 4
+
         Args:
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
@@ -265,9 +453,9 @@ class Fun(BaseCog):
             return
 
         # Check cooldowns.
-        usage_data = await db_manager.get_bod_usage(user_id)
-        last_used = usage_data.get('last_used_timestamp', 0)
-        current_chain = usage_data.get('current_chain', 0)
+        player_data = await db_manager.get_bod_player(user_id)
+        last_used = player_data.get('last_used_timestamp', 0)
+        current_chain = player_data.get('current_chain', 0)
         current_time = time.time()
         time_since_last_use = current_time - last_used
 
@@ -286,32 +474,36 @@ class Fun(BaseCog):
             self.bod_timeout_tasks[user_id] = task
             self.logger.info(f"BOD session started for user {user_id}. Creating timeout task.")
 
-        # Perform roll.
-        math_cog = cast("Math", self.bot.get_cog('Math'))
-        if not math_cog:
-            await ctx.reply("I can't find my dice right now. Please try again later.")
-            self.logger.error("Math cog not found, cannot perform bod roll.")
-            return
+        # Evaluate quote triggers BEFORE rolling (adds to fate bank if matched)
+        if isinstance(ctx.channel, discord.TextChannel):
+            await self._evaluate_quote_trigger(user_id, ctx.channel, ctx.message, current_chain)
 
         try:
+            # Consume fate and determine roll tier
+            fate_tier = await self._consume_fate_and_get_tier(user_id)
+
             # Owner gets guaranteed success until chain 21 for testing purposes, only in DEV_MODE.
             if config.DEV_MODE and await self.bot.is_owner(ctx.author) and current_chain < 21:
                 roll_result = 4
+                fate_tier = "NORMAL"  # Don't show fate flavor for dev bypass
             else:
-                roll_result = await math_cog.get_roll_result("1d4")
+                roll_result = self._fate_roll(fate_tier)
 
             if roll_result == 4:
                 # Successful roll, continue the chain
                 new_chain = current_chain + 1
                 # Update timestamp, chain, and the last channel used.
-                await db_manager.update_bod_usage(user_id, int(current_time), new_chain, ctx.channel.id)
+                await db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
 
                 dialogue = (BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(BOD_CHAIN_DIALOGUE)
                             else f"You've reached an unheard of chain of {new_chain}! The angels sing your name.")
 
+                # Add fate flavor if consumed fate tier was used
+                fate_flavor = self._get_fate_flavor(fate_tier)
+
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_complete.jpg')
                 await ctx.reply(
-                    f"You rolled a 4! **{dialogue}** Your chain is now {new_chain}. Roll again!",
+                    f"{fate_flavor}You rolled a 4! **{dialogue}** Your chain is now {new_chain}. Roll again!",
                     file=discord.File(file_path)
                 )
             else:
@@ -337,7 +529,7 @@ class Fun(BaseCog):
                     self.logger.info(f"BOD chain for user {user_id} failed at chain 0 with a roll of {roll_result}.")
 
                 # Reset chain and start the 12-hour cooldown from now.
-                await db_manager.update_bod_usage(user_id, int(current_time), 0, ctx.channel.id)
+                await db_manager.update_bod_player(user_id, int(current_time), 0, ctx.channel.id)
                 await ctx.reply(reply_message, file=discord.File(file_path))
 
         except FileNotFoundError as e:
@@ -437,7 +629,7 @@ class Fun(BaseCog):
             current_chain = chain_data['current_chain']
 
             # Reset the user's chain in the database first.
-            await db_manager.update_bod_usage(user_id, int(time.time()), 0, channel_id)
+            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             channel = self.bot.get_channel(channel_id)
             if not channel or not isinstance(channel, discord.TextChannel):
@@ -528,6 +720,62 @@ class Fun(BaseCog):
 
         await ctx.reply(embed=embed)
         self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
+
+    async def yujin_quotes(self, ctx: commands.Context, query: str) -> None:
+        """Display available Yujin quotes for BOD.
+
+        Shows quotes in shuffled order so users can't correlate
+        position with chain number.
+
+        Args:
+            ctx (commands.Context): The command context.
+            query (str): The user's query (unused).
+        """
+        if not self.bod_quote_display:
+            await ctx.reply("No Yujin quotes have been configured yet.")
+            return
+
+        # Shuffle a copy of the quotes
+        shuffled_quotes = self.bod_quote_display.copy()
+        random.shuffle(shuffled_quotes)
+
+        embed = discord.Embed(
+            title="Yujin's Words",
+            description="*Speak her words before the boundary, and fate may smile upon you...*",
+            color=discord.Color.purple()
+        )
+
+        # Format quotes as a numbered list
+        quotes_text = "\n".join(f"• *\"{quote}\"*" for quote in shuffled_quotes)
+
+        # Discord embed field limit is 1024 chars, split if needed
+        if len(quotes_text) <= 1024:
+            embed.add_field(name="Known Quotes", value=quotes_text, inline=False)
+        else:
+            # Split into chunks
+            chunks = []
+            current_chunk = ""
+            for quote in shuffled_quotes:
+                line = f"• *\"{quote}\"*\n"
+                if len(current_chunk) + len(line) > 1024:
+                    chunks.append(current_chunk.rstrip())
+                    current_chunk = line
+                else:
+                    current_chunk += line
+            if current_chunk:
+                chunks.append(current_chunk.rstrip())
+
+            for i, chunk in enumerate(chunks):
+                embed.add_field(
+                    name=f"Known Quotes {f'(Part {i+1})' if len(chunks) > 1 else ''}",
+                    value=chunk,
+                    inline=False
+                )
+
+        embed.set_footer(text="The right words at the right time may change your fortune...")
+
+        await ctx.reply(embed=embed)
+        self.logger.info(f"Yujin quotes viewed by {ctx.author}.")
 
 
 async def setup(bot: CoreBot) -> None:

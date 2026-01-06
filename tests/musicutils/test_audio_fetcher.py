@@ -12,7 +12,7 @@ the orchestration logic in isolation.
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from utils.musicutils.music_data import FetchContext, Track
+from utils.musicutils.music_data import AudioUrlResult, FetchContext, Track
 from utils.musicutils.music_auth import (
     AudioFetcher,
     AudioFetchResult,
@@ -110,19 +110,24 @@ class TestAudioFetcherStateManagement:
 
 
 class TestAudioFetcherResidentialCacheHit:
-    """Tests for residential cache hit path."""
+    """Tests for residential cache hit path (after direct fails)."""
 
     @pytest.mark.asyncio
     async def test_returns_cached_path(self, fetcher, mock_cache_manager, mock_track):
-        """Returns local_path when residential cache hits."""
+        """Returns local_path when residential cache hits after direct fails."""
         mock_cache_manager.check_residential.return_value = "/cache/video.mp3"
 
-        result = await fetcher.fetch(mock_track, FetchContext.LIVE)
+        # Direct must fail for us to reach residential cache check
+        with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
+            mock_get.return_value = AudioUrlResult(url=None, error="Blocked")
+            result = await fetcher.fetch(mock_track, FetchContext.LIVE)
+
+            # Verify direct was attempted
+            mock_get.assert_called_once()
 
         assert result.success is True
         assert result.local_path == "/cache/video.mp3"
-        # Should not attempt any direct fetches
-        assert fetcher._get_state(mock_track.video_id).direct_attempts == 0
+        # State is cleared on success, so no point checking direct_attempts
 
 
 class TestAudioFetcherAmbientCacheHit:
@@ -146,19 +151,27 @@ class TestAudioFetcherAmbientCacheHit:
         mock_cache_manager.get_any_local_path.assert_called_once_with(mock_track.video_id)
 
     @pytest.mark.asyncio
-    async def test_residential_takes_priority_over_ambient(
+    async def test_direct_attempted_before_residential_cache(
         self, fetcher, mock_cache_manager, mock_track
     ):
-        """Residential cache is checked before ambient cache."""
+        """Direct fetch is attempted before falling back to residential cache.
+        
+        Even if a residential cached file exists, we try direct first in case
+        the 403 has cleared - direct gives higher quality than residential.
+        """
         mock_cache_manager.check_residential.return_value = "/residential/dQw4w9WgXcQ.mp3"
-        mock_cache_manager.get_any_local_path.return_value = "/playlists/abc123/dQw4w9WgXcQ.mp3"
+        mock_cache_manager.get_any_local_path.return_value = None  # No ambient cache
 
-        result = await fetcher.fetch(mock_track, FetchContext.LIVE)
+        with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
+            # Direct fails, so we fall back to residential cache
+            mock_get.return_value = AudioUrlResult(error="403 Forbidden")
+
+            result = await fetcher.fetch(mock_track, FetchContext.LIVE)
 
         assert result.success is True
         assert result.local_path == "/residential/dQw4w9WgXcQ.mp3"
-        # get_any_local_path should not be called since residential hit first
-        mock_cache_manager.get_any_local_path.assert_not_called()
+        # Direct was attempted first (before checking residential cache)
+        mock_get.assert_called_once()
 
 
 class TestAudioFetcherDirectFetch:
@@ -168,12 +181,10 @@ class TestAudioFetcherDirectFetch:
     async def test_success_on_first_try(self, fetcher, mock_track):
         """Succeeds when get_audio_url returns URL."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (
-                "https://audio.url/stream",  # url
-                False,  # is_unavailable
-                "https://thumb.jpg",  # thumbnail
-                False,  # needs_crop
-                {"Authorization": "token"}  # headers
+            mock_get.return_value = AudioUrlResult(
+                url="https://audio.url/stream",
+                thumbnail="https://thumb.jpg",
+                http_headers={"Authorization": "token"}
             )
 
             result = await fetcher.fetch(mock_track, FetchContext.PREFETCH)
@@ -181,13 +192,14 @@ class TestAudioFetcherDirectFetch:
             assert result.success is True
             assert result.url == "https://audio.url/stream"
             assert result.http_headers == {"Authorization": "token"}
-            assert fetcher._get_state(mock_track.video_id).direct_attempts == 1
+            # State is cleared on success, so we verify via the mock call instead
+            mock_get.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_increments_attempts_on_failure(self, fetcher, mock_track):
         """Direct attempts increment on failure."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             # First attempt fails
             await fetcher.fetch(mock_track, FetchContext.PREFETCH)
@@ -201,7 +213,7 @@ class TestAudioFetcherDirectFetch:
     async def test_stops_at_direct_max(self, fetcher, mock_track):
         """Stops attempting direct after DIRECT_MAX."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             # Exhaust direct attempts
             for _ in range(AudioFetcher.DIRECT_MAX + 1):
@@ -218,7 +230,7 @@ class TestAudioFetcherPrefetchContext:
     async def test_prefetch_no_residential_escalation(self, fetcher, mock_cache_manager, mock_track):
         """PREFETCH does NOT escalate to residential on failure."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             result = await fetcher.fetch(mock_track, FetchContext.PREFETCH)
 
@@ -234,7 +246,7 @@ class TestAudioFetcherLiveContext:
     async def test_live_escalates_to_residential(self, fetcher, mock_cache_manager, mock_track):
         """LIVE escalates to residential on direct failure."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
@@ -257,7 +269,7 @@ class TestAudioFetcherRetryContext:
     async def test_retry_escalates_to_residential(self, fetcher, mock_cache_manager, mock_track):
         """RETRY escalates to residential on direct failure."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
@@ -278,7 +290,7 @@ class TestAudioFetcherResidentialEscalation:
     async def test_no_proxy_configured(self, fetcher, mock_cache_manager, mock_track):
         """Fails gracefully when proxy not configured."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = None  # No proxy
@@ -292,7 +304,7 @@ class TestAudioFetcherResidentialEscalation:
     async def test_residential_attempt_limit(self, fetcher, mock_cache_manager, mock_track):
         """Stops at RESIDENTIAL_MAX attempts."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
@@ -309,7 +321,7 @@ class TestAudioFetcherResidentialEscalation:
     async def test_residential_tracks_bytes(self, fetcher, mock_cache_manager, mock_track):
         """Residential downloads track bytes for cost accounting."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (None, False, None, False, None)
+            mock_get.return_value = AudioUrlResult(error="Failed")
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
@@ -347,11 +359,7 @@ class TestAudioFetcherUnavailable:
     async def test_unavailable_marked_prefetch(self, fetcher, mock_track):
         """Unavailable tracks are flagged for removal (PREFETCH context)."""
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
-            mock_get.return_value = (
-                None,  # No URL
-                True,  # is_unavailable
-                None, False, None
-            )
+            mock_get.return_value = AudioUrlResult(is_unavailable=True)
 
             # Use PREFETCH - won't escalate to residential
             result = await fetcher.fetch(mock_track, FetchContext.PREFETCH)

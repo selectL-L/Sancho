@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from .music_data import Track
 
 # Import Track for runtime use
-from .music_data import Track, DownloadResult
+from .music_data import AudioUrlResult, DownloadResult, Track
 
 
 # ==========================================================================
@@ -137,16 +137,18 @@ def get_residential_proxy_url() -> Optional[str]:
 
     Returns:
         Proxy URL string in format http://user:pass@host:port, or None if not configured.
+        Returns None if RESIDENTIAL_PROXY_ENABLED is False (incomplete config).
     """
     import config
 
-    user = getattr(config, 'RESIDENTIAL_PROXY_USER', '')
-    password = getattr(config, 'RESIDENTIAL_PROXY_PASSWORD', '')
-    host = getattr(config, 'RESIDENTIAL_PROXY_HOST', 'gate.decodo.com')
-    port = getattr(config, 'RESIDENTIAL_PROXY_PORT', 7000)
-
-    if not user or not password:
+    # Check the enabled flag first - this validates all 4 fields are set
+    if not getattr(config, 'RESIDENTIAL_PROXY_ENABLED', False):
         return None
+
+    user = config.RESIDENTIAL_PROXY_USER
+    password = config.RESIDENTIAL_PROXY_PASSWORD
+    host = config.RESIDENTIAL_PROXY_HOST
+    port = config.RESIDENTIAL_PROXY_PORT
 
     return f"http://{user}:{password}@{host}:{port}"
 
@@ -579,7 +581,7 @@ async def get_audio_url(
     track: 'Track',
     logger: Any,
     ydl_opts: Optional[Dict[str, Any]] = None
-) -> tuple[Optional[str], bool, Optional[str], bool, Optional[Dict[str, str]]]:
+) -> AudioUrlResult:
     """Gets the actual streamable audio URL for a track.
 
     NOTE: This is a low-level function. For production use with retry logic
@@ -591,15 +593,10 @@ async def get_audio_url(
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:
-        A tuple of (url, is_unavailable, thumbnail, needs_crop, http_headers) where:
-        - url: The streamable URL, or None if failed
-        - is_unavailable: True if the video is permanently unavailable and should be removed
-        - thumbnail: Best thumbnail URL found, or None
-        - needs_crop: True if thumbnail needs center-cropping to extract album art
-        - http_headers: Dict of HTTP headers needed to fetch the URL, or None
+        AudioUrlResult with url, availability status, thumbnail info, and headers.
     """
     if not yt_dlp:
-        return None, False, None, False, None
+        return AudioUrlResult(error="yt-dlp not available")
 
     if ydl_opts is None:
         ydl_opts = {**YTDLP_OPTIONS, 'extract_flat': False}
@@ -615,7 +612,7 @@ async def get_audio_url(
 
         if not info:
             logger.warning(f"No info returned for {track.title}")
-            return None, True, None, False, None  # No info usually means unavailable
+            return AudioUrlResult(is_unavailable=True, error="No info returned")
 
         # Extract best thumbnail - prefer square (for album art)
         thumbnail_url, needs_crop = await _extract_best_thumbnail(info, logger)
@@ -637,7 +634,12 @@ async def get_audio_url(
             best = max(audio_only, key=lambda f: f.get('abr') or f.get('tbr') or 0)
             # Format may have its own headers that override
             fmt_headers = best.get('http_headers', http_headers)
-            return best.get('url'), False, thumbnail_url, needs_crop, fmt_headers or None
+            return AudioUrlResult(
+                url=best.get('url'),
+                thumbnail=thumbnail_url,
+                thumbnail_needs_crop=needs_crop,
+                http_headers=fmt_headers or None
+            )
 
         # Priority 2: Video+audio combined formats (muxed)
         # Less efficient but necessary for some videos that lack audio-only streams
@@ -650,16 +652,30 @@ async def get_audio_url(
             best = max(combined, key=lambda f: (f.get('abr') or 0, -(f.get('vbr') or f.get('tbr') or 0)))
             logger.info(f"[Audio] Using combined format for {track.title} (no audio-only available)")
             fmt_headers = best.get('http_headers', http_headers)
-            return best.get('url'), False, thumbnail_url, needs_crop, fmt_headers or None
+            return AudioUrlResult(
+                url=best.get('url'),
+                thumbnail=thumbnail_url,
+                thumbnail_needs_crop=needs_crop,
+                http_headers=fmt_headers or None
+            )
 
         # Priority 3: Direct URL fallback (rare, usually livestreams or direct file links)
         if info.get('url'):
             logger.info(f"[Audio] Using direct URL fallback for {track.title}")
-            return info.get('url'), False, thumbnail_url, needs_crop, http_headers or None
+            return AudioUrlResult(
+                url=info.get('url'),
+                thumbnail=thumbnail_url,
+                thumbnail_needs_crop=needs_crop,
+                http_headers=http_headers or None
+            )
 
         # No usable format found
         logger.warning(f"No playable format found for {track.title}")
-        return None, False, thumbnail_url, needs_crop, None
+        return AudioUrlResult(
+            thumbnail=thumbnail_url,
+            thumbnail_needs_crop=needs_crop,
+            error="No playable format found"
+        )
 
     except Exception as e:
         unavailable = is_video_unavailable(e)
@@ -669,7 +685,7 @@ async def get_audio_url(
         else:
             logger.error(f"Error getting audio URL for {track.title}: {e}")
 
-        return None, unavailable, None, False, None
+        return AudioUrlResult(is_unavailable=unavailable, error=str(e))
 
 
 async def search_youtube(

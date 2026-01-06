@@ -237,6 +237,10 @@ class MusicCommandsMixin:
     async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]: ...
     async def _fetch_url_info(self, url: str, force_playlist: bool = False) -> tuple[List[Track], Optional[str], Optional[str]]: ...
 
+    # Ambience wrappers - Music cog owns the relationship with ambience
+    def _ensure_music_for_user(self) -> tuple[Optional[str], Optional[str]]: ...
+    def _get_listen_along_response(self) -> str: ...
+
     # ==========================================================================
     # COMMAND HELPERS (Complex operations only)
     # ==========================================================================
@@ -247,15 +251,13 @@ class MusicCommandsMixin:
         Args:
             ctx: The command context.
         """
-        from utils.ambience import MusicAmbience, ensure_music_for_user
-
         if not YTDLP_AVAILABLE:
             await ctx.send("Music playback isn't available - yt-dlp is not installed.")
             return
 
         # If we don't have a playlist, ask ambience to start music
         if not self.playlist:
-            playlist_url, _ = ensure_music_for_user()
+            playlist_url, _ = self._ensure_music_for_user()
             if playlist_url:
                 self._ambience.confirm_switch(playlist_url)
                 await self._load_playlist()
@@ -304,7 +306,7 @@ class MusicCommandsMixin:
             return
 
         # Send personality-aware flavor text based on current idle activity
-        await ctx.send(MusicAmbience.get_listen_along_response())
+        await ctx.send(self._get_listen_along_response())
 
         await self._start_session(channel, ctx)
 

@@ -35,7 +35,7 @@ class TrackFailureAction(Enum):
     """Actions a user can take when a track fails to play."""
     SKIP = auto()    # Skip but keep in playlist (might work later)
     REMOVE = auto()  # Remove from playlist entirely
-    TIMEOUT = auto() # User didn't respond - defaults to REMOVE
+    TIMEOUT = auto()  # User didn't respond - defaults to REMOVE
 
 
 class TrackFailedView(discord.ui.View):
@@ -977,5 +977,578 @@ async def show_dashboard(
     )
 
     message = await ctx.send(embed=dashboard_embed, view=view)
+    view.message = message
+    return message
+
+
+# =============================================================================
+# Status View (Components V2)
+# =============================================================================
+
+@dataclass
+class StatusHealth:
+    """Health check results for status overview."""
+    gateway: bool  # Gateway latency < 500ms
+    database: bool  # Database responding
+    music_auth: bool  # Music auth method available
+    cache: bool  # Cache manifest valid
+    extensions: bool  # All cogs loaded
+    ytdlp: bool  # yt-dlp available
+
+
+@dataclass
+class StatusData:
+    """All data needed to render status pages."""
+    # Performance
+    gateway_latency: float  # ms
+    roundtrip_latency: float  # ms
+    db_latency: float  # ms
+    cpu_percent: float
+    ram_mb: float
+
+    # Uptime
+    start_timestamp: int  # Unix timestamp
+    uptime_str: str  # "0d 10h 31m"
+
+    # Extensions
+    loaded_cogs: List[str]
+    total_cogs: int
+    failed_cogs: List[str]
+
+    # Health
+    health: StatusHealth
+
+    # Music Auth
+    auth_method: Optional[str]  # 'pot_server', 'cookies', or None
+    pot_server_running: bool
+    pot_plugin_error: Optional[str]
+    cookie_age_days: Optional[int]
+    error_403_count: int
+    error_403_window_mins: int
+    ytdlp_available: bool
+    mutagen_available: bool
+
+    # Music Playback
+    music_status: str  # "idle", "playing", "paused"
+    music_channel: Optional[str]  # Channel name if in voice
+    music_track: Optional[str]  # Current track title
+    music_artist: Optional[str]  # Current track artist
+    music_queue_count: int
+
+    # Cache
+    cache_playlists: int
+    cache_tracks_total: int
+    cache_tracks_downloaded: int
+    cache_size_mb: float
+    cache_orphaned_count: int
+    cache_orphaned_mb: float
+    cache_residential_count: int
+    cache_residential_mb: float
+    cache_residential_cost: float
+    cache_last_refresh_ago: Optional[float]  # seconds
+
+    # Database
+    db_size_mb: float
+
+    # Next Reminder
+    next_reminder_time: Optional[int]  # Unix timestamp
+    next_reminder_user: Optional[str]  # User display name
+
+    # System
+    python_version: str
+    discordpy_version: str
+    platform: str
+    bot_name: str
+    bot_id: int
+    guild_count: int
+
+    # Snapshot timestamp
+    snapshot_timestamp: int
+
+
+class StatusView(discord.ui.LayoutView):
+    """Interactive status view using Components V2.
+
+    Displays bot status across 5 pages:
+    1. Overview - Health checks and quick stats
+    2. Performance - Latencies and resource usage
+    3. Music - Auth status and playback info
+    4. Storage - Cache and database stats
+    5. System - Extensions and environment
+
+    Uses Container, Section, TextDisplay, Separator, and ActionRow components.
+    """
+
+    PAGE_NAMES = [
+        ("🏠", "Overview"),
+        ("⚡", "Performance"),
+        ("🎵", "Music"),
+        ("🗄️", "Storage"),
+        ("🔧", "System"),
+    ]
+
+    def __init__(
+        self,
+        ctx: commands.Context,
+        data: StatusData,
+        timeout: float = 120.0,
+    ):
+        """Initialize the status view.
+
+        Args:
+            ctx: The command context.
+            data: StatusData containing all info to display.
+            timeout: View timeout in seconds.
+        """
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.data = data
+        self.current_page = 0
+        self.message: Optional[discord.Message] = None
+
+        self._build_ui()
+
+    def _get_accent_color(self) -> discord.Colour:
+        """Get accent color based on health status."""
+        h = self.data.health
+        all_healthy = all([h.gateway, h.database, h.music_auth, h.cache, h.extensions, h.ytdlp])
+        any_critical = not h.gateway or not h.database
+
+        if any_critical:
+            return discord.Colour.red()
+        elif all_healthy:
+            return discord.Colour.green()
+        else:
+            return discord.Colour.orange()
+
+    def _build_ui(self) -> None:
+        """Build the UI for the current page."""
+        self.clear_items()
+
+        # Build page content
+        container = ui.Container(accent_colour=self._get_accent_color())
+
+        if self.current_page == 0:
+            self._build_overview_page(container)
+        elif self.current_page == 1:
+            self._build_performance_page(container)
+        elif self.current_page == 2:
+            self._build_music_page(container)
+        elif self.current_page == 3:
+            self._build_storage_page(container)
+        elif self.current_page == 4:
+            self._build_system_page(container)
+
+        # Footer with snapshot timestamp
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+        container.add_item(ui.TextDisplay(f"-# Snapshot taken <t:{self.data.snapshot_timestamp}:R>"))
+
+        self.add_item(container)
+
+        # Navigation row with select menu
+        select_row = ui.ActionRow()
+        page_select = ui.Select(
+            placeholder="Jump to page...",
+            custom_id="status_page_select",
+            options=[
+                discord.SelectOption(
+                    label=f"{emoji} {name}",
+                    value=str(i),
+                    default=(i == self.current_page)
+                )
+                for i, (emoji, name) in enumerate(self.PAGE_NAMES)
+            ]
+        )
+        page_select.callback = self._handle_page_select  # type: ignore[method-assign]
+        select_row.add_item(page_select)
+        self.add_item(select_row)
+
+        # Navigation row with buttons
+        nav_row = ui.ActionRow()
+
+        prev_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="◀",
+            custom_id="status_prev",
+            disabled=(self.current_page == 0)
+        )
+        prev_btn.callback = self._handle_prev  # type: ignore[method-assign]
+
+        page_indicator = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label=f"{self.current_page + 1}/{len(self.PAGE_NAMES)}",
+            custom_id="status_page_indicator",
+            disabled=True
+        )
+
+        next_btn = ui.Button(
+            style=discord.ButtonStyle.secondary,
+            emoji="▶",
+            custom_id="status_next",
+            disabled=(self.current_page == len(self.PAGE_NAMES) - 1)
+        )
+        next_btn.callback = self._handle_next  # type: ignore[method-assign]
+
+        refresh_btn = ui.Button(
+            style=discord.ButtonStyle.primary,
+            emoji="🔄",
+            label="Refresh",
+            custom_id="status_refresh"
+        )
+        refresh_btn.callback = self._handle_refresh  # type: ignore[method-assign]
+
+        nav_row.add_item(prev_btn)
+        nav_row.add_item(page_indicator)
+        nav_row.add_item(next_btn)
+        nav_row.add_item(refresh_btn)
+        self.add_item(nav_row)
+
+    def _health_icon(self, healthy: bool) -> str:
+        """Return health indicator emoji."""
+        return "✅" if healthy else "⚠️"
+
+    def _build_overview_page(self, container: ui.Container) -> None:
+        """Build the Overview page content."""
+        h = self.data.health
+        d = self.data
+
+        # Header
+        container.add_item(ui.TextDisplay("## 🏠 Overview"))
+
+        # Health section
+        health_text = (
+            f"### Health\n"
+            f"{self._health_icon(h.gateway)} Gateway          "
+            f"{self._health_icon(h.database)} Database\n"
+            f"{self._health_icon(h.music_auth)} Music Auth        "
+            f"{self._health_icon(h.cache)} Cache\n"
+            f"{self._health_icon(h.extensions)} Extensions        "
+            f"{self._health_icon(h.ytdlp)} yt-dlp"
+        )
+        container.add_item(ui.TextDisplay(health_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Quick Stats
+        quick_stats = (
+            f"### Quick Stats\n"
+            f"**Uptime:** {d.uptime_str}    **Latency:** {d.gateway_latency:.0f}ms\n"
+            f"**Memory:** {d.ram_mb:.0f} MB    **Cogs:** {len(d.loaded_cogs)}/{d.total_cogs}"
+        )
+        container.add_item(ui.TextDisplay(quick_stats))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Right Now section
+        right_now_lines = ["### Right Now"]
+
+        # Music status
+        if d.music_status == "idle":
+            right_now_lines.append("💤 Music idle")
+        elif d.music_channel:
+            status_emoji = "🎵" if d.music_status == "playing" else "⏸️"
+            right_now_lines.append(f"{status_emoji} In **#{d.music_channel}**")
+            if d.music_track:
+                track_display = d.music_track[:40] + "..." if len(d.music_track) > 40 else d.music_track
+                right_now_lines.append(f"    Playing: {track_display}")
+
+        # Next reminder
+        if d.next_reminder_time:
+            right_now_lines.append(f"⏰ Next reminder: <t:{d.next_reminder_time}:R> for {d.next_reminder_user}")
+        else:
+            right_now_lines.append("⏰ No pending reminders")
+
+        container.add_item(ui.TextDisplay("\n".join(right_now_lines)))
+
+    def _build_performance_page(self, container: ui.Container) -> None:
+        """Build the Performance page content."""
+        d = self.data
+
+        container.add_item(ui.TextDisplay("## ⚡ Performance"))
+
+        # Latency section
+        latency_text = (
+            f"### Latency\n"
+            f"**Gateway:** {d.gateway_latency:.2f}ms\n"
+            f"**Roundtrip:** {d.roundtrip_latency:.2f}ms\n"
+            f"**Database:** {d.db_latency:.2f}ms"
+        )
+        container.add_item(ui.TextDisplay(latency_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Resources section
+        resources_text = (
+            f"### Resources\n"
+            f"**CPU:** {d.cpu_percent:.1f}%\n"
+            f"**RAM:** {d.ram_mb:.2f} MB"
+        )
+        container.add_item(ui.TextDisplay(resources_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Uptime section
+        uptime_text = (
+            f"### Uptime\n"
+            f"**Started:** <t:{d.start_timestamp}:f>\n"
+            f"**Running:** {d.uptime_str}"
+        )
+        container.add_item(ui.TextDisplay(uptime_text))
+
+    def _build_music_page(self, container: ui.Container) -> None:
+        """Build the Music page content."""
+        d = self.data
+
+        container.add_item(ui.TextDisplay("## 🎵 Music System"))
+
+        # Authentication section
+        if d.auth_method == 'pot_server':
+            method_text = "PO Token Server"
+        elif d.auth_method == 'cookies':
+            method_text = "Cookies"
+        else:
+            method_text = "None"
+
+        server_status = "✅ Running" if d.pot_server_running else f"❌ {d.pot_plugin_error or 'Not running'}"
+
+        cookie_text = f"{d.cookie_age_days}d old" if d.cookie_age_days is not None else "Not found"
+
+        error_icon = "✅" if d.error_403_count == 0 else ("⚠️" if d.error_403_count < 3 else "❌")
+
+        auth_text = (
+            f"### Authentication\n"
+            f"**Method:** {method_text}\n"
+            f"**PO Server:** {server_status}\n"
+            f"**Cookies:** {cookie_text}\n"
+            f"**403 Rate:** {d.error_403_count}/{d.error_403_window_mins}m {error_icon}"
+        )
+        container.add_item(ui.TextDisplay(auth_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Playback section
+        if d.music_status == "idle":
+            playback_text = (
+                "### Playback\n"
+                "**Status:** 💤 Idle"
+            )
+        else:
+            status_emoji = "🔊" if d.music_status == "playing" else "⏸️"
+            playback_lines = [
+                "### Playback",
+                f"**Status:** {status_emoji} #{d.music_channel}"
+            ]
+            if d.music_track:
+                playback_lines.append(f"**Track:** {d.music_track}")
+            if d.music_artist:
+                playback_lines.append(f"**Artist:** {d.music_artist}")
+            playback_lines.append(f"**Queue:** {d.music_queue_count} tracks")
+            playback_text = "\n".join(playback_lines)
+
+        container.add_item(ui.TextDisplay(playback_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Dependencies section
+        deps_text = (
+            f"### Dependencies\n"
+            f"**yt-dlp:** {'✅ Available' if d.ytdlp_available else '❌ Missing'}\n"
+            f"**mutagen:** {'✅ Available' if d.mutagen_available else '❌ Missing'}"
+        )
+        container.add_item(ui.TextDisplay(deps_text))
+
+    def _build_storage_page(self, container: ui.Container) -> None:
+        """Build the Storage page content."""
+        d = self.data
+
+        container.add_item(ui.TextDisplay("## 🗄️ Storage"))
+
+        # Music Cache section
+        cache_text = (
+            f"### Music Cache\n"
+            f"**Playlists:** {d.cache_playlists}\n"
+            f"**Tracks:** {d.cache_tracks_total} total ({d.cache_tracks_downloaded} downloaded)\n"
+            f"**Size:** {d.cache_size_mb:.1f} MB"
+        )
+        container.add_item(ui.TextDisplay(cache_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Orphaned Files section
+        orphan_text = (
+            f"### Orphaned Files\n"
+            f"**Count:** {d.cache_orphaned_count} tracks\n"
+            f"**Size:** {d.cache_orphaned_mb:.1f} MB"
+        )
+        container.add_item(ui.TextDisplay(orphan_text))
+
+        # Residential Cache (if any)
+        if d.cache_residential_count > 0:
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+            residential_text = (
+                f"### Residential Cache\n"
+                f"**Files:** {d.cache_residential_count}\n"
+                f"**Size:** {d.cache_residential_mb:.1f} MB\n"
+                f"**Est. cost:** ${d.cache_residential_cost:.2f}"
+            )
+            container.add_item(ui.TextDisplay(residential_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Database section
+        db_text = (
+            f"### Database\n"
+            f"**Size:** {d.db_size_mb:.2f} MB"
+        )
+        container.add_item(ui.TextDisplay(db_text))
+
+        # Last refresh info
+        if d.cache_last_refresh_ago is not None:
+            if d.cache_last_refresh_ago < 3600:
+                refresh_str = f"{int(d.cache_last_refresh_ago / 60)}m ago"
+            elif d.cache_last_refresh_ago < 86400:
+                refresh_str = f"{d.cache_last_refresh_ago / 3600:.1f}h ago"
+            else:
+                refresh_str = f"{d.cache_last_refresh_ago / 86400:.1f}d ago"
+            container.add_item(ui.TextDisplay(f"\n-# Last cache refresh: {refresh_str}"))
+
+    def _build_system_page(self, container: ui.Container) -> None:
+        """Build the System page content."""
+        d = self.data
+
+        container.add_item(ui.TextDisplay("## 🔧 System"))
+
+        # Extensions section
+        cog_list = ", ".join(sorted(d.loaded_cogs))
+        ext_text = (
+            f"### Extensions ({len(d.loaded_cogs)}/{d.total_cogs})\n"
+            f"{cog_list}"
+        )
+        container.add_item(ui.TextDisplay(ext_text))
+
+        # Failed extensions
+        if d.failed_cogs:
+            failed_list = ", ".join(d.failed_cogs)
+            container.add_item(ui.TextDisplay(f"\n**Failed:** {failed_list}"))
+        else:
+            container.add_item(ui.TextDisplay("\n**Failed:** None"))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Environment section
+        env_text = (
+            f"### Environment\n"
+            f"**Python:** {d.python_version}\n"
+            f"**discord.py:** {d.discordpy_version}\n"
+            f"**Platform:** {d.platform}"
+        )
+        container.add_item(ui.TextDisplay(env_text))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Bot Identity section
+        identity_text = (
+            f"### Bot Identity\n"
+            f"**Name:** {d.bot_name}\n"
+            f"**ID:** {d.bot_id}\n"
+            f"**Guilds:** {d.guild_count}"
+        )
+        container.add_item(ui.TextDisplay(identity_text))
+
+    async def _handle_page_select(self, interaction: discord.Interaction) -> None:
+        """Handle page selection from dropdown."""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This status view is not for you.", ephemeral=True)
+            return
+
+        # Get selected value from the select component
+        if interaction.data and 'values' in interaction.data:
+            self.current_page = int(interaction.data['values'][0])
+            self._build_ui()
+            await interaction.response.edit_message(view=self)
+
+    async def _handle_prev(self, interaction: discord.Interaction) -> None:
+        """Handle previous button click."""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This status view is not for you.", ephemeral=True)
+            return
+
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._build_ui()
+            await interaction.response.edit_message(view=self)
+
+    async def _handle_next(self, interaction: discord.Interaction) -> None:
+        """Handle next button click."""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This status view is not for you.", ephemeral=True)
+            return
+
+        if self.current_page < len(self.PAGE_NAMES) - 1:
+            self.current_page += 1
+            self._build_ui()
+            await interaction.response.edit_message(view=self)
+
+    async def _handle_refresh(self, interaction: discord.Interaction) -> None:
+        """Handle refresh button click - requires callback to gather fresh data."""
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This status view is not for you.", ephemeral=True)
+            return
+
+        # Signal that refresh was requested - the cog handles data gathering
+        await interaction.response.send_message("🔄 Use the command again for fresh data.", ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        """Disable navigation on timeout."""
+        if self.message:
+            try:
+                # Rebuild with disabled state
+                self.clear_items()
+
+                # Rebuild current page container (read-only)
+                container = ui.Container(accent_colour=self._get_accent_color())
+
+                if self.current_page == 0:
+                    self._build_overview_page(container)
+                elif self.current_page == 1:
+                    self._build_performance_page(container)
+                elif self.current_page == 2:
+                    self._build_music_page(container)
+                elif self.current_page == 3:
+                    self._build_storage_page(container)
+                elif self.current_page == 4:
+                    self._build_system_page(container)
+
+                container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+                container.add_item(ui.TextDisplay(f"-# Snapshot taken <t:{self.data.snapshot_timestamp}:R> (view expired)"))
+
+                self.add_item(container)
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"StatusView timeout cleanup failed: {e}")
+
+
+async def show_status(
+    ctx: commands.Context,
+    data: StatusData,
+    timeout: float = 120.0
+) -> discord.Message:
+    """Display an interactive status view.
+
+    This is the preferred API for showing the status view. It handles
+    view construction, message sending, and lifecycle management.
+
+    Args:
+        ctx: The command context.
+        data: StatusData containing all status information.
+        timeout: View timeout in seconds (default 120s).
+
+    Returns:
+        The sent message containing the status view.
+    """
+    view = StatusView(ctx=ctx, data=data, timeout=timeout)
+    message = await ctx.send(view=view)
     view.message = message
     return message
