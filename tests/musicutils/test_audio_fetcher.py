@@ -155,7 +155,7 @@ class TestAudioFetcherAmbientCacheHit:
         self, fetcher, mock_cache_manager, mock_track
     ):
         """Direct fetch is attempted before falling back to residential cache.
-        
+
         Even if a residential cached file exists, we try direct first in case
         the 403 has cleared - direct gives higher quality than residential.
         """

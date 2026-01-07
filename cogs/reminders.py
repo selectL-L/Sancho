@@ -1540,7 +1540,10 @@ class Reminders(BaseCog):
 
         except pytz.UnknownTimeZoneError:
             self.logger.warning(f"Failed to set timezone for user {ctx.author.id}: Unrecognized timezone '{timezone_str}'.")
-            await ctx.send(f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`).")
+            await ctx.send(
+                f"`{timezone_str}` is not a recognized timezone. Please use a standard IANA name (e.g., `US/Eastern`, `Europe/London`), "
+                f"a common abbreviation (e.g., `EST`, `BST`), or a GMT/UTC offset (e.g., `GMT+5`)."
+            )
         except Exception as e:
             self.logger.error(f"Unexpected error in timezone NLP: {e}", exc_info=True)
             await ctx.send("An unexpected error occurred.")

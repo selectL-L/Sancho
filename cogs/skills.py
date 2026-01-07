@@ -212,7 +212,10 @@ class Skills(BaseCog):
             # --- Step 1: Get Skill Name ---
             skill_name = ""
             while True:
-                await ctx.send(f"What would you like to name this skill? You can say `exit` at any time to cancel this process.\nYou have **{user_skill_limit - current_skills_count}** skill slot(s) remaining.")
+                await ctx.send(
+                    f"What would you like to name this skill? You can say `exit` at any time to cancel this process.\n"
+                    f"You have **{user_skill_limit - current_skills_count}** skill slot(s) remaining."
+                )
                 name_msg = await self.bot.wait_for('message', check=check, timeout=45.0)
 
                 if name_msg.content.strip().lower() == 'exit':
@@ -230,7 +233,10 @@ class Skills(BaseCog):
             # --- Step 2: Get Aliases ---
             aliases = []
             while True:
-                await ctx.send(f"Got it: `{skill_name}`. What aliases should trigger this skill? Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`.")
+                await ctx.send(
+                    f"Got it: `{skill_name}`. What aliases should trigger this skill? "
+                    f"Please separate them with a `|` (e.g., `smash | big hit | bonk`). You can also say `none`."
+                )
                 aliases_msg = await self.bot.wait_for('message', check=check, timeout=60.0)
 
                 if aliases_msg.content.strip().lower() == 'exit':

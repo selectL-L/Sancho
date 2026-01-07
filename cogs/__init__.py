@@ -1,7 +1,7 @@
 """
 cogs/
 
-This package contains the "cogs" (extensions) for the Sancho Discord bot.
+This package contains the "cogs" (extensions) for the Discord bot.
 Each module in this package represents a distinct feature set or category of commands.
 
 Modules:

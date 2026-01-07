@@ -8,7 +8,6 @@ meaningful behavior that needs testing:
 - AmbienceState.request_switch() / consume_switch() - state machine
 """
 
-import time
 from unittest.mock import MagicMock
 import pytest
 

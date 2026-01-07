@@ -6,13 +6,12 @@ This module contains no I/O operations and minimal dependencies.
 Other musicutils modules import from here.
 """
 
-import asyncio
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
     from discord.ext import commands
