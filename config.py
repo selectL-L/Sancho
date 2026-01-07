@@ -458,22 +458,13 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Convert image format
         ((r'\bconvert\b', r'\bchange to\b'), 'ImageCog', 'convert'),
     ],
-    # Fun Group
+    # Fun Group - Complex commands only (BOD fate system)
+    # Simple Fun commands (including yujin_quotes) are registered dynamically by the Fun cog
     [
-        # 8-Ball
-        ((r'8\s?-?ball',), 'Fun', 'eight_ball'),
-        # Yujin Quotes (for BOD fate system)
-        ((r'\b(yujin\s*)?quotes?\b',), 'Fun', 'yujin_quotes'),
         # BOD Leaderboard (must be checked before the general 'bod' command)
         ((r'\bbod\s.*(leaderboard|lb|scores|ranks)\b',), 'Fun', 'bod_leaderboard'),
         # BOD
         ((r'\bbod\b',), 'Fun', 'bod'),
-        # Sanitize
-        ((r'\bsanitize\b', r'\bsanitise\b'), 'Fun', 'sanitize'),
-        # Pear Wiggler
-        ((r'\bpear\s?wiggler\b',), 'Fun', 'pear_wiggler'),
-        # Issues
-        ((r'\bissues\b', r'\bissue\b'), 'Fun', 'issues'),
     ],
     # Music Group
     [
@@ -507,5 +498,5 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bmove\b',), 'Music', 'move_nlp'),
         # Leave / disconnect
         ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
-    ]
+    ],
 ]

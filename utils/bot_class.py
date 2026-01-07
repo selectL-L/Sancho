@@ -65,6 +65,7 @@ class CoreBot(commands.Bot):
         self.console_task: Optional[asyncio.Task] = None
         self.restart_signal: bool = False
         self.start_time: float = time.time()
+        self._dynamic_nlp_groups: list[list[tuple[tuple[str, ...], str, str]]] = []
 
     @runtime_checkable
     class ContextLike(Protocol):
@@ -118,8 +119,9 @@ class CoreBot(commands.Bot):
             (cog, method, method_name) or `None` if no handler matched.
         """
         # Find a candidate per group (first matching command in a group)
+        # Check both static (config.py) and dynamic (cog-registered) groups
         candidate_commands = []
-        for group in config.NLP_COMMANDS:
+        for group in config.NLP_COMMANDS + self._dynamic_nlp_groups:
             for keywords, cog_name, method_name in group:
                 for keyword in keywords:
                     try:
@@ -153,6 +155,19 @@ class CoreBot(commands.Bot):
             return None
 
         return cog, method, method_name
+
+    def register_nlp_group(self, entries: list[tuple[tuple[str, ...], str, str]]) -> None:
+        """Register a group of NLP commands dynamically.
+
+        Cogs can call this to add their own NLP patterns without
+        polluting config.py. Dynamic groups are checked after
+        static NLP_COMMANDS groups (lower priority).
+
+        Args:
+            entries: A list of NLP command tuples, each containing
+                (keyword_patterns, cog_name, method_name).
+        """
+        self._dynamic_nlp_groups.append(entries)
 
     def register_nlp_command(self) -> None:
         """Registers the /nlp slash command if not already registered.

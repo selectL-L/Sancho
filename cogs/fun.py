@@ -2,6 +2,9 @@
 
 This cog contains miscellaneous "fun" commands that don't fit into other categories.
 It includes commands like a magic 8-ball and other simple, interactive features.
+
+Simple commands are defined in FUN_COMMANDS registry and handled by the dispatcher.
+Complex commands (BOD, etc.) are implemented as regular methods.
 """
 
 import asyncio
@@ -10,8 +13,10 @@ import random
 import re
 import time
 import tomllib
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 import discord
@@ -22,8 +27,99 @@ from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 
 
+# =============================================================================
+# FUN COMMAND REGISTRY
+# =============================================================================
+# Define simple commands here. The dispatcher handles all the boilerplate.
+# Complex commands (BOD, leaderboard, etc.) are regular methods below.
+
+
+@dataclass
+class FunCommand:
+    """Definition for a simple fun command.
+
+    Attributes:
+        name: Method name and identifier (used by NLP dispatcher).
+        patterns: Tuple of regex patterns that trigger this command.
+        error_msg: Message shown when command fails.
+        is_image: If True, send as file attachment. If False, send as text.
+        content: Literal value - text string OR image filename in ASSETS_PATH.
+        file: Read lines from this text file in ASSETS_PATH.
+        attr: Read items from self.{attr} at runtime.
+        image_cog: Call ImageCog.{method}(ctx, query) to get image bytes.
+        random: If True and source has multiple items, pick randomly.
+        require_query: If True, user must provide text after trigger.
+        query_error: Message shown when require_query=True but query is empty.
+    """
+
+    name: str
+    patterns: Tuple[str, ...]
+    error_msg: str = "Something went wrong!"
+
+    # Output type
+    is_image: bool = False
+
+    # Source - set exactly ONE:
+    content: Optional[str] = None
+    file: Optional[str] = None
+    attr: Optional[str] = None
+    image_cog: Optional[str] = None
+
+    # Behavior modifiers
+    random: bool = True
+    require_query: bool = False
+    query_error: str = "You need to provide something!"
+
+
+# Registry of simple fun commands
+FUN_COMMANDS: List[FunCommand] = [
+    # Static images
+    FunCommand(
+        'sanitize', (r'\bsanitize\b', r'\bsanitise\b'),
+        is_image=True, content='sanitize.webp',
+        error_msg="I couldn't find my sanitizer!"),
+    FunCommand(
+        'pear_wiggler', (r'\bpear\s?wiggler\b',),
+        is_image=True, content='pearwiggler.gif',
+        error_msg="I couldn't find the wiggler of the pear variety!"),
+
+    # Static text
+    FunCommand(
+        'issues', (r'\bissues?\b',),
+        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) '
+                'please write your suggestions and issues over there!'),
+
+    # Random from file
+    FunCommand(
+        'eight_ball', (r'8\s?-?ball',),
+        file='8ball.txt',
+        require_query=True,
+        query_error="I cannot intuit from nothing!",
+        error_msg="I seem to have lost my magic 8-ball..."),
+
+    # Random quote from BOD fate system (treasure hunt - shows ONE quote)
+    FunCommand(
+        'yujin_quotes', (r'\b(yujin\s*)?quotes?\b',),
+        attr='bod_quote_display',
+        error_msg="No Yujin quotes have been configured yet."),
+]
+
+# Build lookup dict for __getattr__
+_FUN_COMMAND_LOOKUP: Dict[str, FunCommand] = {cmd.name: cmd for cmd in FUN_COMMANDS}
+
+# Auto-export for config.py - converts registry to NLP_COMMANDS format
+FUN_NLP_ENTRIES: List[Tuple[Tuple[str, ...], str, str]] = [
+    (cmd.patterns, 'Fun', cmd.name) for cmd in FUN_COMMANDS
+]
+
+
 class Fun(BaseCog):
-    """A cog for fun, miscellaneous commands."""
+    """A cog for fun, miscellaneous commands.
+
+    Simple commands are defined in FUN_COMMANDS registry at module level.
+    The __getattr__ method routes NLP dispatcher calls to _dispatch_fun_command.
+    Complex commands (BOD, leaderboard) are implemented as regular methods.
+    """
 
     def __init__(self, bot: CoreBot):
         """Initializes the Fun cog.
@@ -32,24 +128,6 @@ class Fun(BaseCog):
             bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
-        # Load the 8-ball responses from the assets file upon initialization.
-        self.responses = self._load_8ball_responses()
-        self.fun_commands = {
-            'sanitize': {
-                'type': 'image',
-                'file': 'sanitize.webp',
-                'error_message': "I couldn't find my sanitizer!"
-            },
-            'pear_wiggler': {
-                'type': 'image',
-                'file': 'pearwiggler.gif',
-                'error_message': "I couldn't find the wiggler of the pear variety!"
-            },
-            'issues': {
-                'type': 'text',
-                'content': 'My issues page is [here](https://github.com/selectL-L/Sancho/issues) please write your suggestions and issues over there!'
-            }
-        }
         self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
         self.has_cleaned_up_chains = False
         # BOD Fate System
@@ -69,7 +147,7 @@ class Fun(BaseCog):
                 data = tomllib.load(f)
 
             # Load display quotes
-            self.bod_quote_display = data.get('quotes', {}).get('display', [])
+            self.bod_quote_display = data.get('quotes', {}).get('list', [])
 
             # Load triggers - convert string keys to int
             raw_triggers = data.get('triggers', {})
@@ -89,66 +167,131 @@ class Fun(BaseCog):
         except Exception as e:
             self.logger.error(f"Unexpected error loading bod_quotes.toml: {e}", exc_info=True)
 
-    async def fun_command_handler(self, ctx: commands.Context, command: str) -> None:
-        """A generic handler for "fun" commands that post content like images, text, or links.
+    # ==========================================================================
+    # Fun Command Registry Dispatcher
+    # ==========================================================================
+
+    def __getattr__(self, name: str) -> Any:
+        """Dynamic method resolution for registered fun commands.
+
+        When the NLP dispatcher calls getattr(cog, 'sanitize'), this method
+        intercepts the lookup, finds the FunCommand entry in the registry,
+        and returns a handler that routes through _dispatch_fun_command.
+
+        Complex commands (BOD, bod_leaderboard, etc.) are defined as regular
+        methods and take precedence over this lookup.
 
         Args:
-            ctx (commands.Context): The context of the command.
-            command (str): The command that was triggered.
-        """
-        command_details = self.fun_commands.get(command)
-        if not command_details:
-            self.logger.error(f"Fun command '{command}' has no configuration.")
-            return
-
-        command_type = command_details.get('type')
-
-        try:
-            if command_type == 'image':
-                image_file = command_details.get('file')
-                if not image_file:
-                    self.logger.error(f"Image command '{command}' is missing 'file' in its configuration.")
-                    return
-
-                file_path = os.path.join(config.ASSETS_PATH, image_file)
-                await ctx.reply(file=discord.File(file_path))
-                self.logger.info(f"Image command '{command}' used by {ctx.author}.")
-
-            elif command_type == 'text':
-                content = command_details.get('content')
-                if not content:
-                    self.logger.error(f"Text command '{command}' is missing 'content' in its configuration.")
-                    return
-
-                await ctx.reply(content)
-                self.logger.info(f"Text command '{command}' used by {ctx.author}.")
-
-        except FileNotFoundError:
-            error_message = command_details.get('error_message', f"Asset is missing for '{command}'. Please contact my author to fix it!")
-            await ctx.reply(error_message)
-            self.logger.error(f"Asset not found for '{command}' command.")
-        except Exception as e:
-            await ctx.reply("Something went wrong. Please try again.")
-            self.logger.error(f"Error in fun_command_handler for '{command}': {e}", exc_info=True)
-
-    def _load_8ball_responses(self) -> List[str]:
-        """Loads the magic 8-ball responses from the `8ball.txt` file.
+            name: The attribute name being accessed.
 
         Returns:
-            List[str]: A list of response strings. Returns a default list
-                       if the file is not found or is empty.
+            An async handler function for registered commands.
+
+        Raises:
+            AttributeError: If name is not a registered command.
         """
-        responses_path = os.path.join(config.ASSETS_PATH, '8ball.txt')
+        cmd = _FUN_COMMAND_LOOKUP.get(name)
+        if cmd is not None:
+            async def handler(ctx: commands.Context, query: str) -> None:
+                await self._dispatch_fun_command(cmd, ctx, query)
+            return handler
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+    async def _dispatch_fun_command(
+        self,
+        cmd: FunCommand,
+        ctx: commands.Context,
+        query: str
+    ) -> None:
+        """Execute a registered fun command.
+
+        Handles query validation, source resolution, random selection,
+        output formatting (text vs image), and error handling.
+
+        Args:
+            cmd: The FunCommand definition from the registry.
+            ctx: The command context.
+            query: The user's full query string.
+        """
+        # Check query requirement
+        if cmd.require_query:
+            pattern = '|'.join(cmd.patterns)
+            cleaned = re.sub(rf'^.*?({pattern})\s*', '', query, flags=re.IGNORECASE).strip()
+            if not cleaned:
+                await ctx.reply(cmd.query_error)
+                return
+
         try:
-            with open(responses_path, 'r', encoding='utf-8') as f:
-                responses = [line.strip() for line in f if line.strip()]
-            if not responses:
-                self.logger.error("8ball.txt is empty. 8ball command will not work.")
-                return ["It seems I am out of answers."]
-            return responses
+            # Resolve source to list of items
+            items = await self._resolve_fun_source(cmd)
+            if not items:
+                await ctx.reply(cmd.error_msg)
+                return
+
+            # Select item
+            item = random.choice(items) if cmd.random else items[0]
+
+            # Send output
+            if cmd.is_image:
+                if cmd.image_cog:
+                    # item is already processed bytes from ImageCog
+                    await ctx.reply(file=discord.File(BytesIO(item), filename=f"{cmd.name}.png"))
+                else:
+                    # item is filename in ASSETS_PATH
+                    path = os.path.join(config.ASSETS_PATH, item)
+                    await ctx.reply(file=discord.File(path))
+            else:
+                await ctx.reply(item)
+
+            self.logger.info(f"Fun command '{cmd.name}' used by {ctx.author}")
+
         except FileNotFoundError:
-            self.logger.error("8ball.txt not found. 8ball command will not work.")
-            return ["I seem to have lost my magic 8-ball..."]
+            await ctx.reply(cmd.error_msg)
+            self.logger.error(f"Asset missing for fun command '{cmd.name}'")
+        except Exception as e:
+            await ctx.reply(cmd.error_msg)
+            self.logger.error(f"Error in fun command '{cmd.name}': {e}", exc_info=True)
+
+    async def _resolve_fun_source(self, cmd: FunCommand) -> List[Any]:
+        """Resolve a FunCommand's source to a list of items.
+
+        Args:
+            cmd: The FunCommand definition.
+
+        Returns:
+            List of items (strings, filenames, or bytes depending on source type).
+            Empty list if source is unavailable.
+        """
+        if cmd.content is not None:
+            # Literal content - wrap in list
+            return [cmd.content]
+
+        elif cmd.file is not None:
+            # Read lines from file
+            path = os.path.join(config.ASSETS_PATH, cmd.file)
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip()]
+            return lines
+
+        elif cmd.attr is not None:
+            # Read from runtime attribute
+            return getattr(self, cmd.attr, [])
+
+        elif cmd.image_cog is not None:
+            # Call ImageCog method - returns bytes
+            image_cog = self.bot.get_cog('ImageCog')
+            if not image_cog:
+                self.logger.warning(f"ImageCog not available for '{cmd.name}'")
+                return []
+            method = getattr(image_cog, cmd.image_cog, None)
+            if not method:
+                self.logger.error(f"ImageCog has no method '{cmd.image_cog}'")
+                return []
+            # Note: For image_cog, we'd need to pass ctx/query and await
+            # This is a placeholder - actual implementation depends on ImageCog API
+            return []
+
+        return []
 
     # ==========================================================================
     # BOD Fate System Helpers
@@ -421,6 +564,58 @@ class Fun(BaseCog):
                 self.bod_timeout_tasks.pop(user_id, None)
                 self.logger.info(f"Removed BOD task for user {user_id} from tracking.")
 
+    @commands.hybrid_command(name='allquotes', description='Show all Yujin quotes (admin only)')
+    @commands.is_owner()
+    async def all_quotes(self, ctx: commands.Context) -> None:
+        """Display ALL available Yujin quotes for BOD (admin reference).
+
+        Shows quotes in shuffled order. This is an admin-only command
+        for managing/reviewing the quote pool.
+
+        Args:
+            ctx (commands.Context): The command context.
+        """
+        if not self.bod_quote_display:
+            await ctx.reply("No Yujin quotes have been configured yet.")
+            return
+
+        # Shuffle a copy of the quotes
+        shuffled_quotes = self.bod_quote_display.copy()
+        random.shuffle(shuffled_quotes)
+
+        embed = discord.Embed(
+            title="Yujin's Words (All Quotes)",
+            description="*Admin reference - all configured quotes*",
+            color=discord.Color.purple()
+        )
+
+        # Format quotes as a numbered list
+        quotes_text = "\n".join(f'• *"{quote}"*' for quote in shuffled_quotes)
+
+        # Discord embed field limit is 1024 chars, split if needed
+        if len(quotes_text) <= 1024:
+            embed.add_field(name="Known Quotes", value=quotes_text, inline=False)
+        else:
+            # Split into chunks
+            chunks = []
+            current_chunk = ""
+            for quote in shuffled_quotes:
+                line = f'• *"{quote}"*\n'
+                if len(current_chunk) + len(line) > 1024:
+                    chunks.append(current_chunk.rstrip())
+                    current_chunk = line
+                else:
+                    current_chunk += line
+            if current_chunk:
+                chunks.append(current_chunk.rstrip())
+
+            for i, chunk in enumerate(chunks):
+                field_name = "Known Quotes" if i == 0 else "\u200b"  # invisible char for continuation
+                embed.add_field(name=field_name, value=chunk, inline=False)
+
+        await ctx.reply(embed=embed)
+        self.logger.info(f"All Yujin quotes displayed for admin {ctx.author}.")
+
     async def bod(self, ctx: commands.Context, query: str) -> None:
         """A special command that rolls a 1d4.
 
@@ -538,56 +733,6 @@ class Fun(BaseCog):
         except Exception as e:
             await ctx.reply("Something went wrong with the dice roll. Please try again.")
             self.logger.error(f"Error in Fun.bod: {e}", exc_info=True)
-
-    async def eight_ball(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for the 8-ball command.
-
-        It picks a random response from the pre-loaded list and sends it to the channel.
-
-        Args:
-            ctx (commands.Context): The context of the command.
-            query (str): The user's question for the 8-ball.
-        """
-        # The NLP dispatcher passes the whole message. We need to strip the trigger phrase.
-        # This pattern is the same as the one in config.py
-        trigger_pattern = r'8\s?-?ball'
-        cleaned_query = re.sub(rf'^\s*{trigger_pattern}\s*', '', query, flags=re.IGNORECASE).strip()
-
-        if not cleaned_query:
-            await ctx.reply("I cannot intuit from nothing!")
-            self.logger.info(f"8ball command used by {ctx.author} with no actual query.")
-            return
-
-        response = random.choice(self.responses)
-        await ctx.reply(response)
-        self.logger.info(f"8ball command used by {ctx.author} with query '{cleaned_query}'. Response: '{response}'")
-
-    async def sanitize(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for the sanitize command.
-
-        Args:
-            ctx (commands.Context): The command context.
-            query (str): The user's query.
-        """
-        await self.fun_command_handler(ctx, 'sanitize')
-
-    async def pear_wiggler(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for the pear wiggler command.
-
-        Args:
-            ctx (commands.Context): The command context.
-            query (str): The user's query.
-        """
-        await self.fun_command_handler(ctx, 'pear_wiggler')
-
-    async def issues(self, ctx: commands.Context, *, query: str) -> None:
-        """NLP handler for the issues command.
-
-        Args:
-            ctx (commands.Context): The command context.
-            query (str): The user's query.
-        """
-        await self.fun_command_handler(ctx, 'issues')
 
     async def cog_ready(self) -> None:
         """Cleans up any active BOD chains that were interrupted by a restart.
@@ -721,62 +866,6 @@ class Fun(BaseCog):
         await ctx.reply(embed=embed)
         self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
 
-    async def yujin_quotes(self, ctx: commands.Context, query: str) -> None:
-        """Display available Yujin quotes for BOD.
-
-        Shows quotes in shuffled order so users can't correlate
-        position with chain number.
-
-        Args:
-            ctx (commands.Context): The command context.
-            query (str): The user's query (unused).
-        """
-        if not self.bod_quote_display:
-            await ctx.reply("No Yujin quotes have been configured yet.")
-            return
-
-        # Shuffle a copy of the quotes
-        shuffled_quotes = self.bod_quote_display.copy()
-        random.shuffle(shuffled_quotes)
-
-        embed = discord.Embed(
-            title="Yujin's Words",
-            description="*Speak her words before the boundary, and fate may smile upon you...*",
-            color=discord.Color.purple()
-        )
-
-        # Format quotes as a numbered list
-        quotes_text = "\n".join(f"• *\"{quote}\"*" for quote in shuffled_quotes)
-
-        # Discord embed field limit is 1024 chars, split if needed
-        if len(quotes_text) <= 1024:
-            embed.add_field(name="Known Quotes", value=quotes_text, inline=False)
-        else:
-            # Split into chunks
-            chunks = []
-            current_chunk = ""
-            for quote in shuffled_quotes:
-                line = f"• *\"{quote}\"*\n"
-                if len(current_chunk) + len(line) > 1024:
-                    chunks.append(current_chunk.rstrip())
-                    current_chunk = line
-                else:
-                    current_chunk += line
-            if current_chunk:
-                chunks.append(current_chunk.rstrip())
-
-            for i, chunk in enumerate(chunks):
-                embed.add_field(
-                    name=f"Known Quotes {f'(Part {i+1})' if len(chunks) > 1 else ''}",
-                    value=chunk,
-                    inline=False
-                )
-
-        embed.set_footer(text="The right words at the right time may change your fortune...")
-
-        await ctx.reply(embed=embed)
-        self.logger.info(f"Yujin quotes viewed by {ctx.author}.")
-
 
 async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.
@@ -784,4 +873,5 @@ async def setup(bot: CoreBot) -> None:
     Args:
         bot (CoreBot): The bot instance.
     """
+    bot.register_nlp_group(FUN_NLP_ENTRIES)
     await bot.add_cog(Fun(bot))
