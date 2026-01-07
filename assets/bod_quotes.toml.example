@@ -1,0 +1,21 @@
+# BOD Quotes Configuration - Template
+# Copy to 'bod_quotes.toml' and customize.
+#
+# [quotes] - Shown via "yujin quotes" (shuffled on display)
+# [triggers] - Chain position mapped to trigger configs
+#   pattern: Case-insensitive regex matched against user's previous message
+#   tier: LUCKY (50%), BLESSED (75%), or GUARANTEED (100%)
+#   count: How many fate charges to grant
+
+[quotes]
+list = [
+    "Example quote - replace with your own",
+]
+
+# Triggers: chain_position = [{ pattern = "...", tier = "...", count = N }, ...]
+# Chain 0 = first roll (no chain yet), Chain 1 = second roll, etc.
+
+[triggers]
+# 0 = [
+#     { pattern = "example", tier = "LUCKY", count = 1 }
+# ]
