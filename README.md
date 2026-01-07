@@ -1,8 +1,8 @@
-# Sancho (V0.917 - The Music Update)
+# Shiori (V0.9.25 - The Repo Update)
 
 **A Discord bot designed to be more reasonable.**
 
-Sancho is built on the simple premise interacting with her should feel natural. Rather than forcing you to memorize rigid command structures like most other bots, or using slash commands, Sancho attempts to interpret your *intent*.
+Shiori is built on the simple premise interacting with her should feel natural. Rather than forcing you to memorize rigid command structures like most other bots, or using slash commands, Shiori attempts to interpret your *intent*.
 
 If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too, hopefully.
 
@@ -23,7 +23,7 @@ The Skills system acts as a macro manager, allowing you to save complex dice not
 ### ⏰ Reminders
 Set reminders using natural language without worrying about strict syntax.
 *   **Natural Phrasing**: `remind me in 2 hours to check the laundry` or `remind me next tuesday to visit my nan`.
-*   **Timezone Aware**: Use `set timezone` to ensure Sancho knows *your* "8 PM", not the server's.
+*   **Timezone Aware**: Use `set timezone` to ensure Shiori knows *your* "8 PM", not the server's.
 *(Though it is very important to understand that reminders changes very often, it's the most complex function)*
 
 ### 🖼️ Image Tools
@@ -50,10 +50,10 @@ The bot appears to "listen" to music via its Discord status, cycling through a c
 
 ## The Architecture: A "Hybrid" System
 
-Sancho is distinct from standard `discord.py` bots because of her **Hybrid Command Dispatcher**.
+Shiori is distinct from standard `discord.py` bots because of her **Hybrid Command Dispatcher**.
 
 ### 1. The Brain: NLP Dispatcher
-Traditional bots wait for a specific string (e.g., `!ping`). Sancho understands normal language. (Mostly)
+Traditional bots wait for a specific string (e.g., `!ping`). Shiori understands normal language. (Mostly)
 *   **Interceptor**: The bot intercepts messages before being sent to the usual command dispatcher.
 *   **Analysis**: It scans the content against a registry of regex patterns defined in `config.py`.
 *   **Intent**: If a pattern matches (e.g., `r'\broll\b'`), it routes the message to the appropriate handler, regardless of surrounding "fluff" words.
@@ -70,7 +70,7 @@ If you don't have Python installed or prefer a standalone executable, you can do
 1.  Go to the **Actions** tab in this repository.
 2.  Click on the latest workflow run (usually named "Build Application").
 3.  Scroll down to the **Artifacts** section at the bottom.
-4.  Download the **Sancho** zip file for your platform (Windows/Linux/macOS).
+4.  Download the **Shiori** zip file for your platform (Windows/Linux/macOS).
 
 *Note: You will still need to download the `assests` folder and configure `info.env` in the folder where you extract the executable.*
 
@@ -121,8 +121,8 @@ To disable ambience output while keeping internal mood cycling, set `AMBIENCE_EN
 
 1.  **Clone the repository**
     ```bash
-    git clone https://github.com/selectL-L/Sancho.git
-    cd Sancho
+    git clone https://github.com/selectL-L/Shiori.git
+    cd Shiori
     ```
 
 2.  **Run once to generate config**
@@ -157,7 +157,7 @@ We welcome contributions! Please follow these guidelines to keep the project hea
 
 ### Runtime Control
 
-Sancho can be controlled at runtime without using Discord commands. This is **by design** and can be used for server administration, automated scripts, or when you simply prefer managing the bot externally.
+Shiori can be controlled at runtime without using Discord commands. This is **by design** and can be used for server administration, automated scripts, or when you simply prefer managing the bot externally.
 
 #### Available Commands
 
@@ -206,7 +206,7 @@ echo "status" | nc localhost 9999
 
 > [!WARNING]
 > **Database Schema Management**
-> Sancho maintains **two** definitions of the database schema. You must update **BOTH** when making changes:
+> Shiori maintains **two** definitions of the database schema. You must update **BOTH** when making changes:
 > 1.  `utils/database.py`: Used for runtime validation and fresh installs.
 > 2.  `migrate_db.py`: Used for migrating existing data to a new schema.
 
