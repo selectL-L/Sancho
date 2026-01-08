@@ -401,40 +401,55 @@ class Math(BaseCog):
             Dict[str, Any]: A dictionary containing:
                 - 'total': The final result (str).
                 - 'breakdown': A list of roll description strings (List[str]).
-                - 'processed_query': The query after processing (str).
+                - 'expression': The clean, normalized expression (str).
+                - 'context': Context modifiers like advantage/SP (str or empty).
 
         Raises:
             ValueError: If the query is invalid.
         """
-        # --- 1. Sanitize and Detect Keywords ---
-        original_query = " ".join(query.lower().split())
+        # --- 1. Detect Context Modifiers ---
+        work_query = " ".join(query.lower().split())
 
         # Check for advantage/disadvantage.
-        adv = bool(re.search(r'\b(advantage|adv)\b', original_query))
-        dis = bool(re.search(r'\b(disadvantage|dis)\b', original_query))
+        adv = bool(re.search(r'\b(advantage|adv)\b', work_query))
+        dis = bool(re.search(r'\b(disadvantage|dis)\b', work_query))
 
         if adv and dis:
             raise ValueError("Cannot roll with both advantage and disadvantage.")
 
-        # Extract SP (default 50).
+        # Extract SP (default 50) - must happen BEFORE lexing to avoid NUMBER+MODULO confusion.
         sp = 50
-        sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', original_query)
+        sp_explicit = False
+        sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', work_query)
         if sp_match:
             sp = int(sp_match.group(2))
+            sp_explicit = True
             if not (0 <= sp <= 100):
                 raise ValueError("SP must be between 0 and 100.")
-            original_query = original_query.replace(sp_match.group(0), '', 1)
-
-        # Remove keywords (advantage/disadvantage/roll/dice) from query before parsing
-        original_query = re.sub(r'\b(advantage|adv|disadvantage|dis|roll|dice)\b', '', original_query)
+            work_query = work_query.replace(sp_match.group(0), '', 1)
 
         # --- 2. Parse and Evaluate ---
-        lexer = DiceLexer(original_query)
+        # The lexer ignores unrecognized text (roll, dice, me, a, etc.) automatically.
+        lexer = DiceLexer(work_query)
         parser = DiceParser(lexer, advantage=adv, disadvantage=dis, sp=sp)
 
         result = await parser.parse()
 
-        # --- 3. Format Result ---
+        # --- 3. Build Clean Expression and Context ---
+        clean_expression = lexer.get_expression()
+
+        # Build context suffix for display
+        context_parts: List[str] = []
+        if adv:
+            context_parts.append("advantage")
+        if dis:
+            context_parts.append("disadvantage")
+        if sp_explicit:
+            context_parts.append(f"{sp}% chance")
+
+        context_suffix = f" ({', '.join(context_parts)})" if context_parts else ""
+
+        # --- 4. Format Result ---
         if result == int(result):
             result_display = str(int(result))
         else:
@@ -443,7 +458,8 @@ class Math(BaseCog):
         return {
             'total': result_display,
             'breakdown': parser.breakdown,
-            'processed_query': original_query.strip()
+            'expression': clean_expression,
+            'context': context_suffix
         }
 
     async def roll(self, ctx: commands.Context, *, query: str) -> None:
@@ -457,11 +473,12 @@ class Math(BaseCog):
             result_data = await self.evaluate_roll(query)
             result_display = result_data['total']
             roll_descriptions = result_data['breakdown']
-            processed_query = result_data['processed_query']
+            expression = result_data['expression']
+            context = result_data['context']
 
             # Response formatting.
-            response_parts = []
-            response_parts.append(f"`{processed_query}`")
+            response_parts: List[str] = []
+            response_parts.append(f"`{expression}`{context}")
             response_parts.append(f"{ctx.author.mention}, you rolled: **{result_display}**")
             # Add roll breakdown.
             response_parts.extend(roll_descriptions)
@@ -492,10 +509,11 @@ class DiceToken:
     RPAREN = 'RPAREN'
     EOF = 'EOF'
 
-    def __init__(self, type_: str, value: Any, raw: str = ""):
+    def __init__(self, type_: str, value: Any, raw: str = "", normalized: str = ""):
         self.type = type_
         self.value = value
         self.raw = raw
+        self.normalized = normalized or raw  # Fallback to raw if not provided
 
     def __repr__(self):
         return f"Token({self.type}, {self.value})"
@@ -504,11 +522,11 @@ class DiceToken:
 class DiceLexer:
     def __init__(self, text: str):
         self.text = text
-        self.tokens = []
+        self.tokens: List[DiceToken] = []
         self.current = 0
         self._tokenize()
 
-    def _tokenize(self):
+    def _tokenize(self) -> None:
         # Regex patterns - Order DOES matter here
         patterns = [
             (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?!?'),
@@ -537,10 +555,46 @@ class DiceLexer:
             if kind:
                 if kind == DiceToken.NUMBER:
                     self.tokens.append(DiceToken(kind, float(value), value))
+                elif kind == DiceToken.DICE:
+                    # Normalize dice notation: d10 -> 1d10
+                    normalized = self._normalize_dice(value)
+                    self.tokens.append(DiceToken(kind, value, value, normalized))
+                elif kind == DiceToken.COIN:
+                    # Normalize coin notation: c -> 1c
+                    normalized = self._normalize_coin(value)
+                    self.tokens.append(DiceToken(kind, value, value, normalized))
                 else:
                     self.tokens.append(DiceToken(kind, value, value))
 
         self.tokens.append(DiceToken(DiceToken.EOF, None))
+
+    def _normalize_dice(self, dice_str: str) -> str:
+        """Normalize dice notation (d10 -> 1d10, 2D6KH1 -> 2d6kh1)."""
+        match = re.match(r'(\d+)?d(\d+)((?:kh|kl)\d+)?(!)?', dice_str, re.IGNORECASE)
+        if not match:
+            return dice_str.lower()
+        num_dice = match.group(1) or '1'
+        num_sides = match.group(2)
+        keep_part = (match.group(3) or '').lower()
+        exploding = match.group(4) or ''
+        return f"{num_dice}d{num_sides}{keep_part}{exploding}"
+
+    def _normalize_coin(self, coin_str: str) -> str:
+        """Normalize coin notation (c -> 1c)."""
+        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        if not match:
+            return coin_str.lower()
+        num_coins = match.group(1) or '1'
+        return f"{num_coins}c"
+
+    def get_expression(self) -> str:
+        """Reconstruct a clean expression string from parsed tokens."""
+        parts = []
+        for token in self.tokens:
+            if token.type == DiceToken.EOF:
+                break
+            parts.append(token.normalized)
+        return ''.join(parts)
 
     def next(self) -> DiceToken:
         if self.current < len(self.tokens):
