@@ -406,6 +406,13 @@ else:
 #   [ ( (keywords), 'Cog', 'method'), ... ],  # Group 2
 # ]
 #
+# IMPORTANT: The Fun cog dynamically appends its own simple commands to the END
+# of this registry at load time (see cogs/fun.py -> FUN_NLP_ENTRIES). These are
+# hyper-specific patterns (exact phrases, niche triggers) that should only match
+# after all other groups have been checked. Do not add Fun commands here unless
+# they are complex commands that require priority ordering within the Fun group
+# itself (like BOD). Simple Fun commands go in fun.py.
+#
 # Note: *Never* use black formatting, it makes this section unreadable.
 NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Math Group
@@ -415,7 +422,7 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Dice rolling (should be checked before basic calculation)
         ((r'\broll\b', r'\bdice\b'), 'Math', 'roll'),
         # Basic calculation
-        ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b'), 'Math', 'calculate'),
+        ((r'\bcalculate\b', r'\bcalc\b', r'\bcompute\b', r'\bevaluate\b', r'\bsolve\b', r"what('?s| is)\s+\d", r'\bhow much is\b'), 'Math', 'calculate'),
     ],
     # Skills Group
     [
@@ -425,21 +432,21 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Edit an existing skill
         ((r'\b(edit|change|update)\s.*skill(s)?\b',), 'Skills', 'edit_skill_nlp'),
         # List all saved skills
-        ((r'\b(list|check|show)\s.*skill(s)?\b', r'^\s*skills\s*$'), 'Skills', 'list_skills_nlp'),
+        ((r'\b(list|check|show|see)\s.*skill(s)?\b', r'\bmy skills\b', r'\bwhat\b.*\bskills\b', r'^\s*skills\s*$'), 'Skills', 'list_skills_nlp'),
         # Save a new skill
-        ((r'\b(save|create|make)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
-        # Cast or use a skill
-        ((r'\bcast\b', r'\bskill\b', r'\buse\b'), 'Skills', 'use_skill_nlp'),
+        ((r'\b(save|create|make|add)\s.*skill\b',), 'Skills', 'save_skill_nlp'),
+        # Cast or use a skill (anchored to start to prevent broad matching)
+        ((r'^\s*cast\b', r'^\s*use\s+\w', r'^\s*skill\s+\w'), 'Skills', 'use_skill_nlp'),
     ],
     # Reminders Group (note: unlike other groups, this one ENFORCES matching at the front to prevent polluting the query)
     [
-        # Deleting reminders (catches "delete/remove reminder 1", etc.)
+        # Deleting reminders (catches "delete/remove/cancel reminder 1", etc.)
         # This should be checked BEFORE setting reminders, to avoid a conflict on the word "remind"
-        ((r'^\s*(delete|remove)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
+        ((r'^\s*(delete|remove|cancel)\b.*\breminder',), 'Reminders', 'delete_reminders_nlp'),
         # Editing reminders
         ((r'^\s*(edit|change|update)\b.*\breminder',), 'Reminders', 'edit_reminder_nlp'),
         # Checking reminders (catches "check my reminders", "show reminders", etc.)
-        ((r'^\s*(check|show|list)\b.*\breminders\b', r'what are my reminders', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
+        ((r'^\s*(check|show|list|see|view)\b.*\breminders?\b', r'\bmy reminders\b', r'\bwhat are my reminders\b', r'^\s*reminders\s*$'), 'Reminders', 'check_reminders_nlp'),
         # Setting user timezone
         ((r'^\s*(set|change)\s.*timezone\b', r'^\s*(set|change)\s.*tz\b', r'^\s*timezone\b', r'^\s*tz\b'), 'Reminders', 'set_timezone_nlp'),
         # Reminder Settings
@@ -450,7 +457,7 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Image Group
     [
         # Profile picture / avatar
-        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'ImageCog', 'pfp'),
+        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r'\b(show|get)\s.*(pfp|avatar)\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'ImageCog', 'pfp'),
         # Banner
         ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'ImageCog', 'banner'),
         # Resize image
@@ -471,7 +478,8 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Lyrics search (check before general music commands)
         ((r'\blyrics?\b', r'\bfind\s*lyrics\b', r'\bsearch\s*lyrics\b'), 'Music', 'lyrics_nlp'),
         # Listen along / play music (most common entry point)
-        ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\s*(vc|voice|channel)?\b'), 'Music', 'listen_along_nlp'),
+        # 'join' alone is strong enough; come/get/hop just need vc/voice/channel somewhere after
+        ((r'\blisten\s*along\b', r'\bplay\s*music\b', r'\bjoin\b', r'\b(come|get|hop)\b.*\b(vc|voice|channel)\b'), 'Music', 'listen_along_nlp'),
         # Pause playback
         ((r'\bpause\b',), 'Music', 'pause_nlp'),
         # Resume playback - 'play' only when it's the whole command (no song name after)

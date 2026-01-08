@@ -86,12 +86,12 @@ FUN_COMMANDS: List[FunCommand] = [
     # Static text
     FunCommand(
         'issues', (r'\bissues?\b',),
-        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) '
+        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) ' # Note, fix this to point towards Shiori's repo at some point.
                 'please write your suggestions and issues over there!'),
 
     # Random from file
     FunCommand(
-        'eight_ball', (r'8\s?-?ball',),
+        'eight_ball', (r'\b8\s?-?ball',),
         file='8ball.txt',
         require_query=True,
         query_error="I cannot intuit from nothing!",
@@ -99,7 +99,7 @@ FUN_COMMANDS: List[FunCommand] = [
 
     # Random quote from BOD fate system (treasure hunt - shows ONE quote)
     FunCommand(
-        'yujin_quotes', (r'\b(yujin\s*)?quotes?\b',),
+        'yujin_quotes', (r'\byujin\s*quotes?\b',),
         attr='bod_quote_display',
         error_msg="No Yujin quotes have been configured yet."),
 ]
