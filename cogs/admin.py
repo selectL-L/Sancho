@@ -33,6 +33,7 @@ from utils.musicutils import (
     get_track_info_for_download,
     get_youtube_auth_status,
 )
+from utils.musicutils.music_auth import _detect_youtube_auth
 from utils.views import get_selection, show_dashboard, show_status, StatusData, StatusHealth
 
 
@@ -763,17 +764,21 @@ class AdminCog(BaseCog):
         # Gather all data for status view
         data = await self._gather_status_data(ctx, message)
 
+        # Create refresh callback for the view
+        async def refresh_callback() -> StatusData:
+            return await self._gather_status_data(ctx)
+
         # Delete the loading message and show the status view
         await message.delete()
-        await show_status(ctx, data)
+        await show_status(ctx, data, refresh_callback=refresh_callback)
         logging.info(f"Status command used by {ctx.author}.")
 
-    async def _gather_status_data(self, ctx: commands.Context, message: discord.Message) -> StatusData:
+    async def _gather_status_data(self, ctx: commands.Context, message: Optional[discord.Message] = None) -> StatusData:
         """Gather all data needed for the status view.
 
         Args:
             ctx: The command context.
-            message: The loading message (used for roundtrip timing).
+            message: Optional loading message (used for roundtrip timing). If None, roundtrip is skipped.
 
         Returns:
             StatusData populated with all status information.
@@ -786,12 +791,17 @@ class AdminCog(BaseCog):
         # =====================================================================
 
         # Latencies
-        start_time = time.monotonic()
-        await message.edit(content="📊 Measuring latencies...")
-        end_time = time.monotonic()
-        roundtrip_latency = (end_time - start_time) * 1000
         gateway_latency = self.bot.latency * 1000
         db_latency = await self.db_manager.ping() if self.db_manager else -1
+
+        # Roundtrip only if we have a message to edit
+        if message:
+            start_time = time.monotonic()
+            await message.edit(content="📊 Measuring latencies...")
+            end_time = time.monotonic()
+            roundtrip_latency = (end_time - start_time) * 1000
+        else:
+            roundtrip_latency = -1.0  # Not measured
 
         # Resource usage
         resource_tracker = getattr(self.bot, 'resource_tracker', None)
@@ -831,6 +841,8 @@ class AdminCog(BaseCog):
         # MUSIC AUTH STATUS
         # =====================================================================
 
+        # Force refresh POT server status before reading
+        _detect_youtube_auth()
         auth_status = get_youtube_auth_status()
         auth_method = auth_status.auth_method
         pot_server_running = auth_status.pot_server_running
@@ -1416,6 +1428,7 @@ class AdminCog(BaseCog):
         )
 
         # Check current status
+        _detect_youtube_auth()  # Refresh before reading
         auth_status = get_youtube_auth_status()
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
         if cookie_path and os.path.isfile(cookie_path):

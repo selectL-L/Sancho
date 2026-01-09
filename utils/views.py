@@ -1092,6 +1092,7 @@ class StatusView(discord.ui.LayoutView):
         ctx: commands.Context,
         data: StatusData,
         timeout: float = 120.0,
+        refresh_callback: Optional[Callable[[], Awaitable[StatusData]]] = None,
     ):
         """Initialize the status view.
 
@@ -1099,12 +1100,15 @@ class StatusView(discord.ui.LayoutView):
             ctx: The command context.
             data: StatusData containing all info to display.
             timeout: View timeout in seconds.
+            refresh_callback: Optional async callback to fetch fresh StatusData.
         """
         super().__init__(timeout=timeout)
         self.ctx = ctx
         self.data = data
         self.current_page = 0
         self.message: Optional[discord.Message] = None
+        self.refresh_callback = refresh_callback
+        self._initial_timeout = timeout
 
         self._build_ui()
 
@@ -1490,13 +1494,31 @@ class StatusView(discord.ui.LayoutView):
             await interaction.response.edit_message(view=self)
 
     async def _handle_refresh(self, interaction: discord.Interaction) -> None:
-        """Handle refresh button click - requires callback to gather fresh data."""
+        """Handle refresh button click - fetches fresh data and rebuilds UI."""
         if interaction.user.id != self.ctx.author.id:
             await interaction.response.send_message("This status view is not for you.", ephemeral=True)
             return
 
-        # Signal that refresh was requested - the cog handles data gathering
-        await interaction.response.send_message("🔄 Use the command again for fresh data.", ephemeral=True)
+        if self.refresh_callback is None:
+            await interaction.response.send_message("🔄 Use the command again for fresh data.", ephemeral=True)
+            return
+
+        # Defer while we fetch fresh data
+        await interaction.response.defer()
+
+        try:
+            # Fetch fresh data
+            self.data = await self.refresh_callback()
+
+            # Reset timeout
+            self.timeout = self._initial_timeout
+
+            # Rebuild UI with new data
+            self._build_ui()
+            await interaction.edit_original_response(view=self)
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Status refresh failed: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Refresh failed: {e}", ephemeral=True)
 
     async def on_timeout(self) -> None:
         """Disable navigation on timeout."""
@@ -1533,7 +1555,8 @@ class StatusView(discord.ui.LayoutView):
 async def show_status(
     ctx: commands.Context,
     data: StatusData,
-    timeout: float = 120.0
+    timeout: float = 120.0,
+    refresh_callback: Optional[Callable[[], Awaitable[StatusData]]] = None,
 ) -> discord.Message:
     """Display an interactive status view.
 
@@ -1544,11 +1567,12 @@ async def show_status(
         ctx: The command context.
         data: StatusData containing all status information.
         timeout: View timeout in seconds (default 120s).
+        refresh_callback: Optional async callback to fetch fresh StatusData on refresh.
 
     Returns:
         The sent message containing the status view.
     """
-    view = StatusView(ctx=ctx, data=data, timeout=timeout)
+    view = StatusView(ctx=ctx, data=data, timeout=timeout, refresh_callback=refresh_callback)
     message = await ctx.send(view=view)
     view.message = message
     return message
