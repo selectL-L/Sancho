@@ -212,9 +212,11 @@ __marimo__/
 /Impls
 
 # Local files that are created/required
+*.bat
 *.env
 *.db
 *.db.backup
 *.py.backup
 *.toml
 !*.toml.example
+deploy-filter.txt
