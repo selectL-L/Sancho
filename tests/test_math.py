@@ -839,7 +839,8 @@ class TestRollCommand:
             mock_eval.return_value = {
                 'total': '500',
                 'breakdown': ['x' * 4000],  # Very long breakdown
-                'processed_query': '100d20'
+                'expression': '100d20',
+                'context': ''
             }
             await math_cog.roll(mock_ctx, query="100d20")
             mock_ctx.send.assert_called_once()
@@ -862,7 +863,8 @@ class TestEvaluateRoll:
             result = await math_cog.evaluate_roll("1d20")
             assert 'total' in result
             assert 'breakdown' in result
-            assert 'processed_query' in result
+            assert 'expression' in result
+            assert 'context' in result
 
     @pytest.mark.asyncio
     async def test_evaluate_roll_with_advantage(self, math_cog):
@@ -887,11 +889,12 @@ class TestEvaluateRoll:
 
     @pytest.mark.asyncio
     async def test_evaluate_roll_strips_keywords(self, math_cog):
-        """Test that keywords are stripped from processed query."""
+        """Test that keywords are stripped from expression."""
         with patch('random.randint', return_value=10):
             result = await math_cog.evaluate_roll("1d20 advantage")
-            # The advantage keyword should be stripped from processed_query
-            assert 'advantage' not in result['processed_query'].lower() or 'adv' not in result['processed_query'].lower()
+            # The advantage keyword should be stripped from expression
+            assert 'advantage' not in result['expression'].lower()
+            assert 'adv' not in result['expression'].lower()
 
 
 # =============================================================================
