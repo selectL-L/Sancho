@@ -10,21 +10,24 @@ Design Philosophy:
 
 Exports:
     - Wrapper functions (preferred API): get_selection(), show_track_failed(),
-      show_now_playing(), show_dashboard(), launch_modal()
+      show_now_playing(), show_dashboard(), launch_modal(), get_track_selection()
     - Types: TrackFailureAction, NowPlayingState, MusicPlayerProtocol
-    - View classes (for advanced use): PaginatorView, etc.
+    - View classes (for advanced use): PaginatorView, TrackSelectionView, etc.
 """
 
 import io
 import logging
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Awaitable, Callable, Dict, List, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Protocol, cast
 
 import asyncio
 import discord
 from discord import ui
 from discord.ext import commands
+
+if TYPE_CHECKING:
+    from utils.musicutils import Track
 
 
 # =============================================================================
@@ -692,6 +695,361 @@ async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], time
             logging.getLogger(__name__).debug(f"get_selection timeout cleanup failed: {e}")
 
     return result
+
+
+# =============================================================================
+# Track Selection View (YTM Integration) - Components V2
+# =============================================================================
+
+def _format_duration(seconds: int) -> str:
+    """Format duration in seconds to MM:SS string."""
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+@dataclass
+class _SlottedTrack:
+    """Internal wrapper pairing a track with its display slot number."""
+    slot: int
+    track: 'Track'
+    is_recommended: bool = False
+
+
+class TrackSelectionView(ui.LayoutView):
+    """Components V2 view for selecting a track from search results.
+
+    Displays tracks in vertical sections (YTM songs, YouTube videos) with
+    numbered buttons that exactly match the displayed slot numbers.
+
+    Layout:
+        - Slot 0 (green): User's original URL (if URL mode)
+        - Slots 1-3: YouTube Music results (songs preferred)
+        - Slots 4-6: YouTube results (or renumbered if no YTM)
+        - Cancel button
+
+    Usage:
+        view = TrackSelectionView(ctx.author, ytm_tracks, yt_tracks, user_track)
+        message = await ctx.send(view=view)
+        view.message = message
+        await view.wait()
+        selected = view.selected_track  # Track or None
+    """
+
+    def __init__(
+        self,
+        author: discord.User | discord.Member,
+        ytm_tracks: List['Track'],
+        yt_tracks: List['Track'],
+        user_track: Optional['Track'] = None,
+        recommended_id: Optional[str] = None,
+        timeout: float = 30.0,
+    ):
+        """Initialize the track selection view.
+
+        Args:
+            author: The user who can interact with this view.
+            ytm_tracks: YouTube Music results (songs/videos).
+            yt_tracks: YouTube results (from yt-dlp).
+            user_track: If provided, shown as slot 0 (user's original URL).
+            recommended_id: Video ID of recommended track (gets ⭐ badge).
+            timeout: View timeout in seconds.
+        """
+        super().__init__(timeout=timeout)
+        self.author = author
+        self.selected_track: Optional['Track'] = None
+        self.message: Optional[discord.Message] = None
+        self._cancelled = False
+
+        # Build slot mapping
+        self._slots: Dict[int, _SlottedTrack] = {}
+
+        # Slot 0: User's URL (if provided)
+        if user_track:
+            self._slots[0] = _SlottedTrack(slot=0, track=user_track)
+
+        # Slots 1-3: YTM results (always start at 1)
+        ytm_start = 1
+        for i, t in enumerate(ytm_tracks[:3]):
+            s = ytm_start + i
+            is_rec = recommended_id is not None and t.video_id == recommended_id
+            self._slots[s] = _SlottedTrack(slot=s, track=t, is_recommended=is_rec)
+
+        # Slots 4-6: YouTube results (or renumber to 1 if no YTM)
+        yt_start = 4 if ytm_tracks else 1
+        for i, t in enumerate(yt_tracks[:3]):
+            s = yt_start + i
+            self._slots[s] = _SlottedTrack(slot=s, track=t)
+
+        self._ytm_tracks = ytm_tracks[:3]
+        self._yt_tracks = yt_tracks[:3]
+        self._user_track = user_track
+        self._recommended_id = recommended_id
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        """Build the Components V2 UI."""
+        self.clear_items()
+
+        container = ui.Container(accent_colour=discord.Colour.blue())
+
+        # Header
+        container.add_item(ui.TextDisplay("## 🎵 Select a Track"))
+
+        # User's URL section (slot 0)
+        if self._user_track:
+            t = self._user_track
+            title_display = truncate_visual(t.title, 45)
+            artist_display = truncate_visual(t.artist, 35)
+            duration_str = _format_duration(t.duration)
+
+            container.add_item(ui.TextDisplay(
+                f"### 🔗 Your Link\n"
+                f"**0** • **{title_display}**\n"
+                f"by {artist_display} • {duration_str}"
+            ))
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # YTM section
+        if self._ytm_tracks:
+            ytm_text = "### 🎵 YouTube Music\n"
+            ytm_start = 1
+            for i, t in enumerate(self._ytm_tracks):
+                slot_num = ytm_start + i
+                slotted = self._slots.get(slot_num)
+                is_rec = slotted.is_recommended if slotted else False
+
+                title_display = truncate_visual(t.title, 40)
+                artist_display = truncate_visual(t.artist, 30)
+                duration_str = _format_duration(t.duration)
+
+                # Source indicator and recommended badge
+                source_emoji = "🎵" if t.source == 'ytm_song' else "🎬"
+                rec_badge = " ⭐" if is_rec else ""
+
+                # Album info for songs
+                album_line = f"\n-# *{t.album}*" if t.album else ""
+
+                ytm_text += (
+                    f"**{slot_num}** {source_emoji}{rec_badge} **{title_display}**\n"
+                    f"by {artist_display} • {duration_str}{album_line}\n"
+                )
+
+            container.add_item(ui.TextDisplay(ytm_text.strip()))
+
+            if self._yt_tracks:
+                container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # YouTube section
+        if self._yt_tracks:
+            yt_start = 4 if self._ytm_tracks else 1
+            yt_text = "### 📺 YouTube\n"
+            for i, t in enumerate(self._yt_tracks):
+                slot_num = yt_start + i
+                title_display = truncate_visual(t.title, 40)
+                artist_display = truncate_visual(t.artist, 30)
+                duration_str = _format_duration(t.duration)
+
+                yt_text += (
+                    f"**{slot_num}** 📺 **{title_display}**\n"
+                    f"by {artist_display} • {duration_str}\n"
+                )
+
+            container.add_item(ui.TextDisplay(yt_text.strip()))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Buttons - create ActionRows
+        # User URL button (slot 0) - separate row if present
+        if self._user_track:
+            url_row = ui.ActionRow()
+            btn = ui.Button(
+                style=discord.ButtonStyle.success,
+                label="0",
+                custom_id="track_0",
+            )
+            btn.callback = self._make_callback(0)
+            url_row.add_item(btn)
+            container.add_item(url_row)
+
+        # YTM buttons
+        if self._ytm_tracks:
+            ytm_row = ui.ActionRow()
+            ytm_start = 1
+            for i in range(len(self._ytm_tracks)):
+                slot_num = ytm_start + i
+                btn = ui.Button(
+                    style=discord.ButtonStyle.primary,
+                    label=str(slot_num),
+                    custom_id=f"track_{slot_num}",
+                )
+                btn.callback = self._make_callback(slot_num)
+                ytm_row.add_item(btn)
+            container.add_item(ytm_row)
+
+        # YouTube buttons
+        if self._yt_tracks:
+            yt_row = ui.ActionRow()
+            yt_start = 4 if self._ytm_tracks else 1
+            for i in range(len(self._yt_tracks)):
+                slot_num = yt_start + i
+                btn = ui.Button(
+                    style=discord.ButtonStyle.secondary,
+                    label=str(slot_num),
+                    custom_id=f"track_{slot_num}",
+                )
+                btn.callback = self._make_callback(slot_num)
+                yt_row.add_item(btn)
+            container.add_item(yt_row)
+
+        # Cancel button
+        cancel_row = ui.ActionRow()
+        cancel_btn = ui.Button(
+            style=discord.ButtonStyle.danger,
+            label="Cancel",
+            emoji="❌",
+            custom_id="track_cancel",
+        )
+        cancel_btn.callback = self._handle_cancel
+        cancel_row.add_item(cancel_btn)
+        container.add_item(cancel_row)
+
+        # Footer
+        container.add_item(ui.TextDisplay("-# Select by clicking a number • Times out in 30s"))
+
+        self.add_item(container)
+
+    def _make_callback(self, slot: int):
+        """Create a callback for a specific slot."""
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author.id:
+                await interaction.response.send_message(
+                    "This selection is not for you.", ephemeral=True
+                )
+                return
+            slotted = self._slots.get(slot)
+            if slotted:
+                self.selected_track = slotted.track
+            await interaction.response.defer()
+            self.stop()
+        return callback
+
+    async def _handle_cancel(self, interaction: discord.Interaction) -> None:
+        """Handle cancel button."""
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "This selection is not for you.", ephemeral=True
+            )
+            return
+        self._cancelled = True
+        self.selected_track = None
+        await interaction.response.defer()
+        self.stop()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Ensure only the author can interact."""
+        return interaction.user.id == self.author.id
+
+    async def on_timeout(self) -> None:
+        """Handle timeout - clear the view."""
+        self.selected_track = None
+        if self.message:
+            try:
+                # Clear view on timeout
+                await self.message.edit(view=None)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException:
+                pass
+
+
+async def get_track_selection(
+    ctx,
+    ytm_tracks: List['Track'],
+    yt_tracks: List['Track'],
+    user_track: Optional['Track'] = None,
+    recommended_id: Optional[str] = None,
+    timeout: float = 30.0,
+) -> Optional['Track']:
+    """Display track selection UI and wait for user choice.
+
+    This is the main entry point for the track selection flow.
+
+    Args:
+        ctx: Command context (or pseudo-context with author, channel, send()).
+        ytm_tracks: YouTube Music results (songs/videos).
+        yt_tracks: YouTube results (from yt-dlp).
+        user_track: If provided, shown as slot 0 (user's original URL).
+        recommended_id: Video ID of recommended track (gets ⭐ badge).
+        timeout: Selection timeout in seconds.
+
+    Returns:
+        The selected Track, or None if cancelled/timed out.
+    """
+    # Count total options
+    total = len(ytm_tracks) + len(yt_tracks) + (1 if user_track else 0)
+    if total == 0:
+        return None
+
+    # If only one option total, return it directly (no UI needed)
+    if total == 1:
+        if user_track:
+            return user_track
+        return ytm_tracks[0] if ytm_tracks else yt_tracks[0]
+
+    view = TrackSelectionView(
+        ctx.author,
+        ytm_tracks,
+        yt_tracks,
+        user_track,
+        recommended_id,
+        timeout=timeout,
+    )
+
+    # LayoutView requires explicit content/embed clearing
+    message = await ctx.send(view=view, content=None, embed=None)
+    view.message = message
+
+    await view.wait()
+
+    # Update message after selection/timeout
+    if view.selected_track:
+        # Show selected track confirmation
+        selected = view.selected_track
+        title_display = truncate_visual(selected.title, 45)
+        confirmation = ui.LayoutView()
+        conf_container = ui.Container(accent_colour=discord.Colour.green())
+        conf_container.add_item(ui.TextDisplay(
+            f"## ✅ Selected\n"
+            f"**{title_display}**\n"
+            f"by {selected.artist}"
+        ))
+        confirmation.add_item(conf_container)
+        try:
+            await message.edit(view=confirmation)
+        except discord.HTTPException:
+            pass
+    elif view._cancelled:
+        # User cancelled
+        cancel_view = ui.LayoutView()
+        cancel_container = ui.Container(accent_colour=discord.Colour.greyple())
+        cancel_container.add_item(ui.TextDisplay("## ❌ Selection Cancelled"))
+        cancel_view.add_item(cancel_container)
+        try:
+            await message.edit(view=cancel_view)
+        except discord.HTTPException:
+            pass
+    else:
+        # Timeout
+        timeout_view = ui.LayoutView()
+        timeout_container = ui.Container(accent_colour=discord.Colour.greyple())
+        timeout_container.add_item(ui.TextDisplay("## ⏰ Selection Timed Out"))
+        timeout_view.add_item(timeout_container)
+        try:
+            await message.edit(view=timeout_view)
+        except discord.HTTPException:
+            pass
+
+    return view.selected_track
 
 
 class FastConfirmModal(discord.ui.Modal):
