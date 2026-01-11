@@ -58,9 +58,7 @@ from utils.musicutils.music_helpers import (
     # Video ID
     extract_video_id,
     # Thumbnails
-    crop_thumbnail_to_square,
     extract_mp3_thumbnail,
-    get_best_thumbnail_bytes,
     # yt-dlp wrappers
     get_audio_url,
     search_youtube,
@@ -71,6 +69,38 @@ from utils.musicutils.music_helpers import (
     sanitize_filename,
     download_track_as_mp3,
     get_track_info_for_download,
+)
+
+# Thumbnail functions are now in search.py
+from utils.musicutils.search import (
+    fetch_thumbnail_bytes,
+    resize_thumbnail_bytes,
+    fetch_and_resize_thumbnail,
+    extract_best_thumbnail_from_info,
+    get_thumbnail_bytes,
+    # Availability
+    YTMUSIC_AVAILABLE,
+    # Constants
+    THUMBNAIL_WIDTH,
+    # Data class
+    SearchResult,
+    # Video ID
+    extract_video_id as search_extract_video_id,
+    resize_ytm_thumbnail,
+    # YTM functions
+    search_ytm,
+    get_ytm_metadata,
+    is_atv,
+    # YouTube search
+    search_youtube as search_youtube_results,
+    search_youtube_legacy,
+    # Unified search
+    search_query_mode,
+    search_url_mode,
+    # Scoring/filtering
+    score_atv_match,
+    is_relevant,
+    dedupe_results,
 )
 
 __all__ = [
@@ -107,9 +137,12 @@ __all__ = [
     # Video ID
     'extract_video_id',
     # Thumbnails
-    'crop_thumbnail_to_square',
+    'fetch_thumbnail_bytes',
+    'resize_thumbnail_bytes',
+    'fetch_and_resize_thumbnail',
+    'extract_best_thumbnail_from_info',
     'extract_mp3_thumbnail',
-    'get_best_thumbnail_bytes',
+    'get_thumbnail_bytes',
     # yt-dlp wrappers
     'get_audio_url',
     'search_youtube',
@@ -166,4 +199,28 @@ __all__ += [
 
 __all__ += [
     'MusicCommandsMixin',
+]
+
+# Search & metadata (YTM integration)
+
+__all__ += [
+    # Search availability
+    'YTMUSIC_AVAILABLE',
+    # Constants
+    'THUMBNAIL_WIDTH',
+    # Search data
+    'SearchResult',
+    # Search functions
+    'search_extract_video_id',
+    'resize_ytm_thumbnail',
+    'search_ytm',
+    'get_ytm_metadata',
+    'is_atv',
+    'search_youtube_results',
+    'search_query_mode',
+    'search_url_mode',
+    'search_youtube_legacy',
+    'score_atv_match',
+    'is_relevant',
+    'dedupe_results',
 ]
