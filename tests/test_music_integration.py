@@ -98,7 +98,7 @@ def create_user_track() -> Track:
 def mock_bot():
     """Creates a mock bot instance."""
     bot = MagicMock()
-    bot.owner_id = 99999
+    bot.owner_ids = {99999}
     bot.user = MagicMock()
     bot.user.id = 12345
     bot.loop = MagicMock()

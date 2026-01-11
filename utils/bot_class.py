@@ -50,13 +50,13 @@ class CoreBot(commands.Bot):
 
         # Call super().__init__ with all configuration handled internally.
         # We pass `owner_ids` to prevent auto-fetching application info.
-        # If OWNER_ID is set, we use it. If not, we pass {0} to ensure no fetch happens.
-        owner_id = {config.OWNER_ID} if config.OWNER_ID else {0}
+        # If OWNER_IDS is set, we use it. If not, we pass {0} to ensure no fetch happens.
+        owner_ids = config.OWNER_IDS if config.OWNER_IDS else {0}
         super().__init__(
             command_prefix=self._get_case_insensitive_prefix,
             intents=intents,
             case_insensitive=True,
-            owner_ids=owner_id,  # The bot is set up as a team, but is functionally only owned by one user.
+            owner_ids=owner_ids,
             **kwargs
         )
 
@@ -328,8 +328,8 @@ class CoreBot(commands.Bot):
         if message.author.bot:
             return
 
-        # If in developer mode, only respond to the owner.
-        if config.DEV_MODE and message.author.id != config.OWNER_ID:
+        # If in developer mode, only respond to owners.
+        if config.DEV_MODE and message.author.id not in config.OWNER_IDS:
             return
 
         # First, allow `discord.py` to process the message to see if it's a

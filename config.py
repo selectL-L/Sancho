@@ -147,7 +147,8 @@ def check_and_create_env_file() -> None:
             "# (Required) The name the bot uses in user-facing messages.\n"
             "# WARNING: 'NoName' is a placeholder. Please set a real name.",
         "OWNER_ID":
-            "# (Optional) Your Discord user ID. Enables owner-only commands.\n"
+            "# (Optional) Discord user IDs for bot owners, separated by pipes ( | ).\n"
+            "# Example: 123456789|987654321. Enables owner-only commands.\n"
             "# If empty, owner commands are disabled.",
         "AMBIENCE_ENABLED":
             "# (Optional) Enable personality-driven responses (greetings, mood-based replies).\n"
@@ -280,8 +281,12 @@ if BOT_NAME == "NoName":
 BOT_PREFIX = sorted(
     [p.strip() + ' ' for p in BOT_PREFIX_RAW.split('|')], key=len, reverse=True)
 
-raw_owner_id = os.getenv('OWNER_ID')
-OWNER_ID: Optional[int] = int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else None
+raw_owner_ids = os.getenv('OWNER_ID', '')
+OWNER_IDS: set[int] = {
+    int(id_str.strip())
+    for id_str in raw_owner_ids.split('|')
+    if id_str.strip().isdigit()
+}
 
 raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
 AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
