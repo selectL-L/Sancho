@@ -86,7 +86,7 @@ FUN_COMMANDS: List[FunCommand] = [
     # Static text
     FunCommand(
         'issues', (r'\bissues?\b',),
-        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) ' # Note, fix this to point towards Shiori's repo at some point.
+        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) '  # Note, fix this to point towards Shiori's repo at some point.
                 'please write your suggestions and issues over there!'),
 
     # Random from file
