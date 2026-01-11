@@ -80,8 +80,16 @@ from .music_data import LoopMode, LyricsResult, Track
 from .music_helpers import (
     YTDLP_AVAILABLE,
     detect_mix_in_url,
-    get_best_thumbnail_bytes,
 )
+from .search import (
+    YTMUSIC_AVAILABLE,
+    SearchResult,
+    extract_video_id,
+    get_thumbnail_bytes,
+    is_atv,
+)
+
+from utils.views import get_track_selection
 
 if TYPE_CHECKING:
     from utils.views import NowPlayingState
@@ -112,8 +120,8 @@ def music_cooldown(func: NlpHandler) -> NlpHandler:
     """
     @functools.wraps(func)
     async def wrapper(self: 'MusicCommandsMixin', ctx: commands.Context, query: str) -> None:
-        # Bot owner bypasses cooldown
-        if ctx.author.id == self.bot.owner_id:
+        # Bot owners bypass cooldown
+        if ctx.author.id in self.bot.owner_ids:
             await func(self, ctx, query)
             return
 
@@ -165,8 +173,8 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
             await ctx.send("I'm not playing music right now!")
             return
 
-        # Check 2: Bot owner bypasses VC check (debugging)
-        if ctx.author.id == self.bot.owner_id:
+        # Check 2: Bot owners bypass VC check (debugging)
+        if ctx.author.id in self.bot.owner_ids:
             await func(self, ctx, query)
             return
 
@@ -213,6 +221,7 @@ class MusicCommandsMixin:
     _playback: Any
     _ambience: Any
     db_manager: Any
+    cache_manager: Any
     track_started_at: float
     idle_timeout_task: Any
     _playlist_modified_during_session: bool
@@ -236,6 +245,9 @@ class MusicCommandsMixin:
     async def _idle_timeout_loop(self) -> None: ...
     async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]: ...
     async def _fetch_url_info(self, url: str, force_playlist: bool = False) -> tuple[List[Track], Optional[str], Optional[str]]: ...
+
+    # YTM integration methods
+    async def _search_with_ytm(self, query: str, is_url: bool = False) -> tuple[Optional[SearchResult], List[SearchResult], List[SearchResult], Optional[str]]: ...
 
     # Ambience wrappers - Music cog owns the relationship with ambience
     def _ensure_music_for_user(self) -> tuple[Optional[str], Optional[str]]: ...
@@ -310,16 +322,46 @@ class MusicCommandsMixin:
 
         await self._start_session(channel, ctx)
 
+    @staticmethod
+    def _is_pure_playlist_url(url: str) -> bool:
+        """Check if URL is a pure playlist (no video context).
+
+        Returns True for URLs like:
+        - https://youtube.com/playlist?list=PLxxx
+        - https://www.youtube.com/playlist?list=PLxxx
+
+        Returns False for URLs with video context like:
+        - https://youtube.com/watch?v=xxx&list=PLxxx
+        - https://youtu.be/xxx?list=PLxxx
+        """
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+
+        # Check if it's a /playlist path
+        if '/playlist' in parsed.path:
+            return True
+
+        # Check for list= param without v= param (pure playlist via query)
+        query_params = parse_qs(parsed.query)
+        has_list = bool(query_params.get('list'))
+        has_video = bool(query_params.get('v'))
+
+        # Pure playlist: has list param but no video ID
+        if has_list and not has_video and 'youtu.be' not in parsed.netloc:
+            return True
+
+        return False
+
     async def _do_play(self, ctx: commands.Context, query: str) -> None:
         """Internal implementation for play/queue.
 
         Handles both URL-based and search-based track additions.
+        Uses YTM integration when available for better metadata.
 
         Args:
             ctx: The command context.
             query: URL or search query for the track(s).
         """
-        from utils.views import get_selection
         from .music_data import ActiveSession
         from .managed_player import ManagedPlayer
 
@@ -338,87 +380,42 @@ class MusicCommandsMixin:
 
         if is_url:
             # Check if this is a video URL that also contains a mix playlist
-            has_mix, single_url, mix_url = detect_mix_in_url(query)
+            has_mix, single_url, _ = detect_mix_in_url(query)
 
-            if has_mix and single_url and mix_url:
-                # Prompt the user: single song or whole mix?
-                embed = discord.Embed(
-                    title="🎵 Mix Playlist Detected",
-                    description=(
-                        "This link includes a Mix playlist. Would you like to add:\n\n"
-                        "**1.** Just this single song\n"
-                        "**2.** Up to 60 songs from the mix playlist"
-                    ),
-                    color=discord.Color.blue()
-                )
-                embed.set_footer(text="Defaults to single song in 10 seconds...")
+            if has_mix and single_url:
+                # Mix playlists don't actually work reliably - user wants the song, not the mix.
+                # Strip the mix param and treat as single video through YTM flow.
+                self.logger.info(f"[Play] Mix URL detected, extracting single video: {single_url}")
+                tracks_to_add = await self._do_play_url_with_ytm(ctx, single_url)
 
-                options = {"1. Single Song": "single", "2. Mix Playlist": "mix"}
-                selection = await get_selection(ctx, embed, options, timeout=10.0, buttons_only=True)
-
-                if selection == "mix":
-                    await ctx.send("🔍 Fetching mix playlist (up to 60 songs)...")
-                    tracks, error, warning = await self._fetch_url_info(mix_url, force_playlist=True)
-                else:
-                    await ctx.send("🔍 Fetching track info...")
-                    tracks, error, warning = await self._fetch_url_info(single_url)
-            else:
-                await ctx.send("🔍 Fetching track info...")
+            elif self._is_pure_playlist_url(query):
+                # Pure playlist URL (no video context)
+                # Only warn if it's from regular YouTube, not YouTube Music
+                if 'music.youtube.com' not in query:
+                    await ctx.send(
+                        "📋 **This is a normal Youtube Playlist!**\n"
+                        "-# ⚠️ Music tracks from playlists use YouTube's metadata, which may have inaccurate "
+                        "thumbnails and artist info. For best results, add individual songs or use YouTube Music playlist."
+                    )
                 tracks, error, warning = await self._fetch_url_info(query)
+                if error:
+                    await ctx.send(f"❌ {error}")
+                    return
+                tracks_to_add = tracks
+                if warning:
+                    await ctx.send(warning)
 
-            if error:
-                await ctx.send(f"❌ {error}")
-                return
-
-            tracks_to_add = tracks
-
-            if warning:
-                await ctx.send(warning)
+            else:
+                # Regular URL (single video, possibly from a playlist) - use YTM flow
+                tracks_to_add = await self._do_play_url_with_ytm(ctx, query)
 
         else:
-            # Search YouTube
-            await ctx.send(f"🔍 Searching for: **{query}**")
+            # Search query - use YTM integration
+            tracks_to_add = await self._do_play_search_with_ytm(ctx, query)
 
-            results = await self._search_youtube(query, max_results=5)
-            if not results:
-                await ctx.send("No results found. Try a different search term!")
-                return
-
-            if len(results) == 1:
-                tracks_to_add = results
-            else:
-                embed = discord.Embed(
-                    title="🎵 Select a Track",
-                    description="Choose the track you want to play:",
-                    color=discord.Color.blue()
-                )
-
-                options = {}
-                for i, track in enumerate(results, 1):
-                    duration_str = f"{int(track.duration) // 60}:{int(track.duration) % 60:02d}"
-                    embed.add_field(
-                        name=f"{i}. {track.title}",
-                        value=f"by {track.artist} • {duration_str}",
-                        inline=False
-                    )
-                    options[str(i)] = str(i)
-
-                selection = await get_selection(ctx, embed, options, timeout=30.0)
-
-                if not selection:
-                    await ctx.send("Selection timed out. Call me again when you're ready!")
-                    return
-
-                try:
-                    selected_idx = int(selection) - 1
-                    if 0 <= selected_idx < len(results):
-                        tracks_to_add = [results[selected_idx]]
-                    else:
-                        await ctx.send("Invalid selection.")
-                        return
-                except ValueError:
-                    await ctx.send("Invalid selection.")
-                    return
+        if not tracks_to_add:
+            # Error messages already sent by helper methods
+            return
 
         if not tracks_to_add:
             await ctx.send("No tracks to add.")
@@ -505,6 +502,9 @@ class MusicCommandsMixin:
             self.playlist.extend(moved_tracks + new_tracks)
             self._playlist_modified_during_session = True
 
+            # Check if next track changed (handles both new tracks and moved tracks)
+            self._refresh_prefetch_if_stale()
+
             if len(tracks_to_add) == 1:
                 if moved_tracks:
                     await ctx.send(f"⭐ Moved **{tracks_to_add[0].title}** to the end of the queue!")
@@ -517,6 +517,218 @@ class MusicCommandsMixin:
                 if moved_tracks:
                     parts.append(f"moved {len(moved_tracks)}")
                 await ctx.send(f"⭐ **{' and '.join(parts).capitalize()} tracks** to the end of the queue!")
+
+    async def _do_play_url_with_ytm(
+        self,
+        ctx: commands.Context,
+        url: str,
+    ) -> List[Track]:
+        """Handle URL-based play with YTM metadata enhancement.
+
+        If YTM is available and the video is already an ATV (Art Track Video),
+        plays directly. Otherwise, searches for better versions and shows selection.
+
+        Args:
+            ctx: The command context.
+            url: The YouTube URL to play.
+
+        Returns:
+            List of tracks to add (empty if user cancelled or error).
+        """
+        from .search import get_ytm_metadata
+
+        video_id = extract_video_id(url)
+        if not video_id:
+            # Not a valid YouTube URL - fall back to yt-dlp
+            await ctx.send("🔍 Fetching track info...")
+            tracks, error, warning = await self._fetch_url_info(url)
+            if error:
+                await ctx.send(f"❌ {error}")
+                return []
+            if warning:
+                await ctx.send(warning)
+            return tracks
+
+        await ctx.send("🔍 Checking for best version...")
+
+        # Check if YTM is available and try to get metadata
+        if YTMUSIC_AVAILABLE:
+            metadata = await get_ytm_metadata(video_id)
+            if metadata and is_atv(metadata):
+                # Already an ATV - play directly without selection
+                self.logger.debug(f"URL {video_id} is already an ATV, playing directly")
+                tracks, error, warning = await self._fetch_url_info(url)
+                if error:
+                    await ctx.send(f"❌ {error}")
+                    return []
+                if warning:
+                    await ctx.send(warning)
+                return tracks
+
+        # Search for alternatives via YTM
+        try:
+            original, songs, videos, recommended_id = await self._search_with_ytm(video_id, is_url=True)
+        except Exception as e:
+            self.logger.warning(f"YTM search failed for URL, falling back: {e}")
+            # Fall back to direct fetch with friendly message
+            await ctx.send("-# Had a little trouble finding alternatives, but I've got your track!")
+            tracks, error, warning = await self._fetch_url_info(url)
+            if error:
+                await ctx.send(f"❌ {error}")
+                return []
+            if warning:
+                await ctx.send(warning)
+            return tracks
+
+        # If no alternatives found, play the original
+        all_results = songs + videos
+        if not all_results:
+            tracks, error, warning = await self._fetch_url_info(url)
+            if error:
+                await ctx.send(f"❌ {error}")
+                return []
+            if warning:
+                await ctx.send(warning)
+            return tracks
+
+        # Convert results to tracks, keeping original as user_track
+        user_track = original.to_track() if original else None
+
+        # NOTE: We do NOT exclude original_video_id from YTM results.
+        # If the same video appears as an ATV in YTM, that's valuable - it has
+        # better metadata (square thumbnail, clean title). User can choose between
+        # their URL (slot 0) or the YTM version (slot 1) even if same video_id.
+        # We only exclude from YouTube results to avoid showing the exact same thing twice.
+        ytm_tracks = [r.to_track() for r in songs]
+        yt_tracks = [r.to_track() for r in videos if r.video_id != (original.video_id if original else None)]
+
+        if not ytm_tracks and not yt_tracks and user_track:
+            # Only the original URL, no alternatives
+            return [user_track]
+
+        # Show selection UI
+        selected = await get_track_selection(
+            ctx,
+            ytm_tracks=ytm_tracks,
+            yt_tracks=yt_tracks,
+            user_track=user_track,
+            recommended_id=recommended_id,
+            timeout=30.0,
+        )
+
+        if not selected:
+            await ctx.send("Selection timed out. Call me again when you're ready!")
+            return []
+
+        # Log the selection
+        self.logger.info(
+            f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
+            f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
+        )
+
+        return [selected]
+
+    async def _do_play_search_with_ytm(
+        self,
+        ctx: commands.Context,
+        query: str,
+    ) -> List[Track]:
+        """Handle search-based play with YTM integration.
+
+        Searches both YTM and YouTube, deduplicates, and shows selection UI.
+        Falls back to legacy search if YTM is unavailable.
+
+        Args:
+            ctx: The command context.
+            query: The search query.
+
+        Returns:
+            List of tracks to add (empty if user cancelled or error).
+        """
+        from utils.views import get_selection
+
+        await ctx.send(f"🔍 Searching for: **{query}**")
+
+        # Try YTM-enhanced search first
+        if YTMUSIC_AVAILABLE:
+            try:
+                _, songs, videos, _ = await self._search_with_ytm(query, is_url=False)
+
+                if songs or videos:
+                    # Convert results to tracks
+                    ytm_tracks = [r.to_track() for r in songs]
+                    yt_tracks = [r.to_track() for r in videos]
+
+                    total = len(ytm_tracks) + len(yt_tracks)
+                    if total == 1:
+                        return ytm_tracks if ytm_tracks else yt_tracks
+
+                    # Show selection UI
+                    selected = await get_track_selection(
+                        ctx,
+                        ytm_tracks=ytm_tracks,
+                        yt_tracks=yt_tracks,
+                        timeout=30.0,
+                    )
+
+                    if not selected:
+                        await ctx.send("Selection timed out. Call me again when you're ready!")
+                        return []
+
+                    # Log the selection
+                    self.logger.info(
+                        f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
+                        f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
+                    )
+
+                    return [selected]
+
+            except Exception as e:
+                self.logger.warning(f"YTM search failed, falling back to legacy: {e}")
+                await ctx.send("-# Had a little trouble with YouTube Music, showing regular results instead!")
+
+        # Fallback to legacy YouTube search
+        results = await self._search_youtube(query, max_results=5)
+        if not results:
+            await ctx.send("No results found. Try a different search term!")
+            return []
+
+        if len(results) == 1:
+            return results
+
+        # Legacy selection UI
+        embed = discord.Embed(
+            title="🎵 Select a Track",
+            description="Choose the track you want to play:",
+            color=discord.Color.blue()
+        )
+
+        options = {}
+        for i, track in enumerate(results, 1):
+            duration_str = f"{int(track.duration) // 60}:{int(track.duration) % 60:02d}"
+            embed.add_field(
+                name=f"{i}. {track.title}",
+                value=f"by {track.artist} • {duration_str}",
+                inline=False
+            )
+            options[str(i)] = str(i)
+
+        selection = await get_selection(ctx, embed, options, timeout=30.0)
+
+        if not selection:
+            await ctx.send("Selection timed out. Call me again when you're ready!")
+            return []
+
+        try:
+            selected_idx = int(selection) - 1
+            if 0 <= selected_idx < len(results):
+                return [results[selected_idx]]
+            else:
+                await ctx.send("Invalid selection.")
+                return []
+        except ValueError:
+            await ctx.send("Invalid selection.")
+            return []
 
     async def _do_queue(self, ctx: commands.Context) -> None:
         """Internal implementation for queue display.
@@ -1056,7 +1268,7 @@ class MusicCommandsMixin:
             await ctx.send("No track is loaded.")
             return
 
-        thumbnail_bytes = await get_best_thumbnail_bytes(track, self.logger)
+        thumbnail_bytes = await get_thumbnail_bytes(track, self.cache_manager)
         files: List[discord.File] = []
         thumbnail_url: Optional[str] = None
 
@@ -1134,7 +1346,7 @@ class MusicCommandsMixin:
             await ctx.send("I'm not playing music right now!")
             return
 
-        if ctx.author.id != self.bot.owner_id:
+        if ctx.author.id not in self.bot.owner_ids:
             author_voice = getattr(ctx.author, 'voice', None)
             if not author_voice or not author_voice.channel or author_voice.channel.id != self.active_session.channel_id:
                 await ctx.send("You need to be in the voice channel to control playback!")
@@ -1272,7 +1484,7 @@ class MusicCommandsMixin:
 
         new_track = self._get_current_track()
         if new_track:
-            return await get_best_thumbnail_bytes(new_track, self.logger)
+            return await get_thumbnail_bytes(new_track, self.cache_manager)
         return None
 
     async def shuffle_playlist(self) -> None:
@@ -1293,5 +1505,5 @@ class MusicCommandsMixin:
         """Fetch thumbnail bytes for the current track."""
         track = self._get_current_track()
         if track:
-            return await get_best_thumbnail_bytes(track, self.logger)
+            return await get_thumbnail_bytes(track, self.cache_manager)
         return None

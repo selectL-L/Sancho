@@ -57,11 +57,14 @@ from utils.musicutils import (
     MusicCacheManager,
     MusicCommandsMixin,
     PlaybackState,
+    SearchResult,
     Track,
     fetch_playlist_metadata,
     fetch_url_info,
-    get_best_thumbnail_bytes,
+    get_thumbnail_bytes,
     search_youtube,
+    search_query_mode,
+    search_url_mode,
 )
 from utils.views import (
     TrackFailureAction,
@@ -1139,6 +1142,34 @@ class Music(MusicCommandsMixin, BaseCog):
         """
         return await search_youtube(query, max_results, self.logger)
 
+    async def _search_with_ytm(
+        self,
+        query: str,
+        is_url: bool = False,
+    ) -> tuple[Optional[SearchResult], List[SearchResult], List[SearchResult], Optional[str]]:
+        """Unified search using YTM + YouTube with deduplication.
+
+        Searches both YouTube Music (for better metadata/thumbnails) and
+        regular YouTube (via yt-dlp), deduplicates by video ID, and returns
+        combined results prioritized by source quality.
+
+        Args:
+            query: Search query string or video ID (if is_url=True).
+            is_url: If True, query is a video ID to look up.
+
+        Returns:
+            Tuple of (original_result, songs, videos, recommended_id):
+            - original_result: The user's URL result (URL mode only, else None)
+            - songs: List of YTM song results (ATVs)
+            - videos: List of video results (YTM videos + YouTube)
+            - recommended_id: Video ID of high-confidence match (URL mode only, else None)
+        """
+        if is_url:
+            return await search_url_mode(query)
+        # Query mode returns (songs, videos), we add None for original and recommended_id
+        songs, videos = await search_query_mode(query)
+        return (None, songs, videos, None)
+
     async def _fetch_url_info(
         self,
         url: str,
@@ -1213,17 +1244,16 @@ class Music(MusicCommandsMixin, BaseCog):
             # Update track thumbnail if we found one
             if result.thumbnail and not next_track.thumbnail:
                 next_track.thumbnail = result.thumbnail
-                next_track.thumbnail_needs_crop = result.thumbnail_needs_crop
-                self.logger.info(f"[Prefetch] Updated thumbnail (needs_crop={result.thumbnail_needs_crop})")
+                next_track.thumbnail_is_square = result.thumbnail_is_square
+                self.logger.info(f"[Prefetch] Updated thumbnail (is_square={result.thumbnail_is_square})")
 
-            # Fetch thumbnail bytes for instant display (if URL succeeded)
-            if result.success and result.url:
-                try:
-                    result.thumbnail_bytes = await get_best_thumbnail_bytes(next_track, self.logger)
-                    if result.thumbnail_bytes:
-                        self.logger.info(f"[Prefetch] Got thumbnail: {len(result.thumbnail_bytes)} bytes")
-                except Exception as e:
-                    self.logger.warning(f"[Prefetch] Thumbnail fetch failed (non-fatal): {e}")
+            # Fetch thumbnail bytes for instant display
+            try:
+                result.thumbnail_bytes = await get_thumbnail_bytes(next_track, self.cache_manager)
+                if result.thumbnail_bytes:
+                    self.logger.info(f"[Prefetch] Got thumbnail: {len(result.thumbnail_bytes)} bytes")
+            except Exception as e:
+                self.logger.warning(f"[Prefetch] Thumbnail fetch failed (non-fatal): {e}")
 
             self._next_prepared = result
 
@@ -1411,7 +1441,7 @@ class Music(MusicCommandsMixin, BaseCog):
                 # Update thumbnail if we found one
                 if result.thumbnail and not track.thumbnail:
                     track.thumbnail = result.thumbnail
-                    track.thumbnail_needs_crop = result.thumbnail_needs_crop
+                    track.thumbnail_is_square = result.thumbnail_is_square
             else:
                 # Fetch failed
                 if result.is_unavailable:
