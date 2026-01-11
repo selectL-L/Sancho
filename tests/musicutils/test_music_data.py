@@ -164,7 +164,7 @@ class TestTrackSerialization:
         }
         track = Track.from_dict(data)
         assert track.thumbnail is None
-        assert track.thumbnail_needs_crop is False
+        assert track.thumbnail_is_square is False
 
 
 class TestAmbienceStateSwitch:

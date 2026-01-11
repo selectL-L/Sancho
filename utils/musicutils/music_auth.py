@@ -353,7 +353,7 @@ class AudioFetchResult:
     http_headers: Optional[Dict[str, str]] = None
     local_path: Optional[str] = None  # Residential/ambient cache path
     thumbnail: Optional[str] = None
-    thumbnail_needs_crop: bool = False
+    thumbnail_is_square: bool = False
     thumbnail_bytes: Optional[bytes] = None  # Pre-fetched thumbnail
 
     # Failure details
@@ -586,7 +586,7 @@ class AudioFetcher:
                     url=result.url,
                     http_headers=result.http_headers,
                     thumbnail=result.thumbnail,
-                    thumbnail_needs_crop=result.thumbnail_needs_crop,
+                    thumbnail_is_square=result.thumbnail_is_square,
                 )
 
             # No URL but no exception - likely unavailable or extraction failed

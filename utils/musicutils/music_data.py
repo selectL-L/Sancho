@@ -131,9 +131,13 @@ class Track:
     url: str  # YouTube URL
     duration: int  # Duration in seconds
     thumbnail: Optional[str] = None
-    thumbnail_needs_crop: bool = False  # True if thumbnail needs center-crop to square
+    thumbnail_is_square: bool = False  # True if thumbnail is already square (no processing needed)
     user_added: bool = False  # True if added by user (not from ambient playlist)
     video_id: Optional[str] = None  # YouTube video ID (extracted from URL)
+
+    # Display metadata (from YTM when available)
+    album: Optional[str] = None  # Album name (YTM songs only)
+    source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for caching.
@@ -147,8 +151,10 @@ class Track:
             'url': self.url,
             'duration': self.duration,
             'thumbnail': self.thumbnail,
-            'thumbnail_needs_crop': self.thumbnail_needs_crop,
-            'video_id': self.video_id
+            'thumbnail_is_square': self.thumbnail_is_square,
+            'video_id': self.video_id,
+            'album': self.album,
+            'source': self.source,
         }
 
     @classmethod
@@ -160,8 +166,10 @@ class Track:
             url=data['url'],
             duration=data['duration'],
             thumbnail=data.get('thumbnail'),
-            thumbnail_needs_crop=data.get('thumbnail_needs_crop', False),
-            video_id=data.get('video_id') or _extract_video_id(data['url'])
+            thumbnail_is_square=data.get('thumbnail_is_square', False),
+            video_id=data.get('video_id') or _extract_video_id(data['url']),
+            album=data.get('album'),
+            source=data.get('source', 'youtube'),
         )
 
 
@@ -285,7 +293,7 @@ class AudioUrlResult:
     url: Optional[str] = None  # Streamable audio URL
     is_unavailable: bool = False  # True if video is permanently unavailable (remove from playlist)
     thumbnail: Optional[str] = None  # Best thumbnail URL found
-    thumbnail_needs_crop: bool = False  # True if thumbnail needs center-cropping
+    thumbnail_is_square: bool = False  # True if thumbnail is already square
     http_headers: Optional[Dict[str, str]] = None  # Headers needed for FFmpeg
     error: Optional[str] = None  # Error message if fetch failed
 
