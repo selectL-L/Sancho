@@ -152,6 +152,12 @@ async def startup_handler(bot: "CoreBot") -> None:
 
     logging.info(f"{config.BOT_NAME} is ready!")
 
+    # Apply initial visibility from config
+    # This ensures the bot starts in the configured state (e.g., invisible for dev)
+    await bot.change_presence(status=bot.current_visibility)
+    if bot.current_visibility != discord.Status.online:
+        logging.info(f"Initial visibility set to: {bot.current_visibility.name}")
+
     # Call cog_ready() on all cogs to start their background tasks
     await bot.ready_all_cogs()
 

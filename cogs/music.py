@@ -477,8 +477,8 @@ class Music(MusicCommandsMixin, BaseCog):
             await self.active_session.voice_client.disconnect()
             self.active_session = None
 
-        # Clear presence
-        await self.bot.change_presence(activity=None)
+        # Clear presence (respects visibility setting)
+        await self.bot.change_presence_safe(activity=None)
         self.logger.info("Music cog unloaded.")
 
     # ==========================================================================
@@ -1050,7 +1050,7 @@ class Music(MusicCommandsMixin, BaseCog):
                         # Ambience wants us to stop
                         self.playlist = []
                         self._ambience.confirm_switch(None)
-                        await self.bot.change_presence(activity=None)
+                        await self.bot.change_presence_safe(activity=None)
                         self.logger.info("Stopped music per ambience request")
                     elif new_url != self._ambience.current_playlist_url:
                         # Switch to new playlist
@@ -1092,7 +1092,7 @@ class Music(MusicCommandsMixin, BaseCog):
                     name=current_track.title,
                     state=f"by {current_track.artist}"
                 )
-                await self.bot.change_presence(activity=presence_activity)
+                await self.bot.change_presence_safe(activity=presence_activity)
 
                 # Calculate remaining time for current track
                 elapsed = time.time() - self.track_started_at
@@ -1124,7 +1124,7 @@ class Music(MusicCommandsMixin, BaseCog):
             name=track.title,
             state=f"by {track.artist}"
         )
-        await self.bot.change_presence(activity=activity)
+        await self.bot.change_presence_safe(activity=activity)
 
     # ==========================================================================
     # VOICE PLAYBACK

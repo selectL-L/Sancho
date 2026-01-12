@@ -1721,6 +1721,59 @@ class AdminCog(BaseCog):
             await ctx.send(f"❌ Failed to clear fate: {e}", ephemeral=True)
             self.logger.error(f"Failed to clear fate: {e}", exc_info=True)
 
+    @commands.hybrid_command(
+        name="visibility",
+        hidden=True,
+        description="Set bot visibility status (online/idle/dnd/invisible).",
+        help=(
+            "Set the bot's Discord visibility status.\n\n"
+            "Useful for dev bots to go invisible during testing to avoid "
+            "online/offline notification spam. Music presence will not "
+            "override an invisible status."
+        )
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        status="The visibility status to set."
+    )
+    @app_commands.choices(status=[
+        app_commands.Choice(name="Online", value="online"),
+        app_commands.Choice(name="Idle", value="idle"),
+        app_commands.Choice(name="Do Not Disturb", value="dnd"),
+        app_commands.Choice(name="Invisible", value="invisible"),
+    ])
+    async def visibility(
+        self,
+        ctx: commands.Context,
+        status: str
+    ) -> None:
+        """Set the bot's Discord visibility status.
+
+        Useful for dev bots to go invisible during testing to avoid
+        online/offline notification spam. Music presence will not
+        override an invisible status.
+
+        Args:
+            ctx: The command context.
+            status: One of 'online', 'idle', 'dnd', 'invisible'.
+        """
+        status_lower = status.lower()
+        if await self.bot.set_visibility(status_lower):
+            status_emoji = {
+                'online': '🟢',
+                'idle': '🌙',
+                'dnd': '⛔',
+                'invisible': '👻'
+            }
+            emoji = status_emoji.get(status_lower, '')
+            await ctx.send(f"{emoji} Visibility set to **{status_lower}**.", ephemeral=True)
+            self.logger.info(f"Admin {ctx.author} set visibility to {status_lower}.")
+        else:
+            await ctx.send(
+                "❌ Invalid status. Use: online, idle, dnd, invisible.",
+                ephemeral=True
+            )
+
 
 async def setup(bot: CoreBot) -> None:
     """Standard setup function to add the cog to the bot.

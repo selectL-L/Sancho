@@ -82,6 +82,7 @@ def check_and_create_env_file() -> None:
         "BOT_NAME": "NoName",
         "OWNER_ID": "",
         "AMBIENCE_ENABLED": "True",
+        "DEFAULT_VISIBILITY": "online",
         "THEME_COLOR": "",
         # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID": "",
@@ -167,6 +168,10 @@ def check_and_create_env_file() -> None:
         "AMBIENCE_ENABLED":
             "# (Optional) Enable personality-driven responses (greetings, mood-based replies).\n"
             "# Default: True. Set to False to disable without removing ambience.toml.",
+        "DEFAULT_VISIBILITY":
+            "# (Optional) Initial Discord presence status on startup.\n"
+            "# Options: online, idle, dnd, invisible. Default: online.\n"
+            "# Useful for dev bots to start invisible and avoid online/offline spam.",
         "THEME_COLOR":
             "# (Optional) Hex color for the web UI theme (e.g., #9333ea for purple).\n"
             "# If empty, the web UI defaults to green.",
@@ -330,6 +335,10 @@ OWNER_IDS: set[int] = {
 
 raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
 AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
+
+# Default visibility on startup. Valid: online, idle, dnd, invisible
+raw_default_visibility = os.getenv('DEFAULT_VISIBILITY', 'online').lower()
+DEFAULT_VISIBILITY = raw_default_visibility if raw_default_visibility in ('online', 'idle', 'dnd', 'invisible') else 'online'
 
 THEME_COLOR = os.getenv('THEME_COLOR', '')  # Empty = web UI defaults to green
 

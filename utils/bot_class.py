@@ -68,6 +68,85 @@ class CoreBot(commands.Bot):
         self.start_time: float = time.time()
         self._dynamic_nlp_groups: list[list[tuple[tuple[str, ...], str, str]]] = []
 
+        # Visibility control - determines Discord presence status
+        # Maps string names to discord.Status enum values
+        self._visibility_map = {
+            'online': discord.Status.online,
+            'idle': discord.Status.idle,
+            'dnd': discord.Status.dnd,
+            'invisible': discord.Status.invisible,
+        }
+        self._current_visibility: discord.Status = self._visibility_map.get(
+            config.DEFAULT_VISIBILITY, discord.Status.online
+        )
+
+    # =========================================================================
+    # VISIBILITY CONTROL
+    # =========================================================================
+
+    @property
+    def current_visibility(self) -> discord.Status:
+        """The current visibility status for the bot."""
+        return self._current_visibility
+
+    @property
+    def is_visible(self) -> bool:
+        """Whether the bot is currently visible (not invisible)."""
+        return self._current_visibility != discord.Status.invisible
+
+    async def set_visibility(self, status: str) -> bool:
+        """Set the bot's visibility status.
+
+        Args:
+            status: One of 'online', 'idle', 'dnd', 'invisible'.
+
+        Returns:
+            True if the status was changed, False if invalid status.
+        """
+        if status not in self._visibility_map:
+            return False
+
+        self._current_visibility = self._visibility_map[status]
+        logging.info(f"Visibility changed to: {status}")
+
+        # Apply the new visibility immediately
+        # If invisible, clear activity; otherwise preserve current activity
+        if self._current_visibility == discord.Status.invisible:
+            await self.change_presence(status=self._current_visibility, activity=None)
+        else:
+            # Re-apply current activity with new status
+            # This triggers the presence loop to update if needed
+            await self.change_presence(status=self._current_visibility)
+
+        return True
+
+    async def change_presence_safe(
+        self,
+        *,
+        activity: Optional[discord.BaseActivity] = discord.utils.MISSING,
+        status: Optional[discord.Status] = None,
+    ) -> None:
+        """Change presence respecting the current visibility setting.
+
+        Use this instead of `change_presence` when the bot should NOT
+        override an invisible status (e.g., music presence cycling).
+
+        Args:
+            activity: The activity to set. Use None to clear.
+            status: The status to set. If None, uses current visibility.
+        """
+        # If bot is invisible, skip presence updates entirely
+        if self._current_visibility == discord.Status.invisible:
+            return
+
+        # Use current visibility if no status specified
+        effective_status = status if status is not None else self._current_visibility
+
+        if activity is discord.utils.MISSING:
+            await self.change_presence(status=effective_status)
+        else:
+            await self.change_presence(activity=activity, status=effective_status)
+
     @runtime_checkable
     class ContextLike(Protocol):
         """A Protocol describing the minimal Context-like object required by NLP handlers."""
