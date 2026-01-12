@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -849,54 +848,6 @@ def text_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def score_atv_match(
-    original_title: str,
-    original_artist: str,
-    original_duration: Optional[int],
-    original_artist_ids: set[str],
-    candidate: SearchResult
-) -> float:
-    """Score how well a candidate ATV matches the original video.
-
-    Uses geometric mean of title and artist similarity, with duration gate.
-
-    Args:
-        original_title: Title of original video.
-        original_artist: Artist of original video.
-        original_duration: Duration in seconds (optional).
-        original_artist_ids: Set of artist IDs from original.
-        candidate: Candidate search result.
-
-    Returns:
-        Score 0.0-1.0. Higher is better match.
-    """
-    # Artist similarity: ID match = 1.0, otherwise string similarity
-    if candidate.artist_id and candidate.artist_id in original_artist_ids:
-        artist_sim = 1.0
-    else:
-        artist_sim = text_similarity(original_artist, candidate.artist)
-
-    # Title similarity
-    title_sim = text_similarity(original_title, candidate.title)
-
-    # Geometric mean - requires BOTH to match reasonably
-    combined = math.sqrt(title_sim * artist_sim)
-
-    # Duration as soft factor - penalize large differences but never zero out
-    # MVs often have intros/outros that ATVs don't, so differences are expected
-    if original_duration and candidate.duration_seconds:
-        duration_diff = abs(original_duration - candidate.duration_seconds)
-        if duration_diff > 30:
-            # Large difference (>30s) - likely different version, reduce score
-            combined *= 0.5
-        elif duration_diff > 15:
-            # Moderate difference - slight penalty
-            combined *= 0.8
-        # <=15s difference: no penalty
-
-    return combined
-
-
 # ==========================================================================
 # CONFIDENCE FILTERING
 # ==========================================================================
@@ -913,7 +864,7 @@ def _normalize_for_comparison(text: str) -> set[str]:
     return {w for w in words if len(w) > 1 and w not in stopwords}
 
 
-def is_relevant(query: str, result: SearchResult) -> bool:
+def is_relevant(query: str, result: SearchResult, strict: bool = False) -> bool:
     """Check if a result is relevant to the query.
 
     Uses character-level similarity and substring matching to handle:
@@ -924,6 +875,8 @@ def is_relevant(query: str, result: SearchResult) -> bool:
     Args:
         query: Original search query.
         result: Search result to check.
+        strict: If True, use tighter thresholds (for URL mode where query is
+            a video title). If False, use looser thresholds (for human queries).
 
     Returns:
         True if result seems relevant.
@@ -931,9 +884,15 @@ def is_relevant(query: str, result: SearchResult) -> bool:
     q = query.lower()
     combined = f"{result.title} {result.artist}".lower()
 
+    # Garbage filtering thresholds - very low, only catches truly unrelated results
+    # Strict mode (URL) is slightly tighter since titles are cleaner than human queries
+    char_sim_threshold = 0.20 if strict else 0.15
+    short_query_hit_ratio = 0.15 if strict else 0.10
+    long_query_hit_ratio = 0.20 if strict else 0.15
+
     # 1. Character-level similarity (handles CJK, packed titles)
     char_sim = SequenceMatcher(None, q, combined).ratio()
-    if char_sim > 0.35:
+    if char_sim > char_sim_threshold:
         return True
 
     # 2. Substring matching - check if query segments appear anywhere
@@ -944,9 +903,9 @@ def is_relevant(query: str, result: SearchResult) -> bool:
 
         # Scale requirement with query length
         if len(query_words) <= 3:
-            return hit_ratio >= 0.3  # 30% for short queries
+            return hit_ratio >= short_query_hit_ratio
         else:
-            return hit_ratio >= 0.4  # 40% for longer queries
+            return hit_ratio >= long_query_hit_ratio
 
     return False
 
@@ -1134,22 +1093,25 @@ async def search_url_mode(
     for jp_name in jp_names[:2]:  # Limit to 2 Japanese queries
         queries.append(f"{title} {jp_name}")
 
-    # Search YTM with all queries, collecting results and artist IDs
+    # Search YTM with all queries, collecting results
     # NOTE: We do NOT exclude the original video_id from YTM results.
     # If the original appears as an ATV, that's valuable - user can choose between
     # their URL (slot 0, YouTube metadata) or the YTM version (slot 1, clean metadata).
     # Even if same video_id, the metadata quality differs.
     all_ytm_results: List[SearchResult] = []
     seen_ids: set[str] = set()
-    artist_ids: set[str] = set()  # Collect artist IDs from search results
+    original_artist_id: Optional[str] = None  # Artist ID from original video in YTM
     original_found_as_atv = False
 
     for query in queries:
         results = await search_ytm(query, limit=5)
         for r in results:
-            # Collect artist IDs for matching (from all results, not just new ones)
-            if r.artist_id:
-                artist_ids.add(r.artist_id)
+            # Capture artist_id from the ORIGINAL video if it appears in YTM
+            # This lets us match the MV's artist to potential ATVs
+            if r.video_id == video_id and r.artist_id and not original_artist_id:
+                original_artist_id = r.artist_id
+                logger.debug(f"[URL Mode] Found original {video_id} in YTM with artist_id={r.artist_id}")
+
             if r.video_id not in seen_ids:
                 seen_ids.add(r.video_id)
                 all_ytm_results.append(r)
@@ -1163,52 +1125,55 @@ async def search_url_mode(
     yt_results = await search_youtube(title, limit=6)
     yt_results = [r for r in yt_results if r.video_id not in seen_ids and r.video_id != video_id]
 
-    # Score ATVs
+    # Split YTM results into songs (ATVs) and videos
+    # Trust YTM's ranking - don't re-sort, just take in order
     songs = [r for r in all_ytm_results if r.source == 'ytm_song']
     videos = [r for r in all_ytm_results if r.source == 'ytm_video'] + yt_results
 
-    # Score and sort songs by match quality
-    scored_songs: List[Tuple[float, SearchResult]] = []
-    for song in songs:
-        score = score_atv_match(title, author, duration, artist_ids, song)
-        if score > 0.0:  # Only include if passes duration gate
-            scored_songs.append((score, song))
-
-    scored_songs.sort(key=lambda x: x[0], reverse=True)
+    # Garbage filter - only filter videos, NOT songs
+    # YTM ATVs are curated catalog entries - if YTM returned them, they're relevant
+    # Videos (YTM videos + YouTube) can be noisy user uploads, so filter those
+    # Note: This fixes JP↔EN title mismatch where correct ATV has Japanese title
+    videos = [r for r in videos if is_relevant(title, r, strict=True)]
 
     # Determine recommended_id - priority order:
     # 1. Original video_id found as ATV in search → 100% match, it IS the ATV
-    # 2. Strict semantic matching for other ATVs
+    # 2. Semantic matching for top ATV (conservative to avoid false positives on covers)
     recommended_id: Optional[str] = None
 
     if original_found_as_atv:
         # The user's URL is literally the ATV version - can't get more certain than this
         recommended_id = video_id
         logger.info(f"[URL Mode] Original {video_id} IS the ATV - 100% match")
-    elif scored_songs:
-        _, top_song = scored_songs[0]
+    elif songs:
+        top_song = songs[0]
 
-        # Strict matching using DETERMINISTIC signals only:
-        # - Artist ID match (consistent across MV/ATV for same artist)
-        # - High title similarity (>=0.95 for near-exact match)
-        # Duration is NOT used - MVs have intros/outros ATVs don't
-        artist_id_matches = top_song.artist_id and top_song.artist_id in artist_ids
+        # Matching using DETERMINISTIC signals:
+        # - Artist ID match: original MV's artist_id == top song's artist_id
+        # - Title similarity >= 0.85 (allows for feat. additions, language variants)
+        # Note: We can't get the MV→ATV link from YouTube's API, so we rely on text matching
+        artist_id_matches = (
+            original_artist_id is not None
+            and top_song.artist_id is not None
+            and original_artist_id == top_song.artist_id
+        )
         title_sim = text_similarity(title, top_song.title)
 
-        if artist_id_matches and title_sim >= 0.95:
+        if artist_id_matches and title_sim >= 0.85:
             recommended_id = top_song.video_id
             logger.info(
                 f"[URL Mode] Recommending {recommended_id} | "
-                f"artist_id=✓, title_sim={title_sim:.2f}"
+                f"artist_id=✓ ({original_artist_id}), title_sim={title_sim:.2f}"
             )
         else:
             logger.debug(
-                f"[URL Mode] No recommendation - artist_id={artist_id_matches}, "
+                f"[URL Mode] No recommendation - artist_id_match={artist_id_matches} "
+                f"(orig={original_artist_id}, song={top_song.artist_id}), "
                 f"title_sim={title_sim:.2f}"
             )
 
-    # Take top 3 songs
-    final_songs: List[SearchResult] = [song for _score, song in scored_songs[:3]]
+    # Take top 3 songs (YTM's ranking, filtered for relevance)
+    final_songs = songs[:3]
 
     logger.debug(f"[URL Mode] Found {len(final_songs)} songs, {len(videos[:3])} videos for {video_id}")
 

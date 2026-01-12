@@ -97,8 +97,7 @@ from utils.musicutils.search import (
     # Unified search
     search_query_mode,
     search_url_mode,
-    # Scoring/filtering
-    score_atv_match,
+    # Filtering
     is_relevant,
     dedupe_results,
 )
@@ -220,7 +219,6 @@ __all__ += [
     'search_query_mode',
     'search_url_mode',
     'search_youtube_legacy',
-    'score_atv_match',
     'is_relevant',
     'dedupe_results',
 ]
