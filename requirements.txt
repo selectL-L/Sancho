@@ -10,6 +10,15 @@ aiosqlite
 # Asynchronous HTTP client, used by the Starboard cog.
 aiohttp
 
+# Web framework for the Schedule cog's availability web UI.
+fastapi
+
+# ASGI server to run FastAPI, used by the Schedule cog.
+uvicorn[standard]
+
+# Cryptographic signing for session cookies in the Schedule web UI.
+itsdangerous
+
 # For parsing natural language dates and times in the Reminders cog.
 dateparser
 
@@ -38,6 +47,9 @@ bgutil-ytdlp-pot-provider
 
 # For reading and writing MP3 ID3 metadata (title, artist, cover art, etc.).
 mutagen
+
+# For YouTube Music search and metadata retrieval in the Music cog.
+ytmusicapi
 
 # For fetching synced lyrics from LRCLIB in the Music cog.
 syncedlyrics
