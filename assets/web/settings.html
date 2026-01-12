@@ -1,0 +1,1375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings — Shion</title>
+  <link rel="stylesheet" href="tailwind.css">
+  <style>
+    /* ========== THEME COLOR (set dynamically, defaults to purple) ========== */
+    :root {
+      --theme-r: 147;
+      --theme-g: 51;
+      --theme-b: 234;
+    }
+
+    /* ========== RESPONSIVE SCALING ========== */
+    html {
+      font-size: clamp(15px, 0.9vw + 8px, 20px);
+    }
+
+    /* ========== DARK MODE ========== */
+    .dark {
+      --bg-page: #09090b;
+      --bg-card: #18181b;
+      --bg-card-hover: #1f1f23;
+      --bg-input: #27272a;
+      
+      --text-primary: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      
+      --border-default: rgba(63, 63, 70, 0.5);
+      --border-subtle: rgba(63, 63, 70, 0.25);
+      
+      --heatmap-0: transparent;
+      --heatmap-available: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.70);
+      
+      --glass-bg: rgba(39, 39, 42, 0.7);
+      --glass-border: rgba(63, 63, 70, 0.3);
+      
+      --hover-overlay: rgba(255, 255, 255, 0.05);
+      --scrollbar-thumb: #3f3f46;
+      --scrollbar-thumb-hover: #52525b;
+      
+      --danger-bg: rgba(239, 68, 68, 0.12);
+      --danger-border: rgba(239, 68, 68, 0.25);
+      --danger-text: #fca5a5;
+      --danger-hover-bg: rgba(239, 68, 68, 0.20);
+
+      --warning-bg: rgba(251, 191, 36, 0.15);
+      --warning-border: rgba(251, 191, 36, 0.3);
+      --warning-text: #fbbf24;
+
+      --skeleton-base: #27272a;
+    }
+
+    /* ========== LIGHT MODE ========== */
+    .light {
+      --bg-page: #f4f4f5;
+      --bg-card: #ffffff;
+      --bg-card-hover: #fafafa;
+      --bg-input: #f4f4f5;
+      
+      --text-primary: #18181b;
+      --text-secondary: #52525b;
+      --text-muted: #71717a;
+      
+      --border-default: rgba(0, 0, 0, 0.12);
+      --border-subtle: rgba(0, 0, 0, 0.06);
+      
+      --heatmap-0: transparent;
+      --heatmap-available: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.65);
+      
+      --glass-bg: rgba(255, 255, 255, 0.85);
+      --glass-border: rgba(0, 0, 0, 0.08);
+      
+      --hover-overlay: rgba(0, 0, 0, 0.04);
+      --scrollbar-thumb: #d4d4d8;
+      --scrollbar-thumb-hover: #a1a1aa;
+      
+      --danger-bg: rgba(239, 68, 68, 0.08);
+      --danger-border: rgba(239, 68, 68, 0.20);
+      --danger-text: #dc2626;
+      --danger-hover-bg: rgba(239, 68, 68, 0.15);
+
+      --warning-bg: rgba(251, 191, 36, 0.12);
+      --warning-border: rgba(251, 191, 36, 0.25);
+      --warning-text: #b45309;
+
+      --skeleton-base: #e4e4e7;
+    }
+
+    /* ========== BASE STYLES ========== */
+    body {
+      background-color: var(--bg-page);
+      color: var(--text-primary);
+    }
+
+    * {
+      transition-property: background-color, border-color, color, box-shadow, filter;
+      transition-duration: 150ms;
+      transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* ========== COMPONENTS ========== */
+    .card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .glass {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+    }
+
+    .text-primary { color: var(--text-primary); }
+    .text-secondary { color: var(--text-secondary); }
+    .text-muted { color: var(--text-muted); }
+
+    /* ========== WARNING/BLOCKED STATE ========== */
+    .warning-banner {
+      background: var(--warning-bg);
+      border: 1px solid var(--warning-border);
+      color: var(--warning-text);
+    }
+
+    .blocked-overlay {
+      position: absolute;
+      inset: 0;
+      background: var(--bg-card);
+      opacity: 0.95;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.75rem;
+    }
+
+    .blocked-overlay.hidden {
+      display: none;
+    }
+
+    .blocked-message {
+      text-align: center;
+      padding: 2rem;
+    }
+
+    /* ========== AVATAR WITH FALLBACK ========== */
+    .avatar {
+      background: var(--bg-input);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-weight: 500;
+      text-transform: uppercase;
+      overflow: hidden;
+    }
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* ========== INPUTS ========== */
+    .input {
+      background-color: var(--bg-input);
+      border: 1px solid var(--border-default);
+      color: var(--text-primary);
+    }
+    .input::placeholder {
+      color: var(--text-muted);
+    }
+    .input:focus {
+      outline: none;
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+      box-shadow: 0 0 0 3px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.1);
+    }
+
+    /* ========== BUTTONS ========== */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 500;
+      border-radius: 0.75rem;
+      transition: all 150ms;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.25));
+      border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
+      color: var(--text-primary);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.45), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35));
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
+      transform: translateY(-1px);
+    }
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border-default);
+      color: var(--text-secondary);
+    }
+    .btn-ghost:hover {
+      background: var(--hover-overlay);
+      border-color: var(--border-default);
+      color: var(--text-primary);
+    }
+
+    .btn-danger {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      color: var(--danger-text);
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: var(--danger-hover-bg);
+    }
+    .btn-danger:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* ========== TOGGLE SWITCH ========== */
+    .toggle-switch {
+      position: relative;
+      width: 2.75rem;
+      height: 1.5rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.75rem;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .toggle-switch.active {
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
+    }
+    .toggle-switch::after {
+      content: '';
+      position: absolute;
+      top: 0.125rem;
+      left: 0.125rem;
+      width: 1.125rem;
+      height: 1.125rem;
+      background: var(--text-primary);
+      border-radius: 50%;
+      transition: transform 150ms;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .toggle-switch.active::after {
+      transform: translateX(1.25rem);
+    }
+
+    /* ========== GRID STYLES ========== */
+    .grid-cell {
+      position: relative;
+      user-select: none;
+    }
+    
+    .dark .grid-cell:hover {
+      filter: brightness(1.2);
+    }
+    .light .grid-cell:hover {
+      filter: brightness(0.9);
+    }
+
+    .grid-cell.available {
+      background-color: var(--heatmap-available);
+    }
+    .grid-cell.unavailable {
+      background-color: var(--heatmap-0);
+    }
+
+    .row-hour {
+      border-bottom: 1px dashed var(--border-default);
+    }
+    .row-quarter {
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .col-separator {
+      border-right: 1px solid var(--border-subtle);
+    }
+    .grid-border {
+      border-color: var(--border-default);
+    }
+
+    .grid-scroll {
+      max-height: 50vh;
+      overflow-y: auto;
+    }
+
+    .cell-h {
+      height: 1.25rem;
+    }
+
+    /* ========== CURRENT TIME INDICATOR ========== */
+    .time-indicator {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: #ef4444;
+      z-index: 30;
+      pointer-events: none;
+    }
+    .time-indicator::before {
+      content: 'Now';
+      position: absolute;
+      left: -2.5rem;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 0.625rem;
+      font-weight: 600;
+      color: #ef4444;
+      text-transform: uppercase;
+      letter-spacing: 0.025em;
+    }
+    .time-indicator::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 6px;
+      height: 6px;
+      background: #ef4444;
+      border-radius: 50%;
+    }
+
+    /* ========== SCROLLBAR ========== */
+    .grid-scroll::-webkit-scrollbar,
+    ::-webkit-scrollbar {
+      width: 0.375rem;
+    }
+    .grid-scroll::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .grid-scroll::-webkit-scrollbar-thumb,
+    ::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 0.1875rem;
+    }
+    .grid-scroll::-webkit-scrollbar-thumb:hover,
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--scrollbar-thumb-hover);
+    }
+
+    /* ========== SYNCHRONIZED SKELETON ========== */
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .skeleton {
+      background: var(--skeleton-base);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    /* ========== UTILITY ========== */
+    .hover-item:hover {
+      background: var(--hover-overlay);
+    }
+
+    .theme-toggle {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+    .theme-toggle:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-default);
+    }
+
+    .danger-zone {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+    }
+
+    .section-title {
+      font-size: 1.125rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .section-description {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    .back-btn {
+      color: var(--text-secondary);
+    }
+    .back-btn:hover {
+      color: var(--text-primary);
+      background: var(--hover-overlay);
+    }
+
+    .tz-badge {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      font-size: 0.75rem;
+    }
+  </style>
+</head>
+<body class="dark min-h-screen">
+
+  <!-- Timezone Warning Banner -->
+  <div class="warning-banner px-4 py-3 text-center text-sm hidden" id="tz-warning">
+    <span class="font-medium">⚠️ Set your timezone first!</span>
+    <span class="ml-2 opacity-90">Use <code class="px-1.5 py-0.5 rounded text-xs" style="background: var(--hover-overlay)" id="tz-command">!tz America/New_York</code> in Discord before editing your availability.</span>
+  </div>
+  
+  <div class="max-w-3xl mx-auto px-4 py-8">
+    
+    <!-- Header -->
+    <header class="mb-8">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="index.html" class="back-btn p-2 rounded-xl transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+          </a>
+          <div>
+            <h1 class="text-2xl font-medium text-primary">Settings</h1>
+            <p class="text-muted text-sm mt-0.5">Manage your availability and privacy</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <!-- Timezone Badge -->
+          <div class="tz-badge rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 text-secondary" id="tz-badge" title="Your timezone">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span id="tz-display">GMT+0</span>
+          </div>
+
+          <button 
+            onclick="toggleTheme()" 
+            class="theme-toggle p-2.5 rounded-xl text-secondary hover:text-primary"
+            title="Toggle theme"
+          >
+            <svg class="w-5 h-5 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+            </svg>
+            <svg class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Account Section -->
+    <section class="glass rounded-2xl p-5 mb-5">
+      <!-- Skeleton -->
+      <div class="flex items-center justify-between" id="account-skeleton">
+        <div class="flex items-center gap-4">
+          <div class="skeleton w-14 h-14 rounded-full"></div>
+          <div class="space-y-2">
+            <div class="skeleton w-32 h-4 rounded"></div>
+            <div class="skeleton w-24 h-3 rounded"></div>
+          </div>
+        </div>
+        <div class="skeleton w-20 h-9 rounded-xl"></div>
+      </div>
+      <!-- Content -->
+      <div class="flex items-center justify-between hidden" id="account-content">
+        <div class="flex items-center gap-4">
+          <div class="avatar w-14 h-14 rounded-full ring-2 ring-purple-500/20 text-lg" id="user-avatar-container">
+            <!-- Avatar initially hidden, shown when src is set -->
+            <img 
+              alt=""
+              id="user-avatar"
+              style="display: none;"
+            >
+          </div>
+          <div>
+            <div class="text-lg font-medium text-primary" id="username">Username</div>
+            <div class="text-sm text-muted">Logged in via Discord</div>
+          </div>
+        </div>
+        <button onclick="logout()" class="btn btn-ghost px-4 py-2 text-sm">
+          Log out
+        </button>
+      </div>
+    </section>
+
+    <!-- Edit Availability Section -->
+    <section class="card rounded-2xl p-5 mb-5 shadow-lg dark:shadow-black/20 light:shadow-black/5 relative">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="section-title">Your Availability</h2>
+          <p class="section-description">Click and drag to paint when you're free</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="clearAllAvailability()" class="btn btn-danger px-3 py-1.5 text-xs" id="clear-btn">
+            Clear all
+          </button>
+          <button onclick="saveAvailability()" class="btn btn-primary px-4 py-1.5 text-sm" id="save-btn">
+            Save changes
+          </button>
+        </div>
+      </div>
+      
+      <!-- Day headers -->
+      <div class="flex mb-0 pr-[6px]">
+        <div class="w-12 shrink-0"></div>
+        <div class="flex-1 grid grid-cols-7 border-x border-t grid-border">
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Mon</div>
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Tue</div>
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Wed</div>
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Thu</div>
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Fri</div>
+          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Sat</div>
+          <div class="text-center text-xs font-medium text-secondary py-2">Sun</div>
+        </div>
+      </div>
+
+      <!-- Grid container -->
+      <div class="grid-scroll">
+        <!-- Skeleton -->
+        <div class="flex" id="grid-skeleton">
+          <div class="w-12 shrink-0 flex flex-col" id="skeleton-time-labels"></div>
+          <div class="flex-1 border-x border-b grid-border" id="skeleton-cells"></div>
+        </div>
+
+        <!-- Content -->
+        <div class="flex hidden" id="grid-content">
+          <div class="w-12 shrink-0 flex flex-col" id="time-labels"></div>
+          <div class="flex-1 border-x border-b grid-border relative" id="availability-grid"></div>
+        </div>
+      </div>
+
+      <!-- Blocked overlay (shown when no timezone) -->
+      <div class="blocked-overlay hidden" id="grid-blocked">
+        <div class="blocked-message">
+          <div class="text-3xl mb-3">🕐</div>
+          <p class="text-primary font-medium mb-1">Set your timezone first</p>
+          <p class="text-muted text-sm mb-4">We need to know your timezone to<br>show your availability correctly.</p>
+          <code class="px-3 py-1.5 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border-default);" id="tz-command-overlay">!tz America/New_York</code>
+          <p class="text-xs text-muted mt-2">Run this command in Discord</p>
+        </div>
+      </div>
+
+      <p class="text-xs text-muted mt-4 text-center">Tip: Click and drag to select multiple time slots at once</p>
+    </section>
+
+    <!-- Guild Visibility Section -->
+    <section class="glass rounded-2xl p-5 mb-5">
+      <div class="mb-4">
+        <h2 class="section-title">Guild Visibility</h2>
+        <p class="section-description">Choose which servers can see your availability</p>
+      </div>
+      
+      <!-- Skeleton -->
+      <div class="space-y-2" id="guilds-skeleton">
+        <div class="flex items-center justify-between p-3 rounded-xl">
+          <div class="flex items-center gap-3">
+            <div class="skeleton w-6 h-6 rounded"></div>
+            <div class="skeleton w-40 h-3 rounded"></div>
+          </div>
+          <div class="skeleton w-11 h-6 rounded-xl"></div>
+        </div>
+        <div class="flex items-center justify-between p-3 rounded-xl">
+          <div class="flex items-center gap-3">
+            <div class="skeleton w-6 h-6 rounded"></div>
+            <div class="skeleton w-28 h-3 rounded"></div>
+          </div>
+          <div class="skeleton w-11 h-6 rounded-xl"></div>
+        </div>
+        <div class="flex items-center justify-between p-3 rounded-xl">
+          <div class="flex items-center gap-3">
+            <div class="skeleton w-6 h-6 rounded"></div>
+            <div class="skeleton w-32 h-3 rounded"></div>
+          </div>
+          <div class="skeleton w-11 h-6 rounded-xl"></div>
+        </div>
+      </div>
+      <!-- Content -->
+      <div class="space-y-2 hidden" id="guild-list"></div>
+      
+      <p class="text-xs text-muted mt-4">Only members of enabled servers can query your schedule through the bot</p>
+    </section>
+
+    <!-- Blacklist Section -->
+    <section class="glass rounded-2xl p-5 mb-5">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="section-title">Blocked Users</h2>
+          <p class="section-description">These users cannot see your availability</p>
+        </div>
+        <button onclick="showAddBlockModal()" class="btn btn-ghost px-3 py-1.5 text-xs">
+          <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+          </svg>
+          Add user
+        </button>
+      </div>
+      
+      <!-- Skeleton -->
+      <div class="space-y-2" id="blacklist-skeleton">
+        <div class="flex items-center justify-between p-3 rounded-xl">
+          <div class="flex items-center gap-3">
+            <div class="skeleton w-8 h-8 rounded-full"></div>
+            <div class="skeleton w-28 h-3 rounded"></div>
+          </div>
+          <div class="skeleton w-16 h-6 rounded-lg"></div>
+        </div>
+      </div>
+      <!-- Content -->
+      <div class="space-y-2 hidden" id="blacklist"></div>
+    </section>
+
+    <!-- Danger Zone -->
+    <section class="danger-zone rounded-2xl p-5">
+      <h2 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Danger Zone</h2>
+      <p class="text-sm text-muted mb-4">Permanent actions that cannot be undone</p>
+      
+      <button onclick="deleteAllData()" class="btn btn-danger px-4 py-2 text-sm">
+        Delete all my data
+      </button>
+    </section>
+
+  </div>
+
+  <!-- Add user to blacklist modal -->
+  <div id="add-block-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
+    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+      <h3 class="text-lg font-medium text-primary mb-1">Block a user</h3>
+      <p class="text-sm text-muted mb-4">They won't be able to see your availability</p>
+      <input 
+        type="text" 
+        id="block-username-input"
+        placeholder="Username or user ID"
+        class="input w-full rounded-xl px-4 py-2.5 text-sm mb-4"
+      >
+      <div class="flex gap-3 justify-end">
+        <button onclick="hideAddBlockModal()" class="btn btn-ghost px-4 py-2 text-sm">
+          Cancel
+        </button>
+        <button onclick="addToBlacklist()" class="btn btn-primary px-4 py-2 text-sm">
+          Block user
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ========== CONFIG & THEME ==========
+    let botName = 'Bot';
+    let botPrefix = '.';
+
+    async function loadConfig() {
+      try {
+        const response = await fetch('/api/config');
+        if (response.ok) {
+          const config = await response.json();
+          botName = config.botName || 'Bot';
+          botPrefix = config.prefix || '.';
+          document.title = `Settings — ${botName}`;
+          
+          // Update timezone command examples
+          const tzCmd = `${botPrefix}tz America/New_York`;
+          document.getElementById('tz-command').textContent = tzCmd;
+          document.getElementById('tz-command-overlay').textContent = tzCmd;
+          
+          if (config.themeColor) {
+            applyThemeColor(config.themeColor);
+          }
+        }
+      } catch (e) {
+        console.log('Config not available, using defaults');
+      }
+    }
+
+    function applyThemeColor(hex) {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      if (result) {
+        const r = parseInt(result[1], 16);
+        const g = parseInt(result[2], 16);
+        const b = parseInt(result[3], 16);
+        document.documentElement.style.setProperty('--theme-r', r);
+        document.documentElement.style.setProperty('--theme-g', g);
+        document.documentElement.style.setProperty('--theme-b', b);
+      }
+    }
+
+    // ========== AUTH ==========
+    window.currentUser = null;
+
+    async function loadCurrentUser() {
+      try {
+        const response = await fetch('/auth/me');
+        if (response.ok) {
+          const user = await response.json();
+          window.currentUser = user;
+          
+          // Check if re-auth is needed
+          if (user.needs_reauth) {
+            showReauthPrompt(user.reauth_message);
+          }
+          
+          // Setup timezone display/blocking
+          setupTimezone(user);
+          
+          return true;
+        } else if (response.status === 401) {
+          window.location.href = '/auth/login';
+          return false;
+        }
+      } catch (e) {
+        console.log('Auth check failed');
+        window.location.href = '/auth/login';
+        return false;
+      }
+    }
+
+    function setupTimezone(user) {
+      if (!user.hasTimezone) {
+        // No timezone set - show warning and block grid
+        document.getElementById('tz-warning').classList.remove('hidden');
+        document.getElementById('tz-badge').style.display = 'none';
+        document.getElementById('grid-blocked').classList.remove('hidden');
+        document.getElementById('save-btn').disabled = true;
+        document.getElementById('clear-btn').disabled = true;
+      } else {
+        // Has timezone - ensure overlay is hidden and controls enabled
+        document.getElementById('tz-warning').classList.add('hidden');
+        document.getElementById('tz-badge').style.display = '';
+        document.getElementById('grid-blocked').classList.add('hidden');
+        document.getElementById('save-btn').disabled = false;
+        document.getElementById('clear-btn').disabled = false;
+        // Show the IANA code directly (e.g., "America/New_York")
+        document.getElementById('tz-display').textContent = user.timezone;
+      }
+    }
+
+    function showReauthPrompt(message) {
+      const banner = document.createElement('div');
+      banner.className = 'fixed top-0 left-0 right-0 p-4 text-center text-sm z-50';
+      banner.style.background = 'var(--glass-bg)';
+      banner.style.borderBottom = '1px solid var(--glass-border)';
+      banner.style.backdropFilter = 'blur(12px)';
+      banner.innerHTML = `
+        <span class="text-secondary">${message || "Discord wants to verify it's you."}</span>
+        <a href="/auth/login" class="ml-3 px-3 py-1 rounded-lg text-primary" 
+           style="background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3)">
+          Re-authorize
+        </a>
+      `;
+      document.body.prepend(banner);
+      document.body.style.paddingTop = '60px';
+    }
+
+    function logout() {
+      window.location.href = '/auth/logout';
+    }
+
+    // ========== TIME SLOTS ==========
+    const times = [];
+    for (let hour = 0; hour < 24; hour++) {
+      for (let min = 0; min < 60; min += 15) {
+        let displayHour = hour;
+        let ampm = 'AM';
+        
+        if (hour === 0) displayHour = 12;
+        else if (hour === 12) { displayHour = 12; ampm = 'PM'; }
+        else if (hour > 12) { displayHour = hour - 12; ampm = 'PM'; }
+        
+        times.push({
+          key: `${hour.toString().padStart(2,'0')}${min.toString().padStart(2,'0')}`,
+          displayShort: `${displayHour}${ampm.toLowerCase()}`,
+          isHour: min === 0,
+          hour, min
+        });
+      }
+    }
+
+    const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+    // ========== USER DATA ==========
+    const myAvailability = new Set();
+    let guilds = [];
+    let blacklist = [];
+
+    // ========== DRAG STATE ==========
+    let isDragging = false;
+    let dragMode = null;
+
+    // ========== TIME UTILITIES ==========
+    function getCurrentTimeSlotIndex() {
+      const now = new Date();
+      return Math.floor((now.getHours() * 60 + now.getMinutes()) / 15);
+    }
+
+    function getCurrentDayIndex() {
+      const day = new Date().getDay();
+      return day === 0 ? 6 : day - 1; // Convert Sunday=0 to Sunday=6
+    }
+
+    // ========== SKELETON BUILDER ==========
+    function buildSkeleton() {
+      const timeLabels = document.getElementById('skeleton-time-labels');
+      const cells = document.getElementById('skeleton-cells');
+
+      for (let i = 0; i < 96; i++) {
+        const label = document.createElement('div');
+        label.className = 'cell-h flex items-center justify-end pr-2';
+        if (i % 4 === 0) {
+          const textEl = document.createElement('div');
+          textEl.className = 'skeleton w-8 h-3 rounded';
+          label.appendChild(textEl);
+        }
+        timeLabels.appendChild(label);
+      }
+
+      for (let i = 0; i < 96; i++) {
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-7';
+        if (i < 95) row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        for (let j = 0; j < 7; j++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell-h skeleton';
+          if (j < 6) cell.classList.add('col-separator');
+          row.appendChild(cell);
+        }
+        cells.appendChild(row);
+      }
+    }
+
+    // ========== LOAD DATA FROM API ==========
+    async function loadAvailability() {
+      try {
+        const response = await fetch('/api/availability');
+        if (response.ok) {
+          const data = await response.json();
+          myAvailability.clear();
+          for (const slot of data.slots || []) {
+            myAvailability.add(slot);
+            // Update grid cell if it exists
+            const cell = document.querySelector(`[data-key="${slot}"]`);
+            if (cell) {
+              cell.classList.remove('unavailable');
+              cell.classList.add('available');
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load availability:', e);
+      }
+    }
+
+    async function loadGuilds() {
+      try {
+        const response = await fetch('/api/guilds');
+        if (response.ok) {
+          const data = await response.json();
+          guilds = data.guilds || [];
+          buildGuildList();
+        }
+      } catch (e) {
+        console.error('Failed to load guilds:', e);
+      }
+    }
+
+    async function loadBlacklist() {
+      try {
+        const response = await fetch('/api/blacklist');
+        if (response.ok) {
+          const data = await response.json();
+          blacklist = data.users || [];
+          buildBlacklist();
+        }
+      } catch (e) {
+        console.error('Failed to load blacklist:', e);
+      }
+    }
+
+    // ========== BUILD UI ==========
+    function buildTimeLabels() {
+      const container = document.getElementById('time-labels');
+      times.forEach(time => {
+        const label = document.createElement('div');
+        label.className = 'cell-h flex items-center justify-end pr-2 text-sm text-muted';
+        label.textContent = time.isHour ? time.displayShort : '';
+        container.appendChild(label);
+      });
+    }
+
+    function buildGrid() {
+      const grid = document.getElementById('availability-grid');
+      const currentSlot = getCurrentTimeSlotIndex();
+      const currentDay = getCurrentDayIndex();
+
+      times.forEach((time, timeIdx) => {
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-7';
+        row.style.position = 'relative';
+        
+        if (timeIdx < times.length - 1) {
+          row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
+        }
+
+        days.forEach((day, dayIdx) => {
+          const key = `${day}-${time.key}`;
+
+          const cell = document.createElement('div');
+          cell.className = 'grid-cell cell-h cursor-pointer unavailable';
+          cell.dataset.key = key;
+
+          if (dayIdx < days.length - 1) {
+            cell.classList.add('col-separator');
+          }
+
+          cell.addEventListener('mousedown', (e) => {
+            if (!window.currentUser?.hasTimezone) return;
+            e.preventDefault();
+            isDragging = true;
+            const isAvailable = myAvailability.has(key);
+            dragMode = isAvailable ? 'remove' : 'add';
+            toggleCell(cell, key);
+          });
+
+          cell.addEventListener('mouseenter', () => {
+            if (!window.currentUser?.hasTimezone) return;
+            if (isDragging) {
+              if (dragMode === 'add' && !myAvailability.has(key)) {
+                toggleCell(cell, key);
+              } else if (dragMode === 'remove' && myAvailability.has(key)) {
+                toggleCell(cell, key);
+              }
+            }
+          });
+
+          row.appendChild(cell);
+        });
+
+        // Add time indicator for current time
+        if (timeIdx === currentSlot) {
+          const indicator = document.createElement('div');
+          indicator.className = 'time-indicator';
+          indicator.style.left = `${(currentDay / 7) * 100}%`;
+          indicator.style.width = `${100 / 7}%`;
+          row.appendChild(indicator);
+        }
+
+        grid.appendChild(row);
+      });
+
+      document.addEventListener('mouseup', () => {
+        isDragging = false;
+        dragMode = null;
+      });
+    }
+
+    function toggleCell(cell, key) {
+      if (myAvailability.has(key)) {
+        myAvailability.delete(key);
+        cell.classList.remove('available');
+        cell.classList.add('unavailable');
+      } else {
+        myAvailability.add(key);
+        cell.classList.remove('unavailable');
+        cell.classList.add('available');
+      }
+    }
+
+    async function clearAllAvailability() {
+      if (!confirm('Clear all your availability? This cannot be undone.')) return;
+      
+      try {
+        const response = await fetch('/api/availability', { method: 'DELETE' });
+        if (response.ok) {
+          myAvailability.clear();
+          document.querySelectorAll('.grid-cell').forEach(cell => {
+            cell.classList.remove('available');
+            cell.classList.add('unavailable');
+          });
+        } else {
+          alert('Failed to clear availability. Please try again.');
+        }
+      } catch (e) {
+        console.error('Failed to clear availability:', e);
+        alert('Failed to clear availability. Please try again.');
+      }
+    }
+
+    async function saveAvailability() {
+      // Double-check timezone requirement (backend will also enforce this)
+      if (!window.currentUser?.hasTimezone) {
+        alert('You must set your timezone before saving availability. Use the timezone command in Discord.');
+        return;
+      }
+
+      const slots = Array.from(myAvailability);
+      const count = slots.length;
+      const hours = (count * 15 / 60).toFixed(1);
+      
+      try {
+        const response = await fetch('/api/availability', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slots })
+        });
+        
+        if (response.ok) {
+          alert(`Saved! You're available for ${hours} hours per week.`);
+        } else {
+          const data = await response.json();
+          alert(data.error || 'Failed to save availability.');
+        }
+      } catch (e) {
+        console.error('Failed to save availability:', e);
+        alert('Failed to save availability. Please try again.');
+      }
+    }
+
+    // ========== GUILD VISIBILITY ==========
+    function buildGuildList() {
+      const container = document.getElementById('guild-list');
+      
+      if (guilds.length === 0) {
+        container.innerHTML = '<p class="text-sm text-muted py-2">No shared servers found</p>';
+        return;
+      }
+      
+      container.innerHTML = guilds.map(g => `
+        <div class="flex items-center justify-between p-3 rounded-xl hover-item">
+          <div class="flex items-center gap-3">
+            ${g.icon 
+              ? `<img src="${g.icon}" class="w-8 h-8 rounded-full" alt="">`
+              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">${g.name.charAt(0)}</div>`
+            }
+            <span class="text-sm text-primary">${g.name}</span>
+          </div>
+          <div 
+            class="toggle-switch ${g.enabled ? 'active' : ''}"
+            onclick="toggleGuild('${g.id}')"
+          ></div>
+        </div>
+      `).join('');
+    }
+
+    async function toggleGuild(id) {
+      const guild = guilds.find(g => String(g.id) === String(id));
+      if (!guild) return;
+      
+      const newState = !guild.enabled;
+      
+      try {
+        const response = await fetch(`/api/guilds/${id}/visibility`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ visible: newState })
+        });
+        
+        if (response.ok) {
+          guild.enabled = newState;
+          buildGuildList();
+        } else {
+          alert('Failed to update visibility. Please try again.');
+        }
+      } catch (e) {
+        console.error('Failed to toggle guild:', e);
+        alert('Failed to update visibility. Please try again.');
+      }
+    }
+
+    // ========== BLACKLIST ==========
+    function buildBlacklist() {
+      const container = document.getElementById('blacklist');
+      
+      if (blacklist.length === 0) {
+        container.innerHTML = '<p class="text-sm text-muted py-2">No blocked users</p>';
+        return;
+      }
+
+      container.innerHTML = blacklist.map(u => `
+        <div class="flex items-center justify-between p-3 rounded-xl hover-item">
+          <div class="flex items-center gap-3">
+            ${u.avatar 
+              ? `<img src="${u.avatar}" class="w-8 h-8 rounded-full" alt="">`
+              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">?</div>`
+            }
+            <span class="text-sm text-primary">${u.username}</span>
+          </div>
+          <button 
+            onclick="removeFromBlacklist('${u.id}')"
+            class="text-xs px-2 py-1 rounded-lg hover-item"
+            style="color: var(--danger-text)"
+          >
+            Unblock
+          </button>
+        </div>
+      `).join('');
+    }
+
+    async function removeFromBlacklist(id) {
+      try {
+        const response = await fetch(`/api/blacklist/${id}`, { method: 'DELETE' });
+        if (response.ok) {
+          blacklist = blacklist.filter(u => String(u.id) !== String(id));
+          buildBlacklist();
+        } else {
+          alert('Failed to unblock user. Please try again.');
+        }
+      } catch (e) {
+        console.error('Failed to remove from blacklist:', e);
+        alert('Failed to unblock user. Please try again.');
+      }
+    }
+
+    function showAddBlockModal() {
+      const modal = document.getElementById('add-block-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      document.getElementById('block-username-input').focus();
+      // Clear any previous results
+      const resultsDiv = document.getElementById('resolve-results');
+      if (resultsDiv) resultsDiv.remove();
+    }
+
+    function hideAddBlockModal() {
+      const modal = document.getElementById('add-block-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      document.getElementById('block-username-input').value = '';
+      const resultsDiv = document.getElementById('resolve-results');
+      if (resultsDiv) resultsDiv.remove();
+    }
+
+    async function addToBlacklist() {
+      const input = document.getElementById('block-username-input');
+      const query = input.value.trim();
+      if (!query) return;
+
+      // Remove previous results
+      let resultsDiv = document.getElementById('resolve-results');
+      if (resultsDiv) resultsDiv.remove();
+
+      try {
+        const response = await fetch(`/api/users/resolve?query=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (!response.ok) {
+          alert(data.error || 'Failed to search for user.');
+          return;
+        }
+
+        if (data.found) {
+          if (data.multiple) {
+            // Show multiple results to choose from
+            showResolveResults(data.matches);
+          } else {
+            // Single result, block directly
+            await blockUser(data.id, data.username, data.avatar);
+          }
+        } else {
+          // Not found - show message with option to enter ID
+          showNotFoundMessage(data.message);
+        }
+      } catch (e) {
+        console.error('Failed to resolve user:', e);
+        alert('Failed to search for user. Please try again.');
+      }
+    }
+
+    function showResolveResults(matches) {
+      let resultsDiv = document.getElementById('resolve-results');
+      if (!resultsDiv) {
+        resultsDiv = document.createElement('div');
+        resultsDiv.id = 'resolve-results';
+        resultsDiv.className = 'mt-2 max-h-48 overflow-y-auto space-y-1';
+        document.getElementById('block-username-input').parentNode.insertBefore(
+          resultsDiv, 
+          document.getElementById('block-username-input').nextSibling
+        );
+      }
+
+      resultsDiv.innerHTML = `
+        <p class="text-xs text-muted mb-2">Multiple users found. Select one:</p>
+        ${matches.map(u => `
+          <div class="flex items-center justify-between p-2 rounded-lg hover-item cursor-pointer"
+               onclick="blockUser('${u.id}', '${u.username.replace(/'/g, "\\'")}', '${u.avatar || ''}')">
+            <div class="flex items-center gap-2">
+              ${u.avatar 
+                ? `<img src="${u.avatar}" class="w-6 h-6 rounded-full" alt="">`
+                : `<div class="w-6 h-6 rounded-full flex items-center justify-center text-xs" style="background: var(--bg-input)">?</div>`
+              }
+              <span class="text-sm text-primary">${u.username}</span>
+            </div>
+            <span class="text-xs text-muted">${u.id}</span>
+          </div>
+        `).join('')}
+      `;
+    }
+
+    function showNotFoundMessage(message) {
+      let resultsDiv = document.getElementById('resolve-results');
+      if (!resultsDiv) {
+        resultsDiv = document.createElement('div');
+        resultsDiv.id = 'resolve-results';
+        resultsDiv.className = 'mt-2';
+        document.getElementById('block-username-input').parentNode.insertBefore(
+          resultsDiv, 
+          document.getElementById('block-username-input').nextSibling
+        );
+      }
+
+      resultsDiv.innerHTML = `
+        <p class="text-xs text-muted">${message}</p>
+        <p class="text-xs text-secondary mt-1">Enter a user ID directly and press Block again.</p>
+      `;
+    }
+
+    async function blockUser(id, username, avatar) {
+      try {
+        const response = await fetch(`/api/blacklist/${id}`, { method: 'POST' });
+        if (response.ok) {
+          blacklist.push({ id, username, avatar });
+          buildBlacklist();
+          hideAddBlockModal();
+        } else {
+          const data = await response.json();
+          alert(data.error || 'Failed to block user.');
+        }
+      } catch (e) {
+        console.error('Failed to block user:', e);
+        alert('Failed to block user. Please try again.');
+      }
+    }
+
+    document.getElementById('add-block-modal').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) {
+        hideAddBlockModal();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        hideAddBlockModal();
+      }
+    });
+
+    // ========== DANGER ZONE ==========
+    async function deleteAllData() {
+      if (!confirm('This will permanently delete all your availability data, guild settings, and blacklist. Are you sure?')) {
+        return;
+      }
+      if (!confirm('This action cannot be undone. Type "DELETE" in the next prompt to confirm.')) {
+        return;
+      }
+      const confirmation = prompt('Type DELETE to confirm:');
+      if (confirmation !== 'DELETE') {
+        alert('Deletion cancelled.');
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/account', { method: 'DELETE' });
+        if (response.ok) {
+          alert('All data deleted.');
+          window.location.href = '/';
+        } else {
+          alert('Failed to delete data. Please try again.');
+        }
+      } catch (e) {
+        console.error('Failed to delete data:', e);
+        alert('Failed to delete data. Please try again.');
+      }
+    }
+
+    // ========== THEME ==========
+    function toggleTheme() {
+      const body = document.body;
+      const isDark = body.classList.contains('dark');
+      
+      if (isDark) {
+        body.classList.remove('dark');
+        body.classList.add('light');
+      } else {
+        body.classList.remove('light');
+        body.classList.add('dark');
+      }
+      
+      localStorage.setItem('theme', body.classList.contains('dark') ? 'dark' : 'light');
+    }
+
+    function initTheme() {
+      const stored = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      
+      if (stored === 'light' || (!stored && !prefersDark)) {
+        document.body.classList.remove('dark');
+        document.body.classList.add('light');
+      }
+    }
+
+    // ========== SHOW LOADED CONTENT ==========
+    function showLoaded() {
+      // Remove skeletons
+      const gridSkeleton = document.getElementById('grid-skeleton');
+      const accountSkeleton = document.getElementById('account-skeleton');
+      const guildsSkeleton = document.getElementById('guilds-skeleton');
+      const blacklistSkeleton = document.getElementById('blacklist-skeleton');
+      
+      if (gridSkeleton) gridSkeleton.remove();
+      if (accountSkeleton) accountSkeleton.remove();
+      if (guildsSkeleton) guildsSkeleton.remove();
+      if (blacklistSkeleton) blacklistSkeleton.remove();
+
+      // Show content
+      document.getElementById('grid-content').classList.remove('hidden');
+      document.getElementById('account-content').classList.remove('hidden');
+      document.getElementById('guild-list').classList.remove('hidden');
+      document.getElementById('blacklist').classList.remove('hidden');
+
+      // Update user info
+      if (window.currentUser) {
+        document.getElementById('username').textContent = window.currentUser.username;
+        const avatarImg = document.getElementById('user-avatar');
+        const avatarContainer = document.getElementById('user-avatar-container');
+        if (avatarImg && avatarContainer && window.currentUser.avatar) {
+          avatarImg.onerror = function() {
+            this.style.display = 'none';
+            avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
+          };
+          avatarImg.onload = function() {
+            this.style.display = '';
+          };
+          avatarImg.src = window.currentUser.avatar;
+        } else if (avatarContainer) {
+          avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
+        }
+      }
+    }
+
+    // ========== INIT ==========
+    async function init() {
+      initTheme();
+      buildSkeleton();
+      
+      await loadConfig();
+      const authenticated = await loadCurrentUser();
+      if (!authenticated) return;
+      
+      buildTimeLabels();
+      buildGrid();
+      
+      // Load data after grid is built so we can update cells
+      await loadAvailability();
+      await loadGuilds();
+      await loadBlacklist();
+      
+      showLoaded();
+    }
+    
+    init();
+  </script>
+
+</body>
+</html>

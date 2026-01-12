@@ -121,6 +121,27 @@ class DatabaseManager:
                         recurrence_rule TEXT,
                         reply_message_id INTEGER
                     )''',
+                "schedule_availability": '''CREATE TABLE IF NOT EXISTS schedule_availability (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        slot TEXT NOT NULL,
+                        UNIQUE(user_id, slot)
+                    )''',
+                "schedule_availability_meta": '''CREATE TABLE IF NOT EXISTS schedule_availability_meta (
+                        user_id INTEGER PRIMARY KEY,
+                        updated_at INTEGER NOT NULL
+                    )''',
+                "schedule_guild_visibility": '''CREATE TABLE IF NOT EXISTS schedule_guild_visibility (
+                        user_id INTEGER NOT NULL,
+                        guild_id INTEGER NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (user_id, guild_id)
+                    )''',
+                "schedule_user_blacklist": '''CREATE TABLE IF NOT EXISTS schedule_user_blacklist (
+                        user_id INTEGER NOT NULL,
+                        blocked_user_id INTEGER NOT NULL,
+                        PRIMARY KEY (user_id, blocked_user_id)
+                    )''',
                 "user_settings": '''CREATE TABLE IF NOT EXISTS user_settings (
                         user_id INTEGER NOT NULL,
                         key TEXT NOT NULL,
@@ -164,6 +185,12 @@ class DatabaseManager:
                         track_count INTEGER NOT NULL DEFAULT 0,
                         bytes_used INTEGER NOT NULL DEFAULT 0,
                         last_updated INTEGER NOT NULL
+                    )''',
+                "users": '''CREATE TABLE IF NOT EXISTS users (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        avatar TEXT,
+                        last_seen INTEGER NOT NULL
                     )'''
             }
 
@@ -181,6 +208,8 @@ class DatabaseManager:
             # Create Indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_availability_user ON schedule_availability(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility(guild_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries(guild_id)")
 
@@ -191,13 +220,18 @@ class DatabaseManager:
                 "skills": {"id", "user_id", "name", "dice_roll", "skill_type", "description"},
                 "skill_aliases": {"id", "skill_id", "alias"},
                 "reminders": {"id", "user_id", "channel_id", "reminder_time", "message", "created_at", "is_recurring", "recurrence_rule", "reply_message_id"},
+                "schedule_availability": {"id", "user_id", "slot"},
+                "schedule_availability_meta": {"user_id", "updated_at"},
+                "schedule_guild_visibility": {"user_id", "guild_id", "enabled"},
+                "schedule_user_blacklist": {"user_id", "blocked_user_id"},
                 "user_settings": {"user_id", "key", "value"},
                 "bot_settings": {"key", "value"},
                 "guild_settings": {"guild_id", "key", "value"},
                 "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
                 "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
-                "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"}
+                "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"},
+                "users": {"user_id", "username", "avatar", "last_seen"}
             }
 
             schema_issues = []
@@ -916,6 +950,298 @@ class DatabaseManager:
             return dict(row) if row else None
 
     # ==========================================================================
+    # SCHEDULE COG METHODS
+    # Methods for the weekly availability scheduling feature.
+    # ==========================================================================
+
+    async def schedule_get_availability(self, user_id: int) -> List[str]:
+        """Retrieves all availability slots for a user.
+
+        Used By: cogs/schedule.py, utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+
+        Returns:
+            List of slot strings in format "day-HHMM" (e.g., "mon-0930").
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT slot FROM schedule_availability WHERE user_id = ? ORDER BY slot",
+                (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def schedule_get_availability_updated_at(self, user_id: int) -> Optional[int]:
+        """Retrieves the last-modified timestamp for a user's availability.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+
+        Returns:
+            Unix timestamp of last modification, or None if never set.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT updated_at FROM schedule_availability_meta WHERE user_id = ?",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def schedule_set_availability(self, user_id: int, slots: List[str]) -> None:
+        """Replaces all availability slots for a user.
+
+        Deletes existing slots and inserts new ones in a single transaction.
+        Also updates the last-modified timestamp in the meta table.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+            slots: List of slot strings in format "day-HHMM" (e.g., "mon-0930").
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Clear existing slots
+            await db.execute("DELETE FROM schedule_availability WHERE user_id = ?", (user_id,))
+            # Insert new slots
+            for slot in slots:
+                await db.execute(
+                    "INSERT INTO schedule_availability (user_id, slot) VALUES (?, ?)",
+                    (user_id, slot)
+                )
+            # Update last-modified timestamp
+            await db.execute(
+                "INSERT OR REPLACE INTO schedule_availability_meta (user_id, updated_at) VALUES (?, ?)",
+                (user_id, int(time.time()))
+            )
+            await db.commit()
+        logger.info(f"Set {len(slots)} availability slots for user {user_id}")
+
+    async def schedule_clear_availability(self, user_id: int) -> None:
+        """Deletes all availability slots for a user.
+
+        Also removes the last-modified timestamp from meta table.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM schedule_availability WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM schedule_availability_meta WHERE user_id = ?", (user_id,))
+            await db.commit()
+        logger.info(f"Cleared all availability slots for user {user_id}")
+
+    async def schedule_get_guild_visibility(self, user_id: int) -> List[Dict[str, Any]]:
+        """Retrieves guild visibility settings for a user.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+
+        Returns:
+            List of dicts with keys: 'guild_id', 'enabled'.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT guild_id, enabled FROM schedule_guild_visibility WHERE user_id = ?",
+                (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def schedule_set_guild_visibility(self, user_id: int, guild_id: int, enabled: bool) -> None:
+        """Sets visibility for a specific guild.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+            guild_id: The guild's Discord ID.
+            enabled: Whether the guild can see this user's availability.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO schedule_guild_visibility (user_id, guild_id, enabled) VALUES (?, ?, ?)",
+                (user_id, guild_id, 1 if enabled else 0)
+            )
+            await db.commit()
+        logger.info(f"Set guild {guild_id} visibility to {enabled} for user {user_id}")
+
+    async def schedule_get_blacklist(self, user_id: int) -> List[int]:
+        """Retrieves list of blocked user IDs for a user.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user's Discord ID.
+
+        Returns:
+            List of blocked user IDs.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT blocked_user_id FROM schedule_user_blacklist WHERE user_id = ?",
+                (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def schedule_add_to_blacklist(self, user_id: int, blocked_user_id: int) -> None:
+        """Adds a user to the blacklist.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user setting the block.
+            blocked_user_id: The user being blocked.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO schedule_user_blacklist (user_id, blocked_user_id) VALUES (?, ?)",
+                (user_id, blocked_user_id)
+            )
+            await db.commit()
+        logger.info(f"User {user_id} blocked user {blocked_user_id} from viewing schedule")
+
+    async def schedule_remove_from_blacklist(self, user_id: int, blocked_user_id: int) -> None:
+        """Removes a user from the blacklist.
+
+        Used By: utils/web/routes.py
+
+        Args:
+            user_id: The user who set the block.
+            blocked_user_id: The user being unblocked.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM schedule_user_blacklist WHERE user_id = ? AND blocked_user_id = ?",
+                (user_id, blocked_user_id)
+            )
+            await db.commit()
+        logger.info(f"User {user_id} unblocked user {blocked_user_id}")
+
+    async def schedule_can_view(self, requester_id: int, target_id: int, guild_id: int) -> bool:
+        """Checks if requester can view target's availability in a guild.
+
+        Checks: (1) target enabled visibility for guild, (2) requester not blacklisted.
+
+        Used By: cogs/schedule.py (NLP query handlers)
+
+        Args:
+            requester_id: The user requesting to view.
+            target_id: The user whose availability is being requested.
+            guild_id: The guild context.
+
+        Returns:
+            True if allowed, False otherwise.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Check if target has enabled visibility for this guild
+            cursor = await db.execute(
+                "SELECT enabled FROM schedule_guild_visibility WHERE user_id = ? AND guild_id = ?",
+                (target_id, guild_id)
+            )
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return False
+
+            # Check if requester is blacklisted by target
+            cursor = await db.execute(
+                "SELECT 1 FROM schedule_user_blacklist WHERE user_id = ? AND blocked_user_id = ?",
+                (target_id, requester_id)
+            )
+            if await cursor.fetchone():
+                return False
+
+            return True
+
+    async def schedule_get_guild_availability(self, guild_id: int, requester_id: int) -> Dict[int, List[str]]:
+        """Gets availability for all visible users in a guild.
+
+        Filters by: guild visibility enabled AND requester not blacklisted.
+
+        Used By: cogs/schedule.py (NLP query handlers)
+
+        Args:
+            guild_id: The guild to query.
+            requester_id: The user making the request.
+
+        Returns:
+            Dict mapping user_id to list of slot strings.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Get all users who have enabled visibility for this guild
+            # and haven't blacklisted the requester
+            cursor = await db.execute("""
+                SELECT DISTINCT gv.user_id
+                FROM schedule_guild_visibility gv
+                WHERE gv.guild_id = ? AND gv.enabled = 1
+                AND gv.user_id NOT IN (
+                    SELECT bl.user_id FROM schedule_user_blacklist bl
+                    WHERE bl.blocked_user_id = ?
+                )
+            """, (guild_id, requester_id))
+
+            visible_users = [row[0] for row in await cursor.fetchall()]
+
+            result: Dict[int, List[str]] = {}
+            for user_id in visible_users:
+                cursor = await db.execute(
+                    "SELECT slot FROM schedule_availability WHERE user_id = ? ORDER BY slot",
+                    (user_id,)
+                )
+                slots = [row[0] for row in await cursor.fetchall()]
+                result[user_id] = slots
+
+            return result
+
+    async def schedule_get_visible_users_in_guild(self, guild_id: int) -> List[int]:
+        """Gets user IDs who have enabled visibility for a guild.
+
+        Used By: utils/web/routes.py (viewable users endpoint)
+
+        Args:
+            guild_id: The guild to query.
+
+        Returns:
+            List of user IDs with visibility enabled for this guild.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT user_id FROM schedule_guild_visibility WHERE guild_id = ? AND enabled = 1",
+                (guild_id,)
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def schedule_delete_all_user_data(self, user_id: int) -> None:
+        """Deletes all schedule-related data for a user (GDPR/danger zone).
+
+        Removes: availability slots, meta, guild visibility, blacklist entries (both directions).
+
+        Used By: utils/web/routes.py (danger zone)
+
+        Args:
+            user_id: The user's Discord ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM schedule_availability WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM schedule_availability_meta WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM schedule_guild_visibility WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM schedule_user_blacklist WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM schedule_user_blacklist WHERE blocked_user_id = ?", (user_id,))
+            await db.commit()
+        logger.info(f"Deleted all schedule data for user {user_id}")
+
+    # ==========================================================================
     # SKILLS COG METHODS
     # Methods for user skill management (dice macros, etc.).
     # ==========================================================================
@@ -1293,3 +1619,52 @@ class DatabaseManager:
                 )
             )
             await db.commit()
+
+    # =========================================================================
+    # Users Table Methods (Web Auth / User Cache)
+    # =========================================================================
+
+    async def upsert_user(self, user_id: int, username: str, avatar: str | None) -> None:
+        """Insert or update a user's profile data.
+
+        Used By: utils/web/auth.py (OAuth callback)
+
+        Args:
+            user_id: The Discord user ID.
+            username: The user's display name.
+            avatar: URL to the user's avatar, or None.
+        """
+        import time
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO users (user_id, username, avatar, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    avatar = excluded.avatar,
+                    last_seen = excluded.last_seen
+                """,
+                (user_id, username, avatar, int(time.time()))
+            )
+            await db.commit()
+
+    async def get_user(self, user_id: int) -> dict[str, Any] | None:
+        """Get a user's cached profile data.
+
+        Used By: utils/web/auth.py (/auth/me endpoint)
+
+        Args:
+            user_id: The Discord user ID.
+
+        Returns:
+            Dict with user_id, username, avatar, last_seen or None if not found.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT user_id, username, avatar, last_seen FROM users WHERE user_id = ?",
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None

@@ -61,6 +61,24 @@ BACKUP_EXTENSION = ".backup"
 #   Keys: user_id (owner), reminder_time (Unix timestamp for scheduling)
 #   Note: Supports recurring reminders via is_recurring flag and recurrence_rule (iCal RRULE).
 #
+# schedule_availability
+#   Purpose: Stores user's weekly recurring availability as 15-minute time slots.
+#   Used by: cogs/schedule.py, utils/web/routes.py
+#   Keys: user_id (owner)
+#   Note: Slots stored as strings like "mon-0930" (day-HHMM in 24h format).
+#
+# schedule_guild_visibility
+#   Purpose: Controls which guilds can see a user's availability.
+#   Used by: cogs/schedule.py, utils/web/routes.py
+#   Keys: Composite (user_id, guild_id) - one row per guild per user.
+#   Note: Default disabled (opt-in per guild).
+#
+# schedule_user_blacklist
+#   Purpose: Users blocked from viewing a specific user's availability.
+#   Used by: cogs/schedule.py, utils/web/routes.py
+#   Keys: Composite (user_id, blocked_user_id)
+#   Note: Checked before returning availability in queries.
+#
 # user_settings
 #   Purpose: Per-user key-value configuration store.
 #   Used by: cogs/reminders.py (timezone, reminder_destination), cogs/skills.py (skill_limit)
@@ -140,6 +158,35 @@ TABLE_SCHEMAS = {
             reply_message_id INTEGER
         )
     """,
+    "schedule_availability": """
+        CREATE TABLE schedule_availability (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            slot TEXT NOT NULL,
+            UNIQUE(user_id, slot)
+        )
+    """,
+    "schedule_availability_meta": """
+        CREATE TABLE schedule_availability_meta (
+            user_id INTEGER PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        )
+    """,
+    "schedule_guild_visibility": """
+        CREATE TABLE schedule_guild_visibility (
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, guild_id)
+        )
+    """,
+    "schedule_user_blacklist": """
+        CREATE TABLE schedule_user_blacklist (
+            user_id INTEGER NOT NULL,
+            blocked_user_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, blocked_user_id)
+        )
+    """,
     "user_settings": """
         CREATE TABLE user_settings (
             user_id INTEGER NOT NULL,
@@ -197,12 +244,22 @@ TABLE_SCHEMAS = {
             bytes_used INTEGER NOT NULL DEFAULT 0,
             last_updated INTEGER NOT NULL
         )
+    """,
+    "users": """
+        CREATE TABLE users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            avatar TEXT,
+            last_seen INTEGER NOT NULL
+        )
     """
 }
 
 INDEX_SCHEMAS = [
     "CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders (reminder_time);",
     "CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_availability_user ON schedule_availability (user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility (guild_id);",
     "CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);",
     "CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries (guild_id);"
 ]

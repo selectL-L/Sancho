@@ -82,9 +82,18 @@ def check_and_create_env_file() -> None:
         "BOT_NAME": "NoName",
         "OWNER_ID": "",
         "AMBIENCE_ENABLED": "True",
+        "THEME_COLOR": "",
         # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID": "",
         "CONTROL_PORT": "",
+        # WEB SERVER
+        "WEB_ENABLED": "False",
+        "WEB_PORT": "8000",
+        "WEB_HOST": "0.0.0.0",
+        "WEB_SESSION_SECRET": "",
+        "OAUTH_CLIENT_ID": "",
+        "OAUTH_CLIENT_SECRET": "",
+        "OAUTH_REDIRECT_URI": "",
         # DEBUGGING
         "DEV_MODE": "False",
         "DEV_GUILD": "",
@@ -111,6 +120,11 @@ def check_and_create_env_file() -> None:
         "SYSTEM_CHANNEL_ID": (
             "# ═══════════════════════════════════════════════════════════════════════════════\n"
             "#  SYSTEM COMMUNICATION\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "WEB_ENABLED": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  WEB SERVER\n"
             "# ═══════════════════════════════════════════════════════════════════════════════\n"
         ),
         "DEV_MODE": (
@@ -153,6 +167,9 @@ def check_and_create_env_file() -> None:
         "AMBIENCE_ENABLED":
             "# (Optional) Enable personality-driven responses (greetings, mood-based replies).\n"
             "# Default: True. Set to False to disable without removing ambience.toml.",
+        "THEME_COLOR":
+            "# (Optional) Hex color for the web UI theme (e.g., #9333ea for purple).\n"
+            "# If empty, the web UI defaults to green.",
         # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID":
             "# (Optional) Channel ID for bot status messages (startup, errors).\n"
@@ -160,6 +177,29 @@ def check_and_create_env_file() -> None:
         "CONTROL_PORT":
             "# (Optional) TCP port for remote control commands (exit, restart, reload).\n"
             "# Binds to localhost only. If empty, TCP control is disabled.",
+        # WEB SERVER
+        "WEB_ENABLED":
+            "# (Optional) Enable the availability scheduler web server.\n"
+            "# Default: False. Set to True to start the web UI.",
+        "WEB_PORT":
+            "# (Optional) Port for the web server.\n"
+            "# Default: 8000.",
+        "WEB_HOST":
+            "# (Optional) Host to bind the web server.\n"
+            "# Default: 0.0.0.0 (all interfaces). Use 127.0.0.1 for local only.",
+        "WEB_SESSION_SECRET":
+            "# (Required if WEB_ENABLED) Random secret for signing session cookies.\n"
+            "# Generate with: python -c \"import secrets; print(secrets.token_hex(32))\"",
+        "OAUTH_CLIENT_ID":
+            "# (Required if WEB_ENABLED) Discord application client ID.\n"
+            "# Found in Discord Developer Portal > Your App > OAuth2.",
+        "OAUTH_CLIENT_SECRET":
+            "# (Required if WEB_ENABLED) Discord application client secret.\n"
+            "# Found in Discord Developer Portal > Your App > OAuth2.",
+        "OAUTH_REDIRECT_URI":
+            "# (Required if WEB_ENABLED) OAuth callback URL.\n"
+            "# Must match exactly in Discord Developer Portal.\n"
+            "# Example: http://localhost:8000/auth/callback",
         # DEBUGGING
         "DEV_MODE":
             "# (Optional) Developer mode restricts the bot to OWNER_ID only.\n"
@@ -291,6 +331,8 @@ OWNER_IDS: set[int] = {
 raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
 AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
 
+THEME_COLOR = os.getenv('THEME_COLOR', '')  # Empty = web UI defaults to green
+
 # =============================================================================
 # ENVIRONMENT VARIABLES - System Communication
 # =============================================================================
@@ -299,6 +341,31 @@ SYSTEM_CHANNEL_ID: Optional[int] = int(raw_system_channel_id) if raw_system_chan
 
 raw_control_port = os.getenv('CONTROL_PORT')
 CONTROL_PORT: Optional[int] = int(raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
+
+# =============================================================================
+# ENVIRONMENT VARIABLES - Web Server
+# =============================================================================
+# Availability scheduler web UI with Discord OAuth authentication.
+# Requires: WEB_ENABLED=True + all OAuth fields configured.
+raw_web_enabled = os.getenv('WEB_ENABLED', 'False')
+WEB_ENABLED = raw_web_enabled.lower() in ('true', '1', 't')
+
+raw_web_port = os.getenv('WEB_PORT', '8000')
+WEB_PORT = int(raw_web_port) if raw_web_port.isdigit() else 8000
+
+WEB_HOST = os.getenv('WEB_HOST', '0.0.0.0')
+WEB_SESSION_SECRET = os.getenv('WEB_SESSION_SECRET', '')
+OAUTH_CLIENT_ID = os.getenv('OAUTH_CLIENT_ID', '')
+OAUTH_CLIENT_SECRET = os.getenv('OAUTH_CLIENT_SECRET', '')
+OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', '')
+
+# Validate web configuration - key fields required if enabled
+_web_required = [WEB_SESSION_SECRET, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI]
+if WEB_ENABLED and not all(_web_required):
+    print("WARNING: WEB_ENABLED is True but OAuth configuration is incomplete.")
+    print("Required: WEB_SESSION_SECRET, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI")
+    print("Web server is DISABLED.")
+    WEB_ENABLED = False
 
 # =============================================================================
 # ENVIRONMENT VARIABLES - Debugging
@@ -511,5 +578,17 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bmove\b',), 'Music', 'move_nlp'),
         # Leave / disconnect
         ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
+    ],
+    # Schedule Group - Weekly availability scheduler
+    # Patterns TBD - handlers exist in cog but patterns need priority tuning
+    [
+        # Who's available at a time
+        ((), 'Schedule', 'who_available_nlp'),
+        # View someone's schedule
+        ((), 'Schedule', 'view_schedule_nlp'),
+        # Find overlapping availability
+        ((), 'Schedule', 'find_overlap_nlp'),
+        # Edit availability (returns web link)
+        ((), 'Schedule', 'edit_availability_nlp'),
     ],
 ]

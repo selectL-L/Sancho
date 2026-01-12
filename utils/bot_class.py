@@ -47,6 +47,7 @@ class CoreBot(commands.Bot):
         intents = discord.Intents.default()
         intents.messages = True
         intents.message_content = True
+        intents.members = True  # Required for guild.get_member() to work from cache
 
         # Call super().__init__ with all configuration handled internally.
         # We pass `owner_ids` to prevent auto-fetching application info.

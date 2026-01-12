@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Availability</title>
+  <link rel="stylesheet" href="tailwind.css">
+  <style>
+    /* ========== THEME COLOR (set dynamically) ========== */
+    :root {
+      --theme-r: 34;
+      --theme-g: 197;
+      --theme-b: 94;
+    }
+
+    /* ========== RESPONSIVE SCALING ========== */
+    html {
+      font-size: clamp(15px, 0.9vw + 8px, 20px);
+    }
+
+    /* ========== DARK MODE ========== */
+    .dark {
+      --bg-page: #09090b;
+      --bg-card: #18181b;
+      --bg-card-hover: #1f1f23;
+      --bg-input: #27272a;
+      
+      --text-primary: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      
+      --border-default: rgba(63, 63, 70, 0.5);
+      --border-subtle: rgba(63, 63, 70, 0.25);
+      
+      --heatmap-0: transparent;
+      --heatmap-1: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.25);
+      --heatmap-2: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.40);
+      --heatmap-3: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.55);
+      --heatmap-4: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.70);
+      --heatmap-5: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.85);
+      --heatmap-6: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.95);
+      
+      --glass-bg: rgba(39, 39, 42, 0.7);
+      --glass-border: rgba(63, 63, 70, 0.3);
+      
+      --hover-overlay: rgba(255, 255, 255, 0.05);
+      --scrollbar-thumb: #3f3f46;
+      --scrollbar-thumb-hover: #52525b;
+    }
+
+    /* ========== LIGHT MODE ========== */
+    .light {
+      --bg-page: #f4f4f5;
+      --bg-card: #ffffff;
+      --bg-card-hover: #fafafa;
+      --bg-input: #f4f4f5;
+      
+      --text-primary: #18181b;
+      --text-secondary: #52525b;
+      --text-muted: #71717a;
+      
+      --border-default: rgba(0, 0, 0, 0.12);
+      --border-subtle: rgba(0, 0, 0, 0.06);
+      
+      --heatmap-0: transparent;
+      --heatmap-1: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.20);
+      --heatmap-2: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35);
+      --heatmap-3: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.50);
+      --heatmap-4: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.65);
+      --heatmap-5: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.80);
+      --heatmap-6: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.92);
+      
+      --glass-bg: rgba(255, 255, 255, 0.85);
+      --glass-border: rgba(0, 0, 0, 0.08);
+      
+      --hover-overlay: rgba(0, 0, 0, 0.04);
+      --scrollbar-thumb: #d4d4d8;
+      --scrollbar-thumb-hover: #a1a1aa;
+    }
+
+    /* ========== BASE STYLES ========== */
+    body {
+      background-color: var(--bg-page);
+      color: var(--text-primary);
+    }
+
+    * {
+      transition-property: background-color, border-color, color, opacity, transform, box-shadow, filter;
+      transition-duration: 150ms;
+      transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* ========== COMPONENTS ========== */
+    .card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .glass {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+    }
+
+    .text-primary { color: var(--text-primary); }
+    .text-secondary { color: var(--text-secondary); }
+    .text-muted { color: var(--text-muted); }
+
+    /* ========== SKELETON ========== */
+    .skeleton {
+      background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-card-hover) 50%, var(--bg-input) 75%);
+      background-size: 200% 100%;
+      animation: skeleton-loading 1.5s infinite;
+    }
+
+    @keyframes skeleton-loading {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* ========== WARNING BANNER ========== */
+    .warning-banner {
+      background: linear-gradient(90deg, rgba(234, 179, 8, 0.15), rgba(234, 179, 8, 0.08));
+      border: 1px solid rgba(234, 179, 8, 0.3);
+    }
+
+    /* ========== TIMEZONE BADGE ========== */
+    .tz-badge {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+
+    /* ========== GUILD SELECTOR ========== */
+    .guild-selector {
+      position: relative;
+    }
+
+    .guild-selector-btn {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .guild-selector-btn:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-default);
+    }
+
+    .guild-selector .guild-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      margin-top: 0.5rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: 0.75rem;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-8px);
+      transition: all 150ms ease;
+      z-index: 100;
+      max-height: 16rem;
+      overflow-y: auto;
+    }
+
+    .guild-selector.open .guild-dropdown {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+
+    .guild-option {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      cursor: pointer;
+    }
+
+    .guild-option:hover {
+      background: var(--hover-overlay);
+    }
+
+    .guild-option.selected {
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15);
+    }
+
+    .guild-icon {
+      width: 1.5rem;
+      height: 1.5rem;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+
+    /* ========== AVATAR FALLBACK ========== */
+    .avatar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15));
+      color: var(--text-primary);
+      font-weight: 500;
+      overflow: hidden;
+    }
+
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* ========== GRID STYLES ========== */
+    .grid-cell {
+      position: relative;
+    }
+    
+    .dark .grid-cell:hover {
+      filter: brightness(1.3);
+      z-index: 10;
+    }
+
+    .light .grid-cell:hover {
+      filter: brightness(0.85);
+      z-index: 10;
+    }
+
+    .dark .grid-cell.locked {
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,0.85);
+    }
+
+    .light .grid-cell.locked {
+      box-shadow: inset 0 0 0 2px rgba(0,0,0,0.6);
+    }
+
+    /* Tooltip */
+    .grid-cell::after {
+      content: 'Click to lock';
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%) translateY(-4px);
+      padding: 0.25rem 0.625rem;
+      border-radius: 0.375rem;
+      font-size: 0.6875rem;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 100ms;
+      z-index: 100;
+    }
+
+    .dark .grid-cell::after {
+      background: #27272a;
+      color: #e4e4e7;
+      border: 1px solid rgba(63,63,70,0.6);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .light .grid-cell::after {
+      background: #ffffff;
+      color: #18181b;
+      border: 1px solid rgba(0,0,0,0.1);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .grid-cell:hover::after {
+      opacity: 1;
+    }
+
+    .grid-cell.locked::after {
+      content: 'Click to unlock';
+    }
+
+    .intensity-0 { background-color: var(--heatmap-0); }
+    .intensity-1 { background-color: var(--heatmap-1); }
+    .intensity-2 { background-color: var(--heatmap-2); }
+    .intensity-3 { background-color: var(--heatmap-3); }
+    .intensity-4 { background-color: var(--heatmap-4); }
+    .intensity-5 { background-color: var(--heatmap-5); }
+    .intensity-6 { background-color: var(--heatmap-6); }
+
+    /* Best time glow for 4+ people */
+    .best-time {
+      box-shadow: 0 0 6px 1px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
+    }
+
+    .row-hour {
+      border-bottom: 1px dashed var(--border-default);
+    }
+    .row-quarter {
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .col-separator {
+      border-right: 1px solid var(--border-subtle);
+    }
+    .grid-border {
+      border-color: var(--border-default);
+    }
+
+    /* ========== TIME INDICATOR ========== */
+    .time-indicator {
+      position: absolute;
+      top: 0;
+      height: 2px;
+      background: #ef4444;
+      box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+      z-index: 20;
+    }
+
+    .time-indicator::before {
+      content: 'Now';
+      position: absolute;
+      top: -0.625rem;
+      left: 0;
+      font-size: 0.5625rem;
+      color: #ef4444;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    /* ========== SCROLLBAR ========== */
+    .grid-scroll {
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+
+    .grid-scroll::-webkit-scrollbar,
+    ::-webkit-scrollbar {
+      width: 0.375rem;
+    }
+    .grid-scroll::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .grid-scroll::-webkit-scrollbar-thumb,
+    ::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 0.1875rem;
+    }
+    .grid-scroll::-webkit-scrollbar-thumb:hover,
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--scrollbar-thumb-hover);
+    }
+
+    /* ========== LEGEND ========== */
+    .legend-gradient {
+      background: linear-gradient(to right, 
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.20),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.50),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.65),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.80),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.92)
+      );
+    }
+
+    /* ========== INTERACTIVE ELEMENTS ========== */
+    .person-selected {
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15);
+    }
+
+    .avatar-pill {
+      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.06));
+      border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2);
+    }
+    .avatar-pill:hover {
+      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.20), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12));
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35);
+    }
+
+    .hover-item:hover {
+      background: var(--hover-overlay);
+    }
+
+    .theme-toggle {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+    .theme-toggle:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-default);
+    }
+
+    /* ========== EMPTY STATE ========== */
+    .empty-state-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(var(--bg-page), 0.8);
+      backdrop-filter: blur(4px);
+      border-radius: 1rem;
+      z-index: 30;
+    }
+
+    .empty-state-overlay.hidden {
+      display: none;
+    }
+
+    .dark .empty-state-overlay {
+      background: rgba(9, 9, 11, 0.85);
+    }
+
+    .light .empty-state-overlay {
+      background: rgba(244, 244, 245, 0.85);
+    }
+
+    /* ========== SHARED SERVERS TRUNCATION ========== */
+    .shared-servers {
+      max-width: 100%;
+    }
+
+    .shared-servers.expanded {
+      white-space: normal;
+      word-break: break-word;
+    }
+
+    /* ========== ANIMATIONS ========== */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .sidebar-content {
+      animation: fadeIn 150ms ease-out;
+    }
+
+    /* ========== GRID CELL HEIGHT ========== */
+    .cell-h {
+      height: 1.25rem;
+    }
+  </style>
+</head>
+<body class="dark min-h-screen">
+  
+  <!-- Timezone Warning Banner -->
+  <div id="tz-warning" class="warning-banner px-4 py-3 text-center hidden">
+    <span class="text-yellow-500 text-sm">
+      ⚠️ You haven't set your timezone yet. <a href="settings.html" class="underline font-medium hover:text-yellow-400">Set it now</a> to see availability in your local time.
+    </span>
+  </div>
+
+  <div class="max-w-6xl mx-auto px-4 py-8">
+    
+    <!-- Header -->
+    <header class="mb-8">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="text-2xl font-medium text-primary">Weekly Availability</h1>
+          <p class="text-muted mt-1">See when everyone's free</p>
+        </div>
+        
+        <div class="flex items-center gap-3">
+          <!-- Timezone Badge -->
+          <div class="tz-badge px-3 py-1.5 rounded-lg flex items-center gap-2" id="tz-badge">
+            <svg class="w-4 h-4 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="text-xs text-secondary" id="tz-display">--</span>
+          </div>
+
+          <!-- Guild Selector -->
+          <div class="guild-selector" id="guild-selector">
+            <button class="guild-selector-btn flex items-center gap-3 px-4 py-2.5 rounded-xl" onclick="toggleGuildDropdown()">
+              <img src="" alt="" class="guild-icon" id="selected-guild-icon" style="display: none;">
+              <span class="text-sm font-medium text-primary" id="selected-guild-name">Select Server</span>
+              <svg class="w-4 h-4 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </button>
+            <div class="guild-dropdown" id="guild-dropdown"></div>
+          </div>
+
+          <button 
+            onclick="toggleTheme()" 
+            class="theme-toggle p-2.5 rounded-xl text-secondary hover:text-primary"
+            title="Toggle theme"
+          >
+            <svg class="w-5 h-5 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+            </svg>
+            <svg class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main content -->
+    <div class="flex gap-5 items-start">
+      
+      <!-- Grid area -->
+      <div class="flex-1 min-w-0">
+        <div class="card rounded-2xl p-5 shadow-lg dark:shadow-black/25 light:shadow-black/5 relative">
+          
+          <!-- Day headers -->
+          <div class="flex mb-0 pr-[6px]">
+            <div class="w-12 shrink-0"></div>
+            <div class="flex-1 grid grid-cols-7 border-x border-t grid-border">
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Mon</div>
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Tue</div>
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Wed</div>
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Thu</div>
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Fri</div>
+              <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Sat</div>
+              <div class="text-center text-xs font-medium text-secondary py-2">Sun</div>
+            </div>
+          </div>
+
+          <!-- Grid Skeleton -->
+          <div class="grid-scroll" id="grid-skeleton">
+            <div class="flex">
+              <div class="w-12 shrink-0 flex flex-col" id="skeleton-time-labels"></div>
+              <div class="flex-1 border-x border-b grid-border" id="skeleton-cells"></div>
+            </div>
+          </div>
+
+          <!-- Grid Content (hidden until loaded) -->
+          <div class="grid-scroll hidden" id="grid-content">
+            <div class="flex">
+              <div class="w-12 shrink-0 flex flex-col" id="time-labels"></div>
+              <div class="flex-1 border-x border-b grid-border" id="availability-grid"></div>
+            </div>
+          </div>
+
+          <!-- Empty State Overlay -->
+          <div class="empty-state-overlay hidden" id="empty-state">
+            <svg class="w-12 h-12 text-muted mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
+            </svg>
+            <p class="text-muted text-sm" id="empty-state-title">No one has shared their availability yet</p>
+            <p class="text-muted text-xs mt-1" id="empty-state-subtitle">Be the first! <a href="settings.html" class="underline">Set yours</a></p>
+          </div>
+
+        </div>
+        
+        <!-- Legend -->
+        <div class="flex items-center justify-center gap-4 mt-5 text-xs text-muted">
+          <span>Less</span>
+          <div class="legend-gradient w-32 h-2.5 rounded-full"></div>
+          <span>More</span>
+          <span class="ml-4 flex items-center gap-1.5">
+            <span class="w-3 h-3 rounded-sm" style="background: var(--heatmap-5); box-shadow: 0 0 6px 1px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);"></span>
+            Best times
+          </span>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <aside class="w-64 shrink-0 flex flex-col gap-3 sticky top-4">
+        
+        <!-- User's own pill -->
+        <a href="settings.html" class="avatar-pill rounded-full py-2.5 pl-2.5 pr-3 flex items-center w-full hover:scale-[1.02] active:scale-[0.98] no-underline" id="user-pill">
+          <div class="avatar w-9 h-9 rounded-full ring-2 ring-purple-500/30 shrink-0 text-sm" id="user-avatar-container">
+            <!-- Avatar initially hidden, shown when src is set -->
+            <img 
+              alt=""
+              id="user-avatar"
+              style="display: none;"
+            >
+          </div>
+          <span class="text-sm font-medium text-primary flex-1 text-center" id="user-pill-text">Edit my availability</span>
+        </a>
+
+        <div class="glass rounded-2xl p-4 flex-1">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-medium text-primary">Available</h2>
+            <span class="text-xs text-muted" id="available-count">hover a time</span>
+          </div>
+          
+          <div id="time-label" class="text-xs text-muted mb-2 hidden"></div>
+          
+          <div class="min-h-[6rem] max-h-[12rem] overflow-y-auto">
+            <!-- Skeleton -->
+            <div class="space-y-2" id="available-skeleton">
+              <div class="flex items-center gap-2.5 p-2">
+                <div class="skeleton w-7 h-7 rounded-full shrink-0"></div>
+                <div class="flex-1 space-y-1.5">
+                  <div class="skeleton w-20 h-3 rounded"></div>
+                  <div class="skeleton w-28 h-3 rounded"></div>
+                </div>
+              </div>
+              <div class="flex items-center gap-2.5 p-2">
+                <div class="skeleton w-7 h-7 rounded-full shrink-0"></div>
+                <div class="flex-1 space-y-1.5">
+                  <div class="skeleton w-16 h-3 rounded"></div>
+                  <div class="skeleton w-24 h-3 rounded"></div>
+                </div>
+              </div>
+            </div>
+            <!-- Content -->
+            <div id="available-list" class="hidden">
+              <p class="text-muted text-xs">Hover over the grid to see who's free</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass rounded-2xl p-4">
+          <h3 class="text-sm font-medium text-primary mb-2">Everyone</h3>
+          <p class="text-xs text-muted mb-3">Click to view schedule</p>
+          
+          <div class="max-h-[14rem] overflow-y-auto">
+            <!-- Skeleton -->
+            <div class="space-y-2" id="participants-skeleton">
+              <div class="flex items-center gap-2.5 p-2">
+                <div class="skeleton w-7 h-7 rounded-full shrink-0"></div>
+                <div class="flex-1 space-y-1.5">
+                  <div class="skeleton w-16 h-3 rounded"></div>
+                  <div class="skeleton w-24 h-3 rounded"></div>
+                </div>
+              </div>
+              <div class="flex items-center gap-2.5 p-2">
+                <div class="skeleton w-7 h-7 rounded-full shrink-0"></div>
+                <div class="flex-1 space-y-1.5">
+                  <div class="skeleton w-20 h-3 rounded"></div>
+                  <div class="skeleton w-20 h-3 rounded"></div>
+                </div>
+              </div>
+              <div class="flex items-center gap-2.5 p-2">
+                <div class="skeleton w-7 h-7 rounded-full shrink-0"></div>
+                <div class="flex-1 space-y-1.5">
+                  <div class="skeleton w-14 h-3 rounded"></div>
+                  <div class="skeleton w-28 h-3 rounded"></div>
+                </div>
+              </div>
+            </div>
+            <!-- Content -->
+            <div class="space-y-1 hidden" id="all-participants"></div>
+          </div>
+        </div>
+
+      </aside>
+
+    </div>
+  </div>
+
+  <script>
+    // ========== CONFIG & STATE ==========
+    let botName = 'Bot';
+    window.currentUser = null;
+    let guilds = [];
+    let selectedGuildId = null;
+    let participants = [];
+    let availability = {};
+    let lockedCell = null;
+    let viewingPerson = null;
+
+    const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
+
+    // ========== AVATAR HELPERS ==========
+    function getAvatarUrl(user) {
+      if (user.avatar && user.avatar.startsWith('http')) return user.avatar;
+      return DEFAULT_AVATAR;
+    }
+
+    function handleAvatarError(img, fallbackInitial) {
+      img.style.display = 'none';
+      if (img.parentElement && fallbackInitial) {
+        img.parentElement.textContent = fallbackInitial.charAt(0).toUpperCase();
+      }
+    }
+
+    // ========== TIME UTILITIES ==========
+    function formatRelativeTime(timestamp) {
+      if (!timestamp) return 'never';
+      const date = new Date(timestamp * 1000);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffMins = Math.floor(diffMs / (1000 * 60));
+      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      const diffWeeks = Math.floor(diffDays / 7);
+
+      if (diffMins < 5) return 'just now';
+      if (diffMins < 60) return `${diffMins}m ago`;
+      if (diffHours < 24) return `${diffHours}h ago`;
+      if (diffDays < 7) return `${diffDays}d ago`;
+      if (diffWeeks < 4) return `${diffWeeks}w ago`;
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    function getCurrentTimeSlotIndex() {
+      const now = new Date();
+      return Math.floor((now.getHours() * 60 + now.getMinutes()) / 15);
+    }
+
+    function getCurrentDayIndex() {
+      const day = new Date().getDay();
+      return day === 0 ? 6 : day - 1;
+    }
+
+    // ========== TIME SLOTS ==========
+    const times = [];
+    for (let hour = 0; hour < 24; hour++) {
+      for (let min = 0; min < 60; min += 15) {
+        let displayHour = hour;
+        let ampm = 'AM';
+        
+        if (hour === 0) displayHour = 12;
+        else if (hour === 12) { displayHour = 12; ampm = 'PM'; }
+        else if (hour > 12) { displayHour = hour - 12; ampm = 'PM'; }
+        
+        const minStr = min === 0 ? '' : `:${min.toString().padStart(2, '0')}`;
+        
+        times.push({
+          key: `${hour.toString().padStart(2,'0')}${min.toString().padStart(2,'0')}`,
+          display: `${displayHour}${minStr} ${ampm}`,
+          displayShort: `${displayHour}${ampm.toLowerCase()}`,
+          isHour: min === 0,
+          hour: hour,
+          min: min
+        });
+      }
+    }
+
+    const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+    const dayNames = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
+
+    // ========== API CALLS ==========
+    async function loadConfig() {
+      try {
+        const response = await fetch('/api/config');
+        if (response.ok) {
+          const config = await response.json();
+          botName = config.botName || 'Bot';
+          document.title = `Availability — ${botName}`;
+          
+          if (config.themeColor) {
+            applyThemeColor(config.themeColor);
+          }
+        }
+      } catch (e) {
+        console.log('Config not available, using defaults');
+      }
+    }
+
+    function applyThemeColor(hex) {
+      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      if (result) {
+        const r = parseInt(result[1], 16);
+        const g = parseInt(result[2], 16);
+        const b = parseInt(result[3], 16);
+        document.documentElement.style.setProperty('--theme-r', r);
+        document.documentElement.style.setProperty('--theme-g', g);
+        document.documentElement.style.setProperty('--theme-b', b);
+      }
+    }
+
+    async function loadCurrentUser() {
+      try {
+        const response = await fetch('/auth/me', { credentials: 'include' });
+        if (response.ok) {
+          window.currentUser = await response.json();
+          
+          // Update user pill avatar
+          const avatarImg = document.getElementById('user-avatar');
+          const avatarContainer = document.getElementById('user-avatar-container');
+          if (avatarImg && avatarContainer && window.currentUser.avatar) {
+            avatarImg.onerror = function() {
+              this.style.display = 'none';
+              avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
+            };
+            avatarImg.onload = function() {
+              this.style.display = '';
+            };
+            avatarImg.src = window.currentUser.avatar;
+          } else if (avatarContainer) {
+            // No avatar URL, show initial
+            avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
+          }
+          
+          // Setup timezone display
+          setupTimezone();
+        } else if (response.status === 401) {
+          window.location.href = '/auth/login';
+        }
+      } catch (e) {
+        console.error('Failed to load current user:', e);
+      }
+    }
+
+    async function loadGuilds() {
+      try {
+        const response = await fetch('/api/guilds', { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          guilds = data.guilds || [];
+          
+          // Priority: 1) URL param (from command), 2) localStorage, 3) first guild
+          const urlParams = new URLSearchParams(window.location.search);
+          const urlGuildId = urlParams.get('guild');
+          const savedGuildId = localStorage.getItem('selectedGuildId');
+          
+          if (urlGuildId && guilds.some(g => g.id === urlGuildId)) {
+            selectedGuildId = urlGuildId;
+            localStorage.setItem('selectedGuildId', urlGuildId); // Save for future visits
+          } else if (savedGuildId && guilds.some(g => g.id === savedGuildId)) {
+            selectedGuildId = savedGuildId;
+          } else if (guilds.length > 0) {
+            selectedGuildId = guilds[0].id;
+          }
+          
+          buildGuildDropdown();
+          updateSelectedGuildDisplay();
+        }
+      } catch (e) {
+        console.error('Failed to load guilds:', e);
+      }
+    }
+
+    async function loadParticipants() {
+      if (!selectedGuildId) {
+        showLoaded();
+        return;
+      }
+      
+      try {
+        const response = await fetch(`/api/guilds/${selectedGuildId}/viewable-users`, { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          participants = data.users || [];
+          
+          // Now load availability for each participant
+          await loadAllAvailability();
+          
+          // Build the UI
+          buildTimeLabels();
+          buildGrid();
+          buildParticipantList();
+        } else {
+          console.warn(`Failed to load participants: ${response.status}`);
+          participants = [];
+        }
+        showLoaded();
+      } catch (e) {
+        console.error('Failed to load participants:', e);
+        participants = [];
+        showLoaded(); // Show empty state
+      }
+    }
+
+    async function loadAllAvailability() {
+      availability = {};
+      
+      // Initialize all slots as empty arrays
+      days.forEach(day => {
+        times.forEach(time => {
+          availability[`${day}-${time.key}`] = [];
+        });
+      });
+
+      // Load availability for each participant
+      const promises = participants.map(async (p) => {
+        try {
+          // Use different endpoint for self vs others
+          const url = p.isSelf 
+            ? '/api/availability' 
+            : `/api/users/${p.id}/availability`;
+          
+          const response = await fetch(url, { credentials: 'include' });
+          if (response.ok) {
+            const data = await response.json();
+            p.lastUpdated = data.updated_at; // Store updated_at on participant
+            
+            // Process their availability - handle both formats
+            // /api/availability returns {slots: ["mon-0800", ...]}
+            // /api/users/:id/availability returns {availability: {mon: ["0800", ...], ...}}
+            if (p.isSelf && data.slots) {
+              // Self endpoint format: slots array like ["mon-0800", "mon-0815", ...]
+              data.slots.forEach(slot => {
+                if (availability[slot]) {
+                  availability[slot].push(p);
+                }
+              });
+            } else if (data.availability) {
+              // Other user format: {mon: ["0800", "0815"], tue: [...]}
+              Object.entries(data.availability).forEach(([day, slots]) => {
+                slots.forEach(slot => {
+                  const key = `${day}-${slot}`;
+                  if (availability[key]) {
+                    availability[key].push(p);
+                  }
+                });
+              });
+            }
+          } else {
+            console.warn(`Failed to load availability for ${p.id}: ${response.status}`);
+          }
+        } catch (e) {
+          console.error(`Failed to load availability for ${p.id}:`, e);
+        }
+      });
+
+      await Promise.all(promises);
+    }
+
+    // ========== SKELETON BUILDER ==========
+    function buildSkeleton() {
+      const timeLabels = document.getElementById('skeleton-time-labels');
+      const cells = document.getElementById('skeleton-cells');
+
+      for (let i = 0; i < 96; i++) {
+        const label = document.createElement('div');
+        label.className = 'cell-h flex items-center justify-end pr-2';
+        if (i % 4 === 0) {
+          const textEl = document.createElement('div');
+          textEl.className = 'skeleton w-8 h-3 rounded';
+          label.appendChild(textEl);
+        }
+        timeLabels.appendChild(label);
+      }
+
+      for (let i = 0; i < 96; i++) {
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-7';
+        if (i < 95) row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        for (let j = 0; j < 7; j++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell-h skeleton';
+          if (j < 6) cell.classList.add('col-separator');
+          row.appendChild(cell);
+        }
+        cells.appendChild(row);
+      }
+    }
+
+    // ========== GUILD SELECTOR ==========
+    function buildGuildDropdown() {
+      const dropdown = document.getElementById('guild-dropdown');
+      dropdown.innerHTML = guilds.map(g => `
+        <div class="guild-option ${g.id === selectedGuildId ? 'selected' : ''}" onclick="selectGuild('${g.id}')">
+          <img src="${g.icon || ''}" alt="" class="guild-icon" onerror="this.style.display='none'">
+          <span class="text-sm text-primary">${g.name}</span>
+        </div>
+      `).join('');
+    }
+
+    function updateSelectedGuildDisplay() {
+      const guild = guilds.find(g => g.id === selectedGuildId);
+      if (guild) {
+        document.getElementById('selected-guild-name').textContent = guild.name;
+        const icon = document.getElementById('selected-guild-icon');
+        if (guild.icon) {
+          icon.src = guild.icon;
+          icon.style.display = '';
+        } else {
+          icon.style.display = 'none';
+        }
+      }
+    }
+
+    function toggleGuildDropdown() {
+      document.getElementById('guild-selector').classList.toggle('open');
+    }
+
+    async function selectGuild(guildId) {
+      selectedGuildId = guildId;
+      localStorage.setItem('selectedGuildId', guildId);
+      
+      updateSelectedGuildDisplay();
+      buildGuildDropdown();
+      toggleGuildDropdown();
+      
+      // Reset view state
+      if (lockedCell) {
+        lockedCell.classList.remove('locked');
+      }
+      lockedCell = null;
+      viewingPerson = null;
+      
+      // Clear available sidebar to avoid stale data
+      document.getElementById('available-count').textContent = 'hover a time';
+      document.getElementById('time-label').classList.add('hidden');
+      document.getElementById('available-list').innerHTML = '<p class="text-muted text-xs">Hover over the grid to see who\'s free</p>';
+      
+      // Hide empty state (will be re-evaluated after load)
+      document.getElementById('empty-state').classList.add('hidden');
+      
+      // Reload participants for new guild
+      // Show loading state
+      document.getElementById('grid-content').classList.add('hidden');
+      document.getElementById('grid-skeleton').classList.remove('hidden');
+      document.getElementById('all-participants').classList.add('hidden');
+      document.getElementById('participants-skeleton')?.classList.remove('hidden');
+      document.getElementById('available-list').classList.add('hidden');
+      document.getElementById('available-skeleton')?.classList.remove('hidden');
+      
+      // Clear existing grid
+      document.getElementById('time-labels').innerHTML = '';
+      document.getElementById('availability-grid').innerHTML = '';
+      
+      await loadParticipants();
+    }
+
+    document.addEventListener('click', (e) => {
+      const selector = document.getElementById('guild-selector');
+      if (!selector.contains(e.target)) selector.classList.remove('open');
+    });
+
+    // ========== TIMEZONE ==========
+    function setupTimezone() {
+      if (!window.currentUser?.hasTimezone) {
+        document.getElementById('tz-warning').classList.remove('hidden');
+        document.getElementById('tz-badge').style.display = 'none';
+      } else if (window.currentUser?.timezone) {
+        // Display the IANA timezone code directly (e.g., "America/New_York")
+        document.getElementById('tz-display').textContent = window.currentUser.timezone;
+      }
+    }
+
+    // ========== BUILD UI ==========
+    function buildTimeLabels() {
+      const container = document.getElementById('time-labels');
+      container.innerHTML = '';
+      times.forEach(time => {
+        const label = document.createElement('div');
+        label.className = 'cell-h flex items-center justify-end pr-2 text-sm text-muted';
+        label.textContent = time.isHour ? time.displayShort : '';
+        container.appendChild(label);
+      });
+    }
+
+    function buildGrid() {
+      const grid = document.getElementById('availability-grid');
+      grid.innerHTML = '';
+      const currentSlot = getCurrentTimeSlotIndex();
+      const currentDay = getCurrentDayIndex();
+
+      times.forEach((time, timeIdx) => {
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-7';
+        row.style.position = 'relative';
+        
+        if (timeIdx < times.length - 1) row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
+
+        days.forEach((day, dayIdx) => {
+          const key = `${day}-${time.key}`;
+          const available = availability[key] || [];
+          const intensity = Math.min(6, available.length);
+
+          const cell = document.createElement('div');
+          cell.className = `grid-cell cell-h cursor-pointer intensity-${intensity}`;
+          cell.dataset.key = key;
+          cell.dataset.day = day;
+          cell.dataset.time = time.display;
+
+          if (intensity >= 4) cell.classList.add('best-time');
+          if (dayIdx < days.length - 1) cell.classList.add('col-separator');
+
+          cell.addEventListener('mouseenter', () => showAvailable(key, available, time.display));
+          cell.addEventListener('mouseleave', () => { if (!lockedCell) clearHover(); });
+          cell.addEventListener('click', () => lockCell(cell, key, available, time.display));
+
+          row.appendChild(cell);
+        });
+
+        // Time indicator for current time
+        if (timeIdx === currentSlot) {
+          const indicator = document.createElement('div');
+          indicator.className = 'time-indicator';
+          indicator.style.left = `${(currentDay / 7) * 100}%`;
+          indicator.style.width = `${100 / 7}%`;
+          row.appendChild(indicator);
+        }
+
+        grid.appendChild(row);
+      });
+
+      // Show empty state if no participants have availability
+      // (participants includes self now, so check if anyone has slots)
+      const anyoneHasSlots = Object.values(availability).some(arr => arr.length > 0);
+      if (!anyoneHasSlots) {
+        const emptyState = document.getElementById('empty-state');
+        const emptyTitle = document.getElementById('empty-state-title');
+        const emptySubtitle = document.getElementById('empty-state-subtitle');
+        
+        // Check if self is in participants (has visibility enabled)
+        const selfInList = participants.some(p => p.isSelf);
+        
+        if (selfInList) {
+          emptyTitle.textContent = "You haven't set any availability yet";
+          emptySubtitle.innerHTML = '<a href="settings.html" class="underline">Add your available times</a>';
+        } else {
+          emptyTitle.textContent = "No one has shared their availability yet";
+          emptySubtitle.innerHTML = 'Be the first! <a href="settings.html" class="underline">Set yours</a>';
+        }
+        emptyState.classList.remove('hidden');
+      } else {
+        document.getElementById('empty-state').classList.add('hidden');
+      }
+    }
+
+    function showAvailable(key, available, timeDisplay) {
+      if (lockedCell || viewingPerson) return;
+      updateSidebar(key, available, timeDisplay);
+    }
+
+    function clearHover() {
+      document.getElementById('available-count').textContent = 'hover a time';
+      document.getElementById('time-label').classList.add('hidden');
+      document.getElementById('available-list').innerHTML = '<p class="text-muted text-xs">Hover over the grid to see who\'s free</p>';
+    }
+
+    function lockCell(cell, key, available, timeDisplay) {
+      if (viewingPerson) clearPersonView();
+
+      if (lockedCell === cell) {
+        lockedCell.classList.remove('locked');
+        lockedCell = null;
+        clearHover();
+        return;
+      }
+
+      if (lockedCell) lockedCell.classList.remove('locked');
+
+      lockedCell = cell;
+      cell.classList.add('locked');
+      updateSidebar(key, available, timeDisplay);
+    }
+
+    function updateSidebar(key, available, timeDisplay) {
+      const day = key.split('-')[0];
+
+      document.getElementById('available-count').textContent = `${available.length}/${participants.length}`;
+      
+      const timeLabel = document.getElementById('time-label');
+      timeLabel.textContent = `${dayNames[day]} at ${timeDisplay}`;
+      timeLabel.classList.remove('hidden');
+
+      const list = document.getElementById('available-list');
+      
+      if (available.length === 0) {
+        list.innerHTML = '<div class="sidebar-content"><p class="text-muted text-xs">No one is available</p></div>';
+        return;
+      }
+
+      list.innerHTML = `<div class="sidebar-content space-y-1">${available.map(p => `
+        <div class="flex items-center gap-2.5 p-2 rounded-lg hover-item cursor-default">
+          <div class="avatar w-7 h-7 rounded-full shrink-0 text-xs">
+            <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${p.username || p.name}')">
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="text-sm text-primary">
+              ${p.username || p.name}
+              <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.lastUpdated)}</span>
+            </div>
+            <div class="text-xs text-muted shared-servers truncate">${formatSharedServers(p.shared_guilds)}</div>
+          </div>
+        </div>
+      `).join('')}</div>`;
+    }
+
+    function formatSharedServers(servers) {
+      if (!servers || servers.length === 0) return '';
+      const names = servers.map(s => s.name || s);
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return names.join(', ');
+      return `${names[0]}, +${names.length - 1} more`;
+    }
+
+    function buildParticipantList() {
+      const list = document.getElementById('all-participants');
+      
+      // Filter out self for sidebar (they have their own pill), but they're still in heatmap
+      const otherParticipants = participants.filter(p => !p.isSelf);
+      
+      if (otherParticipants.length === 0) {
+        // Check if only self is in participants
+        if (participants.length > 0 && participants.every(p => p.isSelf)) {
+          list.innerHTML = '<p class="text-muted text-xs">Your availability is shown on the grid.<br>Invite others to share theirs!</p>';
+        } else {
+          list.innerHTML = '<p class="text-muted text-xs">No one has shared their availability yet</p>';
+        }
+        return;
+      }
+
+      list.innerHTML = otherParticipants.map(p => {
+        const sharedNames = (p.shared_guilds || []).map(s => s.name || s).join(', ');
+        return `
+          <div 
+            class="flex items-center gap-2.5 p-2 rounded-lg hover-item cursor-pointer person-row"
+            data-person-id="${p.id}"
+            onclick="viewPersonSchedule('${p.id}')"
+          >
+            <div class="avatar w-7 h-7 rounded-full shrink-0 text-xs">
+              <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${p.username || p.name}')">
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="text-sm text-secondary">
+                ${p.username || p.name}
+                <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.lastUpdated)}</span>
+              </div>
+              <div class="text-xs text-muted shared-servers truncate" data-full="${sharedNames}">${formatSharedServers(p.shared_guilds)}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function viewPersonSchedule(personId) {
+      const person = participants.find(p => p.id === personId);
+      if (!person) return;
+
+      if (lockedCell) {
+        lockedCell.classList.remove('locked');
+        lockedCell = null;
+      }
+
+      if (viewingPerson === personId) {
+        clearPersonView();
+        return;
+      }
+
+      viewingPerson = personId;
+
+      document.querySelectorAll('.person-row').forEach(row => {
+        row.classList.remove('person-selected');
+        const sharedServersEl = row.querySelector('.shared-servers');
+        if (row.dataset.personId === personId) {
+          row.classList.add('person-selected');
+          if (sharedServersEl) {
+            sharedServersEl.textContent = sharedServersEl.dataset.full;
+            sharedServersEl.classList.add('expanded');
+          }
+        } else {
+          if (sharedServersEl) {
+            const servers = sharedServersEl.dataset.full.split(', ');
+            sharedServersEl.textContent = formatSharedServers(servers.map(s => ({ name: s })));
+            sharedServersEl.classList.remove('expanded');
+          }
+        }
+      });
+
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const key = cell.dataset.key;
+        const available = availability[key] || [];
+        const personIsAvailable = available.some(p => p.id === personId);
+        
+        cell.className = cell.className.replace(/intensity-\d/g, '').replace('best-time', '');
+        cell.classList.add(personIsAvailable ? 'intensity-4' : 'intensity-0');
+      });
+
+      const sharedNames = (person.shared_guilds || []).map(s => s.name || s).join(', ');
+      
+      document.getElementById('available-count').textContent = person.username || person.name;
+      document.getElementById('time-label').classList.add('hidden');
+      document.getElementById('available-list').innerHTML = `
+        <div class="sidebar-content">
+          <div class="flex items-center gap-3 p-2">
+            <div class="avatar w-9 h-9 rounded-full shrink-0 text-sm">
+              <img src="${getAvatarUrl(person)}" alt="" onerror="handleAvatarError(this, '${person.username || person.name}')">
+            </div>
+            <div class="min-w-0">
+              <div class="text-sm text-primary font-medium">${person.username || person.name}</div>
+              <div class="text-xs text-muted">Updated ${formatRelativeTime(person.lastUpdated)}</div>
+            </div>
+          </div>
+          <div class="text-xs text-muted mt-2 px-2">
+            <span class="text-secondary">Servers in common:</span><br>
+            ${sharedNames || 'None'}
+          </div>
+          <p class="text-xs text-muted mt-3">Click their name again to exit</p>
+        </div>
+      `;
+    }
+
+    function clearPersonView() {
+      viewingPerson = null;
+      
+      document.querySelectorAll('.person-row').forEach(row => {
+        row.classList.remove('person-selected');
+        const sharedServersEl = row.querySelector('.shared-servers');
+        if (sharedServersEl) {
+          const servers = sharedServersEl.dataset.full.split(', ');
+          sharedServersEl.textContent = formatSharedServers(servers.map(s => ({ name: s })));
+          sharedServersEl.classList.remove('expanded');
+        }
+      });
+
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const key = cell.dataset.key;
+        const available = availability[key] || [];
+        const intensity = Math.min(6, available.length);
+        
+        cell.className = cell.className.replace(/intensity-\d/g, '').replace('best-time', '');
+        cell.classList.add(`intensity-${intensity}`);
+        if (intensity >= 4) cell.classList.add('best-time');
+      });
+
+      clearHover();
+    }
+
+    // ========== THEME ==========
+    function toggleTheme() {
+      const body = document.body;
+      if (body.classList.contains('dark')) {
+        body.classList.remove('dark');
+        body.classList.add('light');
+      } else {
+        body.classList.remove('light');
+        body.classList.add('dark');
+      }
+      localStorage.setItem('theme', body.classList.contains('dark') ? 'dark' : 'light');
+    }
+
+    function initTheme() {
+      const stored = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (stored === 'light' || (!stored && !prefersDark)) {
+        document.body.classList.remove('dark');
+        document.body.classList.add('light');
+      }
+    }
+
+    // ========== SWAP SKELETON FOR CONTENT ==========
+    function showLoaded() {
+      // Hide skeletons (don't remove - we may need them again on guild switch)
+      const gridSkeleton = document.getElementById('grid-skeleton');
+      const availableSkeleton = document.getElementById('available-skeleton');
+      const participantsSkeleton = document.getElementById('participants-skeleton');
+      
+      if (gridSkeleton) gridSkeleton.classList.add('hidden');
+      if (availableSkeleton) availableSkeleton.classList.add('hidden');
+      if (participantsSkeleton) participantsSkeleton.classList.add('hidden');
+
+      // Show content
+      document.getElementById('grid-content').classList.remove('hidden');
+      document.getElementById('available-list').classList.remove('hidden');
+      document.getElementById('all-participants').classList.remove('hidden');
+    }
+
+    // ========== INIT ==========
+    async function init() {
+      initTheme();
+      buildSkeleton();
+
+      // Load config and user in parallel
+      await Promise.all([
+        loadConfig(),
+        loadCurrentUser()
+      ]);
+
+      // Load guilds (depends on user being loaded)
+      await loadGuilds();
+
+      // Load participants for selected guild
+      if (selectedGuildId) {
+        await loadParticipants();
+      } else {
+        showLoaded(); // No guilds, show empty
+      }
+    }
+
+    init();
+  </script>
+
+</body>
+</html>
