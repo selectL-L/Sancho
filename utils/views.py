@@ -726,6 +726,10 @@ class TrackSelectionView(ui.LayoutView):
         - Slots 4-6: YouTube results (or renumbered if no YTM)
         - Cancel button
 
+    Auto-Select:
+        If a recommended track (⭐) is present, it will be auto-selected
+        after a shorter timeout (15s) unless the user picks something else.
+
     Usage:
         view = TrackSelectionView(ctx.author, ytm_tracks, yt_tracks, user_track)
         message = await ctx.send(view=view)
@@ -733,6 +737,9 @@ class TrackSelectionView(ui.LayoutView):
         await view.wait()
         selected = view.selected_track  # Track or None
     """
+
+    # Auto-select timeout for recommended tracks (seconds)
+    AUTO_SELECT_TIMEOUT = 15.0
 
     def __init__(
         self,
@@ -753,14 +760,18 @@ class TrackSelectionView(ui.LayoutView):
             recommended_id: Video ID of recommended track (gets ⭐ badge).
             timeout: View timeout in seconds.
         """
-        super().__init__(timeout=timeout)
+        # If there's a recommended track, use shorter auto-select timeout
+        effective_timeout = self.AUTO_SELECT_TIMEOUT if recommended_id else timeout
+        super().__init__(timeout=effective_timeout)
         self.author = author
         self.selected_track: Optional['Track'] = None
         self.message: Optional[discord.Message] = None
         self._cancelled = False
+        self._auto_selected = False  # True if auto-selected on timeout
 
         # Build slot mapping
         self._slots: Dict[int, _SlottedTrack] = {}
+        self._recommended_slot: Optional[int] = None  # Track which slot has recommended
 
         # Slot 0: User's URL (if provided)
         if user_track:
@@ -772,6 +783,8 @@ class TrackSelectionView(ui.LayoutView):
             s = ytm_start + i
             is_rec = recommended_id is not None and t.video_id == recommended_id
             self._slots[s] = _SlottedTrack(slot=s, track=t, is_recommended=is_rec)
+            if is_rec:
+                self._recommended_slot = s
 
         # Slots 4-6: YouTube results (or renumber to 1 if no YTM)
         yt_start = 4 if ytm_tracks else 1
@@ -783,6 +796,7 @@ class TrackSelectionView(ui.LayoutView):
         self._yt_tracks = yt_tracks[:3]
         self._user_track = user_track
         self._recommended_id = recommended_id
+        self._effective_timeout = effective_timeout
 
         self._build_ui()
 
@@ -822,15 +836,16 @@ class TrackSelectionView(ui.LayoutView):
                 artist_display = truncate_visual(t.artist, 30)
                 duration_str = _format_duration(t.duration)
 
-                # Source indicator and recommended badge
+                # Source indicator, explicit badge, and recommended badge
                 source_emoji = "🎵" if t.source == 'ytm_song' else "🎬"
+                explicit_badge = "🅴" if t.is_explicit else ""
                 rec_badge = " ⭐" if is_rec else ""
 
                 # Album info for songs
                 album_line = f"\n-# *{t.album}*" if t.album else ""
 
                 ytm_text += (
-                    f"**{slot_num}** {source_emoji}{rec_badge} **{title_display}**\n"
+                    f"**{slot_num}** {source_emoji}{explicit_badge}{rec_badge} **{title_display}**\n"
                     f"by {artist_display} • {duration_str}{album_line}\n"
                 )
 
@@ -913,8 +928,12 @@ class TrackSelectionView(ui.LayoutView):
         cancel_row.add_item(cancel_btn)
         container.add_item(cancel_row)
 
-        # Footer
-        container.add_item(ui.TextDisplay("-# Select by clicking a number • Times out in 30s"))
+        # Footer - different message if auto-select is enabled
+        if self._recommended_id:
+            footer_text = f"-# ⭐ Auto-selects recommended in {int(self._effective_timeout)}s • Pick another to override"
+        else:
+            footer_text = "-# Select by clicking a number • Times out in 30s"
+        container.add_item(ui.TextDisplay(footer_text))
 
         self.add_item(container)
 
@@ -950,16 +969,9 @@ class TrackSelectionView(ui.LayoutView):
         return interaction.user.id == self.author.id
 
     async def on_timeout(self) -> None:
-        """Handle timeout - clear the view."""
-        self.selected_track = None
-        if self.message:
-            try:
-                # Clear view on timeout
-                await self.message.edit(view=None)
-            except discord.NotFound:
-                pass
-            except discord.HTTPException:
-                pass
+        """Handle timeout - view cleanup handled by get_track_selection."""
+        # Don't edit message here - let get_track_selection handle all UI updates
+        # This includes auto-select logic which needs to happen synchronously
 
 
 async def get_track_selection(
@@ -1011,15 +1023,29 @@ async def get_track_selection(
 
     await view.wait()
 
+    # Handle auto-select if timed out with a recommended track
+    if not view.selected_track and not view._cancelled and view._recommended_slot is not None:
+        slotted = view._slots.get(view._recommended_slot)
+        if slotted:
+            view.selected_track = slotted.track
+            view._auto_selected = True
+
     # Update message after selection/timeout
     if view.selected_track:
         # Show selected track confirmation
         selected = view.selected_track
         title_display = truncate_visual(selected.title, 45)
+
+        # Different header for auto-selected vs manual
+        if view._auto_selected:
+            header = "## ⭐ Auto-Selected"
+        else:
+            header = "## ✅ Selected"
+
         confirmation = ui.LayoutView()
         conf_container = ui.Container(accent_colour=discord.Colour.green())
         conf_container.add_item(ui.TextDisplay(
-            f"## ✅ Selected\n"
+            f"{header}\n"
             f"**{title_display}**\n"
             f"by {selected.artist}"
         ))

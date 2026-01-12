@@ -138,6 +138,7 @@ class Track:
     # Display metadata (from YTM when available)
     album: Optional[str] = None  # Album name (YTM songs only)
     source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
+    is_explicit: Optional[bool] = None  # True if explicit, False if clean
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for caching.
@@ -155,6 +156,7 @@ class Track:
             'video_id': self.video_id,
             'album': self.album,
             'source': self.source,
+            'is_explicit': self.is_explicit,
         }
 
     @classmethod
@@ -170,6 +172,7 @@ class Track:
             video_id=data.get('video_id') or _extract_video_id(data['url']),
             album=data.get('album'),
             source=data.get('source', 'youtube'),
+            is_explicit=data.get('is_explicit'),
         )
 
 

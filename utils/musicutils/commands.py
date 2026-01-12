@@ -617,8 +617,7 @@ class MusicCommandsMixin:
         )
 
         if not selected:
-            await ctx.send("Selection timed out. Call me again when you're ready!")
-            return []
+            return []  # View already showed cancel/timeout message
 
         # Log the selection
         self.logger.info(
@@ -672,8 +671,7 @@ class MusicCommandsMixin:
                     )
 
                     if not selected:
-                        await ctx.send("Selection timed out. Call me again when you're ready!")
-                        return []
+                        return []  # View already showed cancel/timeout message
 
                     # Log the selection
                     self.logger.info(

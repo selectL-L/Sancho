@@ -105,6 +105,7 @@ class SearchResult:
     thumbnail_is_square: bool = False  # True for ATVs (lh3 thumbnails)
     source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
     video_type: Optional[str] = None  # MUSIC_VIDEO_TYPE_ATV, etc.
+    is_explicit: Optional[bool] = None  # True if explicit, False if clean, None if unknown
 
     def to_track(self) -> Track:
         """Convert to Track for playback."""
@@ -118,6 +119,7 @@ class SearchResult:
             video_id=self.video_id,
             album=self.album,
             source=self.source,
+            is_explicit=self.is_explicit,
         )
 
 
@@ -575,12 +577,15 @@ def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
 async def search_ytm(query: str, limit: int = 10) -> List[SearchResult]:
     """Search YouTube Music for tracks.
 
+    Performs unfiltered search (songs + videos) and filtered songs search in
+    parallel to get both mixed results AND album info for ATVs.
+
     Args:
         query: Search query string.
         limit: Maximum results to return.
 
     Returns:
-        List of SearchResult objects (songs and videos mixed).
+        List of SearchResult objects (songs and videos mixed, with album info).
     """
     ytm = _get_ytm()
     if not ytm:
@@ -588,18 +593,43 @@ async def search_ytm(query: str, limit: int = 10) -> List[SearchResult]:
         return []
 
     try:
-        def do_search() -> List[Dict[str, Any]]:
+        def do_unfiltered_search() -> List[Dict[str, Any]]:
             return ytm.search(query, limit=limit)  # type: ignore[union-attr]
 
-        results = await asyncio.wait_for(
-            asyncio.to_thread(do_search),
+        def do_songs_search() -> List[Dict[str, Any]]:
+            return ytm.search(query, filter="songs", limit=limit)  # type: ignore[union-attr]
+
+        # Run both searches in parallel
+        unfiltered_task = asyncio.to_thread(do_unfiltered_search)
+        songs_task = asyncio.to_thread(do_songs_search)
+
+        unfiltered_results, songs_results = await asyncio.wait_for(
+            asyncio.gather(unfiltered_task, songs_task),
             timeout=15.0
         )
 
+        # Build album and explicit maps from filtered songs search
+        album_map: Dict[str, Optional[str]] = {}
+        explicit_map: Dict[str, Optional[bool]] = {}
+        for item in songs_results:
+            video_id = item.get('videoId')
+            if video_id:
+                album_info = item.get('album')
+                if album_info:
+                    album_map[video_id] = album_info.get('name')
+                # isExplicit is True/False/None in filtered search results
+                explicit_map[video_id] = item.get('isExplicit')
+
+        # Parse unfiltered results (has both songs and videos)
         parsed: List[SearchResult] = []
-        for item in results:
+        for item in unfiltered_results:
             result = _parse_ytm_result(item)
             if result:
+                # Attach album and explicit info from filtered search if available
+                if result.video_id in album_map:
+                    result.album = album_map[result.video_id]
+                if result.video_id in explicit_map:
+                    result.is_explicit = explicit_map[result.video_id]
                 parsed.append(result)
 
         # Fetch duration for results that don't have it (songs often missing duration in search)
@@ -852,11 +882,17 @@ def score_atv_match(
     # Geometric mean - requires BOTH to match reasonably
     combined = math.sqrt(title_sim * artist_sim)
 
-    # Duration gate: reject if durations differ by more than 15 seconds
+    # Duration as soft factor - penalize large differences but never zero out
+    # MVs often have intros/outros that ATVs don't, so differences are expected
     if original_duration and candidate.duration_seconds:
         duration_diff = abs(original_duration - candidate.duration_seconds)
-        if duration_diff > 15:
-            return 0.0  # Probably different version/track
+        if duration_diff > 30:
+            # Large difference (>30s) - likely different version, reduce score
+            combined *= 0.5
+        elif duration_diff > 15:
+            # Moderate difference - slight penalty
+            combined *= 0.8
+        # <=15s difference: no penalty
 
     return combined
 
@@ -1078,14 +1114,6 @@ async def search_url_mode(
     tags = microformat.get('tags', [])
     jp_names = extract_jp_names(tags)
 
-    # Get artist IDs for matching
-    # Search with author name to find artist ID
-    artist_ids: set[str] = set()
-    quick_search = await search_ytm(f"{title} {author}", limit=3)
-    for r in quick_search:
-        if r.artist_id:
-            artist_ids.add(r.artist_id)
-
     # Build original SearchResult
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
     thumb_url = thumbnails[-1].get('url') if thumbnails else None
@@ -1101,22 +1129,27 @@ async def search_url_mode(
     )
 
     # Multi-query search for YTM
+    # Primary query always first, then Japanese name variants if available
     queries = [f"{title} {author}"]
     for jp_name in jp_names[:2]:  # Limit to 2 Japanese queries
         queries.append(f"{title} {jp_name}")
 
-    # Search YTM with all queries
+    # Search YTM with all queries, collecting results and artist IDs
     # NOTE: We do NOT exclude the original video_id from YTM results.
     # If the original appears as an ATV, that's valuable - user can choose between
     # their URL (slot 0, YouTube metadata) or the YTM version (slot 1, clean metadata).
     # Even if same video_id, the metadata quality differs.
     all_ytm_results: List[SearchResult] = []
     seen_ids: set[str] = set()
+    artist_ids: set[str] = set()  # Collect artist IDs from search results
     original_found_as_atv = False
 
     for query in queries:
         results = await search_ytm(query, limit=5)
         for r in results:
+            # Collect artist IDs for matching (from all results, not just new ones)
+            if r.artist_id:
+                artist_ids.add(r.artist_id)
             if r.video_id not in seen_ids:
                 seen_ids.add(r.video_id)
                 all_ytm_results.append(r)
@@ -1155,26 +1188,23 @@ async def search_url_mode(
     elif scored_songs:
         _, top_song = scored_songs[0]
 
-        # Strict matching: require artist ID match + high title similarity + close duration
+        # Strict matching using DETERMINISTIC signals only:
+        # - Artist ID match (consistent across MV/ATV for same artist)
+        # - High title similarity (>=0.95 for near-exact match)
+        # Duration is NOT used - MVs have intros/outros ATVs don't
         artist_id_matches = top_song.artist_id and top_song.artist_id in artist_ids
         title_sim = text_similarity(title, top_song.title)
-        duration_close = (
-            duration is not None and top_song.duration_seconds is not None
-            and abs(duration - top_song.duration_seconds) <= 5
-        )
 
-        # All three conditions must be met for the star
-        if artist_id_matches and title_sim > 0.85 and duration_close:
+        if artist_id_matches and title_sim >= 0.95:
             recommended_id = top_song.video_id
-            duration_diff = abs(duration - top_song.duration_seconds) if duration and top_song.duration_seconds else 0
             logger.info(
                 f"[URL Mode] Recommending {recommended_id} | "
-                f"artist_id=✓, title_sim={title_sim:.2f}, duration_diff={duration_diff}s"
+                f"artist_id=✓, title_sim={title_sim:.2f}"
             )
         else:
             logger.debug(
                 f"[URL Mode] No recommendation - artist_id={artist_id_matches}, "
-                f"title_sim={title_sim:.2f}, duration_close={duration_close}"
+                f"title_sim={title_sim:.2f}"
             )
 
     # Take top 3 songs
