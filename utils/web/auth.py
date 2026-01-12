@@ -9,6 +9,7 @@ This module provides OAuth2 authentication with Discord, including:
 Session cookie stores only user_id and token_expires_at (minimal footprint).
 User profile data (username, avatar) is cached in the database for persistence.
 Guild membership is determined from the bot's cache at runtime.
+When DEV_MODE is enabled, /auth/me returns mock user data for UI testing.
 """
 
 import logging
@@ -53,6 +54,8 @@ def _to_display_format(tz_str: str | None) -> str | None:
             return f"GMT-{hour}"
 
     return tz_str
+
+
 logger = logging.getLogger(__name__)
 
 # Discord OAuth2 endpoints
@@ -215,6 +218,11 @@ async def get_current_user(request: Request) -> JSONResponse:
     Returns:
         JSON with user info (id, username, avatar, needs_reauth) or 401 if not logged in.
     """
+    # DEV_MODE: Return mock current user
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_current_user())
+
     user_id = request.session.get("user_id")
     if not user_id:
         return JSONResponse(
@@ -289,8 +297,14 @@ async def get_user_guilds(request: Request) -> list[int]:
     """Get the list of guild IDs the user shares with the bot.
 
     Queries the bot's cache for guilds where this user is a member.
-    Uses multiple lookup methods to handle member cache limitations.
+    Uses cache-first lookup with API fallback for uncached members.
     Results are cached on the request to avoid repeated API calls.
+
+    Note on performance: This function may make up to N API calls where N is
+    the number of bot guilds where the user isn't in the member cache. With
+    the members intent enabled, most users should be cached. The fallback
+    handles edge cases like very large guilds or recently joined members.
+    Rate limit errors are caught silently (user won't see that guild).
 
     Args:
         request: The incoming request.
@@ -308,24 +322,28 @@ async def get_user_guilds(request: Request) -> list[int]:
 
     bot = request.app.state.bot
     shared_guilds = []
+    uncached_count = 0
 
     for guild in bot.guilds:
-        # Try get_member first (cached lookup)
+        # Try get_member first (cached lookup - instant, no API call)
         member = guild.get_member(user_id)
         if member:
             shared_guilds.append(guild.id)
             continue
 
-        # If not in cache, check if user is in the guild's member list
+        # If not in cache, fetch from Discord API
         # This handles cases where member cache isn't fully populated
-        # but the user has interacted with the bot before
+        uncached_count += 1
         try:
             member = await guild.fetch_member(user_id)
             if member:
                 shared_guilds.append(guild.id)
         except Exception:
-            # User is not in this guild, skip
+            # User is not in this guild, or rate limited - skip silently
             pass
+
+    if uncached_count > 0:
+        logger.debug(f"get_user_guilds for {user_id}: {len(shared_guilds)} shared, {uncached_count} required API lookup")
 
     # Cache on request state for subsequent calls in same request
     request.state._user_guilds = shared_guilds

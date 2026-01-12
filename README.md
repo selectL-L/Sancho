@@ -1,4 +1,4 @@
-# Shiori (V0.9.25 - The Repo Update)
+# Shiori (V0.9.32 - The Web Update)
 
 **A Discord bot designed to be more reasonable.**
 
@@ -154,6 +154,12 @@ To disable ambience output while keeping internal mood cycling, set `AMBIENCE_EN
 ## Developer Guide
 
 We welcome contributions! Please follow these guidelines to keep the project healthy.
+
+### DEV_MODE
+
+Setting `DEV_MODE=True` in `info.env` enables debug logging and restricts slash command sync to `DEV_GUILD`. 
+
+**Web UI testing:** DEV_MODE routes use mock data instead of real Discord data. You must create `utils/web/mock_data.py` yourself—this file is gitignored. Check the imports in `utils/web/routes.py` for the expected function signatures.
 
 ### Runtime Control
 

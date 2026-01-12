@@ -86,7 +86,7 @@
 
     * {
       transition-property: background-color, border-color, color, opacity, transform, box-shadow, filter;
-      transition-duration: 150ms;
+      transition-duration: 200ms;
       transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
     }
 
@@ -234,43 +234,35 @@
       box-shadow: inset 0 0 0 2px rgba(0,0,0,0.6);
     }
 
-    /* Tooltip */
-    .grid-cell::after {
-      content: 'Click to lock';
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%) translateY(-4px);
+    /* Fixed tooltip (JS-managed) */
+    #cell-tooltip {
+      position: fixed;
       padding: 0.25rem 0.625rem;
       border-radius: 0.375rem;
       font-size: 0.6875rem;
       white-space: nowrap;
-      opacity: 0;
       pointer-events: none;
+      z-index: 1000;
+      opacity: 0;
       transition: opacity 100ms;
-      z-index: 100;
     }
 
-    .dark .grid-cell::after {
+    #cell-tooltip.visible {
+      opacity: 1;
+    }
+
+    .dark #cell-tooltip {
       background: #27272a;
       color: #e4e4e7;
       border: 1px solid rgba(63,63,70,0.6);
       box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
 
-    .light .grid-cell::after {
+    .light #cell-tooltip {
       background: #ffffff;
       color: #18181b;
       border: 1px solid rgba(0,0,0,0.1);
       box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-
-    .grid-cell:hover::after {
-      opacity: 1;
-    }
-
-    .grid-cell.locked::after {
-      content: 'Click to unlock';
     }
 
     .intensity-0 { background-color: var(--heatmap-0); }
@@ -288,6 +280,11 @@
 
     .row-hour {
       border-bottom: 1px dashed var(--border-default);
+    }
+    .row-hour-label {
+      border-top: 2px solid var(--border-default);
+      margin-left: auto;
+      width: 2.5rem;
     }
     .row-quarter {
       border-bottom: 1px solid var(--border-subtle);
@@ -324,6 +321,7 @@
     .grid-scroll {
       max-height: 65vh;
       overflow-y: auto;
+      overflow-x: clip;
     }
 
     .grid-scroll::-webkit-scrollbar,
@@ -409,25 +407,122 @@
       background: rgba(244, 244, 245, 0.85);
     }
 
-    /* ========== SHARED SERVERS TRUNCATION ========== */
-    .shared-servers {
-      max-width: 100%;
-    }
-
-    .shared-servers.expanded {
-      white-space: normal;
-      word-break: break-word;
-    }
-
     /* ========== ANIMATIONS ========== */
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-4px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-100%); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes slideUp {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(-100%); }
+    }
+
     .sidebar-content {
       animation: fadeIn 150ms ease-out;
     }
+
+    /* ========== SIDEBAR FADE ========== */
+    #available-list {
+      transition: opacity 100ms ease;
+    }
+
+    /* ========== VIEWING BANNER ========== */
+    .viewing-banner {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+      border-left: 3px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.8);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      animation: slideDown 200ms ease-out;
+    }
+
+    .viewing-banner.hiding {
+      animation: slideUp 150ms ease-in forwards;
+    }
+
+    .viewing-banner.hidden {
+      display: none;
+    }
+
+    .viewing-banner-exit {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
+      font-size: 0.75rem;
+      transition: color 150ms, background 150ms;
+    }
+
+    .viewing-banner-exit:hover {
+      color: var(--text-primary);
+      background: var(--hover-overlay);
+    }
+
+    /* ========== TOAST NOTIFICATIONS ========== */
+    .toast-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      pointer-events: none;
+    }
+    .toast {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      transform: translateX(120%);
+      opacity: 0;
+      transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease;
+      pointer-events: auto;
+      max-width: 20rem;
+    }
+    .toast.show {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    .toast.hiding {
+      transform: translateX(120%);
+      opacity: 0;
+    }
+    .toast-icon {
+      width: 1.25rem;
+      height: 1.25rem;
+      flex-shrink: 0;
+    }
+    .toast-message {
+      font-size: 0.875rem;
+      color: var(--text-primary);
+    }
+    .toast.success { border-left: 3px solid #22c55e; }
+    .toast.success .toast-icon { color: #22c55e; }
+    .toast.error { border-left: 3px solid #ef4444; }
+    .toast.error .toast-icon { color: #ef4444; }
+    .toast.info { border-left: 3px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.8); }
+    .toast.info .toast-icon { color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 1); }
 
     /* ========== GRID CELL HEIGHT ========== */
     .cell-h {
@@ -437,6 +532,12 @@
 </head>
 <body class="dark min-h-screen">
   
+  <!-- Fixed Tooltip -->
+  <div id="cell-tooltip">Click to lock</div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
   <!-- Timezone Warning Banner -->
   <div id="tz-warning" class="warning-banner px-4 py-3 text-center hidden">
     <span class="text-yellow-500 text-sm">
@@ -498,6 +599,16 @@
       <div class="flex-1 min-w-0">
         <div class="card rounded-2xl p-5 shadow-lg dark:shadow-black/25 light:shadow-black/5 relative">
           
+          <!-- Viewing Person Banner (hidden by default) -->
+          <div id="viewing-banner" class="viewing-banner hidden">
+            <span class="text-sm text-secondary">
+              Viewing <strong class="text-primary" id="viewing-name"></strong>'s availability
+            </span>
+            <button onclick="clearPersonView()" class="viewing-banner-exit">
+              ✕ Exit
+            </button>
+          </div>
+
           <!-- Day headers -->
           <div class="flex mb-0 pr-[6px]">
             <div class="w-12 shrink-0"></div>
@@ -645,12 +756,41 @@
     window.currentUser = null;
     let guilds = [];
     let selectedGuildId = null;
-    let participants = [];
+    let participants = [];  // Guild-specific users for heatmap
+    let allViewableUsers = [];  // Cross-guild users for Everyone sidebar
     let availability = {};
     let lockedCell = null;
     let viewingPerson = null;
 
     const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
+
+    // ========== TOAST NOTIFICATIONS ==========
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      
+      const icons = {
+        success: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+        info: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+      };
+      
+      toast.innerHTML = `${icons[type] || icons.info}<span class="toast-message">${message}</span>`;
+      container.appendChild(toast);
+      
+      // Trigger animation
+      requestAnimationFrame(() => {
+        toast.classList.add('show');
+      });
+      
+      // Auto dismiss
+      setTimeout(() => {
+        toast.classList.remove('show');
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
 
     // ========== AVATAR HELPERS ==========
     function getAvatarUrl(user) {
@@ -662,6 +802,30 @@
       img.style.display = 'none';
       if (img.parentElement && fallbackInitial) {
         img.parentElement.textContent = fallbackInitial.charAt(0).toUpperCase();
+      }
+    }
+
+    // ========== SHARED GUILDS HELPERS ==========
+    function formatSharedGuilds(sharedGuilds) {
+      if (!sharedGuilds || sharedGuilds.length === 0) return '';
+      const names = sharedGuilds.map(g => g.name);
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return names.join(', ');
+      return `${names[0]}, ${names[1].substring(0, 1)}...`;
+    }
+
+    function resortSharedGuilds() {
+      // Re-sort all users' shared_guilds to put the selected guild first
+      for (const user of allViewableUsers) {
+        if (user.shared_guilds && user.shared_guilds.length > 1) {
+          user.shared_guilds.sort((a, b) => {
+            // Selected guild first
+            if (a.id === selectedGuildId) return -1;
+            if (b.id === selectedGuildId) return 1;
+            // Then alphabetical
+            return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+          });
+        }
       }
     }
 
@@ -825,13 +989,12 @@
           const data = await response.json();
           participants = data.users || [];
           
-          // Now load availability for each participant
+          // Now load availability for each participant (for heatmap)
           await loadAllAvailability();
           
-          // Build the UI
+          // Build the heatmap UI
           buildTimeLabels();
           buildGrid();
-          buildParticipantList();
         } else {
           console.warn(`Failed to load participants: ${response.status}`);
           participants = [];
@@ -841,6 +1004,25 @@
         console.error('Failed to load participants:', e);
         participants = [];
         showLoaded(); // Show empty state
+      }
+    }
+
+    async function loadAllViewableUsers() {
+      // Load ALL users across ALL guilds for the Everyone sidebar
+      try {
+        const focusGuild = selectedGuildId || '0';
+        const response = await fetch(`/api/all-viewable-users?focus_guild=${focusGuild}`, { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          allViewableUsers = data.users || [];
+          buildParticipantList();
+        } else {
+          console.warn(`Failed to load all viewable users: ${response.status}`);
+          allViewableUsers = [];
+        }
+      } catch (e) {
+        console.error('Failed to load all viewable users:', e);
+        allViewableUsers = [];
       }
     }
 
@@ -867,25 +1049,12 @@
             const data = await response.json();
             p.lastUpdated = data.updated_at; // Store updated_at on participant
             
-            // Process their availability - handle both formats
-            // /api/availability returns {slots: ["mon-0800", ...]}
-            // /api/users/:id/availability returns {availability: {mon: ["0800", ...], ...}}
-            if (p.isSelf && data.slots) {
-              // Self endpoint format: slots array like ["mon-0800", "mon-0815", ...]
+            // Both endpoints return {slots: ["mon-0800", ...]} format
+            if (data.slots) {
               data.slots.forEach(slot => {
                 if (availability[slot]) {
                   availability[slot].push(p);
                 }
-              });
-            } else if (data.availability) {
-              // Other user format: {mon: ["0800", "0815"], tue: [...]}
-              Object.entries(data.availability).forEach(([day, slots]) => {
-                slots.forEach(slot => {
-                  const key = `${day}-${slot}`;
-                  if (availability[key]) {
-                    availability[key].push(p);
-                  }
-                });
               });
             }
           } else {
@@ -917,8 +1086,13 @@
 
       for (let i = 0; i < 96; i++) {
         const row = document.createElement('div');
-        row.className = 'grid grid-cols-7';
-        if (i < 95) row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        row.className = 'grid grid-cols-7 cell-h';
+        // Last row (i=95, 11:45pm) gets row-hour to visually wrap to 12am
+        if (i === 95) {
+          row.classList.add('row-hour');
+        } else {
+          row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        }
         for (let j = 0; j < 7; j++) {
           const cell = document.createElement('div');
           cell.className = 'cell-h skeleton';
@@ -981,12 +1155,10 @@
       // Hide empty state (will be re-evaluated after load)
       document.getElementById('empty-state').classList.add('hidden');
       
-      // Reload participants for new guild
+      // Reload participants for new guild (heatmap data)
       // Show loading state
       document.getElementById('grid-content').classList.add('hidden');
       document.getElementById('grid-skeleton').classList.remove('hidden');
-      document.getElementById('all-participants').classList.add('hidden');
-      document.getElementById('participants-skeleton')?.classList.remove('hidden');
       document.getElementById('available-list').classList.add('hidden');
       document.getElementById('available-skeleton')?.classList.remove('hidden');
       
@@ -995,6 +1167,10 @@
       document.getElementById('availability-grid').innerHTML = '';
       
       await loadParticipants();
+
+      // Re-sort shared_guilds to prioritize newly selected guild
+      resortSharedGuilds();
+      buildParticipantList();
     }
 
     document.addEventListener('click', (e) => {
@@ -1020,6 +1196,7 @@
       times.forEach(time => {
         const label = document.createElement('div');
         label.className = 'cell-h flex items-center justify-end pr-2 text-sm text-muted';
+        if (time.isHour) label.classList.add('row-hour-label');
         label.textContent = time.isHour ? time.displayShort : '';
         container.appendChild(label);
       });
@@ -1033,10 +1210,15 @@
 
       times.forEach((time, timeIdx) => {
         const row = document.createElement('div');
-        row.className = 'grid grid-cols-7';
+        row.className = 'grid grid-cols-7 cell-h';
         row.style.position = 'relative';
         
-        if (timeIdx < times.length - 1) row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
+        // Add border class: last row (11:45pm) gets row-hour to visually wrap to 12am
+        if (timeIdx === times.length - 1) {
+          row.classList.add('row-hour');
+        } else {
+          row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
+        }
 
         days.forEach((day, dayIdx) => {
           const key = `${day}-${time.key}`;
@@ -1052,9 +1234,18 @@
           if (intensity >= 4) cell.classList.add('best-time');
           if (dayIdx < days.length - 1) cell.classList.add('col-separator');
 
-          cell.addEventListener('mouseenter', () => showAvailable(key, available, time.display));
-          cell.addEventListener('mouseleave', () => { if (!lockedCell) clearHover(); });
-          cell.addEventListener('click', () => lockCell(cell, key, available, time.display));
+          cell.addEventListener('mouseenter', () => {
+            showAvailable(key, available, time.display);
+            showCellTooltip(cell);
+          });
+          cell.addEventListener('mouseleave', () => {
+            if (!lockedCell) clearHover();
+            hideCellTooltip();
+          });
+          cell.addEventListener('click', () => {
+            lockCell(cell, key, available, time.display);
+            if (tooltipCell === cell) showCellTooltip(cell);  // Update tooltip text
+          });
 
           row.appendChild(cell);
         });
@@ -1100,6 +1291,39 @@
       updateSidebar(key, available, timeDisplay);
     }
 
+    // ========== CELL TOOLTIP ==========
+    const cellTooltip = document.getElementById('cell-tooltip');
+    let tooltipCell = null;
+    let tooltipTimeout = null;
+
+    function showCellTooltip(cell) {
+      // Clear any pending tooltip
+      if (tooltipTimeout) clearTimeout(tooltipTimeout);
+      hideCellTooltip();
+      
+      // Delay before showing
+      tooltipTimeout = setTimeout(() => {
+        tooltipCell = cell;
+        const isLocked = cell.classList.contains('locked');
+        cellTooltip.textContent = isLocked ? 'Click to unlock' : 'Click to lock';
+        
+        const rect = cell.getBoundingClientRect();
+        cellTooltip.style.left = `${rect.left + rect.width / 2}px`;
+        cellTooltip.style.top = `${rect.top - 4}px`;
+        cellTooltip.style.transform = 'translate(-50%, -100%)';
+        cellTooltip.classList.add('visible');
+      }, 180);
+    }
+
+    function hideCellTooltip() {
+      if (tooltipTimeout) {
+        clearTimeout(tooltipTimeout);
+        tooltipTimeout = null;
+      }
+      tooltipCell = null;
+      cellTooltip.classList.remove('visible');
+    }
+
     function clearHover() {
       document.getElementById('available-count').textContent = 'hover a time';
       document.getElementById('time-label').classList.add('hidden');
@@ -1134,76 +1358,69 @@
 
       const list = document.getElementById('available-list');
       
-      if (available.length === 0) {
-        list.innerHTML = '<div class="sidebar-content"><p class="text-muted text-xs">No one is available</p></div>';
-        return;
-      }
-
-      list.innerHTML = `<div class="sidebar-content space-y-1">${available.map(p => `
-        <div class="flex items-center gap-2.5 p-2 rounded-lg hover-item cursor-default">
-          <div class="avatar w-7 h-7 rounded-full shrink-0 text-xs">
-            <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${p.username || p.name}')">
-          </div>
-          <div class="min-w-0 flex-1">
-            <div class="text-sm text-primary">
-              ${p.username || p.name}
-              <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.lastUpdated)}</span>
+      // Fade out, update, fade in
+      list.style.opacity = '0';
+      
+      setTimeout(() => {
+        if (available.length === 0) {
+          list.innerHTML = '<div class="sidebar-content"><p class="text-muted text-xs">No one is available</p></div>';
+        } else {
+          list.innerHTML = `<div class="sidebar-content space-y-1">${available.map(p => `
+            <div class="flex items-center gap-2.5 p-2 rounded-lg hover-item cursor-default">
+              <div class="avatar w-7 h-7 rounded-full shrink-0 text-xs">
+                <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${(p.username || p.name || '').replace(/'/g, "\\'")}')">
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="text-sm text-primary">
+                  ${p.username || p.name}
+                  <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.lastUpdated)}</span>
+                </div>
+              </div>
             </div>
-            <div class="text-xs text-muted shared-servers truncate">${formatSharedServers(p.shared_guilds)}</div>
-          </div>
-        </div>
-      `).join('')}</div>`;
-    }
-
-    function formatSharedServers(servers) {
-      if (!servers || servers.length === 0) return '';
-      const names = servers.map(s => s.name || s);
-      if (names.length === 1) return names[0];
-      if (names.length === 2) return names.join(', ');
-      return `${names[0]}, +${names.length - 1} more`;
+          `).join('')}</div>`;
+        }
+        list.style.opacity = '1';
+      }, 80);
     }
 
     function buildParticipantList() {
       const list = document.getElementById('all-participants');
       
-      // Filter out self for sidebar (they have their own pill), but they're still in heatmap
-      const otherParticipants = participants.filter(p => !p.isSelf);
-      
-      if (otherParticipants.length === 0) {
-        // Check if only self is in participants
-        if (participants.length > 0 && participants.every(p => p.isSelf)) {
-          list.innerHTML = '<p class="text-muted text-xs">Your availability is shown on the grid.<br>Invite others to share theirs!</p>';
-        } else {
-          list.innerHTML = '<p class="text-muted text-xs">No one has shared their availability yet</p>';
-        }
+      // Use allViewableUsers (cross-guild) for the Everyone sidebar
+      if (allViewableUsers.length === 0) {
+        list.innerHTML = '<p class="text-muted text-xs">No one has shared their availability yet</p>';
         return;
       }
 
-      list.innerHTML = otherParticipants.map(p => {
-        const sharedNames = (p.shared_guilds || []).map(s => s.name || s).join(', ');
+      list.innerHTML = allViewableUsers.map(p => {
+        const sharedGuildsText = formatSharedGuilds(p.shared_guilds);
+        const allGuildsText = (p.shared_guilds || []).map(g => g.name).join(', ');
+        const safeName = (p.username || p.name || '').replace(/'/g, "\\'");
         return `
           <div 
             class="flex items-center gap-2.5 p-2 rounded-lg hover-item cursor-pointer person-row"
             data-person-id="${p.id}"
+            data-shared-guilds="${encodeURIComponent(allGuildsText)}"
             onclick="viewPersonSchedule('${p.id}')"
           >
             <div class="avatar w-7 h-7 rounded-full shrink-0 text-xs">
-              <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${p.username || p.name}')">
+              <img src="${getAvatarUrl(p)}" alt="" onerror="handleAvatarError(this, '${safeName}')">
             </div>
             <div class="min-w-0 flex-1">
-              <div class="text-sm text-secondary">
+              <div class="text-sm text-secondary truncate">
                 ${p.username || p.name}
-                <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.lastUpdated)}</span>
+                <span class="text-muted text-xs ml-1">· ${formatRelativeTime(p.updated_at)}</span>
               </div>
-              <div class="text-xs text-muted shared-servers truncate" data-full="${sharedNames}">${formatSharedServers(p.shared_guilds)}</div>
+              <div class="text-xs text-muted truncate shared-guilds-text">${sharedGuildsText}</div>
             </div>
           </div>
         `;
       }).join('');
     }
 
-    function viewPersonSchedule(personId) {
-      const person = participants.find(p => p.id === personId);
+    async function viewPersonSchedule(personId) {
+      // Find person in allViewableUsers (the cross-guild list)
+      const person = allViewableUsers.find(p => p.id === personId);
       if (!person) return;
 
       if (lockedCell) {
@@ -1220,66 +1437,95 @@
 
       document.querySelectorAll('.person-row').forEach(row => {
         row.classList.remove('person-selected');
-        const sharedServersEl = row.querySelector('.shared-servers');
         if (row.dataset.personId === personId) {
           row.classList.add('person-selected');
-          if (sharedServersEl) {
-            sharedServersEl.textContent = sharedServersEl.dataset.full;
-            sharedServersEl.classList.add('expanded');
-          }
-        } else {
-          if (sharedServersEl) {
-            const servers = sharedServersEl.dataset.full.split(', ');
-            sharedServersEl.textContent = formatSharedServers(servers.map(s => ({ name: s })));
-            sharedServersEl.classList.remove('expanded');
-          }
         }
       });
 
+      // Show viewing banner
+      const banner = document.getElementById('viewing-banner');
+      const viewingName = document.getElementById('viewing-name');
+      viewingName.textContent = person.username || person.name;
+      banner.classList.remove('hidden', 'hiding');
+
+      // Show skeleton loading state for heatmap
+      document.getElementById('grid-content').classList.add('hidden');
+      document.getElementById('grid-skeleton').classList.remove('hidden');
+
+      // Fetch this person's availability with minimum delay for natural feel
+      let personSlots = new Set();
+      const fetchStart = Date.now();
+      
+      try {
+        const response = await fetch(`/api/users/${personId}/availability`, { credentials: 'include' });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.slots) {
+            data.slots.forEach(slot => personSlots.add(slot));
+          }
+        }
+      } catch (e) {
+        console.error(`Failed to load availability for ${personId}:`, e);
+        showToast('Failed to load availability', 'error');
+      }
+
+      // Ensure minimum 500ms loading time for natural feel
+      const elapsed = Date.now() - fetchStart;
+      if (elapsed < 500) {
+        await new Promise(resolve => setTimeout(resolve, 500 - elapsed));
+      }
+
+      // Hide skeleton, show content
+      document.getElementById('grid-skeleton').classList.add('hidden');
+      document.getElementById('grid-content').classList.remove('hidden');
+
+      // Update heatmap to show this person's availability
       document.querySelectorAll('.grid-cell').forEach(cell => {
         const key = cell.dataset.key;
-        const available = availability[key] || [];
-        const personIsAvailable = available.some(p => p.id === personId);
+        const personIsAvailable = personSlots.has(key);
         
         cell.className = cell.className.replace(/intensity-\d/g, '').replace('best-time', '');
         cell.classList.add(personIsAvailable ? 'intensity-4' : 'intensity-0');
       });
 
-      const sharedNames = (person.shared_guilds || []).map(s => s.name || s).join(', ');
-      
+      // Build servers in common list
+      const sharedGuildsHtml = (person.shared_guilds || []).map(g => g.name).join(', ') || 'None';
+
       document.getElementById('available-count').textContent = person.username || person.name;
       document.getElementById('time-label').classList.add('hidden');
       document.getElementById('available-list').innerHTML = `
         <div class="sidebar-content">
           <div class="flex items-center gap-3 p-2">
             <div class="avatar w-9 h-9 rounded-full shrink-0 text-sm">
-              <img src="${getAvatarUrl(person)}" alt="" onerror="handleAvatarError(this, '${person.username || person.name}')">
+              <img src="${getAvatarUrl(person)}" alt="" onerror="handleAvatarError(this, '${(person.username || person.name || '').replace(/'/g, "\\'")}')">
             </div>
             <div class="min-w-0">
               <div class="text-sm text-primary font-medium">${person.username || person.name}</div>
-              <div class="text-xs text-muted">Updated ${formatRelativeTime(person.lastUpdated)}</div>
+              <div class="text-xs text-muted">Updated ${formatRelativeTime(person.updated_at)}</div>
             </div>
           </div>
           <div class="text-xs text-muted mt-2 px-2">
             <span class="text-secondary">Servers in common:</span><br>
-            ${sharedNames || 'None'}
+            ${sharedGuildsHtml}
           </div>
-          <p class="text-xs text-muted mt-3">Click their name again to exit</p>
+          <p class="text-xs text-muted mt-3 px-2">Click their name again to exit</p>
         </div>
       `;
     }
 
     function clearPersonView() {
       viewingPerson = null;
+
+      // Animate banner out
+      const banner = document.getElementById('viewing-banner');
+      banner.classList.add('hiding');
+      setTimeout(() => {
+        banner.classList.add('hidden');
+        banner.classList.remove('hiding');
+      }, 150);
       
       document.querySelectorAll('.person-row').forEach(row => {
         row.classList.remove('person-selected');
-        const sharedServersEl = row.querySelector('.shared-servers');
-        if (sharedServersEl) {
-          const servers = sharedServersEl.dataset.full.split(', ');
-          sharedServersEl.textContent = formatSharedServers(servers.map(s => ({ name: s })));
-          sharedServersEl.classList.remove('expanded');
-        }
       });
 
       document.querySelectorAll('.grid-cell').forEach(cell => {
@@ -1334,6 +1580,28 @@
       document.getElementById('all-participants').classList.remove('hidden');
     }
 
+    // ========== TIME INDICATOR UPDATE ==========
+    function updateTimeIndicator() {
+      const indicator = document.querySelector('.time-indicator');
+      if (!indicator) return;
+
+      const currentSlot = getCurrentTimeSlotIndex();
+      const currentDay = getCurrentDayIndex();
+      const grid = document.getElementById('availability-grid');
+      if (!grid) return;
+
+      // Move indicator to correct row
+      const rows = grid.querySelectorAll('.grid');
+      if (rows[currentSlot]) {
+        // Remove from old parent
+        indicator.remove();
+        // Add to new row
+        rows[currentSlot].appendChild(indicator);
+        indicator.style.left = `${(currentDay / 7) * 100}%`;
+        indicator.style.width = `${100 / 7}%`;
+      }
+    }
+
     // ========== INIT ==========
     async function init() {
       initTheme();
@@ -1348,12 +1616,18 @@
       // Load guilds (depends on user being loaded)
       await loadGuilds();
 
-      // Load participants for selected guild
+      // Load participants for selected guild (heatmap) and all viewable users (sidebar)
       if (selectedGuildId) {
-        await loadParticipants();
+        await Promise.all([
+          loadParticipants(),
+          loadAllViewableUsers()
+        ]);
       } else {
         showLoaded(); // No guilds, show empty
       }
+
+      // Update time indicator every minute
+      setInterval(updateTimeIndicator, 60000);
     }
 
     init();

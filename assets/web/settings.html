@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Settings — Shion</title>
+  <title>Settings</title>
   <link rel="stylesheet" href="tailwind.css">
   <style>
     /* ========== THEME COLOR (set dynamically, defaults to purple) ========== */
@@ -98,7 +98,7 @@
 
     * {
       transition-property: background-color, border-color, color, box-shadow, filter;
-      transition-duration: 150ms;
+      transition-duration: 200ms;
       transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
     }
 
@@ -255,12 +255,74 @@
       height: 1.125rem;
       background: var(--text-primary);
       border-radius: 50%;
-      transition: transform 150ms;
+      transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
       box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     }
     .toggle-switch.active::after {
       transform: translateX(1.25rem);
     }
+
+    /* ========== CELL PULSE ANIMATION ========== */
+    @keyframes cell-pulse {
+      0% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
+      50% { box-shadow: inset 0 0 10px 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6); }
+      100% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
+    }
+    .grid-cell.pulse {
+      animation: cell-pulse 300ms ease-out;
+    }
+
+    /* ========== TOAST NOTIFICATIONS ========== */
+    .toast-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      pointer-events: none;
+    }
+    .toast {
+      background: var(--glass-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      transform: translateX(120%);
+      opacity: 0;
+      transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease;
+      pointer-events: auto;
+      max-width: 20rem;
+    }
+    .toast.show {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    .toast.hiding {
+      transform: translateX(120%);
+      opacity: 0;
+    }
+    .toast-icon {
+      width: 1.25rem;
+      height: 1.25rem;
+      flex-shrink: 0;
+    }
+    .toast-message {
+      font-size: 0.875rem;
+      color: var(--text-primary);
+    }
+    .toast.success { border-left: 3px solid #22c55e; }
+    .toast.success .toast-icon { color: #22c55e; }
+    .toast.error { border-left: 3px solid #ef4444; }
+    .toast.error .toast-icon { color: #ef4444; }
+    .toast.info { border-left: 3px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.8); }
+    .toast.info .toast-icon { color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 1); }
 
     /* ========== GRID STYLES ========== */
     .grid-cell {
@@ -284,6 +346,11 @@
 
     .row-hour {
       border-bottom: 1px dashed var(--border-default);
+    }
+    .row-hour-label {
+      border-top: 2px solid var(--border-default);
+      margin-left: auto;
+      width: 2.5rem;
     }
     .row-quarter {
       border-bottom: 1px solid var(--border-subtle);
@@ -532,15 +599,19 @@
       <!-- Grid container -->
       <div class="grid-scroll">
         <!-- Skeleton -->
-        <div class="flex" id="grid-skeleton">
-          <div class="w-12 shrink-0 flex flex-col" id="skeleton-time-labels"></div>
-          <div class="flex-1 border-x border-b grid-border" id="skeleton-cells"></div>
+        <div id="grid-skeleton">
+          <div class="flex">
+            <div class="w-12 shrink-0 flex flex-col" id="skeleton-time-labels"></div>
+            <div class="flex-1 border-x border-b grid-border" id="skeleton-cells"></div>
+          </div>
         </div>
 
         <!-- Content -->
-        <div class="flex hidden" id="grid-content">
-          <div class="w-12 shrink-0 flex flex-col" id="time-labels"></div>
-          <div class="flex-1 border-x border-b grid-border relative" id="availability-grid"></div>
+        <div class="hidden" id="grid-content">
+          <div class="flex">
+            <div class="w-12 shrink-0 flex flex-col" id="time-labels"></div>
+            <div class="flex-1 border-x border-b grid-border relative" id="availability-grid"></div>
+          </div>
         </div>
       </div>
 
@@ -634,6 +705,49 @@
       </button>
     </section>
 
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Clear All Confirmation Modal -->
+  <div id="clear-confirm-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
+    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl" style="border: 1px solid var(--danger-border);">
+      <h3 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Clear all availability?</h3>
+      <p class="text-sm text-muted mb-4">This will remove all your saved time slots. This action cannot be undone.</p>
+      <div class="flex gap-3 justify-end">
+        <button onclick="hideClearConfirmModal()" class="btn btn-ghost px-4 py-2 text-sm">
+          Cancel
+        </button>
+        <button onclick="confirmClearAll()" class="btn btn-danger px-4 py-2 text-sm">
+          Clear all
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete All Data Modal -->
+  <div id="delete-data-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
+    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl" style="border: 1px solid var(--danger-border);">
+      <h3 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Delete all your data?</h3>
+      <p class="text-sm text-muted mb-4">This will permanently delete your availability, guild settings, and blocked users. This action cannot be undone.</p>
+      <p class="text-xs text-muted mb-3">Type <strong class="text-primary">DELETE</strong> to confirm:</p>
+      <input 
+        type="text" 
+        id="delete-confirm-input"
+        placeholder="Type DELETE"
+        class="input w-full rounded-xl px-4 py-2.5 text-sm mb-4"
+        autocomplete="off"
+      >
+      <div class="flex gap-3 justify-end">
+        <button onclick="hideDeleteDataModal()" class="btn btn-ghost px-4 py-2 text-sm">
+          Cancel
+        </button>
+        <button onclick="confirmDeleteAllData()" class="btn btn-danger px-4 py-2 text-sm" id="delete-confirm-btn" disabled>
+          Delete everything
+        </button>
+      </div>
+    </div>
   </div>
 
   <!-- Add user to blacklist modal -->
@@ -829,8 +943,13 @@
 
       for (let i = 0; i < 96; i++) {
         const row = document.createElement('div');
-        row.className = 'grid grid-cols-7';
-        if (i < 95) row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        row.className = 'grid grid-cols-7 cell-h';
+        // Last row (i=95, 11:45pm) gets row-hour to visually wrap to 12am
+        if (i === 95) {
+          row.classList.add('row-hour');
+        } else {
+          row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
+        }
         for (let j = 0; j < 7; j++) {
           const cell = document.createElement('div');
           cell.className = 'cell-h skeleton';
@@ -895,6 +1014,7 @@
       times.forEach(time => {
         const label = document.createElement('div');
         label.className = 'cell-h flex items-center justify-end pr-2 text-sm text-muted';
+        if (time.isHour) label.classList.add('row-hour-label');
         label.textContent = time.isHour ? time.displayShort : '';
         container.appendChild(label);
       });
@@ -907,10 +1027,13 @@
 
       times.forEach((time, timeIdx) => {
         const row = document.createElement('div');
-        row.className = 'grid grid-cols-7';
+        row.className = 'grid grid-cols-7 cell-h';
         row.style.position = 'relative';
         
-        if (timeIdx < times.length - 1) {
+        // Add border class: last row (11:45pm) gets row-hour to visually wrap to 12am
+        if (timeIdx === times.length - 1) {
+          row.classList.add('row-hour');
+        } else {
           row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
         }
 
@@ -967,6 +1090,11 @@
     }
 
     function toggleCell(cell, key) {
+      // Add pulse animation
+      cell.classList.remove('pulse');
+      void cell.offsetWidth; // Force reflow to restart animation
+      cell.classList.add('pulse');
+      
       if (myAvailability.has(key)) {
         myAvailability.delete(key);
         cell.classList.remove('available');
@@ -978,8 +1106,49 @@
       }
     }
 
-    async function clearAllAvailability() {
-      if (!confirm('Clear all your availability? This cannot be undone.')) return;
+    // ========== TOAST NOTIFICATIONS ==========
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      
+      const icons = {
+        success: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+        info: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+      };
+      
+      toast.innerHTML = `${icons[type] || icons.info}<span class="toast-message">${message}</span>`;
+      container.appendChild(toast);
+      
+      // Trigger animation
+      requestAnimationFrame(() => {
+        toast.classList.add('show');
+      });
+      
+      // Auto dismiss
+      setTimeout(() => {
+        toast.classList.remove('show');
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    // ========== CLEAR ALL MODAL ==========
+    function showClearConfirmModal() {
+      const modal = document.getElementById('clear-confirm-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function hideClearConfirmModal() {
+      const modal = document.getElementById('clear-confirm-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function confirmClearAll() {
+      hideClearConfirmModal();
       
       try {
         const response = await fetch('/api/availability', { method: 'DELETE' });
@@ -989,21 +1158,31 @@
             cell.classList.remove('available');
             cell.classList.add('unavailable');
           });
+          showToast('All availability cleared', 'success');
         } else {
-          alert('Failed to clear availability. Please try again.');
+          showToast('Failed to clear availability', 'error');
         }
       } catch (e) {
         console.error('Failed to clear availability:', e);
-        alert('Failed to clear availability. Please try again.');
+        showToast('Failed to clear availability', 'error');
       }
+    }
+
+    async function clearAllAvailability() {
+      showClearConfirmModal();
     }
 
     async function saveAvailability() {
       // Double-check timezone requirement (backend will also enforce this)
       if (!window.currentUser?.hasTimezone) {
-        alert('You must set your timezone before saving availability. Use the timezone command in Discord.');
+        showToast('Set your timezone in Discord first', 'error');
         return;
       }
+
+      const saveBtn = document.getElementById('save-btn');
+      const originalText = saveBtn.textContent;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
 
       const slots = Array.from(myAvailability);
       const count = slots.length;
@@ -1017,14 +1196,17 @@
         });
         
         if (response.ok) {
-          alert(`Saved! You're available for ${hours} hours per week.`);
+          showToast(`Saved! ${hours} hours per week`, 'success');
         } else {
           const data = await response.json();
-          alert(data.error || 'Failed to save availability.');
+          showToast(data.error || 'Failed to save', 'error');
         }
       } catch (e) {
         console.error('Failed to save availability:', e);
-        alert('Failed to save availability. Please try again.');
+        showToast('Failed to save availability', 'error');
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalText;
       }
     }
 
@@ -1038,7 +1220,7 @@
       }
       
       container.innerHTML = guilds.map(g => `
-        <div class="flex items-center justify-between p-3 rounded-xl hover-item">
+        <div class="flex items-center justify-between p-3 rounded-xl hover-item" data-guild-id="${g.id}">
           <div class="flex items-center gap-3">
             ${g.icon 
               ? `<img src="${g.icon}" class="w-8 h-8 rounded-full" alt="">`
@@ -1058,7 +1240,17 @@
       const guild = guilds.find(g => String(g.id) === String(id));
       if (!guild) return;
       
-      const newState = !guild.enabled;
+      // Find the toggle element directly instead of rebuilding
+      const guildRow = document.querySelector(`[data-guild-id="${id}"]`);
+      const toggle = guildRow?.querySelector('.toggle-switch');
+      if (!toggle) return;
+      
+      const wasEnabled = guild.enabled;
+      const newState = !wasEnabled;
+      
+      // Optimistic update - toggle immediately for smooth feel
+      guild.enabled = newState;
+      toggle.classList.toggle('active', newState);
       
       try {
         const response = await fetch(`/api/guilds/${id}/visibility`, {
@@ -1067,15 +1259,18 @@
           body: JSON.stringify({ visible: newState })
         });
         
-        if (response.ok) {
-          guild.enabled = newState;
-          buildGuildList();
-        } else {
-          alert('Failed to update visibility. Please try again.');
+        if (!response.ok) {
+          // Revert on failure
+          guild.enabled = wasEnabled;
+          toggle.classList.toggle('active', wasEnabled);
+          showToast('Failed to update visibility', 'error');
         }
       } catch (e) {
         console.error('Failed to toggle guild:', e);
-        alert('Failed to update visibility. Please try again.');
+        // Revert on failure
+        guild.enabled = wasEnabled;
+        toggle.classList.toggle('active', wasEnabled);
+        showToast('Failed to update visibility', 'error');
       }
     }
 
@@ -1093,7 +1288,7 @@
           <div class="flex items-center gap-3">
             ${u.avatar 
               ? `<img src="${u.avatar}" class="w-8 h-8 rounded-full" alt="">`
-              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">?</div>`
+              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">${(u.username || '?').charAt(0).toUpperCase()}</div>`
             }
             <span class="text-sm text-primary">${u.username}</span>
           </div>
@@ -1114,12 +1309,13 @@
         if (response.ok) {
           blacklist = blacklist.filter(u => String(u.id) !== String(id));
           buildBlacklist();
+          showToast('User unblocked', 'success');
         } else {
-          alert('Failed to unblock user. Please try again.');
+          showToast('Failed to unblock user', 'error');
         }
       } catch (e) {
         console.error('Failed to remove from blacklist:', e);
-        alert('Failed to unblock user. Please try again.');
+        showToast('Failed to unblock user', 'error');
       }
     }
 
@@ -1156,7 +1352,7 @@
         const data = await response.json();
         
         if (!response.ok) {
-          alert(data.error || 'Failed to search for user.');
+          showToast(data.error || 'Failed to search for user', 'error');
           return;
         }
 
@@ -1174,7 +1370,7 @@
         }
       } catch (e) {
         console.error('Failed to resolve user:', e);
-        alert('Failed to search for user. Please try again.');
+        showToast('Failed to search for user', 'error');
       }
     }
 
@@ -1233,13 +1429,14 @@
           blacklist.push({ id, username, avatar });
           buildBlacklist();
           hideAddBlockModal();
+          showToast('User blocked', 'success');
         } else {
           const data = await response.json();
-          alert(data.error || 'Failed to block user.');
+          showToast(data.error || 'Failed to block user', 'error');
         }
       } catch (e) {
         console.error('Failed to block user:', e);
-        alert('Failed to block user. Please try again.');
+        showToast('Failed to block user', 'error');
       }
     }
 
@@ -1249,38 +1446,67 @@
       }
     });
 
+    document.getElementById('clear-confirm-modal')?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) hideClearConfirmModal();
+    });
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         hideAddBlockModal();
+        hideClearConfirmModal();
+        hideDeleteDataModal();
       }
     });
 
     // ========== DANGER ZONE ==========
-    async function deleteAllData() {
-      if (!confirm('This will permanently delete all your availability data, guild settings, and blacklist. Are you sure?')) {
-        return;
-      }
-      if (!confirm('This action cannot be undone. Type "DELETE" in the next prompt to confirm.')) {
-        return;
-      }
-      const confirmation = prompt('Type DELETE to confirm:');
-      if (confirmation !== 'DELETE') {
-        alert('Deletion cancelled.');
-        return;
-      }
+    function showDeleteDataModal() {
+      const modal = document.getElementById('delete-data-modal');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      document.getElementById('delete-confirm-input').value = '';
+      document.getElementById('delete-confirm-btn').disabled = true;
+      document.getElementById('delete-confirm-input').focus();
+    }
+
+    function hideDeleteDataModal() {
+      const modal = document.getElementById('delete-data-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      document.getElementById('delete-confirm-input').value = '';
+    }
+
+    // Enable delete button only when user types DELETE
+    document.getElementById('delete-confirm-input')?.addEventListener('input', (e) => {
+      document.getElementById('delete-confirm-btn').disabled = e.target.value !== 'DELETE';
+    });
+
+    // Close delete modal on backdrop click
+    document.getElementById('delete-data-modal')?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) hideDeleteDataModal();
+    });
+
+    async function confirmDeleteAllData() {
+      const input = document.getElementById('delete-confirm-input');
+      if (input.value !== 'DELETE') return;
+      
+      hideDeleteDataModal();
       
       try {
         const response = await fetch('/api/account', { method: 'DELETE' });
         if (response.ok) {
-          alert('All data deleted.');
-          window.location.href = '/';
+          showToast('All data deleted', 'success');
+          setTimeout(() => { window.location.href = '/'; }, 1500);
         } else {
-          alert('Failed to delete data. Please try again.');
+          showToast('Failed to delete data', 'error');
         }
       } catch (e) {
         console.error('Failed to delete data:', e);
-        alert('Failed to delete data. Please try again.');
+        showToast('Failed to delete data', 'error');
       }
+    }
+
+    async function deleteAllData() {
+      showDeleteDataModal();
     }
 
     // ========== THEME ==========
@@ -1348,6 +1574,28 @@
       }
     }
 
+    // ========== TIME INDICATOR UPDATE ==========
+    function updateTimeIndicator() {
+      const indicator = document.querySelector('.time-indicator');
+      if (!indicator) return;
+
+      const currentSlot = getCurrentTimeSlotIndex();
+      const currentDay = getCurrentDayIndex();
+      const grid = document.getElementById('availability-grid');
+      if (!grid) return;
+
+      // Move indicator to correct row
+      const rows = grid.querySelectorAll('.grid');
+      if (rows[currentSlot]) {
+        // Remove from old parent
+        indicator.remove();
+        // Add to new row
+        rows[currentSlot].appendChild(indicator);
+        indicator.style.left = `${(currentDay / 7) * 100}%`;
+        indicator.style.width = `${100 / 7}%`;
+      }
+    }
+
     // ========== INIT ==========
     async function init() {
       initTheme();
@@ -1366,6 +1614,9 @@
       await loadBlacklist();
       
       showLoaded();
+
+      // Update time indicator every minute
+      setInterval(updateTimeIndicator, 60000);
     }
     
     init();

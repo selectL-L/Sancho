@@ -5,10 +5,13 @@ This module provides REST API endpoints for:
 - /api/availability: Get/set user's availability slots
 - /api/guilds: List user's guilds with visibility settings
 - /api/guilds/{guild_id}/visibility: Toggle guild visibility
+- /api/guilds/{guild_id}/viewable-users: Users visible in a specific guild (for heatmap)
+- /api/all-viewable-users: All users visible across any guild (for Everyone sidebar)
 - /api/blacklist: Manage blocked users
 - /api/account: Delete all user data
 
 All routes except /api/config require authentication.
+When DEV_MODE is enabled, mock data is returned for UI testing.
 """
 
 import logging
@@ -115,6 +118,11 @@ async def get_config() -> JSONResponse:
     Returns:
         JSON with botName and optional themeColor.
     """
+    # DEV_MODE: Return mock config
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_config())
+
     response: dict[str, Any] = {
         "botName": config.BOT_NAME,
     }
@@ -184,7 +192,7 @@ async def resolve_user(request: Request, query: str = "") -> JSONResponse:
             # Check username, display name, and global name
             if (query_lower in member.name.lower() or
                 query_lower in member.display_name.lower() or
-                (member.global_name and query_lower in member.global_name.lower())):
+                    (member.global_name and query_lower in member.global_name.lower())):
                 # Avoid duplicates
                 if not any(m["id"] == member.id for m in matches):
                     matches.append({
@@ -232,6 +240,11 @@ async def get_availability(request: Request) -> JSONResponse:
     Returns:
         JSON with slots array, or 401 if not authenticated.
     """
+    # DEV_MODE: Return mock availability
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_availability())
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -258,19 +271,6 @@ async def set_availability(request: Request) -> JSONResponse:
     Returns:
         JSON success message, or 401/400/403 on error.
     """
-    user_id = await get_user_id(request)
-    if (error := require_auth(user_id)):
-        return error
-
-    # Require timezone to be set before saving availability
-    bot = request.app.state.bot
-    user_tz = await bot.db_manager.get_user_timezone(user_id)
-    if not user_tz:
-        return JSONResponse(
-            status_code=403,
-            content={"error": "You must set your timezone before saving availability. Use the timezone command in Discord."},
-        )
-
     try:
         body = await request.json()
         slots = body.get("slots", [])
@@ -298,16 +298,15 @@ async def set_availability(request: Request) -> JSONResponse:
         if len(parts) != 2:
             continue
 
-        day, time = parts
+        day, time_str = parts
         if day not in valid_days:
             continue
 
-        # Validate time format (HHMM)
-        if len(time) != 4 or not time.isdigit():
+        if len(time_str) != 4 or not time_str.isdigit():
             continue
 
-        hour = int(time[:2])
-        minute = int(time[2:])
+        hour = int(time_str[:2])
+        minute = int(time_str[2:])
 
         if hour < 0 or hour > 23:
             continue
@@ -315,6 +314,24 @@ async def set_availability(request: Request) -> JSONResponse:
             continue
 
         valid_slots.append(slot)
+
+    # DEV_MODE: Save to ephemeral mock store
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.set_mock_availability(valid_slots))
+
+    user_id = await get_user_id(request)
+    if (error := require_auth(user_id)):
+        return error
+
+    # Require timezone to be set before saving availability
+    bot = request.app.state.bot
+    user_tz = await bot.db_manager.get_user_timezone(user_id)
+    if not user_tz:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "You must set your timezone before saving availability. Use the timezone command in Discord."},
+        )
 
     await bot.db_manager.schedule_set_availability(user_id, valid_slots)  # type: ignore[arg-type]
 
@@ -333,6 +350,11 @@ async def clear_availability(request: Request) -> JSONResponse:
     Returns:
         JSON success message, or 401 if not authenticated.
     """
+    # DEV_MODE: Clear ephemeral mock store
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.clear_mock_availability())
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -358,6 +380,11 @@ async def get_guilds(request: Request) -> JSONResponse:
     Returns:
         JSON with guilds array, or 401 if not authenticated.
     """
+    # DEV_MODE: Return mock guilds
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_guilds())
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -405,6 +432,11 @@ async def set_guild_visibility(request: Request, guild_id: str) -> JSONResponse:
     Returns:
         JSON success message, or 401/400 on error.
     """
+    # DEV_MODE: Toggle in ephemeral mock store
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.toggle_mock_guild_visibility(guild_id))
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -459,6 +491,11 @@ async def get_blacklist(request: Request) -> JSONResponse:
     Returns:
         JSON with users array (id, username), or 401 if not authenticated.
     """
+    # DEV_MODE: Return mock blacklist
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_blacklist())
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -491,6 +528,11 @@ async def add_to_blacklist(request: Request, blocked_user_id: str) -> JSONRespon
     Returns:
         JSON success message, or 401/400 on error.
     """
+    # DEV_MODE: Add to ephemeral mock blacklist
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.add_mock_blacklist(blocked_user_id))
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -529,6 +571,11 @@ async def remove_from_blacklist(request: Request, blocked_user_id: str) -> JSONR
     Returns:
         JSON success message, or 401 if not authenticated.
     """
+    # DEV_MODE: Remove from ephemeral mock blacklist
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.remove_mock_blacklist(blocked_user_id))
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -562,6 +609,11 @@ async def delete_account(request: Request) -> JSONResponse:
     Returns:
         JSON success message, or 401 if not authenticated.
     """
+    # DEV_MODE: Reset ephemeral mock state
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.delete_mock_account())
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -594,6 +646,11 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
     Returns:
         JSON with users array, or 401/403 on error.
     """
+    # DEV_MODE: Return mock viewable users
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_viewable_users(guild_id))
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error
@@ -683,6 +740,119 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
     return JSONResponse(content={"users": users, "guild_name": guild.name})
 
 
+@router.get("/all-viewable-users")
+async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JSONResponse:
+    """Get ALL users whose availability is viewable across ANY shared guild.
+
+    This endpoint aggregates users from all guilds where:
+    - Requester is a member
+    - Target user has enabled visibility
+    - Neither has blocked the other
+
+    For each user, returns the list of shared guilds (where both are members
+    AND target has visibility enabled), sorted with focus_guild first if applicable,
+    then alphabetically.
+
+    Args:
+        request: The incoming request.
+        focus_guild: Guild ID to prioritize in shared_guilds ordering (optional).
+
+    Returns:
+        JSON with users array including shared_guilds for each user.
+    """
+    # DEV_MODE: Return mock all viewable users
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_all_viewable_users(focus_guild))
+
+    user_id = await get_user_id(request)
+    if (error := require_auth(user_id)):
+        return error
+
+    # Parse focus guild ID
+    focus_guild_int = 0
+    if focus_guild and focus_guild != "0":
+        try:
+            focus_guild_int = int(focus_guild)
+        except ValueError:
+            pass
+
+    bot = request.app.state.bot
+    user_guild_ids = await get_user_guilds(request)
+
+    # Get requester's blacklist once
+    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))  # type: ignore[arg-type]
+
+    # Aggregate: user_id -> {info, shared_guilds: []}
+    user_data: dict[int, dict[str, Any]] = {}
+
+    for guild_id in user_guild_ids:
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            continue
+
+        # Get users who have enabled visibility for this guild
+        visible_user_ids = await bot.db_manager.schedule_get_visible_users_in_guild(guild_id)  # type: ignore[arg-type]
+
+        for target_id in visible_user_ids:
+            # Skip self (we'll handle self separately at the end)
+            if target_id == user_id:
+                continue
+
+            # Skip users in my blacklist
+            if target_id in my_blacklist:
+                continue
+
+            # Check if target has blocked me (cache this check per-user)
+            if target_id not in user_data:
+                target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))  # type: ignore[arg-type]
+                if user_id in target_blacklist:
+                    continue
+
+            # Get member info from this guild
+            member = guild.get_member(target_id)
+            if not member:
+                try:
+                    member = await guild.fetch_member(target_id)
+                except Exception:
+                    continue
+
+            if not member:
+                continue
+
+            # Initialize user entry if not seen before
+            if target_id not in user_data:
+                updated_at = await bot.db_manager.schedule_get_availability_updated_at(target_id)
+                user_data[target_id] = {
+                    "id": str(target_id),
+                    "username": member.display_name,
+                    "avatar": member.display_avatar.url,
+                    "updated_at": updated_at,
+                    "isSelf": False,
+                    "shared_guilds": [],
+                }
+
+            # Add this guild to their shared_guilds
+            user_data[target_id]["shared_guilds"].append({
+                "id": str(guild_id),
+                "name": guild.name,
+                "icon": guild.icon.url if guild.icon else None,
+            })
+
+    # Sort shared_guilds for each user: focus guild first, then alphabetical
+    for data in user_data.values():
+        data["shared_guilds"].sort(key=lambda g: (
+            0 if int(g["id"]) == focus_guild_int else 1,  # Focus guild first
+            g["name"].lower()  # Then alphabetical
+        ))
+
+    # Convert to list and sort by username
+    users = list(user_data.values())
+    users.sort(key=lambda u: u["username"].lower())
+
+    return JSONResponse(content={"users": users})
+
+
 @router.get("/users/{target_user_id}/availability")
 async def get_user_availability(request: Request, target_user_id: str, guild_id: str = "0") -> JSONResponse:
     """Get another user's availability.
@@ -700,6 +870,11 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
     Returns:
         JSON with availability slots, or 401/403 on error.
     """
+    # DEV_MODE: Return mock user availability
+    if config.DEV_MODE:
+        from utils.web import mock_data
+        return JSONResponse(content=mock_data.get_mock_user_availability(target_user_id))
+
     user_id = await get_user_id(request)
     if (error := require_auth(user_id)):
         return error

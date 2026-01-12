@@ -119,7 +119,7 @@ def create_app(bot: "CoreBot") -> FastAPI:
         session_cookie="schedule_session",
         max_age=7 * 24 * 60 * 60,  # 7 days
         same_site="lax",
-        https_only=False,  # Allow HTTP for local dev (cookie is still signed) PLEASE revert this in production.
+        https_only=not config.DEV_MODE,  # HTTPS required in production, HTTP allowed in dev
         path="/",
     )
 
