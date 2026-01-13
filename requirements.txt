@@ -51,6 +51,16 @@ mutagen
 # For YouTube Music search and metadata retrieval in the Music cog.
 ytmusicapi
 
+# CJK transliteration for cross-script music search matching.
+# Japanese -> Romaji (Hepburn romanization)
+pykakasi
+
+# Chinese -> Pinyin (standard Mandarin romanization)
+pypinyin
+
+# Korean -> Romanized (Revised Romanization of Korean, official ROK standard)
+korean-romanizer
+
 # For fetching synced lyrics from LRCLIB in the Music cog.
 syncedlyrics
 

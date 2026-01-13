@@ -71,6 +71,10 @@ VERSION_LABELS = {
 # Scoring thresholds
 STAR_THRESHOLD = 0.6  # Minimum combined score to award star
 GARBAGE_SIMILARITY_THRESHOLD = 0.3  # Below this = garbage (same-script only)
+# Cross-script results get a lower threshold because YTM is more selective about
+# returning cross-language results. This is for data gathering - we trust YTM
+# but log what we see to validate that trust over time.
+CROSS_SCRIPT_GARBAGE_THRESHOLD = 0.2
 
 # Thumbnail constants
 THUMBNAIL_WIDTH = 720  # Target width for resized thumbnails
@@ -100,6 +104,242 @@ def _get_ytm() -> Optional[YTMusic]:  # type: ignore[return]
             logger.warning(f"Failed to initialize YTMusic: {e}")
             return None
     return _ytm
+
+
+# ==========================================================================
+# CJK TRANSLITERATION (Rule-based, deterministic)
+# ==========================================================================
+# These libraries convert CJK text to romanized forms for cross-script matching.
+# All conversions are rule-based dictionary lookups - same input always produces
+# same output. This is NOT machine learning, just linguistic rules.
+#
+# WHY THIS MATTERS:
+# When a user searches "Murasaki Shion", YTM might return results titled "紫咲シオン".
+# Without transliteration, we can't verify if "紫咲シオン" matches "Murasaki Shion"
+# because they share zero characters. With transliteration, we can convert
+# "紫咲シオン" → "murasaki shion" and detect the match.
+#
+# CURRENT LIMITATION:
+# Transliteration helps with VERIFICATION but not DISCOVERY. If YTM doesn't
+# return the Japanese result in the first place, transliteration can't help.
+# That's why we still need the multi-query approach (searching with both
+# "Murasaki Shion" AND "紫咲シオン" extracted from video tags).
+
+# Japanese: pykakasi (Hepburn romanization)
+try:
+    import pykakasi
+    _kakasi = pykakasi.kakasi()
+    PYKAKASI_AVAILABLE = True
+except ImportError:
+    _kakasi = None
+    PYKAKASI_AVAILABLE = False
+
+# Chinese: pypinyin (Pinyin romanization)
+try:
+    from pypinyin import lazy_pinyin
+    PYPINYIN_AVAILABLE = True
+except ImportError:
+    lazy_pinyin = None  # type: ignore[assignment]
+    PYPINYIN_AVAILABLE = False
+
+# Korean: korean-romanizer (Revised Romanization of Korean)
+try:
+    from korean_romanizer.romanizer import Romanizer
+    KOREAN_ROMANIZER_AVAILABLE = True
+except ImportError:
+    Romanizer = None  # type: ignore[misc, assignment]
+    KOREAN_ROMANIZER_AVAILABLE = False
+
+
+def has_japanese(text: str) -> bool:
+    """Check if text contains Japanese-specific characters (hiragana/katakana).
+
+    Kanji (CJK ideographs) are shared with Chinese, so we specifically check
+    for hiragana and katakana which are unique to Japanese.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if text contains hiragana or katakana.
+    """
+    for char in text:
+        # Hiragana: U+3040 to U+309F
+        if '\u3040' <= char <= '\u309f':
+            return True
+        # Katakana: U+30A0 to U+30FF
+        if '\u30a0' <= char <= '\u30ff':
+            return True
+    return False
+
+
+def has_chinese(text: str) -> bool:
+    """Check if text contains Chinese characters without Japanese kana.
+
+    CJK ideographs (kanji/hanzi) are shared between Japanese and Chinese.
+    We assume text is Chinese if it has CJK ideographs but NO hiragana/katakana.
+    This is imperfect but works for most real-world cases.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if text appears to be Chinese (has hanzi, no kana).
+    """
+    has_hanzi = any('\u4e00' <= char <= '\u9fff' for char in text)
+    return has_hanzi and not has_japanese(text)
+
+
+def has_korean(text: str) -> bool:
+    """Check if text contains Korean Hangul characters.
+
+    Hangul syllables occupy a distinct Unicode block, making detection
+    unambiguous unlike the shared CJK ideographs.
+
+    Args:
+        text: Text to check.
+
+    Returns:
+        True if text contains Hangul.
+    """
+    # Hangul Syllables: U+AC00 to U+D7AF
+    return any('\uac00' <= char <= '\ud7af' for char in text)
+
+
+def transliterate_japanese(text: str) -> Optional[str]:
+    """Convert Japanese text to Hepburn romanization.
+
+    Uses pykakasi for rule-based conversion. This is deterministic:
+    same input always produces same output.
+
+    Args:
+        text: Text potentially containing Japanese characters.
+
+    Returns:
+        Romanized text, or None if pykakasi unavailable or conversion unchanged.
+    """
+    if not PYKAKASI_AVAILABLE or not _kakasi:
+        return None
+    if not has_cjk(text):
+        return None
+
+    try:
+        result = _kakasi.convert(text)
+        # pykakasi returns list of dicts with 'hepburn' key for romanization
+        romaji = ' '.join(item['hepburn'] for item in result)
+        # Clean up: collapse multiple spaces, strip, lowercase
+        romaji = ' '.join(romaji.split()).strip().lower()
+        # Only return if we actually converted something
+        return romaji if romaji and romaji != text.lower() else None
+    except Exception as e:
+        logger.debug(f"[Transliterate] Japanese conversion failed: {e}")
+        return None
+
+
+def transliterate_chinese(text: str) -> Optional[str]:
+    """Convert Chinese text to Pinyin romanization.
+
+    Uses pypinyin's lazy_pinyin for simple conversion without tone marks.
+
+    Args:
+        text: Text potentially containing Chinese characters.
+
+    Returns:
+        Pinyin text, or None if pypinyin unavailable or conversion unchanged.
+    """
+    if not PYPINYIN_AVAILABLE or not lazy_pinyin:
+        return None
+    if not has_chinese(text):
+        return None
+
+    try:
+        # lazy_pinyin returns list of pinyin strings
+        pinyin_list = lazy_pinyin(text)
+        pinyin = ' '.join(pinyin_list)
+        pinyin = ' '.join(pinyin.split()).strip().lower()
+        return pinyin if pinyin and pinyin != text.lower() else None
+    except Exception as e:
+        logger.debug(f"[Transliterate] Chinese conversion failed: {e}")
+        return None
+
+
+def transliterate_korean(text: str) -> Optional[str]:
+    """Convert Korean text to romanization.
+
+    Uses korean-romanizer which follows the Revised Romanization of Korean,
+    the official romanization system used by the Republic of Korea.
+
+    Args:
+        text: Text potentially containing Korean characters.
+
+    Returns:
+        Romanized text, or None if korean-romanizer unavailable or conversion unchanged.
+    """
+    if not KOREAN_ROMANIZER_AVAILABLE or not Romanizer:
+        return None
+    if not has_korean(text):
+        return None
+
+    try:
+        romanizer = Romanizer(text)
+        romanized = romanizer.romanize()
+        romanized = ' '.join(romanized.split()).strip().lower()
+        return romanized if romanized and romanized != text.lower() else None
+    except Exception as e:
+        logger.debug(f"[Transliterate] Korean conversion failed: {e}")
+        return None
+
+
+def expand_text(text: str) -> set[str]:
+    """Expand text to all script representations.
+
+    Returns the original text plus any romanized versions. This is additive:
+    the original is ALWAYS included. Deterministic: same input → same output.
+
+    Args:
+        text: Text to expand.
+
+    Returns:
+        Set containing original text plus any romanized versions.
+    """
+    representations = {text.lower()}
+
+    # Try each transliteration in order of likely relevance
+    # Japanese is most common for our use case (VTuber music)
+    romaji = transliterate_japanese(text)
+    if romaji:
+        representations.add(romaji)
+
+    # Chinese - Bilibili VTubers, C-pop covers
+    pinyin = transliterate_chinese(text)
+    if pinyin:
+        representations.add(pinyin)
+
+    # Korean - K-pop is everywhere
+    korean_roman = transliterate_korean(text)
+    if korean_roman:
+        representations.add(korean_roman)
+
+    return representations
+
+
+def extract_words_expanded(text: str) -> set[str]:
+    """Extract words from ALL script representations of text.
+
+    Combines extract_words() across all transliterated forms. This enables
+    cross-script word matching: "紫咲シオン" expands to include "murasaki"
+    and "shion", which can then match a query for "Murasaki Shion".
+
+    Args:
+        text: Text to extract words from.
+
+    Returns:
+        Set of lowercase words (2+ characters) from all representations.
+    """
+    words: set[str] = set()
+    for representation in expand_text(text):
+        words.update(extract_words(representation))
+    return words
 
 
 # ==========================================================================
@@ -379,9 +619,21 @@ def format_view_count(count: Optional[int]) -> str:
 def is_relevant(query: str, result: SearchResult) -> bool:
     """Determine if a search result is relevant to the query.
 
-    Uses language-aware filtering:
-    - Cross-script (Latin query, CJK result or vice versa): Trust YTM's judgment
-    - Same-script: Apply similarity/substring checks to catch garbage
+    Uses language-aware filtering with transliteration support:
+    - Expands CJK text to romanized forms for cross-script verification
+    - Cross-script matches: attempt verification, fall back to trusting YTM
+    - Same-script matches: use similarity/containment checks
+
+    DESIGN PHILOSOPHY (Data Gathering Phase):
+    We currently TRUST YTM for cross-script results while LOGGING what we see.
+    YTM is more selective about returning cross-language results, so their
+    cross-script results are generally higher quality. However, we want to
+    gather data on:
+    1. How often transliteration verification succeeds vs fails
+    2. What similarity scores cross-script results typically get
+    3. Whether blind trust ever lets through garbage
+
+    This logging will help us decide if/when to tighten cross-script filtering.
 
     Args:
         query: Original search query.
@@ -392,32 +644,82 @@ def is_relevant(query: str, result: SearchResult) -> bool:
     """
     query_has_cjk = has_cjk(query)
     title_has_cjk = has_cjk(result.title)
+    is_cross_script = query_has_cjk != title_has_cjk
 
-    # Cross-script: trust YTM, they wouldn't return unrelated cross-language results
-    if query_has_cjk != title_has_cjk:
-        logger.debug(f"Cross-script match, trusting YTM: {result.title}")
-        return True
-
-    # Same-script: apply similarity checks
     combined = f"{result.title} {result.artist}"
 
-    # Check if query words appear in result
-    query_words = set(normalize_text(query).split())
-    result_words = set(normalize_text(combined).split())
+    # Extract words from ALL representations (original + transliterated)
+    # This is the key to cross-script verification: "紫咲シオン" expands to
+    # include "murasaki", "shion" which can match query "Murasaki Shion"
+    query_words = extract_words_expanded(query)
+    result_words = extract_words_expanded(combined)
 
-    # If any query word appears in result, it's relevant
-    if query_words & result_words:
+    # Word overlap in ANY representation = definitely relevant
+    word_overlap = query_words & result_words
+    if word_overlap:
+        if is_cross_script:
+            logger.debug(
+                f"[Cross-Script Verified] query='{query}' | "
+                f"result='{result.title}' by '{result.artist}' | "
+                f"overlapping_words={word_overlap}"
+            )
         return True
 
-    # Containment check
-    if text_contains(combined, query) or text_contains(query, result.title):
-        return True
+    # Containment check across all representations
+    # Check if any representation of query is contained in any representation of result
+    for q_repr in expand_text(query):
+        q_norm = normalize_text(q_repr)
+        for r_repr in expand_text(combined):
+            r_norm = normalize_text(r_repr)
+            if q_norm in r_norm or r_norm in q_norm:
+                if is_cross_script:
+                    logger.debug(
+                        f"[Cross-Script Containment] query='{query}' ({q_repr}) | "
+                        f"result='{result.title}' ({r_repr})"
+                    )
+                return True
 
-    # Similarity fallback
+    # Similarity fallback (on original text - transliteration handled above)
     title_sim = text_similarity(query, result.title)
     combined_sim = text_similarity(query, combined)
+    best_sim = max(title_sim, combined_sim)
 
-    if title_sim >= GARBAGE_SIMILARITY_THRESHOLD or combined_sim >= GARBAGE_SIMILARITY_THRESHOLD:
+    # Use script-appropriate threshold
+    # Cross-script gets lower threshold because YTM is more selective
+    threshold = CROSS_SCRIPT_GARBAGE_THRESHOLD if is_cross_script else GARBAGE_SIMILARITY_THRESHOLD
+
+    # Log borderline cases for threshold tuning
+    if threshold - 0.1 <= best_sim < threshold + 0.1:
+        logger.debug(
+            f"[Garbage Filter Borderline] query='{query}' | "
+            f"result='{result.title}' by '{result.artist}' | "
+            f"title_sim={title_sim:.2f}, combined_sim={combined_sim:.2f} | "
+            f"threshold={threshold} ({'cross-script' if is_cross_script else 'same-script'}) | "
+            f"{'KEPT' if best_sim >= threshold else 'FILTERED'}"
+        )
+
+    if best_sim >= threshold:
+        return True
+
+    # Cross-script: trust YTM even if our verification failed
+    # WHY: YTM wouldn't return cross-language results unless they're confident.
+    # We've tried to verify with transliteration above. If verification failed,
+    # it could mean:
+    # 1. Our transliteration is incomplete (e.g., unusual kanji readings)
+    # 2. The match is semantic, not lexical (e.g., translated titles)
+    # 3. YTM knows something we don't (internal metadata matching)
+    #
+    # FUTURE WORK: If logs show garbage escaping through this path, we can:
+    # - Tighten the cross-script threshold
+    # - Add more transliteration rules
+    # - Require minimum similarity even for cross-script
+    if is_cross_script:
+        logger.debug(
+            f"[Cross-Script Blind Trust] query='{query}' | "
+            f"result='{result.title}' by '{result.artist}' | "
+            f"sim={best_sim:.2f} below threshold {threshold}, but trusting YTM | "
+            f"MONITOR: verification failed, relying on YTM's cross-language matching"
+        )
         return True
 
     logger.debug(f"Filtered as garbage: {result.title} (sim={title_sim:.2f})")
@@ -463,7 +765,9 @@ def calculate_artist_confidence(original: OriginalMetadata, candidate: SearchRes
 def calculate_title_match(orig_title: str, cand_title: str) -> float:
     """Calculate how well candidate title matches original.
 
+    Uses transliteration expansion for cross-script matching.
     Containment-first (if one contains the other, high match).
+    Word overlap ratio as secondary signal.
     Similarity-fallback.
 
     Args:
@@ -473,15 +777,39 @@ def calculate_title_match(orig_title: str, cand_title: str) -> float:
     Returns:
         Match score between 0.0 and 1.0.
     """
-    orig_norm = normalize_text(orig_title)
-    cand_norm = normalize_text(cand_title)
+    # Expand both titles to all representations (original + transliterated)
+    orig_representations = expand_text(orig_title)
+    cand_representations = expand_text(cand_title)
 
-    # Containment: strong signal
-    if orig_norm in cand_norm or cand_norm in orig_norm:
-        return 0.9
+    best_match = 0.0
 
-    # Similarity fallback
-    return text_similarity(orig_title, cand_title)
+    # Check all combinations of representations
+    for orig_repr in orig_representations:
+        orig_norm = normalize_text(orig_repr)
+
+        for cand_repr in cand_representations:
+            cand_norm = normalize_text(cand_repr)
+
+            # Containment: strong signal
+            if orig_norm in cand_norm or cand_norm in orig_norm:
+                best_match = max(best_match, 0.9)
+                continue
+
+            # Word overlap ratio
+            orig_words = set(orig_norm.split())
+            cand_words = set(cand_norm.split())
+
+            if orig_words and cand_words:
+                overlap = len(orig_words & cand_words)
+                total = max(len(orig_words), len(cand_words))
+                ratio = overlap / total
+                best_match = max(best_match, ratio)
+
+            # Similarity as final fallback
+            sim = text_similarity(orig_repr, cand_repr)
+            best_match = max(best_match, sim)
+
+    return best_match
 
 
 def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> float:
@@ -532,6 +860,21 @@ def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> floa
     # Combined score: weighted average
     score = (artist_conf * 0.4) + (title_match * 0.6)
     logger.info(f"  → PASSED: score={score:.2f} (threshold was {title_threshold:.2f})")
+
+    # Log edge cases for threshold validation
+    if score < STAR_THRESHOLD and score >= 0.5:
+        logger.info(
+            f"[Star Near-Miss] '{candidate.title}' by '{candidate.artist}' | "
+            f"score={score:.2f} < threshold={STAR_THRESHOLD} | "
+            f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
+        )
+    elif score >= STAR_THRESHOLD and score < 0.7:
+        logger.info(
+            f"[Star Near-Hit] '{candidate.title}' by '{candidate.artist}' | "
+            f"score={score:.2f} (barely passed) | "
+            f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
+        )
+
     return score
 
 
@@ -567,41 +910,440 @@ def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Opt
 
 
 # ==========================================================================
-# JAPANESE NAME EXTRACTION
+# CJK TAG CONFIDENCE SCORING
+# ==========================================================================
+#
+# This system scores tags by likelihood of being a useful artist name.
+# It replaces the binary _SKIP_TAGS approach with nuanced confidence scoring.
+#
+# The confidence system IS ACTIVE - it determines which tags are returned.
+#
+# TRANSLITERATION CROSS-CHECK: DATA GATHERING ONLY
+# -------------------------------------------------
+# The one exception is the transliteration cross-check in calculate_tag_confidence().
+# This uses pykakasi/pypinyin/korean-romanizer to romanize CJK tags and compare
+# against the author field. This feature is LOGGED but does NOT affect confidence
+# scores yet because:
+# - The transliteration libraries are untested in production
+# - Kanji readings can be ambiguous (稲葉曇 → "inaba don" vs "inabakumori")
+# - We need real-world data to validate the approach
+#
+# Once logs show transliteration matching reliably identifies artists,
+# we can wire it up to boost confidence scores.
+
+# ==========================================================================
+# HARD SKIP LISTS - Tags that are NEVER artist names (confidence = 0.0)
 # ==========================================================================
 
-# Tags to skip when extracting artist names
-_SKIP_TAGS = {
-    'ホロライブ', 'hololive', 'にじさんじ', 'nijisanji',
-    '歌ってみた', 'cover', 'original', 'オリジナル',
-    '実況', 'バーチャル', 'vtuber', 'virtual',
-    'music', 'mv', 'pv', 'lyric', 'lyrics',
+_HARD_SKIP_EXACT = {
+    # Agencies - organization names, never individual artists
+    'ホロライブ', 'hololive', 'holostars', 'ホロスターズ',
+    'にじさんじ', 'nijisanji', 'anycolor',
+    'vspo', 'ぶいすぽ', 'vshojo', 'phase connect',
+    'idol corp', '774inc', 'brave group',
+    'cover corp', 'カバー株式会社',
+
+    # Format markers - describe video type, not artist
+    'mv', 'pv', 'music video', 'ミュージックビデオ',
+    'lyric', 'lyrics', '歌詞',
+    'shorts', '#shorts',
+
+    # Platform noise
+    'youtube', 'youtube music', 'spotify',
 }
 
+# Containment check - if these appear ANYWHERE in the tag, hard skip
+_HARD_SKIP_CONTAINS = {
+    'hololive', 'nijisanji', 'にじさんじ', 'ホロライブ',
+}
 
-def extract_jp_names(tags: List[str]) -> List[str]:
+# ==========================================================================
+# SOFT SKIP LIST - Reduces confidence but doesn't zero out
+# ==========================================================================
+# These COULD be part of a legitimate compound tag (e.g., "Official髭男dism")
+# so we penalize rather than reject outright.
+
+_SOFT_SKIP = {
+    # Content type descriptors
+    '歌ってみた', 'cover', 'カバー', 'covered',
+    'original', 'オリジナル', 'オリジナル曲',
+    'コラボ', 'collab', 'collaboration',
+    '公式', 'official',
+
+    # Event markers
+    '周年', 'anniversary',
+    '誕生日', 'birthday',
+    'デビュー', 'debut',
+    '卒業', 'graduation',
+    '記念', 'commemoration',
+
+    # Role descriptors (but NOT vocaloid producer - those are real names)
+    '歌い手', 'utaite',
+    'vシンガー', 'vsinger',
+
+    # Genre markers
+    '東方', 'touhou',
+    'jpop', 'j-pop', 'kpop', 'k-pop',
+}
+
+# ==========================================================================
+# LEGACY SKIP TAGS (RELIC)
+# ==========================================================================
+# Preserved for reference. This was the original binary approach before
+# confidence scoring was implemented. The categories informed the new
+# _HARD_SKIP_EXACT and _SOFT_SKIP lists above.
+#
+# _LEGACY_SKIP_AGENCIES = {
+#     'ホロライブ', 'hololive', 'hololive production',
+#     'にじさんじ', 'nijisanji',
+# }
+# _LEGACY_SKIP_CONTENT_TYPE = {
+#     '歌ってみた', 'cover', 'original', 'オリジナル', '実況',
+# }
+# _LEGACY_SKIP_FORMAT = {
+#     'music', 'mv', 'pv', 'lyric', 'lyrics',
+#     'バーチャル', 'vtuber', 'virtual',
+# }
+# _LEGACY_SKIP_TAGS = _LEGACY_SKIP_AGENCIES | _LEGACY_SKIP_CONTENT_TYPE | _LEGACY_SKIP_FORMAT
+
+
+# ==========================================================================
+# CONFIDENCE SCORING HELPERS
+# ==========================================================================
+
+def _calculate_script_ratio(tag: str) -> float:
+    """Calculate the ratio of CJK characters to total alphabetic characters.
+
+    Used to determine if a tag is primarily CJK (likely Japanese/Chinese name)
+    vs primarily Latin (less useful for CJK name extraction).
+
+    Args:
+        tag: The tag to analyze.
+
+    Returns:
+        Float from 0.0 (no CJK) to 1.0 (pure CJK).
+        Returns 0.0 if no alphabetic characters present.
+    """
+    cjk_count = sum(1 for c in tag if has_cjk(c))
+    latin_count = sum(1 for c in tag if c.isalpha() and ord(c) < 0x300)
+    total = cjk_count + latin_count
+
+    if total == 0:
+        return 0.0
+
+    return cjk_count / total
+
+
+def _is_vocaloid_p_pattern(tag: str) -> bool:
+    """Detect Vocaloid producer naming pattern: CJK characters + P suffix.
+
+    Examples: みきとP, ハチP, ピノキオピー, syudouP
+
+    These are almost always real artist names and should get a confidence boost.
+
+    Args:
+        tag: The tag to check.
+
+    Returns:
+        True if tag matches the VocaloidP pattern.
+    """
+    # Ends with P or fullwidth P (U+FF30)
+    if not tag.endswith('P') and not tag.endswith('Ｐ'):  # noqa: RUF001
+        return False
+
+    # Has CJK content before the P
+    prefix = tag[:-1]
+    return len(prefix) >= 2 and has_cjk(prefix)
+
+
+def _title_similarity(tag: str, title: str) -> float:
+    """Calculate similarity between tag and video title.
+
+    Used to detect when a tag IS the song title (which we want to filter out).
+    Intentionally simple word overlap - we just want to catch obvious cases.
+
+    Args:
+        tag: The tag to check.
+        title: The video title.
+
+    Returns:
+        Float from 0.0 (no overlap) to 1.0 (tag words all appear in title).
+    """
+    def normalize(s: str) -> set:
+        s = s.lower()
+        # Remove common title noise/brackets (fullwidth chars intentional)
+        for noise in ['【', '】', '「', '」', '[', ']', '/', '-', '|', '(', ')', '（', '）']:  # noqa: RUF001
+            s = s.replace(noise, ' ')
+        return {w for w in s.split() if len(w) >= 2}
+
+    tag_words = normalize(tag)
+    title_words = normalize(title)
+
+    if not tag_words or not title_words:
+        return 0.0
+
+    overlap = len(tag_words & title_words)
+
+    # Ratio of tag words that appear in title
+    return overlap / len(tag_words)
+
+
+def calculate_tag_confidence(
+    tag: str,
+    video_title: Optional[str] = None,
+    author: Optional[str] = None,
+) -> float:
+    """Score how likely a tag is to be a useful CJK artist name.
+
+    Args:
+        tag: The tag to score.
+        video_title: Optional video title (used to detect song name tags).
+        author: Optional author/channel name (used for transliteration cross-check logging).
+
+    Returns:
+        Confidence score from 0.0 to 1.0:
+        - 0.0: Definitely not an artist name (hard skip)
+        - 0.1-0.3: Unlikely to be useful
+        - 0.4-0.6: Uncertain
+        - 0.7-0.9: Likely a good artist name
+        - 1.0: Reserved for exact matches to known artists (future use)
+    """
+    tag_lower = tag.lower().strip()
+
+    if not tag_lower:
+        return 0.0
+
+    # -------------------------------------------------------------------------
+    # HARD SKIP CHECK
+    # -------------------------------------------------------------------------
+
+    if tag_lower in _HARD_SKIP_EXACT:
+        return 0.0
+
+    if any(skip in tag_lower for skip in _HARD_SKIP_CONTAINS):
+        return 0.0
+
+    # -------------------------------------------------------------------------
+    # VIDEO TITLE SIMILARITY CHECK
+    # -------------------------------------------------------------------------
+    # Penalize tags that look like the song title rather than artist name
+
+    title_penalty = 1.0
+    if video_title:
+        similarity = _title_similarity(tag, video_title)
+
+        if similarity > 0.8:
+            # Tag is almost identical to title - almost certainly the song name
+            return 0.1
+        elif similarity > 0.5:
+            # Suspicious overlap - might be song name, reduce confidence
+            title_penalty = 0.6
+
+    # -------------------------------------------------------------------------
+    # SCRIPT COMPOSITION SCORING
+    # -------------------------------------------------------------------------
+    # Pure CJK tags are more likely to be Japanese/Chinese artist names
+
+    cjk_ratio = _calculate_script_ratio(tag)
+
+    if cjk_ratio == 1.0:
+        # Pure CJK - highest base confidence
+        confidence = 0.85
+    elif cjk_ratio >= 0.7:
+        # Mostly CJK with some Latin (like "みきとP", "DECO*27")
+        confidence = 0.75
+    elif cjk_ratio >= 0.4:
+        # Mixed - uncertain but possible
+        confidence = 0.55
+    elif cjk_ratio > 0:
+        # Mostly Latin with some CJK - probably not what we want
+        confidence = 0.3
+    else:
+        # Pure Latin - not relevant for CJK name extraction
+        return 0.0
+
+    # -------------------------------------------------------------------------
+    # SPECIAL PATTERN DETECTION
+    # -------------------------------------------------------------------------
+
+    # VocaloidP pattern gets a boost - these are almost always artist names
+    if _is_vocaloid_p_pattern(tag):
+        confidence = max(confidence, 0.8)
+
+    # -------------------------------------------------------------------------
+    # AUTHOR TRANSLITERATION CROSS-CHECK (DATA GATHERING)
+    # -------------------------------------------------------------------------
+    # Log transliteration matches for data gathering - does NOT affect score yet.
+    # Once logs show this reliably identifies artists, we can wire it up to boost.
+    #
+    # WHY NOT WIRED UP: Kanji readings can be ambiguous (稲葉曇 → "inaba don"
+    # vs "inabakumori"). Need real-world data to validate before trusting.
+
+    if author and has_cjk(tag):
+        # Try all applicable transliterations
+        romanizations: List[Tuple[str, str]] = []  # (library_name, result)
+
+        if has_japanese(tag):
+            jp_romaji = transliterate_japanese(tag)
+            if jp_romaji:
+                romanizations.append(('pykakasi', jp_romaji))
+
+        if has_chinese(tag):
+            cn_pinyin = transliterate_chinese(tag)
+            if cn_pinyin:
+                romanizations.append(('pypinyin', cn_pinyin))
+
+        if has_korean(tag):
+            kr_roman = transliterate_korean(tag)
+            if kr_roman:
+                romanizations.append(('korean-romanizer', kr_roman))
+
+        # Check for matches against author
+        author_lower = author.lower().replace(' ', '')
+        for lib_name, romanized in romanizations:
+            romanized_normalized = romanized.lower().replace(' ', '')
+            match_type: Optional[str] = None
+
+            if romanized_normalized == author_lower:
+                match_type = 'exact'
+            elif romanized_normalized in author_lower:
+                match_type = 'tag_in_author'
+            elif author_lower in romanized_normalized:
+                match_type = 'author_in_tag'
+
+            if match_type:
+                logger.info(
+                    f"[Transliteration Cross-Check] MATCH | "
+                    f"tag='{tag}' | romanized='{romanized}' | author='{author}' | "
+                    f"match_type={match_type} | library={lib_name} | "
+                    f"current_confidence={confidence:.2f}"
+                )
+                # FUTURE: Uncomment to boost confidence when validated
+                # confidence = max(confidence, 0.9)
+            else:
+                logger.debug(
+                    f"[Transliteration Cross-Check] no_match | "
+                    f"tag='{tag}' | romanized='{romanized}' | author='{author}' | "
+                    f"library={lib_name}"
+                )
+
+    # -------------------------------------------------------------------------
+    # LENGTH PENALTIES
+    # -------------------------------------------------------------------------
+
+    tag_len = len(tag)
+
+    if tag_len < 2:
+        # Single character - very unlikely to be a useful artist name
+        confidence *= 0.3
+    elif tag_len > 25:
+        # Very long - probably a phrase or description, not a name
+        confidence *= 0.4
+    elif tag_len > 20:
+        # Long - suspicious
+        confidence *= 0.5
+    elif tag_len > 15:
+        # Slightly long - mild penalty
+        confidence *= 0.8
+
+    # -------------------------------------------------------------------------
+    # SOFT SKIP PENALTIES
+    # -------------------------------------------------------------------------
+
+    if any(skip in tag_lower for skip in _SOFT_SKIP):
+        confidence *= 0.5
+
+    # -------------------------------------------------------------------------
+    # APPLY TITLE PENALTY
+    # -------------------------------------------------------------------------
+
+    confidence *= title_penalty
+
+    return round(confidence, 3)
+
+
+def extract_cjk_artist_names(
+    tags: List[str],
+    video_title: Optional[str] = None,
+    author: Optional[str] = None,
+    min_confidence: float = 0.4,
+    max_results: int = 3,
+) -> List[Tuple[str, float]]:
+    """Extract likely CJK artist names from video tags, ranked by confidence.
+
+    Args:
+        tags: List of video tags to analyze.
+        video_title: Video title (used to filter out song name tags).
+        author: Author/channel name (used for transliteration cross-check logging).
+        min_confidence: Minimum confidence threshold to include a tag.
+        max_results: Maximum number of tags to return.
+
+    Returns:
+        List of (tag, confidence) tuples, sorted by confidence descending.
+    """
+    scored: List[Tuple[str, float]] = []
+
+    for tag in tags:
+        tag = tag.strip()
+
+        # Must have CJK to be relevant for this extractor
+        if not has_cjk(tag):
+            continue
+
+        confidence = calculate_tag_confidence(tag, video_title, author)
+
+        if confidence >= min_confidence:
+            scored.append((tag, confidence))
+
+    # Sort by confidence descending, take top N
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return scored[:max_results]
+
+
+def extract_jp_names(
+    tags: List[str],
+    video_title: Optional[str] = None,
+    author: Optional[str] = None,
+) -> List[str]:
     """Extract likely Japanese artist names from video tags.
 
     This is the crown jewel for cross-language matching. Video tags contain
     both romanized and Japanese names (e.g., 'Murasaki Shion' and '紫咲シオン').
     By searching with both, we find ATVs regardless of how YTM indexed them.
 
+    Uses confidence-based scoring to filter tags. Tags are scored 0.0-1.0 based
+    on likelihood of being an actual artist name vs noise (agencies, song titles,
+    format markers, etc.).
+
     Args:
         tags: List of video tags.
+        video_title: Video title (used to penalize tags that match the song name).
+        author: Author/channel name (used for transliteration cross-check logging).
 
     Returns:
-        List of tags that look like Japanese artist names.
+        List of tags that look like CJK artist names, sorted by confidence.
     """
-    names: List[str] = []
-    for tag in tags:
-        if not has_cjk(tag):
-            continue
-        if not (2 <= len(tag) <= 20):
-            continue
-        if any(skip.lower() in tag.lower() for skip in _SKIP_TAGS):
-            continue
-        names.append(tag)
-    return names
+    if not tags:
+        return []
+
+    # Use confidence-based extraction
+    ranked = extract_cjk_artist_names(
+        tags,
+        video_title=video_title,
+        author=author,
+        min_confidence=0.4,
+        max_results=3,
+    )
+
+    # Log for observability
+    if ranked:
+        logger.debug(
+            f"[Tag Extraction] Confidence-based: {[(t, f'{c:.2f}') for t, c in ranked]}"
+        )
+
+    # Return just the tag names (strip confidence scores)
+    return [tag for tag, _conf in ranked]
 
 
 # ==========================================================================
@@ -1010,28 +1752,30 @@ async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[Search
 
 async def search_url_mode(
     url_or_id: str
-) -> Tuple[Optional[SearchResult], List[SearchResult], List[SearchResult], Optional[str]]:
+) -> Tuple[SearchResult, List[SearchResult], List[SearchResult], Optional[str]]:
     """Search for alternatives to a user-provided URL (URL Mode).
 
-    If the URL is already an ATV, returns (None, [], [], None) - just play it.
-    Otherwise, searches for matching ATVs and related videos using multi-query
-    with Japanese name extraction.
+    If the URL is already an ATV, returns it directly with proper metadata and
+    empty alternatives (no selection UI needed). Otherwise, searches for matching
+    ATVs and related videos using multi-query with Japanese name extraction.
 
     Args:
         url_or_id: YouTube video URL or video ID.
 
     Returns:
         Tuple of (original, songs, videos, recommended_id):
-        - original: SearchResult for user's URL (None if already ATV)
-        - songs: Up to 3 ATVs
-        - videos: Up to 3 related videos
-        - recommended_id: Video ID of recommended song, or None
+        - original: SearchResult for user's URL (always present)
+        - songs: Up to 3 ATVs (empty if original is already an ATV)
+        - videos: Up to 3 related videos (empty if original is already an ATV)
+        - recommended_id: Video ID of recommended song (original's ID if ATV)
+
+    Raises:
+        ValueError: If video ID cannot be extracted from url_or_id.
     """
     # Normalize input: extract video ID if a URL was passed
     video_id = extract_video_id(url_or_id)
     if not video_id:
-        logger.warning(f"[URL Mode] Could not extract video ID from: {url_or_id}")
-        return None, [], [], None
+        raise ValueError(f"Could not extract video ID from: {url_or_id}")
 
     # Get metadata for the original video
     metadata = await get_ytm_metadata(video_id)
@@ -1049,10 +1793,38 @@ async def search_url_mode(
 
     video_details = metadata.get('videoDetails', {})
 
-    # Check if already an ATV - if so, just play it
+    # Check if already an ATV - return it with proper metadata, no alternatives needed
     if is_atv(metadata):
-        logger.info(f"[URL Mode] {video_id} is already an ATV, playing directly")
-        return None, [], [], None
+        logger.info(f"[URL Mode] {video_id} is already an ATV, returning with metadata")
+        # For ATVs, videoDetails.author IS the clean artist name (not channel)
+        atv_title = video_details.get('title', 'Unknown')
+        atv_artist = video_details.get('author', 'Unknown')
+        atv_duration = int(video_details.get('lengthSeconds', 0) or 0)
+        atv_view_count = extract_view_count(metadata)
+
+        # ATVs have square thumbnails
+        thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
+        atv_thumb_url = None
+        if thumbnails:
+            # Get largest thumbnail and resize
+            raw_url = thumbnails[-1].get('url')
+            if raw_url:
+                atv_thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
+
+        atv_result = SearchResult(
+            video_id=video_id,
+            title=atv_title,
+            artist=atv_artist,
+            duration_seconds=atv_duration,
+            thumbnail_url=atv_thumb_url,
+            thumbnail_is_square=True,  # ATVs always have square art
+            source='ytm_song',
+            video_type=MUSIC_VIDEO_TYPE_ATV,
+            version_label='Official Audio',
+            view_count=atv_view_count,
+        )
+        # Return ATV as original, empty alternatives, itself as recommended
+        return atv_result, [], [], video_id
 
     # Extract metadata for searching
     # Start with videoDetails (structured metadata)
@@ -1086,7 +1858,7 @@ async def search_url_mode(
 
     # Extract tags for Japanese name extraction
     tags = microformat.get('tags', [])
-    jp_names = extract_jp_names(tags)
+    jp_names = extract_jp_names(tags, video_title=title, author=author)
 
     # Build original SearchResult
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])

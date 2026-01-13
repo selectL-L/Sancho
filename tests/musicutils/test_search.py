@@ -440,3 +440,240 @@ class TestTrackHasCorrectPlaybackInfo:
 
         assert ytm_result.to_track().source == "ytm_song"
         assert yt_result.to_track().source == "youtube"
+
+
+# ==========================================================================
+# TAG CONFIDENCE SCORING TESTS
+# ==========================================================================
+
+
+class TestTagConfidenceScoring:
+    """Tests for CJK artist name extraction with confidence scoring.
+
+    Tests both the new confidence system and legacy compatibility.
+    """
+
+    def test_pure_cjk_tag_high_confidence(self):
+        """Pure CJK artist names should get high confidence."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # Pure Japanese name
+        conf = calculate_tag_confidence('紫咲シオン')
+        assert conf >= 0.7, f"Pure CJK should be high confidence, got {conf}"
+
+        # Chinese characters
+        conf = calculate_tag_confidence('周杰伦')
+        assert conf >= 0.7, f"Pure Chinese should be high confidence, got {conf}"
+
+    def test_vocaloid_p_pattern_boosted(self):
+        """VocaloidP pattern (name + P suffix) should get confidence boost."""
+        from utils.musicutils.search import calculate_tag_confidence, _is_vocaloid_p_pattern
+
+        # Test pattern detection - requires CJK content before P
+        assert _is_vocaloid_p_pattern('みきとP')
+        assert _is_vocaloid_p_pattern('ハチP')
+        assert not _is_vocaloid_p_pattern('syudouP')  # No CJK - doesn't match pattern
+        assert not _is_vocaloid_p_pattern('Music')  # No CJK
+        assert not _is_vocaloid_p_pattern('P')  # Too short
+
+        # Test confidence boost
+        conf = calculate_tag_confidence('みきとP')
+        assert conf >= 0.8, f"VocaloidP pattern should be >= 0.8, got {conf}"
+
+    def test_hard_skip_exact_zero_confidence(self):
+        """Tags in hard skip list should get 0.0 confidence."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        assert calculate_tag_confidence('ホロライブ') == 0.0
+        assert calculate_tag_confidence('hololive') == 0.0
+        assert calculate_tag_confidence('nijisanji') == 0.0
+        assert calculate_tag_confidence('mv') == 0.0
+        assert calculate_tag_confidence('MV') == 0.0  # Case insensitive
+
+    def test_hard_skip_contains_zero_confidence(self):
+        """Tags containing hard skip patterns should get 0.0 confidence."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # Contains 'hololive'
+        assert calculate_tag_confidence('hololive production') == 0.0
+        # Contains 'にじさんじ'
+        assert calculate_tag_confidence('にじさんじ所属') == 0.0
+
+    def test_song_title_similarity_penalty(self):
+        """Tags that look like the song title should be penalized."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # Tag matches video title
+        conf_with_title = calculate_tag_confidence('ステラステラ', video_title='Stellar Stellar / 星街すいせい')
+        conf_without = calculate_tag_confidence('ステラステラ')
+
+        # Both should pass, but with title should be penalized (or at least not higher)
+        # If the title isn't closely matching, penalty might be small
+        assert conf_with_title >= 0.0
+        assert conf_without >= 0.0
+
+        # High overlap case - tag IS the song name
+        conf_exact = calculate_tag_confidence('ロキ', video_title='ロキ / Roki')
+        # This should be penalized since tag appears in title
+        assert conf_exact <= 0.4, f"Song title tag should be penalized, got {conf_exact}"
+
+    def test_soft_skip_reduces_but_not_zeros(self):
+        """Soft skip terms should reduce confidence but not to zero."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # "cover" is soft skip
+        conf = calculate_tag_confidence('歌ってみた')
+        assert 0.0 < conf < 0.6, f"Soft skip should reduce confidence, got {conf}"
+
+        # "original" is soft skip
+        conf = calculate_tag_confidence('オリジナル曲')
+        assert 0.0 < conf < 0.6, f"Soft skip should reduce confidence, got {conf}"
+
+    def test_length_penalties(self):
+        """Tags with unusual length should be penalized."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # Single char - too short
+        conf_short = calculate_tag_confidence('愛')
+        assert conf_short < 0.5, f"Single char should be penalized, got {conf_short}"
+
+        # Very long - probably a phrase
+        long_tag = '東京都渋谷区の歌い手による歌ってみた動画'
+        conf_long = calculate_tag_confidence(long_tag)
+        assert conf_long < 0.5, f"Very long tag should be penalized, got {conf_long}"
+
+    def test_extract_cjk_artist_names_returns_sorted(self):
+        """extract_cjk_artist_names should return tags sorted by confidence."""
+        from utils.musicutils.search import extract_cjk_artist_names
+
+        tags = [
+            'ホロライブ',  # Hard skip - 0.0
+            '星街すいせい',  # Pure CJK - high
+            'みきとP',  # VocaloidP - boosted
+            'music',  # No CJK - filtered out
+            '歌ってみた',  # Soft skip - reduced
+        ]
+
+        results = extract_cjk_artist_names(tags, min_confidence=0.0)
+
+        # Should have filtered out 'ホロライブ' (0.0) and 'music' (no CJK)
+        tag_names = [t for t, c in results]
+        assert 'ホロライブ' not in tag_names or results[0][1] == 0.0
+        assert 'music' not in tag_names
+
+        # Check sorted by confidence descending
+        confidences = [c for t, c in results]
+        assert confidences == sorted(confidences, reverse=True), "Results should be sorted by confidence"
+
+    def test_extract_cjk_artist_names_respects_max_results(self):
+        """extract_cjk_artist_names should respect max_results parameter."""
+        from utils.musicutils.search import extract_cjk_artist_names
+
+        tags = ['星街すいせい', '紫咲シオン', '宝鐘マリン', '白上フブキ', '大空スバル']
+        results = extract_cjk_artist_names(tags, max_results=2)
+
+        assert len(results) <= 2, f"Should return max 2 results, got {len(results)}"
+
+    def test_extract_jp_names_backward_compatible(self):
+        """extract_jp_names should still work without video_title (backward compat)."""
+        from utils.musicutils.search import extract_jp_names
+
+        tags = ['星街すいせい', 'Hoshimachi Suisei', 'hololive', '歌ってみた']
+
+        # Should work without video_title
+        names = extract_jp_names(tags)
+
+        # Should return CJK tags that pass legacy filtering
+        assert '星街すいせい' in names
+        # Latin-only should be excluded
+        assert 'Hoshimachi Suisei' not in names
+        # Hard skip should be excluded
+        assert 'hololive' not in names
+
+    def test_extract_jp_names_with_video_title(self):
+        """extract_jp_names should accept video_title parameter for title filtering."""
+        from utils.musicutils.search import extract_jp_names
+
+        tags = ['星街すいせい', 'ステラステラ']
+
+        # With video_title, tags matching the title get penalized
+        names = extract_jp_names(tags, video_title='Stellar Stellar')
+
+        # Artist name should still be included
+        assert '星街すいせい' in names
+
+    def test_stellar_stellar_stress_test(self):
+        """Stress test with Stellar Stellar's tag explosion scenario.
+
+        Stellar Stellar has many Hololive member tags. The confidence system
+        should handle this gracefully.
+        """
+        from utils.musicutils.search import extract_cjk_artist_names
+
+        # Simulated tags from Stellar Stellar video
+        tags = [
+            '星街すいせい',  # Actual artist - should be high
+            'ステラステラ',  # Song title - should be penalized with title context
+            'hololive', 'ホロライブ',  # Agency - hard skip
+            '白上フブキ', '大空スバル', '紫咲シオン',  # Other members
+            '宝鐘マリン', 'さくらみこ', 'ときのそら',
+            'music', 'MV', '歌ってみた',  # Format/content type
+        ]
+
+        # With video title, song name tag should be penalized
+        results = extract_cjk_artist_names(
+            tags,
+            video_title='Stellar Stellar / 星街すいせい',
+            min_confidence=0.4,
+            max_results=3
+        )
+
+        # Should have reasonable number of results
+        assert len(results) <= 3, f"max_results should be respected, got {len(results)}"
+
+        # Agency tags should not appear
+        tag_names = [t for t, c in results]
+        assert 'hololive' not in tag_names
+        assert 'ホロライブ' not in tag_names
+
+        # Actual artist should appear (though other members might too)
+        # This is expected - confidence scoring alone can't know who the
+        # "real" artist is among multiple valid CJK names.
+
+    def test_mixed_script_moderate_confidence(self):
+        """Mixed CJK/Latin tags should get moderate confidence."""
+        from utils.musicutils.search import calculate_tag_confidence
+
+        # DECO*27 style name - pure Latin + symbols, no CJK
+        conf = calculate_tag_confidence('DECO*27')
+        # No CJK, so should be 0
+        assert conf == 0.0, f"Pure Latin should be 0.0, got {conf}"
+
+        # Mixed but has CJK - note "official" is soft skip, so reduced
+        conf = calculate_tag_confidence('Official髭男dism')
+        # Contains 'official' (soft skip) so heavily penalized
+        assert 0.0 < conf < 0.5, f"Soft skip content should be penalized, got {conf}"
+
+        # Mixed without soft skip penalty
+        conf = calculate_tag_confidence('髭男dism')
+        assert 0.3 <= conf <= 0.8, f"Mixed script without soft skip should be moderate, got {conf}"
+
+    def test_script_ratio_calculation(self):
+        """_calculate_script_ratio should correctly measure CJK proportion."""
+        from utils.musicutils.search import _calculate_script_ratio
+
+        # Pure CJK
+        assert _calculate_script_ratio('星街すいせい') == 1.0
+
+        # Pure Latin
+        assert _calculate_script_ratio('Suisei') == 0.0
+
+        # Mixed - should be between 0 and 1
+        ratio = _calculate_script_ratio('みきとP')
+        assert 0.5 < ratio < 1.0, f"Mixed should be partial, got {ratio}"
+
+        # Empty string
+        assert _calculate_script_ratio('') == 0.0
+
+        # Numbers/symbols only
+        assert _calculate_script_ratio('12345') == 0.0

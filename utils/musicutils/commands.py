@@ -84,9 +84,7 @@ from .music_helpers import (
 from .search import (
     YTMUSIC_AVAILABLE,
     SearchResult,
-    extract_video_id,
     get_thumbnail_bytes,
-    is_atv,
 )
 
 from utils.views import get_track_selection
@@ -525,8 +523,9 @@ class MusicCommandsMixin:
     ) -> List[Track]:
         """Handle URL-based play with YTM metadata enhancement.
 
-        If YTM is available and the video is already an ATV (Art Track Video),
-        plays directly. Otherwise, searches for better versions and shows selection.
+        Delegates to search.py for all metadata handling. If the video is already
+        an ATV, search_url_mode returns it with proper metadata and empty alternatives.
+        Otherwise, shows selection UI with alternatives.
 
         Args:
             ctx: The command context.
@@ -535,76 +534,33 @@ class MusicCommandsMixin:
         Returns:
             List of tracks to add (empty if user cancelled or error).
         """
-        from .search import get_ytm_metadata
-
-        video_id = extract_video_id(url)
-        if not video_id:
-            # Not a valid YouTube URL - fall back to yt-dlp
-            await ctx.send("🔍 Fetching track info...")
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
-
         await ctx.send("🔍 Checking for best version...")
 
-        # Check if YTM is available and try to get metadata
-        if YTMUSIC_AVAILABLE:
-            metadata = await get_ytm_metadata(video_id)
-            if metadata and is_atv(metadata):
-                # Already an ATV - play directly without selection
-                self.logger.debug(f"URL {video_id} is already an ATV, playing directly")
-                tracks, error, warning = await self._fetch_url_info(url)
-                if error:
-                    await ctx.send(f"❌ {error}")
-                    return []
-                if warning:
-                    await ctx.send(warning)
-                return tracks
-
-        # Search for alternatives via YTM
+        # search.py handles ALL metadata - YTM lookups, yt-dlp searches, everything
         try:
-            original, songs, videos, recommended_id = await self._search_with_ytm(video_id, is_url=True)
+            original, songs, videos, recommended_id = await self._search_with_ytm(url, is_url=True)
+        except ValueError as e:
+            # Invalid URL format - not a YouTube URL
+            self.logger.warning(f"Invalid URL format: {e}")
+            await ctx.send("❌ That doesn't look like a valid YouTube URL.")
+            return []
         except Exception as e:
-            self.logger.warning(f"YTM search failed for URL, falling back: {e}")
-            # Fall back to direct fetch with friendly message
-            await ctx.send("-# Had a little trouble finding alternatives, but I've got your track!")
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
+            self.logger.warning(f"YTM search failed for URL: {e}")
+            await ctx.send("❌ Couldn't fetch track info. The video may be unavailable.")
+            return []
 
-        # If no alternatives found, play the original
-        all_results = songs + videos
-        if not all_results:
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
+        # In URL mode, search_url_mode guarantees original is non-None
+        assert original is not None, "search_url_mode should always return original for URL mode"
 
-        # Convert results to tracks, keeping original as user_track
-        user_track = original.to_track() if original else None
+        # If no alternatives, play original directly (handles ATVs and no-match cases)
+        if not songs and not videos:
+            return [original.to_track()]
 
-        # NOTE: We do NOT exclude original_video_id from YTM results.
-        # If the same video appears as an ATV in YTM, that's valuable - it has
-        # better metadata (square thumbnail, clean title). User can choose between
-        # their URL (slot 0) or the YTM version (slot 1) even if same video_id.
-        # We only exclude from YouTube results to avoid showing the exact same thing twice.
+        # Show selection UI
+        user_track = original.to_track()
         ytm_tracks = [r.to_track() for r in songs]
-        yt_tracks = [r.to_track() for r in videos if r.video_id != (original.video_id if original else None)]
-
-        if not ytm_tracks and not yt_tracks and user_track:
-            # Only the original URL, no alternatives
-            return [user_track]
+        # Exclude original from yt results to avoid duplicate
+        yt_tracks = [r.to_track() for r in videos if r.video_id != original.video_id]
 
         # Show selection UI
         selected = await get_track_selection(
