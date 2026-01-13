@@ -231,9 +231,94 @@ def normalize_text(text: str) -> str:
     """
     text = unicodedata.normalize('NFKC', text)
     text = text.lower().strip()
-    # Remove common suffixes that vary between versions
-    text = re.sub(r'\s*[\(\[](official\s*)?(music\s*)?(video|audio|mv|lyric|lyrics|visualizer)[\)\]]', '', text, flags=re.IGNORECASE)
     return text
+
+
+def clean_microformat_title(title: str) -> str:
+    """Strip YouTube suffixes from microformat title.
+
+    Args:
+        title: Raw microformat title.
+
+    Returns:
+        Cleaned title without YouTube suffixes.
+    """
+    for suffix in (' - YouTube Music', ' - YouTube'):
+        if title.endswith(suffix):
+            return title[:-len(suffix)]
+    return title
+
+
+def extract_words(text: str) -> set[str]:
+    """Extract words from text for comparison.
+
+    Simple word extraction without any filtering. Used for detecting
+    content mismatches where one title has words the other doesn't.
+
+    Args:
+        text: Text to extract words from.
+
+    Returns:
+        Set of lowercase words (2+ characters).
+    """
+    # Simple: split on non-word characters, keep words 2+ chars
+    words = set()
+    for word in text.lower().split():
+        # Strip punctuation from edges (including CJK brackets)
+        # Yes Ruff, those are intentional Japanese brackets, not typos.
+        # You'd know that if you ever listened to J-pop.
+        cleaned = word.strip('()[]【】「」『』〔〕.,!?&-')  # noqa: RUF001
+        if len(cleaned) >= 2:
+            words.add(cleaned)
+    return words
+
+
+def has_ytm_catalog_mismatch(
+    vd_title: str,
+    vd_author: str,
+    mf_title: str
+) -> bool:
+    """Detect if YTM videoDetails has wrong metadata (catalog mismatch).
+
+    YTM's catalog sometimes maps the wrong song to a video ID. We detect this
+    by checking if videoDetails introduces significant new content words that
+    don't appear in the microformat title.
+
+    The key insight: formatting differences ("ft." vs "&", bracket styles) are
+    fine, but **new content words** (like "Slowed", "Reverb") indicate a mismatch.
+
+    Args:
+        vd_title: Title from videoDetails.
+        vd_author: Author from videoDetails.
+        mf_title: Cleaned title from microformat.
+
+    Returns:
+        True if mismatch detected, False if videoDetails seems trustworthy.
+    """
+    # Combine author + title like "Artist - Title" for comparison
+    vd_combined = f"{vd_author} - {vd_title}" if vd_author else vd_title
+
+    vd_words = extract_words(vd_combined)
+    mf_words = extract_words(mf_title)
+
+    # Words in videoDetails but NOT in microformat = potential new content
+    extra_in_vd = vd_words - mf_words
+
+    # Filter out very short extras (single chars that slipped through)
+    # and common connector words that might appear differently
+    extra_in_vd = {w for w in extra_in_vd if len(w) >= 3}
+
+    # 2+ extra content words = suspicious
+    # Examples that trigger: "Slowed + Reverb" (2 words), "Nightcore Remix" (2 words)
+    # Examples that don't: "ft" vs "&" (connector difference, not content)
+    if len(extra_in_vd) >= 2:
+        logger.warning(
+            f"[YTM Metadata] Catalog mismatch detected: "
+            f"videoDetails='{vd_combined}' has extra words {extra_in_vd} vs microformat='{mf_title}'"
+        )
+        return True
+
+    return False
 
 
 def text_similarity(a: str, b: str) -> float:
@@ -924,7 +1009,7 @@ async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[Search
 
 
 async def search_url_mode(
-    video_id: str
+    url_or_id: str
 ) -> Tuple[Optional[SearchResult], List[SearchResult], List[SearchResult], Optional[str]]:
     """Search for alternatives to a user-provided URL (URL Mode).
 
@@ -933,7 +1018,7 @@ async def search_url_mode(
     with Japanese name extraction.
 
     Args:
-        video_id: YouTube video ID from user's URL.
+        url_or_id: YouTube video URL or video ID.
 
     Returns:
         Tuple of (original, songs, videos, recommended_id):
@@ -942,6 +1027,12 @@ async def search_url_mode(
         - videos: Up to 3 related videos
         - recommended_id: Video ID of recommended song, or None
     """
+    # Normalize input: extract video ID if a URL was passed
+    video_id = extract_video_id(url_or_id)
+    if not video_id:
+        logger.warning(f"[URL Mode] Could not extract video ID from: {url_or_id}")
+        return None, [], [], None
+
     # Get metadata for the original video
     metadata = await get_ytm_metadata(video_id)
 
@@ -964,13 +1055,36 @@ async def search_url_mode(
         return None, [], [], None
 
     # Extract metadata for searching
-    title = video_details.get('title', 'Unknown')
-    author = video_details.get('author', 'Unknown')
+    # Start with videoDetails (structured metadata)
+    vd_title = video_details.get('title', 'Unknown')
+    vd_author = video_details.get('author', 'Unknown')
     duration = int(video_details.get('lengthSeconds', 0) or 0)
     view_count = extract_view_count(metadata)
 
-    # Extract tags for Japanese name extraction
+    # Extract microformat (raw YouTube title) for comparison
     microformat = metadata.get('microformat', {}).get('microformatDataRenderer', {})
+    mf_title_raw = microformat.get('title', '')
+    mf_title = clean_microformat_title(mf_title_raw) if mf_title_raw else ''
+
+    # Check for YTM catalog mismatch (videoDetails points to wrong song)
+    # If detected, prefer microformat title over videoDetails
+    if mf_title and has_ytm_catalog_mismatch(vd_title, vd_author, mf_title):
+        logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
+        # Microformat is "Artist - Title" format, use as-is for display
+        title = mf_title
+        # Try to extract artist from "Artist - Title" format
+        if ' - ' in mf_title:
+            parts = mf_title.split(' - ', 1)
+            author = parts[0].strip()
+            title = parts[1].strip() if len(parts) > 1 else mf_title
+        else:
+            author = vd_author  # Fall back to videoDetails author
+    else:
+        # Trust videoDetails
+        title = vd_title
+        author = vd_author
+
+    # Extract tags for Japanese name extraction
     tags = microformat.get('tags', [])
     jp_names = extract_jp_names(tags)
 

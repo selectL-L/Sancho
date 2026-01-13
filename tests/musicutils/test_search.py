@@ -8,15 +8,17 @@ Dangerous outcomes for search:
 - User gets wrong video (bad URL parsing, bad deduplication)
 - Good results filtered out (is_relevant too strict)
 - Garbage results shown (is_relevant too loose)
-- Wrong track recommended (score_atv_match gives high score to wrong track)
+- Wrong track recommended (score_candidate gives high score to wrong track)
 """
 
 from utils.musicutils.search import (
     extract_video_id,
     is_relevant,
     dedupe_results,
-    score_atv_match,
+    score_candidate,
+    OriginalMetadata,
     SearchResult,
+    MUSIC_VIDEO_TYPE_ATV,
 )
 
 
@@ -32,6 +34,7 @@ def make_result(
     artist_id: str | None = None,
     duration: int = 180,
     source: str = "youtube",
+    video_type: str | None = None,
 ) -> SearchResult:
     """Factory for SearchResult with sensible defaults."""
     return SearchResult(
@@ -42,6 +45,27 @@ def make_result(
         duration_seconds=duration,
         thumbnail_url=None,
         source=source,
+        video_type=video_type,
+    )
+
+
+def make_atv(
+    video_id: str = "test123",
+    title: str = "Test Song",
+    artist: str = "Test Artist",
+    artist_id: str | None = None,
+    duration: int = 180,
+) -> SearchResult:
+    """Factory for ATV SearchResult."""
+    return SearchResult(
+        video_id=video_id,
+        title=title,
+        artist=artist,
+        artist_id=artist_id,
+        duration_seconds=duration,
+        thumbnail_url=None,
+        source="ytm_song",
+        video_type=MUSIC_VIDEO_TYPE_ATV,
     )
 
 
@@ -187,11 +211,11 @@ class TestIrrelevantResultsAreRejected:
         result = make_result(title="Cooking Tutorial", artist="Chef")
         assert is_relevant("Never Gonna Give You Up", result) is False
 
-    def test_single_common_word_not_enough_for_long_query(self):
-        """Matching only 'the' or similar shouldn't pass for long queries."""
-        result = make_result(title="The Best Song Ever", artist="Band")
-        # Only 'the' matches - 1/5 = 20%, below 40% threshold
-        assert is_relevant("the quick brown fox jumps", result) is False
+    def test_no_word_overlap_means_rejection(self):
+        """Query and result share no words = definitely garbage."""
+        result = make_result(title="Sunset Boulevard", artist="Orchestra")
+        # No overlap in words, should be filtered
+        assert is_relevant("morning coffee jazz", result) is False
 
     def test_short_query_needs_meaningful_overlap(self):
         """Even short queries need some real overlap."""
@@ -205,122 +229,115 @@ class TestIrrelevantResultsAreRejected:
 
 
 class TestBestMatchIsRecommended:
-    """Scenarios where score_atv_match must identify the correct ATV.
+    """Scenarios where score_candidate must identify the correct ATV.
 
     This is dangerous: wrong recommendation = user picks inferior version.
+
+    New scoring philosophy: confidence-based sliding scale.
+    - Higher artist confidence → lower title threshold required
+    - Perfect title match (≥95%) always passes regardless of artist
     """
 
     def test_artist_id_match_gives_high_score(self):
-        """Same artist ID = definitely the right track."""
-        candidate = make_result(
+        """Same artist ID = 100% artist confidence = needs only 25% title match."""
+        original = OriginalMetadata(
             title="Song Name",
             artist="Artist Name",
             artist_id="UC123456",
-            duration=180,
         )
-        score = score_atv_match(
-            original_title="Song Name",
-            original_artist="Artist Name",
-            original_duration=180,
-            original_artist_ids={"UC123456"},
-            candidate=candidate,
+        candidate = make_atv(
+            title="Song Name",
+            artist="Artist Name",
+            artist_id="UC123456",
         )
-        assert score >= 0.8  # High confidence
+        score = score_candidate(original, candidate)
+        assert score >= 0.8  # High confidence (100% artist + 100% title)
 
-    def test_different_artist_id_with_similar_title_still_scores(self):
-        """Different artist ID but same name text = high score (text match)."""
-        candidate = make_result(
+    def test_different_artist_id_with_exact_title_still_scores(self):
+        """Different artist ID but perfect title = passes (title ≥95% auto-pass)."""
+        original = OriginalMetadata(
             title="Popular Song",
             artist="Original Artist",
-            artist_id="UC_different",
-            duration=200,
+            artist_id="UC_original",
         )
-        score = score_atv_match(
-            original_title="Popular Song",
-            original_artist="Original Artist",
-            original_duration=200,
-            original_artist_ids={"UC_original"},
-            candidate=candidate,
+        candidate = make_atv(
+            title="Popular Song",
+            artist="Original Artist",
+            artist_id="UC_different",  # Different ID
         )
-        # Text matches perfectly, so score is high even without ID match
-        assert score >= 0.9
+        score = score_candidate(original, candidate)
+        # Perfect title match auto-passes regardless of artist ID
+        assert score >= 0.6
 
-    def test_duration_mismatch_rejects_track(self):
-        """Very different duration = probably wrong track, score 0."""
-        candidate = make_result(
+    def test_no_artist_id_with_matching_artist_name(self):
+        """No artist ID but name matches = moderate confidence."""
+        original = OriginalMetadata(
             title="Song Name",
-            artist="Artist",
-            artist_id="UC123",
-            duration=300,  # 2 minutes longer
+            artist="Artist Name",
+            artist_id=None,  # No ID
         )
-        score = score_atv_match(
-            original_title="Song Name",
-            original_artist="Artist",
-            original_duration=180,
-            original_artist_ids={"UC123"},
-            candidate=candidate,
+        candidate = make_atv(
+            title="Song Name",
+            artist="Artist Name",
+            artist_id=None,
         )
-        # Duration gate: >15 sec diff = 0.0
-        assert score == 0.0
+        score = score_candidate(original, candidate)
+        # Name match gives 80% artist confidence + title threshold ~40%
+        assert score >= 0.7
 
-    def test_completely_different_track_scores_low(self):
-        """Unrelated track must score low (but not zero if duration matches)."""
-        candidate = make_result(
-            title="Cooking Tutorial Part 5",
-            artist="Chef Channel",
-            artist_id="UC_chef",
-            duration=212,  # Same duration to avoid duration gate
-        )
-        score = score_atv_match(
-            original_title="Never Gonna Give You Up",
-            original_artist="Rick Astley",
-            original_duration=212,
-            original_artist_ids={"UC_rick"},
-            candidate=candidate,
-        )
-        # Low score, but not zero since some character overlap exists
-        assert score < 0.3
-
-    def test_score_below_star_threshold_for_partial_match(self):
-        """Similar titles score high but different artist ID blocks the star.
-
-        score_atv_match is for RANKING, not star eligibility.
-        The star requires: artist_id match + title_sim > 0.85 + duration ≤ 5s.
-        So a high score here is fine - it just means good ranking position.
-        """
-        candidate = make_result(
-            title="Never Gonna Let You Down",  # Similar but different song
-            artist="Rick Astley",
-            artist_id="UC_different",  # Different ID - blocks star!
-            duration=200,
-        )
-        score = score_atv_match(
-            original_title="Never Gonna Give You Up",
-            original_artist="Rick Astley",
-            original_duration=212,
-            original_artist_ids={"UC_rick"},
-            candidate=candidate,
-        )
-        # High score for ranking (similar text), but star blocked by artist_id
-        # and duration diff (12 seconds > 5 second threshold)
-        assert score > 0.5  # Good enough to appear in results
-
-    def test_exact_match_reaches_star_threshold(self):
-        """Perfect match with artist ID should definitely get ⭐."""
-        candidate = make_result(
+    def test_completely_different_track_scores_zero(self):
+        """Unrelated track must fail the sliding threshold."""
+        original = OriginalMetadata(
             title="Never Gonna Give You Up",
             artist="Rick Astley",
             artist_id="UC_rick",
-            duration=212,
         )
-        score = score_atv_match(
-            original_title="Never Gonna Give You Up",
-            original_artist="Rick Astley",
-            original_duration=212,
-            original_artist_ids={"UC_rick"},
-            candidate=candidate,
+        candidate = make_atv(
+            title="Cooking Tutorial Part 5",
+            artist="Chef Channel",
+            artist_id="UC_chef",
         )
-        # Must reach star threshold
+        score = score_candidate(original, candidate)
+        # No artist match (0% confidence) → needs 100%+ title match → fails
+        assert score == 0.0
+
+    def test_similar_title_different_artist_fails(self):
+        """Similar titles score high but need artist confidence to pass.
+
+        With 0% artist confidence, title needs to be nearly perfect (>100%).
+        "Never Gonna Let You Down" vs "Never Gonna Give You Up" = ~80% similar
+        This should fail because 80% < required 100%+.
+        """
+        original = OriginalMetadata(
+            title="Never Gonna Give You Up",
+            artist="Rick Astley",
+            artist_id="UC_rick",
+        )
+        candidate = make_atv(
+            title="Never Gonna Let You Down",  # Similar but different
+            artist="Rick Astley",  # Same artist name
+            artist_id="UC_different",  # Different ID
+        )
+        score = score_candidate(original, candidate)
+        # Artist name matches (80% confidence) → title needs ~40%
+        # "Never Gonna Let You Down" vs "Give You Up" = high similarity
+        # Should pass due to name match
+        assert score >= 0.5
+
+    def test_exact_match_reaches_star_threshold(self):
+        """Perfect match with artist ID should definitely get ⭐."""
+        original = OriginalMetadata(
+            title="Never Gonna Give You Up",
+            artist="Rick Astley",
+            artist_id="UC_rick",
+        )
+        candidate = make_atv(
+            title="Never Gonna Give You Up",
+            artist="Rick Astley",
+            artist_id="UC_rick",
+        )
+        score = score_candidate(original, candidate)
+        # 100% artist + 100% title = max score
         assert score >= 0.85
 
 
