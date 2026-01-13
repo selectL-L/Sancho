@@ -77,6 +77,9 @@ utils/web/mock_data.py
 *.bat
 deploy-filter.txt
 
+# Temporary shelved files
+search_old.py
+
 
 # -----------------------------------------------------------------------------
 # EDITORS / IDEs

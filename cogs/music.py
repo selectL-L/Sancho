@@ -1166,9 +1166,9 @@ class Music(MusicCommandsMixin, BaseCog):
         """
         if is_url:
             return await search_url_mode(query)
-        # Query mode returns (songs, videos), we add None for original and recommended_id
-        songs, videos = await search_query_mode(query)
-        return (None, songs, videos, None)
+        # Query mode returns (songs, videos, recommended_id)
+        songs, videos, recommended_id = await search_query_mode(query)
+        return (None, songs, videos, recommended_id)
 
     async def _fetch_url_info(
         self,

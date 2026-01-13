@@ -139,6 +139,8 @@ class Track:
     album: Optional[str] = None  # Album name (YTM songs only)
     source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
     is_explicit: Optional[bool] = None  # True if explicit, False if clean
+    version_label: str = "Video"  # "Official Audio", "Music Video", etc.
+    view_count: Optional[int] = None  # Raw view count for display
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for caching.
@@ -157,6 +159,8 @@ class Track:
             'album': self.album,
             'source': self.source,
             'is_explicit': self.is_explicit,
+            'version_label': self.version_label,
+            'view_count': self.view_count,
         }
 
     @classmethod
@@ -173,6 +177,8 @@ class Track:
             album=data.get('album'),
             source=data.get('source', 'youtube'),
             is_explicit=data.get('is_explicit'),
+            version_label=data.get('version_label', 'Video'),
+            view_count=data.get('view_count'),
         )
 
 

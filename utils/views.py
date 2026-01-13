@@ -268,6 +268,11 @@ class NowPlayingState:
     in_voice: bool
     playlist_count: int
     thumbnail_url: Optional[str] = None
+    # NEW: Display metadata
+    version_label: str = "Video"  # "Official Audio", "Music Video", etc.
+    view_count_str: str = ""  # Pre-formatted: "1.2M views"
+    album: Optional[str] = None
+    is_explicit: Optional[bool] = None
 
 
 # Type aliases for NowPlayingView callbacks
@@ -353,19 +358,37 @@ class NowPlayingView(ui.LayoutView):
             )
             container.add_item(gallery)
 
-        # Track info
+        # Track info header
         status_emoji = "🎵" if state.in_voice else "🎧"
         status_text = "Now Playing" if state.in_voice else "Currently Listening To"
 
         display_title = truncate_visual(state.track_title, 48) if visual_width(state.track_title) > 48 else state.track_title
         display_artist = truncate_visual(state.track_artist, 40) if visual_width(state.track_artist) > 40 else state.track_artist
 
-        container.add_item(ui.TextDisplay(
-            f"## {status_emoji} {status_text}\n"
-            f"**[{display_title}]({state.track_url})**\n"
-            f"by {display_artist}"
-        ))
+        # Build badges line
+        badges = []
+        if state.version_label and state.version_label != "Video":
+            badges.append(f"🏷️ {state.version_label}")
+        if state.is_explicit:
+            badges.append("🅴")
+        badge_line = " • ".join(badges) if badges else ""
 
+        # Build metadata line (album, view count)
+        meta_parts = []
+        if state.album:
+            meta_parts.append(f"*{state.album}*")
+        if state.view_count_str:
+            meta_parts.append(state.view_count_str)
+        meta_line = " • ".join(meta_parts)
+
+        # Compose track info
+        track_info = f"## {status_emoji} {status_text}\n**[{display_title}]({state.track_url})**\nby {display_artist}"
+        if badge_line:
+            track_info += f"\n{badge_line}"
+        if meta_line:
+            track_info += f"\n-# {meta_line}"
+
+        container.add_item(ui.TextDisplay(track_info))
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
         # Progress bar
@@ -706,6 +729,19 @@ def _format_duration(seconds: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def _format_view_count(count: Optional[int]) -> str:
+    """Format view count for display (e.g., 1.2M views)."""
+    if count is None:
+        return ""
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f}B views"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M views"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}K views"
+    return f"{count} views"
+
+
 @dataclass
 class _SlottedTrack:
     """Internal wrapper pairing a track with its display slot number."""
@@ -815,11 +851,18 @@ class TrackSelectionView(ui.LayoutView):
             title_display = truncate_visual(t.title, 45)
             artist_display = truncate_visual(t.artist, 35)
             duration_str = _format_duration(t.duration)
+            view_str = _format_view_count(t.view_count)
+
+            # Build metadata line
+            meta_parts = [duration_str]
+            if view_str:
+                meta_parts.append(view_str)
+            meta_line = " • ".join(meta_parts)
 
             container.add_item(ui.TextDisplay(
                 f"### 🔗 Your Link\n"
                 f"**0** • **{title_display}**\n"
-                f"by {artist_display} • {duration_str}"
+                f"by {artist_display} • {meta_line}"
             ))
             container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
@@ -835,18 +878,24 @@ class TrackSelectionView(ui.LayoutView):
                 title_display = truncate_visual(t.title, 40)
                 artist_display = truncate_visual(t.artist, 30)
                 duration_str = _format_duration(t.duration)
+                view_str = _format_view_count(t.view_count)
 
-                # Source indicator, explicit badge, and recommended badge
-                source_emoji = "🎵" if t.source == 'ytm_song' else "🎬"
-                explicit_badge = "🅴" if t.is_explicit else ""
+                # Version label emoji mapping
+                version_emoji = "🎵" if t.version_label == "Official Audio" else "🎬" if t.version_label == "Music Video" else "📀"
+                explicit_badge = " 🅴" if t.is_explicit else ""
                 rec_badge = " ⭐" if is_rec else ""
 
-                # Album info for songs
-                album_line = f"\n-# *{t.album}*" if t.album else ""
+                # Build metadata line (album, view count)
+                meta_parts = []
+                if t.album:
+                    meta_parts.append(f"*{t.album}*")
+                if view_str:
+                    meta_parts.append(view_str)
+                meta_line = f"\n-# {' • '.join(meta_parts)}" if meta_parts else ""
 
                 ytm_text += (
-                    f"**{slot_num}** {source_emoji}{explicit_badge}{rec_badge} **{title_display}**\n"
-                    f"by {artist_display} • {duration_str}{album_line}\n"
+                    f"**{slot_num}** {version_emoji}{explicit_badge}{rec_badge} **{title_display}**\n"
+                    f"by {artist_display} • {duration_str}{meta_line}\n"
                 )
 
             container.add_item(ui.TextDisplay(ytm_text.strip()))
@@ -863,10 +912,17 @@ class TrackSelectionView(ui.LayoutView):
                 title_display = truncate_visual(t.title, 40)
                 artist_display = truncate_visual(t.artist, 30)
                 duration_str = _format_duration(t.duration)
+                view_str = _format_view_count(t.view_count)
+
+                # Build metadata line
+                meta_parts = [duration_str]
+                if view_str:
+                    meta_parts.append(view_str)
+                meta_line = " • ".join(meta_parts)
 
                 yt_text += (
                     f"**{slot_num}** 📺 **{title_display}**\n"
-                    f"by {artist_display} • {duration_str}\n"
+                    f"by {artist_display} • {meta_line}\n"
                 )
 
             container.add_item(ui.TextDisplay(yt_text.strip()))

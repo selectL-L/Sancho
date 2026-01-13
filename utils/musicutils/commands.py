@@ -1446,6 +1446,19 @@ class MusicCommandsMixin:
             is_playing = self._player.is_playing
             is_paused = self._player.is_paused
 
+        # Format view count for display
+        view_count_str = ""
+        if track and track.view_count is not None:
+            vc = track.view_count
+            if vc >= 1_000_000_000:
+                view_count_str = f"{vc / 1_000_000_000:.1f}B views"
+            elif vc >= 1_000_000:
+                view_count_str = f"{vc / 1_000_000:.1f}M views"
+            elif vc >= 1_000:
+                view_count_str = f"{vc / 1_000:.1f}K views"
+            else:
+                view_count_str = f"{vc} views"
+
         return NowPlayingState(
             track_title=track.title if track else "Unknown",
             track_artist=track.artist if track else "Unknown",
@@ -1459,6 +1472,11 @@ class MusicCommandsMixin:
             in_voice=self.active_session is not None,
             playlist_count=len(self.playlist),
             thumbnail_url=thumbnail_url,
+            # New metadata fields
+            version_label=track.version_label if track else "Video",
+            view_count_str=view_count_str,
+            album=track.album if track else None,
+            is_explicit=track.is_explicit if track else None,
         )
 
     async def toggle_playback(self) -> None:
