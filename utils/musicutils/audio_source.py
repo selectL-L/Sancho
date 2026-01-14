@@ -161,7 +161,7 @@ class SeekableAudioSource(discord.AudioSource):
         Called by discord.py's voice client ~50 times per second.
 
         Returns:
-            3840 bytes of PCM audio data, or empty bytes if EOF.
+            3840 bytes of PCM audio data, or empty bytes if EOF/incomplete.
         """
         if self._is_paused:
             return self._silence
@@ -171,7 +171,12 @@ class SeekableAudioSource(discord.AudioSource):
 
         try:
             data = self._process.stdout.read(FRAME_SIZE)
-            if not data:
+
+            # CRITICAL: Discord.py expects exactly FRAME_SIZE bytes.
+            # Returning partial frames causes audio corruption/static.
+            # This can happen at stream start while FFmpeg is buffering,
+            # or at stream end. Return empty to signal EOF for partial data.
+            if len(data) != FRAME_SIZE:
                 return b''
 
             # Apply volume if not 1.0

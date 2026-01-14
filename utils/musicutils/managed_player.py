@@ -179,8 +179,19 @@ class ManagedPlayer:
 
         # Stop current playback if any. The callback from this stop will see
         # the incremented generation and exit early.
+        # IMPORTANT: We need to wait for the old AudioPlayer thread to fully stop
+        # before starting a new one. discord.py's vc.stop() just signals the thread
+        # to stop but doesn't wait. If we start a new player immediately, the old
+        # thread might still be sending silence packets, corrupting the encoder state.
+        old_player = self._vc._player if hasattr(self._vc, '_player') else None
         if self._vc.is_playing():
             self._vc.stop()
+
+        # Wait for old AudioPlayer thread to finish (up to 100ms)
+        # This prevents race conditions between the old thread's send_silence()
+        # and the new thread's audio output, which can cause static/glitches.
+        if old_player is not None and old_player.is_alive():
+            old_player.join(timeout=0.1)
 
         # Clean up old source. Safe because any pending callback will exit early
         # due to generation mismatch before trying to access the source.
