@@ -123,6 +123,22 @@ BACKUP_EXTENSION = ".backup"
 #   Keys: year_month (e.g., "2025-01") for monthly aggregation
 #   Note: Stores track_count, bytes_used, and estimated cost for billing awareness.
 #
+# users
+#   Purpose: Cached Discord user profile data for the web interface.
+#   Used by: utils/web/auth.py (OAuth callback, /auth/me endpoint)
+#   Keys: user_id (Discord snowflake)
+#   Note: Stores username, avatar URL, and last_seen timestamp. Survives session expiry
+#         so we can greet returning users by name even after re-authentication.
+#
+# web_sessions
+#   Purpose: Server-side session storage for web authentication.
+#   Used by: utils/web/session_middleware.py, utils/web/auth.py
+#   Keys: session_id (UUID v4 string)
+#   Note: Stores Discord OAuth tokens (access + refresh) server-side. Only session_id
+#         is sent to client in cookie. Enables indefinite sessions via token refresh.
+#         Sessions unused for 90+ days are cleaned up on server startup.
+#         CASCADE delete on user_id means deleting a user deletes their sessions.
+#
 # ==================================================================================
 TABLE_SCHEMAS = {
     "skills": """
@@ -252,6 +268,18 @@ TABLE_SCHEMAS = {
             avatar TEXT,
             last_seen INTEGER NOT NULL
         )
+    """,
+    "web_sessions": """
+        CREATE TABLE web_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            token_expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+        )
     """
 }
 
@@ -261,7 +289,9 @@ INDEX_SCHEMAS = [
     "CREATE INDEX IF NOT EXISTS idx_schedule_availability_user ON schedule_availability (user_id);",
     "CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility (guild_id);",
     "CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);",
-    "CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries (guild_id);"
+    "CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries (guild_id);",
+    "CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_web_sessions_last_seen ON web_sessions (last_seen_at);"
 ]
 
 # ==================================================================================

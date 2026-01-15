@@ -6,10 +6,11 @@ This module provides OAuth2 authentication with Discord, including:
 - User info endpoint (who am I?)
 - Logout endpoint
 
-Session cookie stores only user_id and token_expires_at (minimal footprint).
+Session data (tokens) is stored server-side in the database.
+Only an opaque session_id is sent to the client in a cookie.
 User profile data (username, avatar) is cached in the database for persistence.
 Guild membership is determined from the bot's cache at runtime.
-When DEV_MODE is enabled, /auth/me returns mock user data for UI testing.
+When WEB_MOCK_DATA is enabled, /auth/me returns mock user data for UI testing.
 """
 
 import logging
@@ -20,10 +21,20 @@ import time
 import aiohttp
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 import config
+from utils.web.session_middleware import (
+    clear_session_cookie,
+    generate_session_id,
+    set_session_cookie,
+)
 
 router = APIRouter()
+
+# OAuth state cookie (temporary, short-lived for CSRF protection)
+OAUTH_STATE_COOKIE = "oauth_state"
+OAUTH_STATE_MAX_AGE = 300  # 5 minutes - plenty of time for OAuth flow
 
 
 def _to_display_format(tz_str: str | None) -> str | None:
@@ -73,7 +84,8 @@ OAUTH_SCOPES = "identify"
 async def login(request: Request) -> RedirectResponse:
     """Redirect user to Discord OAuth2 authorization page.
 
-    Generates a state token to prevent CSRF attacks and stores it in the session.
+    Generates a state token to prevent CSRF attacks and stores it in a
+    signed, short-lived cookie.
 
     Args:
         request: The incoming request.
@@ -83,7 +95,10 @@ async def login(request: Request) -> RedirectResponse:
     """
     # Generate state for CSRF protection
     state = secrets.token_urlsafe(32)
-    request.session["oauth_state"] = state
+
+    # Sign the state with the session secret
+    serializer = URLSafeTimedSerializer(config.WEB_SESSION_SECRET)
+    signed_state = serializer.dumps(state)
 
     # Build authorization URL
     params = {
@@ -97,7 +112,17 @@ async def login(request: Request) -> RedirectResponse:
     query = "&".join(f"{k}={v}" for k, v in params.items())
     auth_url = f"{DISCORD_AUTHORIZE_URL}?{query}"
 
-    return RedirectResponse(url=auth_url)
+    response = RedirectResponse(url=auth_url)
+    response.set_cookie(
+        OAUTH_STATE_COOKIE,
+        signed_state,
+        max_age=OAUTH_STATE_MAX_AGE,
+        path="/",
+        secure=not config.DEV_MODE,
+        httponly=True,
+        samesite="lax"
+    )
+    return response
 
 
 @router.get("/callback")
@@ -121,9 +146,20 @@ async def callback(request: Request, code: str = "", state: str = "", error: str
         logger.warning(f"OAuth callback received error: {error}")
         return RedirectResponse(url="/?error=access_denied")
 
-    # Validate state to prevent CSRF
-    stored_state = request.session.pop("oauth_state", None)
-    if not stored_state or stored_state != state:
+    # Validate state to prevent CSRF (stored in signed cookie)
+    signed_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not signed_state:
+        logger.warning("OAuth callback missing state cookie (possible CSRF)")
+        return RedirectResponse(url="/?error=invalid_state")
+
+    try:
+        serializer = URLSafeTimedSerializer(config.WEB_SESSION_SECRET)
+        stored_state = serializer.loads(signed_state, max_age=OAUTH_STATE_MAX_AGE)
+    except BadSignature:
+        logger.warning("OAuth callback state signature invalid or expired (possible CSRF)")
+        return RedirectResponse(url="/?error=invalid_state")
+
+    if stored_state != state:
         logger.warning("OAuth callback state mismatch (possible CSRF)")
         return RedirectResponse(url="/?error=invalid_state")
 
@@ -195,14 +231,28 @@ async def callback(request: Request, code: str = "", state: str = "", error: str
     bot = request.app.state.bot
     await bot.db_manager.upsert_user(user_id, username, avatar_url)
 
-    # Store minimal data in session cookie
-    # Only user_id and token_expires_at - this fits easily in 4KB
-    request.session["user_id"] = user_id
-    request.session["token_expires_at"] = int(time.time()) + expires_in
+    # Create server-side session
+    session_id = generate_session_id()
+    token_expires_at = int(time.time()) + expires_in
 
-    logger.info(f"User {user_id} ({username}) logged in successfully")
+    # Get refresh token from response
+    refresh_token = tokens.get("refresh_token", "")
 
-    return RedirectResponse(url="/settings.html", status_code=302)
+    await bot.db_manager.create_session(
+        session_id=session_id,
+        user_id=user_id,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_expires_at=token_expires_at
+    )
+
+    logger.info(f"User {user_id} ({username}) logged in successfully, session {session_id[:8]}...")
+
+    # Set session cookie, clear OAuth state cookie, and redirect to index
+    response = RedirectResponse(url="/index.html", status_code=302)
+    set_session_cookie(response, session_id)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+    return response
 
 
 @router.get("/me")
@@ -210,20 +260,21 @@ async def get_current_user(request: Request) -> JSONResponse:
     """Get the currently logged-in user's info.
 
     Fetches user profile from database (permanent memory).
-    Checks if Discord auth has expired based on token_expires_at.
+    Session validity and token refresh is handled by middleware.
 
     Args:
         request: The incoming request.
 
     Returns:
-        JSON with user info (id, username, avatar, needs_reauth) or 401 if not logged in.
+        JSON with user info (id, username, avatar) or 401 if not logged in.
     """
-    # DEV_MODE: Return mock current user
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock current user for UI testing
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_current_user())
 
-    user_id = request.session.get("user_id")
+    # user_id is set by session middleware
+    user_id = getattr(request.state, "user_id", None)
     if not user_id:
         return JSONResponse(
             status_code=401,
@@ -235,54 +286,64 @@ async def get_current_user(request: Request) -> JSONResponse:
     user = await bot.db_manager.get_user(user_id)
 
     if not user:
-        # User ID in cookie but not in database - shouldn't happen, but handle it
+        # User ID in session but not in database - shouldn't happen, but handle it
         logger.warning(f"User {user_id} in session but not in database")
-        request.session.clear()
         return JSONResponse(
             status_code=401,
             content={"error": "Not authenticated"},
         )
 
-    # Check if Discord auth has expired
-    token_expires_at = request.session.get("token_expires_at", 0)
-    needs_reauth = time.time() > token_expires_at
-
     # Get user's timezone from reminders settings
     user_tz = await bot.db_manager.get_user_timezone(user_id)
 
     response = {
-        "id": user["user_id"],
+        "id": str(user["user_id"]),  # String to avoid JS precision loss
         "username": user["username"],
         "avatar": user["avatar"],
-        "needs_reauth": needs_reauth,
         "timezone": _to_display_format(user_tz),
         "hasTimezone": user_tz is not None,
     }
-
-    if needs_reauth:
-        response["reauth_message"] = "Discord wants to check it's still you - please log in again!"
 
     return JSONResponse(content=response)
 
 
 @router.get("/logout")
-async def logout(request: Request) -> RedirectResponse:
-    """Log out the current user by clearing their session.
+async def logout(request: Request, clear: str = "") -> RedirectResponse:
+    """Log out the current user.
+
+    With clear=true, deletes ALL sessions for the user.
+    Otherwise, only deletes the current session.
 
     Args:
         request: The incoming request.
+        clear: If "true", delete all user sessions.
 
     Returns:
         Redirect to home page.
     """
-    request.session.clear()
-    return RedirectResponse(url="/")
+    bot = request.app.state.bot
+    user_id = getattr(request.state, "user_id", None)
+    session_id = getattr(request.state, "session_id", None)
+
+    if user_id and clear == "true":
+        # Clear all sessions for user
+        await bot.db_manager.delete_user_sessions(user_id)
+        logger.info(f"User {user_id} logged out and cleared all sessions")
+    elif session_id:
+        # Delete only this session
+        await bot.db_manager.delete_session(session_id)
+        logger.info(f"Session {session_id[:8]}... logged out")
+
+    response = RedirectResponse(url="/")
+    clear_session_cookie(response)
+    return response
 
 
 async def get_user_id(request: Request) -> int | None:
-    """Extract the user ID from the session.
+    """Extract the user ID from the request state.
 
     This is a helper function for use in route handlers.
+    The user_id is set by the session middleware.
 
     Args:
         request: The incoming request.
@@ -290,7 +351,9 @@ async def get_user_id(request: Request) -> int | None:
     Returns:
         User ID if logged in, None otherwise.
     """
-    return request.session.get("user_id")
+    user_id = getattr(request.state, "user_id", None)
+    logger.debug(f"get_user_id: request.state.user_id = {user_id}")
+    return user_id
 
 
 async def get_user_guilds(request: Request) -> list[int]:
@@ -316,7 +379,7 @@ async def get_user_guilds(request: Request) -> list[int]:
     if hasattr(request.state, '_user_guilds'):
         return request.state._user_guilds
 
-    user_id = request.session.get("user_id")
+    user_id = getattr(request.state, "user_id", None)
     if not user_id:
         return []
 

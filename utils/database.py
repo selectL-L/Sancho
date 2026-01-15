@@ -191,6 +191,16 @@ class DatabaseManager:
                         username TEXT NOT NULL,
                         avatar TEXT,
                         last_seen INTEGER NOT NULL
+                    )''',
+                "web_sessions": '''CREATE TABLE IF NOT EXISTS web_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        access_token TEXT NOT NULL,
+                        refresh_token TEXT NOT NULL,
+                        token_expires_at INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        last_seen_at INTEGER NOT NULL,
+                        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
                     )'''
             }
 
@@ -212,6 +222,8 @@ class DatabaseManager:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility(guild_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries(guild_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_last_seen ON web_sessions(last_seen_at)")
 
             await db.commit()
 
@@ -231,7 +243,8 @@ class DatabaseManager:
                 "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
                 "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"},
-                "users": {"user_id", "username", "avatar", "last_seen"}
+                "users": {"user_id", "username", "avatar", "last_seen"},
+                "web_sessions": {"session_id", "user_id", "access_token", "refresh_token", "token_expires_at", "created_at", "last_seen_at"}
             }
 
             schema_issues = []
@@ -965,12 +978,14 @@ class DatabaseManager:
         Returns:
             List of slot strings in format "day-HHMM" (e.g., "mon-0930").
         """
+        logger.debug(f"schedule_get_availability: querying for user_id={user_id} (type={type(user_id).__name__})")
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
                 "SELECT slot FROM schedule_availability WHERE user_id = ? ORDER BY slot",
                 (user_id,)
             )
-            rows = await cursor.fetchall()
+            rows = list(await cursor.fetchall())
+            logger.debug(f"schedule_get_availability: found {len(rows)} slots for user_id={user_id}")
             return [row[0] for row in rows]
 
     async def schedule_get_availability_updated_at(self, user_id: int) -> Optional[int]:
@@ -1240,6 +1255,154 @@ class DatabaseManager:
             await db.execute("DELETE FROM schedule_user_blacklist WHERE blocked_user_id = ?", (user_id,))
             await db.commit()
         logger.info(f"Deleted all schedule data for user {user_id}")
+
+    # ==========================================================================
+    # WEB SESSION METHODS
+    # Methods for managing web sessions and OAuth tokens. PART OF SCHEDULE COGS METHODS.
+    # ==========================================================================
+
+    async def create_session(
+        self,
+        session_id: str,
+        user_id: int,
+        access_token: str,
+        refresh_token: str,
+        token_expires_at: int
+    ) -> None:
+        """Create a new web session.
+
+        Used By: utils/web/auth.py (OAuth callback)
+
+        Args:
+            session_id: UUID v4 string for this session.
+            user_id: The Discord user ID.
+            access_token: Discord OAuth2 access token.
+            refresh_token: Discord OAuth2 refresh token.
+            token_expires_at: Unix timestamp when access_token expires.
+        """
+        import time
+        now = int(time.time())
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO web_sessions (session_id, user_id, access_token, refresh_token, token_expires_at, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, user_id, access_token, refresh_token, token_expires_at, now, now)
+            )
+            await db.commit()
+
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Get a web session by its ID.
+
+        Used By: utils/web/session_middleware.py
+
+        Args:
+            session_id: The session UUID to look up.
+
+        Returns:
+            Dict with all session fields, or None if not found.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT session_id, user_id, access_token, refresh_token, token_expires_at, created_at, last_seen_at
+                FROM web_sessions WHERE session_id = ?
+                """,
+                (session_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_session_tokens(
+        self,
+        session_id: str,
+        access_token: str,
+        refresh_token: str,
+        token_expires_at: int
+    ) -> None:
+        """Update a session's OAuth tokens after refresh.
+
+        Used By: utils/web/session_middleware.py (token refresh)
+
+        Args:
+            session_id: The session UUID to update.
+            access_token: New Discord access token.
+            refresh_token: New Discord refresh token.
+            token_expires_at: New expiration timestamp.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE web_sessions
+                SET access_token = ?, refresh_token = ?, token_expires_at = ?
+                WHERE session_id = ?
+                """,
+                (access_token, refresh_token, token_expires_at, session_id)
+            )
+            await db.commit()
+
+    async def update_session_last_seen(self, session_id: str) -> None:
+        """Update a session's last_seen_at timestamp.
+
+        Used By: utils/web/session_middleware.py (on every request)
+
+        Args:
+            session_id: The session UUID to update.
+        """
+        import time
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE web_sessions SET last_seen_at = ? WHERE session_id = ?",
+                (int(time.time()), session_id)
+            )
+            await db.commit()
+
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a single web session.
+
+        Used By: utils/web/auth.py (logout, token refresh failure)
+
+        Args:
+            session_id: The session UUID to delete.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM web_sessions WHERE session_id = ?", (session_id,))
+            await db.commit()
+
+    async def delete_user_sessions(self, user_id: int) -> None:
+        """Delete all web sessions for a user.
+
+        Used By: utils/web/auth.py (logout with clear=true)
+
+        Args:
+            user_id: The Discord user ID whose sessions to delete.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM web_sessions WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    async def cleanup_stale_sessions(self, max_age_days: int = 90) -> int:
+        """Delete sessions that haven't been used in a long time.
+
+        Used By: utils/lifecycle.py (bot startup), scheduled task
+
+        Args:
+            max_age_days: Sessions older than this many days are deleted.
+
+        Returns:
+            Number of sessions deleted.
+        """
+        import time
+        cutoff = int(time.time()) - (max_age_days * 24 * 60 * 60)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM web_sessions WHERE last_seen_at < ?",
+                (cutoff,)
+            )
+            await db.commit()
+            return cursor.rowcount
 
     # ==========================================================================
     # SKILLS COG METHODS
@@ -1668,3 +1831,7 @@ class DatabaseManager:
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    # =========================================================================
+    # Web Sessions Table Methods (Server-Side Session Storage)
+    # =========================================================================

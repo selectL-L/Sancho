@@ -2,7 +2,7 @@
 
 This module creates and configures the FastAPI application with:
 - Static file serving for the web UI assets
-- Session management via signed cookies
+- Server-side session management (tokens stored in database)
 - Rate limiting (60 requests/minute per IP)
 - CORS blocking (same-origin only)
 - OAuth2 routes for Discord authentication
@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.sessions import SessionMiddleware
 
 import config
 from utils.web.auth import router as auth_router
 from utils.web.routes import router as api_router
+from utils.web.session_middleware import SessionMiddleware as ServerSessionMiddleware
 
 if TYPE_CHECKING:
     from utils.bot_class import CoreBot
@@ -111,17 +111,9 @@ def create_app(bot: "CoreBot") -> FastAPI:
 
         return await call_next(request)
 
-    # Session middleware using signed cookies (stateless)
-    # path="/" ensures cookie is sent for all routes
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=config.WEB_SESSION_SECRET,
-        session_cookie="schedule_session",
-        max_age=7 * 24 * 60 * 60,  # 7 days
-        same_site="lax",
-        https_only=not config.DEV_MODE,  # HTTPS required in production, HTTP allowed in dev
-        path="/",
-    )
+    # Server-side session middleware
+    # Stores tokens in database, only session_id in cookie
+    app.add_middleware(ServerSessionMiddleware)
 
     # API routes
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
@@ -133,8 +125,15 @@ def create_app(bot: "CoreBot") -> FastAPI:
 
     @app.on_event("startup")
     async def on_startup() -> None:
-        """Log server startup."""
+        """Log server startup and clean stale sessions."""
         logger.info(f"Web server started on {config.WEB_HOST}:{config.WEB_PORT}")
+        # Clean up sessions that haven't been used in 90 days
+        try:
+            deleted = await bot.db_manager.cleanup_stale_sessions(max_age_days=90)  # type: ignore[union-attr]
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} stale web sessions")
+        except Exception as e:
+            logger.warning(f"Failed to clean stale sessions: {e}")
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:

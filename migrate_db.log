@@ -1,0 +1,53 @@
+2026-01-15 01:09:13,472 - INFO - Found 'Shion.db'. Migrating/Upgrading in-place.
+2026-01-15 01:09:13,472 - INFO - Backing up source database to 'C:\Users\sayhi\Documents\VSWorkspaces\Shiori\assets\Shion.db.backup'...
+2026-01-15 01:09:13,473 - INFO - Backup successful.
+2026-01-15 01:09:13,474 - INFO - Reading data from backup database...
+2026-01-15 01:09:13,484 - INFO - ...reading from table 'skills'
+2026-01-15 01:09:13,485 - INFO - ...reading from table 'skill_aliases'
+2026-01-15 01:09:13,485 - INFO - ...reading from table 'reminders'
+2026-01-15 01:09:13,485 - INFO - ...reading from table 'schedule_availability'
+2026-01-15 01:09:13,486 - INFO - ...reading from table 'schedule_availability_meta'
+2026-01-15 01:09:13,486 - INFO - ...reading from table 'schedule_guild_visibility'
+2026-01-15 01:09:13,486 - INFO - ...reading from table 'schedule_user_blacklist'
+2026-01-15 01:09:13,487 - INFO - ...reading from table 'user_settings'
+2026-01-15 01:09:13,487 - INFO - ...reading from table 'bot_settings'
+2026-01-15 01:09:13,487 - INFO - ...reading from table 'guild_settings'
+2026-01-15 01:09:13,488 - INFO - ...reading from table 'starboard_entries'
+2026-01-15 01:09:13,488 - INFO - ...reading from table 'bod_players'
+2026-01-15 01:09:13,488 - INFO - ...reading from table 'bod_leaderboard'
+2026-01-15 01:09:13,489 - INFO - ...reading from table 'proxy_usage'
+2026-01-15 01:09:13,489 - INFO - ...reading from table 'users'
+2026-01-15 01:09:13,489 - INFO - ...reading from table 'web_sessions'
+2026-01-15 01:09:13,490 - INFO - Creating new database at 'C:\Users\sayhi\Documents\VSWorkspaces\Shiori\assets\Shion.db' with updated schema...
+2026-01-15 01:09:13,490 - INFO - ...creating table 'skills'
+2026-01-15 01:09:13,496 - INFO - ...creating table 'skill_aliases'
+2026-01-15 01:09:13,501 - INFO - ...creating table 'reminders'
+2026-01-15 01:09:13,505 - INFO - ...creating table 'schedule_availability'
+2026-01-15 01:09:13,509 - INFO - ...creating table 'schedule_availability_meta'
+2026-01-15 01:09:13,512 - INFO - ...creating table 'schedule_guild_visibility'
+2026-01-15 01:09:13,516 - INFO - ...creating table 'schedule_user_blacklist'
+2026-01-15 01:09:13,520 - INFO - ...creating table 'user_settings'
+2026-01-15 01:09:13,523 - INFO - ...creating table 'bot_settings'
+2026-01-15 01:09:13,527 - INFO - ...creating table 'guild_settings'
+2026-01-15 01:09:13,530 - INFO - ...creating table 'starboard_entries'
+2026-01-15 01:09:13,534 - INFO - ...creating table 'bod_players'
+2026-01-15 01:09:13,537 - INFO - ...creating table 'bod_leaderboard'
+2026-01-15 01:09:13,540 - INFO - ...creating table 'proxy_usage'
+2026-01-15 01:09:13,544 - INFO - ...creating table 'users'
+2026-01-15 01:09:13,547 - INFO - ...creating table 'web_sessions'
+2026-01-15 01:09:13,551 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders (reminder_time);
+2026-01-15 01:09:13,555 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id);
+2026-01-15 01:09:13,558 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_schedule_availability_user ON schedule_availability (user_id);
+2026-01-15 01:09:13,562 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility (guild_id);
+2026-01-15 01:09:13,565 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);
+2026-01-15 01:09:13,569 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries (guild_id);
+2026-01-15 01:09:13,573 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id);
+2026-01-15 01:09:13,577 - INFO - ...creating index: CREATE INDEX IF NOT EXISTS idx_web_sessions_last_seen ON web_sessions (last_seen_at);
+2026-01-15 01:09:13,581 - INFO - New database created successfully.
+2026-01-15 01:09:13,581 - INFO - Migrating data to new database...
+2026-01-15 01:09:13,582 - INFO - ...migrating 1 rows for table 'users'
+2026-01-15 01:09:13,583 - INFO - ...migrating 1 rows for table 'web_sessions'
+2026-01-15 01:09:13,586 - INFO - Data migration successful!
+2026-01-15 01:09:13,586 - INFO - 
+Migration complete! Your old database is saved as 'C:\Users\sayhi\Documents\VSWorkspaces\Shiori\assets\Shion.db.backup'.
+2026-01-15 01:09:13,586 - INFO - You can now start the bot.

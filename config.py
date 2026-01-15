@@ -95,6 +95,7 @@ def check_and_create_env_file() -> None:
         "OAUTH_CLIENT_ID": "",
         "OAUTH_CLIENT_SECRET": "",
         "OAUTH_REDIRECT_URI": "",
+        "WEB_MOCK_DATA": "False",
         # DEBUGGING
         "DEV_MODE": "False",
         "DEV_GUILD": "",
@@ -205,6 +206,10 @@ def check_and_create_env_file() -> None:
             "# (Required if WEB_ENABLED) OAuth callback URL.\n"
             "# Must match exactly in Discord Developer Portal.\n"
             "# Example: http://localhost:8000/auth/callback",
+        "WEB_MOCK_DATA":
+            "# (Optional) Return mock/fake data from web APIs for UI testing.\n"
+            "# Separate from DEV_MODE so you can have debug logging without mock data.\n"
+            "# Default: False. Only set True when testing the web UI without real data.",
         # DEBUGGING
         "DEV_MODE":
             "# (Optional) Developer mode restricts the bot to OWNER_ID only.\n"
@@ -381,6 +386,9 @@ if WEB_ENABLED and not all(_web_required):
 # =============================================================================
 raw_dev_mode = os.getenv('DEV_MODE', 'False')
 DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
+
+raw_web_mock = os.getenv('WEB_MOCK_DATA', 'False')
+WEB_MOCK_DATA = raw_web_mock.lower() in ('true', '1', 't')
 
 raw_dev_guild = os.getenv('DEV_GUILD')
 DEV_GUILD: Optional[int] = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None

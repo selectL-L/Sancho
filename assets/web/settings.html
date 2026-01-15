@@ -4,179 +4,467 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settings</title>
-  <link rel="stylesheet" href="tailwind.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
   <style>
-    /* ========== THEME COLOR (set dynamically, defaults to purple) ========== */
+    /*
+     * Settings V3 - Unified with Index V5.2
+     * Native resolution: 1440p (2560×1440)
+     * Everything scales proportionally via root font-size
+     */
+
+    /* ========== SCALING ========== */
+    html {
+      font-size: clamp(12px, 0.75vw, 28px);
+    }
+
+    /* ========== CSS VARIABLES ========== */
     :root {
+      /* Theme color (set dynamically from API) */
       --theme-r: 147;
       --theme-g: 51;
       --theme-b: 234;
-    }
 
-    /* ========== RESPONSIVE SCALING ========== */
-    html {
-      font-size: clamp(15px, 0.9vw + 8px, 20px);
+      /* Grid dimensions - matching V5.2 */
+      --cell-height: 2rem;
+      --cell-width: 9.75rem;
+      --time-label-width: 4rem;
+      --header-row-height: 3.5rem;
+
+      /* Sidebar */
+      --sidebar-width: 20rem;
+
+      /* Spacing */
+      --unit-gap: 1rem;
+      --page-padding: 1.25rem;
+      --card-radius: 1rem;
+
+      /* Computed grid width */
+      --grid-width: calc(var(--time-label-width) + (var(--cell-width) * 7));
     }
 
     /* ========== DARK MODE ========== */
     .dark {
-      --bg-page: #09090b;
-      --bg-card: #18181b;
-      --bg-card-hover: #1f1f23;
-      --bg-input: #27272a;
-      
-      --text-primary: #fafafa;
+      --bg-page: #08080a;
+      --bg-card: #111114;
+      --bg-card-elevated: #1a1a1e;
+      --bg-input: #1e1e22;
+
+      --text-primary: #f4f4f5;
       --text-secondary: #a1a1aa;
-      --text-muted: #71717a;
-      
-      --border-default: rgba(63, 63, 70, 0.5);
-      --border-subtle: rgba(63, 63, 70, 0.25);
-      
-      --heatmap-0: transparent;
+      --text-muted: #63636b;
+
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --border-default: rgba(255, 255, 255, 0.10);
+      --border-subtle: rgba(255, 255, 255, 0.05);
+
       --heatmap-available: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.70);
-      
-      --glass-bg: rgba(39, 39, 42, 0.7);
-      --glass-border: rgba(63, 63, 70, 0.3);
-      
-      --hover-overlay: rgba(255, 255, 255, 0.05);
-      --scrollbar-thumb: #3f3f46;
-      --scrollbar-thumb-hover: #52525b;
-      
+
+      --glass-bg: rgba(17, 17, 20, 0.85);
+      --glass-border: rgba(255, 255, 255, 0.08);
+
+      --shadow-soft: 0 0.5rem 2rem rgba(0, 0, 0, 0.5);
+
       --danger-bg: rgba(239, 68, 68, 0.12);
       --danger-border: rgba(239, 68, 68, 0.25);
       --danger-text: #fca5a5;
       --danger-hover-bg: rgba(239, 68, 68, 0.20);
-
-      --warning-bg: rgba(251, 191, 36, 0.15);
-      --warning-border: rgba(251, 191, 36, 0.3);
-      --warning-text: #fbbf24;
-
-      --skeleton-base: #27272a;
     }
 
     /* ========== LIGHT MODE ========== */
     .light {
-      --bg-page: #f4f4f5;
+      --bg-page: #f5f5f7;
       --bg-card: #ffffff;
-      --bg-card-hover: #fafafa;
-      --bg-input: #f4f4f5;
-      
+      --bg-card-elevated: #ffffff;
+      --bg-input: #ececef;
+
       --text-primary: #18181b;
       --text-secondary: #52525b;
-      --text-muted: #71717a;
-      
-      --border-default: rgba(0, 0, 0, 0.12);
-      --border-subtle: rgba(0, 0, 0, 0.06);
-      
-      --heatmap-0: transparent;
+      --text-muted: #a1a1aa;
+
+      --border-strong: rgba(0, 0, 0, 0.15);
+      --border-default: rgba(0, 0, 0, 0.10);
+      --border-subtle: rgba(0, 0, 0, 0.05);
+
       --heatmap-available: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.65);
-      
-      --glass-bg: rgba(255, 255, 255, 0.85);
+
+      --glass-bg: rgba(255, 255, 255, 0.9);
       --glass-border: rgba(0, 0, 0, 0.08);
-      
-      --hover-overlay: rgba(0, 0, 0, 0.04);
-      --scrollbar-thumb: #d4d4d8;
-      --scrollbar-thumb-hover: #a1a1aa;
-      
+
+      --shadow-soft: 0 0.5rem 2rem rgba(0, 0, 0, 0.1);
+
       --danger-bg: rgba(239, 68, 68, 0.08);
       --danger-border: rgba(239, 68, 68, 0.20);
       --danger-text: #dc2626;
       --danger-hover-bg: rgba(239, 68, 68, 0.15);
-
-      --warning-bg: rgba(251, 191, 36, 0.12);
-      --warning-border: rgba(251, 191, 36, 0.25);
-      --warning-text: #b45309;
-
-      --skeleton-base: #e4e4e7;
     }
 
-    /* ========== BASE STYLES ========== */
+    /* ========== RESET ========== */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
     body {
-      background-color: var(--bg-page);
+      font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+      background: var(--bg-page);
       color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
     }
 
-    * {
-      transition-property: background-color, border-color, color, box-shadow, filter;
-      transition-duration: 200ms;
-      transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    /* ========== PAGE STRUCTURE ========== */
+    .page {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: var(--page-padding);
+      gap: var(--page-padding);
     }
 
-    /* ========== COMPONENTS ========== */
-    .card {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+    /* ========== PAGE HEADER ========== */
+    .page-header {
+      width: calc(var(--grid-width) + var(--unit-gap) + var(--sidebar-width));
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
     }
 
-    .glass {
-      background: var(--glass-bg);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--glass-border);
+    .page-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
     }
 
-    .text-primary { color: var(--text-primary); }
-    .text-secondary { color: var(--text-secondary); }
-    .text-muted { color: var(--text-muted); }
-
-    /* ========== WARNING/BLOCKED STATE ========== */
-    .warning-banner {
-      background: var(--warning-bg);
-      border: 1px solid var(--warning-border);
-      color: var(--warning-text);
-    }
-
-    .blocked-overlay {
-      position: absolute;
-      inset: 0;
-      background: var(--bg-card);
-      opacity: 0.95;
-      z-index: 20;
+    .back-btn {
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 0.75rem;
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 0.625rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: all 150ms ease;
     }
 
-    .blocked-overlay.hidden {
+    .back-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+      color: var(--text-primary);
+    }
+
+    .back-btn svg {
+      width: 1.125rem;
+      height: 1.125rem;
+    }
+
+    .page-header-title {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+    }
+
+    .page-header-title h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+    }
+
+    .page-header-title .bot-credit {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .page-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+    }
+
+    /* ========== CONTROL ELEMENTS ========== */
+    .tz-badge {
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.625rem;
+      padding: 0.5rem 0.875rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 200ms ease;
+    }
+
+    .tz-badge svg {
+      width: 1rem;
+      height: 1rem;
+      color: var(--text-muted);
+    }
+
+    .tz-badge span {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+
+    .theme-toggle {
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.625rem;
+      padding: 0.5rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 200ms ease;
+    }
+
+    .theme-toggle:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .theme-toggle svg {
+      width: 1.125rem;
+      height: 1.125rem;
+      color: var(--text-secondary);
+    }
+
+    .dark .theme-toggle .icon-sun { display: block; }
+    .dark .theme-toggle .icon-moon { display: none; }
+    .light .theme-toggle .icon-sun { display: none; }
+    .light .theme-toggle .icon-moon { display: block; }
+
+    /* ========== MAIN UNIT ========== */
+    .main-unit {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      justify-content: center;
+    }
+
+    .unit-inner {
+      display: flex;
+      gap: var(--unit-gap);
+      height: 100%;
+    }
+
+    /* ========== GRID CARD ========== */
+    .grid-card {
+      width: var(--grid-width);
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--card-radius);
+      box-shadow: var(--shadow-soft);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ========== GRID HEADER ROW ========== */
+    .grid-header {
+      display: grid;
+      grid-template-columns: var(--time-label-width) repeat(7, var(--cell-width));
+      flex-shrink: 0;
+    }
+
+    .header-cell {
+      height: var(--header-row-height);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-bottom: 2px solid var(--border-strong);
+    }
+
+    .header-cell.time-corner {
+      justify-content: flex-end;
+      padding-right: 0.5rem;
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .header-cell.day-header {
+      flex-direction: column;
+      border-left: 1px solid var(--border-strong);
+    }
+
+    .header-cell.day-header:last-child {
+      border-right: 1px solid var(--border-strong);
+    }
+
+    .header-cell .today-tag {
+      font-size: 0.5625rem;
+      font-weight: 600;
+      color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      height: 0.875rem;
+    }
+
+    .header-cell .day-name {
+      font-size: 0.9375rem;
+      font-weight: 500;
+    }
+
+    .header-cell .day-date {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      margin-top: 0.125rem;
+    }
+
+    /* ========== GRID SCROLL CONTAINER ========== */
+    .grid-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: none;
+    }
+
+    .grid-scroll::-webkit-scrollbar {
       display: none;
     }
 
-    .blocked-message {
-      text-align: center;
-      padding: 2rem;
+    /* ========== GRID BODY ========== */
+    .grid-body {
+      display: grid;
+      grid-template-columns: var(--time-label-width) repeat(7, var(--cell-width));
     }
 
-    /* ========== AVATAR WITH FALLBACK ========== */
-    .avatar {
-      background: var(--bg-input);
+    /* ========== TIME LABELS ========== */
+    .time-label {
+      height: var(--cell-height);
       display: flex;
       align-items: center;
-      justify-content: center;
-      color: var(--text-muted);
+      justify-content: flex-end;
+      padding-right: 0.625rem;
+      font-size: 0.8125rem;
       font-weight: 500;
+      color: transparent;
       text-transform: uppercase;
-      overflow: hidden;
-    }
-    .avatar img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
+      letter-spacing: 0.02em;
+      position: relative;
     }
 
-    /* ========== INPUTS ========== */
-    .input {
-      background-color: var(--bg-input);
-      border: 1px solid var(--border-default);
-      color: var(--text-primary);
+    .time-label.hour {
+      color: var(--text-secondary);
     }
-    .input::placeholder {
+
+    /* Hour marker line */
+    .time-label.hour:not(:first-child)::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: var(--border-default);
+    }
+
+    /* ========== GRID CELLS ========== */
+    .grid-cell {
+      height: var(--cell-height);
+      border-left: 1px solid var(--border-strong);
+      background: var(--cell-bg, transparent);
+      cursor: pointer;
+      position: relative;
+      transition: filter 150ms ease;
+    }
+
+    .grid-cell:nth-child(8n) {
+      border-right: 1px solid var(--border-strong);
+    }
+
+    .grid-cell:hover {
+      filter: brightness(1.3);
+      z-index: 5;
+    }
+
+    /* Hour start rows */
+    .grid-cell.hour-start {
+      border-top: 1px solid var(--border-default);
+    }
+
+    /* Half hour rows */
+    .grid-cell.half-hour {
+      border-top: 1px dashed var(--border-subtle);
+    }
+
+    /* Last row */
+    .grid-body .grid-cell:nth-last-child(-n+7) {
+      border-bottom: 2px solid var(--border-strong);
+    }
+
+    /* Cell states */
+    .grid-cell.available {
+      --cell-bg: var(--heatmap-available);
+    }
+
+    .grid-cell.unavailable {
+      --cell-bg: transparent;
+    }
+
+    /* Cell pulse animation */
+    @keyframes cell-pulse {
+      0% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
+      50% { box-shadow: inset 0 0 0.625rem 0.125rem rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6); }
+      100% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
+    }
+
+    .grid-cell.pulse {
+      animation: cell-pulse 300ms ease-out;
+    }
+
+    /* Current time indicator */
+    .time-indicator {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: #ef4444;
+      box-shadow: 0 0 0.5rem rgba(239, 68, 68, 0.6);
+      z-index: 15;
+      pointer-events: none;
+    }
+
+    .time-indicator::before {
+      content: 'Now';
+      position: absolute;
+      top: -0.875rem;
+      left: 0.25rem;
+      font-size: 0.5625rem;
+      color: #ef4444;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* ========== GRID FOOTER ========== */
+    .grid-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border-default);
+      flex-shrink: 0;
+    }
+
+    .grid-footer-tip {
+      font-size: 0.75rem;
       color: var(--text-muted);
     }
-    .input:focus {
-      outline: none;
-      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
-      box-shadow: 0 0 0 3px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.1);
+
+    .grid-footer-actions {
+      display: flex;
+      gap: 0.5rem;
     }
 
     /* ========== BUTTONS ========== */
@@ -184,24 +472,34 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      gap: 0.375rem;
+      font-family: inherit;
+      font-size: 0.8125rem;
       font-weight: 500;
-      border-radius: 0.75rem;
-      transition: all 150ms;
+      padding: 0.5rem 1rem;
+      border-radius: 0.625rem;
+      cursor: pointer;
+      transition: all 150ms ease;
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.25));
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.25)
+      );
       border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
       color: var(--text-primary);
     }
+
     .btn-primary:hover:not(:disabled) {
-      background: linear-gradient(135deg, rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.45), rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35));
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.45),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35)
+      );
       border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
       transform: translateY(-1px);
     }
-    .btn-primary:active {
-      transform: translateY(0);
-    }
+
     .btn-primary:disabled {
       opacity: 0.5;
       cursor: not-allowed;
@@ -212,9 +510,10 @@
       border: 1px solid var(--border-default);
       color: var(--text-secondary);
     }
+
     .btn-ghost:hover {
-      background: var(--hover-overlay);
-      border-color: var(--border-default);
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
       color: var(--text-primary);
     }
 
@@ -223,56 +522,290 @@
       border: 1px solid var(--danger-border);
       color: var(--danger-text);
     }
+
     .btn-danger:hover:not(:disabled) {
       background: var(--danger-hover-bg);
     }
-    .btn-danger:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+
+    .btn-sm {
+      font-size: 0.75rem;
+      padding: 0.375rem 0.75rem;
     }
 
-    /* ========== TOGGLE SWITCH ========== */
-    .toggle-switch {
-      position: relative;
-      width: 2.75rem;
-      height: 1.5rem;
-      background: var(--bg-input);
-      border: 1px solid var(--border-default);
-      border-radius: 0.75rem;
-      cursor: pointer;
+    .btn svg {
+      width: 1rem;
+      height: 1rem;
+    }
+
+    /* ========== SIDEBAR ========== */
+    .sidebar {
+      width: var(--sidebar-width);
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    /* User pill */
+    .user-pill {
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.06)
+      );
+      border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2);
+      border-radius: 2rem;
+      padding: 0.5rem 0.875rem 0.5rem 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
       flex-shrink: 0;
     }
+
+    .avatar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      overflow: hidden;
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15)
+      );
+      flex-shrink: 0;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .user-pill .avatar {
+      width: 2rem;
+      height: 2rem;
+      font-size: 0.75rem;
+      box-shadow: 0 0 0 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+    }
+
+    .user-pill-text {
+      flex: 1;
+      font-size: 1.2rem;
+      font-weight: 500;
+      color: var(--text-primary);
+	  text-align: center;
+    }
+
+    /* Sidebar cards */
+    .sidebar-card {
+      background: var(--glass-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--glass-border);
+      border-radius: 0.875rem;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .sidebar-card.flex-1 {
+      flex: 1;
+    }
+
+    .sidebar-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.25rem;
+      flex-shrink: 0;
+    }
+
+    .sidebar-card-header h3 {
+      font-size: 1.25rem;
+      font-weight: 500;
+    }
+
+    .sidebar-card-header .count {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .sidebar-card-subtitle {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .sidebar-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      position: relative;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar {
+      width: 0.25rem;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .sidebar-scroll::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 0.125rem;
+    }
+
+    .light .sidebar-scroll::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.15);
+    }
+
+    /* List items */
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.375rem;
+      border-radius: 0.375rem;
+      transition: background 150ms ease;
+    }
+
+    .list-item:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .light .list-item:hover {
+      background: rgba(0, 0, 0, 0.03);
+    }
+
+    .list-item-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 0;
+    }
+
+    .list-item-icon {
+      width: 1.625rem;
+      height: 1.625rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-input);
+      font-size: 0.5625rem;
+      color: var(--text-muted);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .list-item-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .list-item-name {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .list-empty {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      padding: 0.5rem 0;
+      text-align: center;
+    }
+
+    /* Toggle switch */
+    .toggle-switch {
+      position: relative;
+      width: 2.5rem;
+      height: 1.375rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.6875rem;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 200ms ease;
+    }
+
     .toggle-switch.active {
       background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
       border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
     }
+
     .toggle-switch::after {
       content: '';
       position: absolute;
       top: 0.125rem;
       left: 0.125rem;
-      width: 1.125rem;
-      height: 1.125rem;
+      width: 1rem;
+      height: 1rem;
       background: var(--text-primary);
       border-radius: 50%;
       transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
     }
+
     .toggle-switch.active::after {
-      transform: translateX(1.25rem);
+      transform: translateX(1.125rem);
     }
 
-    /* ========== CELL PULSE ANIMATION ========== */
-    @keyframes cell-pulse {
-      0% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
-      50% { box-shadow: inset 0 0 10px 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6); }
-      100% { box-shadow: inset 0 0 0 0 rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0); }
-    }
-    .grid-cell.pulse {
-      animation: cell-pulse 300ms ease-out;
+    /* Small action button */
+    .action-btn {
+      font-family: inherit;
+      font-size: 0.6875rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 150ms ease;
     }
 
-    /* ========== TOAST NOTIFICATIONS ========== */
+    .action-btn:hover {
+      color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .action-btn.danger:hover {
+      color: var(--danger-text);
+      background: var(--danger-bg);
+    }
+
+    /* Danger zone card */
+    .danger-card {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      border-radius: 0.875rem;
+      padding: 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .danger-card h3 {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--danger-text);
+      margin-bottom: 0.25rem;
+    }
+
+    .danger-card p {
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    /* ========== TOAST ========== */
     .toast-container {
       position: fixed;
       top: 1rem;
@@ -281,775 +814,621 @@
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
-      pointer-events: none;
     }
+
     .toast {
-      background: var(--glass-bg);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--glass-border);
-      border-radius: 0.75rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: 0.625rem;
       padding: 0.75rem 1rem;
       display: flex;
       align-items: center;
-      gap: 0.625rem;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      transform: translateX(120%);
-      opacity: 0;
-      transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease;
-      pointer-events: auto;
-      max-width: 20rem;
+      gap: 0.5rem;
+      box-shadow: var(--shadow-soft);
+      animation: toast-in 300ms ease;
     }
-    .toast.show {
-      transform: translateX(0);
-      opacity: 1;
-    }
+
     .toast.hiding {
-      transform: translateX(120%);
-      opacity: 0;
+      animation: toast-out 200ms ease forwards;
     }
-    .toast-icon {
-      width: 1.25rem;
-      height: 1.25rem;
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(1rem); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes toast-out {
+      from { opacity: 1; transform: translateX(0); }
+      to { opacity: 0; transform: translateX(1rem); }
+    }
+
+    .toast svg {
+      width: 1rem;
+      height: 1rem;
       flex-shrink: 0;
     }
-    .toast-message {
-      font-size: 0.875rem;
-      color: var(--text-primary);
-    }
-    .toast.success { border-left: 3px solid #22c55e; }
-    .toast.success .toast-icon { color: #22c55e; }
-    .toast.error { border-left: 3px solid #ef4444; }
-    .toast.error .toast-icon { color: #ef4444; }
-    .toast.info { border-left: 3px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.8); }
-    .toast.info .toast-icon { color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 1); }
 
-    /* ========== GRID STYLES ========== */
-    .grid-cell {
-      position: relative;
-      user-select: none;
-    }
-    
-    .dark .grid-cell:hover {
-      filter: brightness(1.2);
-    }
-    .light .grid-cell:hover {
-      filter: brightness(0.9);
+    .toast.success svg { color: #22c55e; }
+    .toast.error svg { color: #ef4444; }
+    .toast.info svg { color: var(--text-muted); }
+
+    .toast span {
+      font-size: 0.8125rem;
     }
 
-    .grid-cell.available {
-      background-color: var(--heatmap-available);
-    }
-    .grid-cell.unavailable {
-      background-color: var(--heatmap-0);
-    }
-
-    .row-hour {
-      border-bottom: 1px dashed var(--border-default);
-    }
-    .row-hour-label {
-      border-top: 2px solid var(--border-default);
-      margin-left: auto;
-      width: 2.5rem;
-    }
-    .row-quarter {
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .col-separator {
-      border-right: 1px solid var(--border-subtle);
-    }
-    .grid-border {
-      border-color: var(--border-default);
+    /* ========== MODALS ========== */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
     }
 
-    .grid-scroll {
-      max-height: 50vh;
-      overflow-y: auto;
+    .modal-backdrop.visible {
+      display: flex;
     }
 
-    .cell-h {
-      height: 1.25rem;
+    .modal {
+      background: var(--glass-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--glass-border);
+      border-radius: 1rem;
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 24rem;
+      margin: 1rem;
+      box-shadow: var(--shadow-soft);
     }
 
-    /* ========== CURRENT TIME INDICATOR ========== */
-    .time-indicator {
-      position: absolute;
-      left: 0;
-      right: 0;
-      height: 2px;
-      background: #ef4444;
-      z-index: 30;
-      pointer-events: none;
-    }
-    .time-indicator::before {
-      content: 'Now';
-      position: absolute;
-      left: -2.5rem;
-      top: 50%;
-      transform: translateY(-50%);
-      font-size: 0.625rem;
-      font-weight: 600;
-      color: #ef4444;
-      text-transform: uppercase;
-      letter-spacing: 0.025em;
-    }
-    .time-indicator::after {
-      content: '';
-      position: absolute;
-      left: 0;
-      top: 50%;
-      transform: translateY(-50%);
-      width: 6px;
-      height: 6px;
-      background: #ef4444;
-      border-radius: 50%;
+    .modal.danger {
+      border-color: var(--danger-border);
     }
 
-    /* ========== SCROLLBAR ========== */
-    .grid-scroll::-webkit-scrollbar,
-    ::-webkit-scrollbar {
-      width: 0.375rem;
-    }
-    .grid-scroll::-webkit-scrollbar-track,
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    .grid-scroll::-webkit-scrollbar-thumb,
-    ::-webkit-scrollbar-thumb {
-      background: var(--scrollbar-thumb);
-      border-radius: 0.1875rem;
-    }
-    .grid-scroll::-webkit-scrollbar-thumb:hover,
-    ::-webkit-scrollbar-thumb:hover {
-      background: var(--scrollbar-thumb-hover);
-    }
-
-    /* ========== SYNCHRONIZED SKELETON ========== */
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-
-    .skeleton {
-      background: var(--skeleton-base);
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-
-    /* ========== UTILITY ========== */
-    .hover-item:hover {
-      background: var(--hover-overlay);
-    }
-
-    .theme-toggle {
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-    }
-    .theme-toggle:hover {
-      background: var(--bg-card-hover);
-      border-color: var(--border-default);
-    }
-
-    .danger-zone {
-      background: var(--danger-bg);
-      border: 1px solid var(--danger-border);
-    }
-
-    .section-title {
+    .modal-title {
       font-size: 1.125rem;
+      font-weight: 500;
+      margin-bottom: 0.25rem;
+    }
+
+    .modal.danger .modal-title {
+      color: var(--danger-text);
+    }
+
+    .modal-description {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      margin-bottom: 1rem;
+      line-height: 1.5;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    /* Session modal buttons */
+    .session-options {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .session-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
+      width: 100%;
+      padding: 0.875rem 1rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.75rem;
+      cursor: pointer;
+      transition: all 150ms ease;
+      text-align: left;
+    }
+
+    .session-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .session-btn-title {
+      font-size: 0.9375rem;
       font-weight: 500;
       color: var(--text-primary);
     }
 
-    .section-description {
+    .session-btn-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .session-btn-danger {
+      border-color: var(--danger-border);
+    }
+
+    .session-btn-danger:hover {
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+    }
+
+    .session-btn-danger .session-btn-title {
+      color: var(--danger-text);
+    }
+
+    .input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.75rem;
+      padding: 0.625rem 1rem;
+      font-family: inherit;
+      font-size: 0.875rem;
+      color: var(--text-primary);
+      transition: all 150ms ease;
+    }
+
+    .input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .input:focus {
+      outline: none;
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+      box-shadow: 0 0 0 3px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.1);
+    }
+
+    /* ========== LOGIN REDIRECT OVERLAY ========== */
+    .login-redirect-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-page);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 300ms ease, visibility 300ms ease;
+    }
+
+    .login-redirect-overlay.visible {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .login-redirect-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: 1.5rem;
+      padding: 2.5rem;
+      text-align: center;
+      max-width: 26rem;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .login-redirect-card h2 {
+      font-size: 1.375rem;
+      font-weight: 500;
+      margin-bottom: 0.75rem;
+    }
+
+    .login-redirect-card p {
       font-size: 0.875rem;
       color: var(--text-muted);
-      margin-top: 0.25rem;
+      margin-bottom: 1.5rem;
+      line-height: 1.6;
     }
 
-    .back-btn {
-      color: var(--text-secondary);
-    }
-    .back-btn:hover {
+    .login-redirect-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.25)
+      );
+      border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
       color: var(--text-primary);
-      background: var(--hover-overlay);
+      border-radius: 0.75rem;
+      padding: 0.875rem 1.5rem;
+      font-family: inherit;
+      font-size: 0.9375rem;
+      font-weight: 500;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 150ms ease;
     }
 
-    .tz-badge {
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-      font-size: 0.75rem;
+    .login-redirect-btn:hover {
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.45),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35)
+      );
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
+      transform: translateY(-1px);
+    }
+
+    .login-redirect-btn svg {
+      width: 1.125rem;
+      height: 1.125rem;
     }
   </style>
 </head>
-<body class="dark min-h-screen">
+<body class="dark">
 
-  <!-- Timezone Warning Banner -->
-  <div class="warning-banner px-4 py-3 text-center text-sm hidden" id="tz-warning">
-    <span class="font-medium">⚠️ Set your timezone first!</span>
-    <span class="ml-2 opacity-90">Use <code class="px-1.5 py-0.5 rounded text-xs" style="background: var(--hover-overlay)" id="tz-command">!tz America/New_York</code> in Discord before editing your availability.</span>
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Login Redirect Overlay -->
+  <div class="login-redirect-overlay" id="login-redirect-overlay">
+    <div class="login-redirect-card">
+      <h2>Oops, you're not logged in!</h2>
+      <p>You landed on the settings page without logging in first.<br>Please return to the main page to log in with Discord.</p>
+      <a href="index.html" class="login-redirect-btn">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+        </svg>
+        Go to Availability Tracker
+      </a>
+    </div>
   </div>
-  
-  <div class="max-w-3xl mx-auto px-4 py-8">
-    
-    <!-- Header -->
-    <header class="mb-8">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <a href="index.html" class="back-btn p-2 rounded-xl transition-colors">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
-            </svg>
-          </a>
-          <div>
-            <h1 class="text-2xl font-medium text-primary">Settings</h1>
-            <p class="text-muted text-sm mt-0.5">Manage your availability and privacy</p>
-          </div>
-        </div>
-        <div class="flex items-center gap-3">
-          <!-- Timezone Badge -->
-          <div class="tz-badge rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 text-secondary" id="tz-badge" title="Your timezone">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <span id="tz-display">GMT+0</span>
-          </div>
 
-          <button 
-            onclick="toggleTheme()" 
-            class="theme-toggle p-2.5 rounded-xl text-secondary hover:text-primary"
-            title="Toggle theme"
-          >
-            <svg class="w-5 h-5 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
-            </svg>
-            <svg class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
-            </svg>
-          </button>
+  <div class="page">
+
+    <!-- Page Header -->
+    <header class="page-header">
+      <div class="page-header-left">
+        <a href="index.html" class="back-btn">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+        </a>
+        <div class="page-header-title">
+          <h1>Settings</h1>
+          <!-- Bot name set dynamically from API -->
+          <span class="bot-credit" id="bot-credit"></span>
         </div>
+      </div>
+
+      <div class="page-header-controls">
+        <!-- LEGACY: Empty placeholder for header grid sizing. Remove when layout is refactored. -->
+        <div style="visibility: hidden; width: 0;"></div>
+
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+          <svg class="icon-sun" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+          <svg class="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+        </button>
       </div>
     </header>
 
-    <!-- Account Section -->
-    <section class="glass rounded-2xl p-5 mb-5">
-      <!-- Skeleton -->
-      <div class="flex items-center justify-between" id="account-skeleton">
-        <div class="flex items-center gap-4">
-          <div class="skeleton w-14 h-14 rounded-full"></div>
-          <div class="space-y-2">
-            <div class="skeleton w-32 h-4 rounded"></div>
-            <div class="skeleton w-24 h-3 rounded"></div>
-          </div>
-        </div>
-        <div class="skeleton w-20 h-9 rounded-xl"></div>
-      </div>
-      <!-- Content -->
-      <div class="flex items-center justify-between hidden" id="account-content">
-        <div class="flex items-center gap-4">
-          <div class="avatar w-14 h-14 rounded-full ring-2 ring-purple-500/20 text-lg" id="user-avatar-container">
-            <!-- Avatar initially hidden, shown when src is set -->
-            <img 
-              alt=""
-              id="user-avatar"
-              style="display: none;"
-            >
-          </div>
-          <div>
-            <div class="text-lg font-medium text-primary" id="username">Username</div>
-            <div class="text-sm text-muted">Logged in via Discord</div>
-          </div>
-        </div>
-        <button onclick="logout()" class="btn btn-ghost px-4 py-2 text-sm">
-          Log out
-        </button>
-      </div>
-    </section>
+    <!-- Main Unit -->
+    <main class="main-unit">
+      <div class="unit-inner">
 
-    <!-- Edit Availability Section -->
-    <section class="card rounded-2xl p-5 mb-5 shadow-lg dark:shadow-black/20 light:shadow-black/5 relative">
-      <div class="flex items-center justify-between mb-4">
-        <div>
-          <h2 class="section-title">Your Availability</h2>
-          <p class="section-description">Click and drag to paint when you're free</p>
-        </div>
-        <div class="flex gap-2">
-          <button onclick="clearAllAvailability()" class="btn btn-danger px-3 py-1.5 text-xs" id="clear-btn">
-            Clear all
-          </button>
-          <button onclick="saveAvailability()" class="btn btn-primary px-4 py-1.5 text-sm" id="save-btn">
-            Save changes
-          </button>
-        </div>
-      </div>
-      
-      <!-- Day headers -->
-      <div class="flex mb-0 pr-[6px]">
-        <div class="w-12 shrink-0"></div>
-        <div class="flex-1 grid grid-cols-7 border-x border-t grid-border">
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Mon</div>
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Tue</div>
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Wed</div>
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Thu</div>
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Fri</div>
-          <div class="text-center text-xs font-medium text-secondary py-2 border-r" style="border-color: var(--border-subtle)">Sat</div>
-          <div class="text-center text-xs font-medium text-secondary py-2">Sun</div>
-        </div>
-      </div>
+        <!-- Grid Card -->
+        <div class="grid-card">
 
-      <!-- Grid container -->
-      <div class="grid-scroll">
-        <!-- Skeleton -->
-        <div id="grid-skeleton">
-          <div class="flex">
-            <div class="w-12 shrink-0 flex flex-col" id="skeleton-time-labels"></div>
-            <div class="flex-1 border-x border-b grid-border" id="skeleton-cells"></div>
+          <!-- Grid Header -->
+          <div class="grid-header" id="grid-header">
+            <div class="header-cell time-corner"></div>
+            <!-- Day headers generated by JS -->
           </div>
+
+          <!-- Grid Scroll Container -->
+          <div class="grid-scroll" id="grid-scroll">
+            <div class="grid-body" id="grid-body">
+              <!-- Cells generated by JS -->
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="grid-footer">
+            <span class="grid-footer-tip">Click and drag to paint when you're free</span>
+            <div class="grid-footer-actions">
+              <button onclick="clearAllAvailability()" class="btn btn-danger btn-sm" id="clear-btn">Clear all</button>
+              <button onclick="saveAvailability()" class="btn btn-primary" id="save-btn">Save changes</button>
+            </div>
+          </div>
+
         </div>
 
-        <!-- Content -->
-        <div class="hidden" id="grid-content">
-          <div class="flex">
-            <div class="w-12 shrink-0 flex flex-col" id="time-labels"></div>
-            <div class="flex-1 border-x border-b grid-border relative" id="availability-grid"></div>
-          </div>
-        </div>
-      </div>
+        <!-- Sidebar -->
+        <aside class="sidebar">
 
-      <!-- Blocked overlay (shown when no timezone) -->
-      <div class="blocked-overlay hidden" id="grid-blocked">
-        <div class="blocked-message">
-          <div class="text-3xl mb-3">🕐</div>
-          <p class="text-primary font-medium mb-1">Set your timezone first</p>
-          <p class="text-muted text-sm mb-4">We need to know your timezone to<br>show your availability correctly.</p>
-          <code class="px-3 py-1.5 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border-default);" id="tz-command-overlay">!tz America/New_York</code>
-          <p class="text-xs text-muted mt-2">Run this command in Discord</p>
-        </div>
-      </div>
-
-      <p class="text-xs text-muted mt-4 text-center">Tip: Click and drag to select multiple time slots at once</p>
-    </section>
-
-    <!-- Guild Visibility Section -->
-    <section class="glass rounded-2xl p-5 mb-5">
-      <div class="mb-4">
-        <h2 class="section-title">Guild Visibility</h2>
-        <p class="section-description">Choose which servers can see your availability</p>
-      </div>
-      
-      <!-- Skeleton -->
-      <div class="space-y-2" id="guilds-skeleton">
-        <div class="flex items-center justify-between p-3 rounded-xl">
-          <div class="flex items-center gap-3">
-            <div class="skeleton w-6 h-6 rounded"></div>
-            <div class="skeleton w-40 h-3 rounded"></div>
+          <!-- User Pill -->
+          <div class="user-pill" id="user-pill" onclick="showSessionModal()" style="cursor: pointer;">
+            <div class="avatar" id="user-avatar">?</div>
+            <span class="user-pill-text" id="user-name">Loading...</span>
           </div>
-          <div class="skeleton w-11 h-6 rounded-xl"></div>
-        </div>
-        <div class="flex items-center justify-between p-3 rounded-xl">
-          <div class="flex items-center gap-3">
-            <div class="skeleton w-6 h-6 rounded"></div>
-            <div class="skeleton w-28 h-3 rounded"></div>
-          </div>
-          <div class="skeleton w-11 h-6 rounded-xl"></div>
-        </div>
-        <div class="flex items-center justify-between p-3 rounded-xl">
-          <div class="flex items-center gap-3">
-            <div class="skeleton w-6 h-6 rounded"></div>
-            <div class="skeleton w-32 h-3 rounded"></div>
-          </div>
-          <div class="skeleton w-11 h-6 rounded-xl"></div>
-        </div>
-      </div>
-      <!-- Content -->
-      <div class="space-y-2 hidden" id="guild-list"></div>
-      
-      <p class="text-xs text-muted mt-4">Only members of enabled servers can query your schedule through the bot</p>
-    </section>
 
-    <!-- Blacklist Section -->
-    <section class="glass rounded-2xl p-5 mb-5">
-      <div class="flex items-center justify-between mb-4">
-        <div>
-          <h2 class="section-title">Blocked Users</h2>
-          <p class="section-description">These users cannot see your availability</p>
-        </div>
-        <button onclick="showAddBlockModal()" class="btn btn-ghost px-3 py-1.5 text-xs">
-          <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-          </svg>
-          Add user
-        </button>
-      </div>
-      
-      <!-- Skeleton -->
-      <div class="space-y-2" id="blacklist-skeleton">
-        <div class="flex items-center justify-between p-3 rounded-xl">
-          <div class="flex items-center gap-3">
-            <div class="skeleton w-8 h-8 rounded-full"></div>
-            <div class="skeleton w-28 h-3 rounded"></div>
+          <!-- Guild Visibility -->
+          <div class="sidebar-card flex-1">
+            <div class="sidebar-card-header">
+              <h3>Guild Visibility</h3>
+              <span class="count" id="guild-count"></span>
+            </div>
+            <p class="sidebar-card-subtitle">Who can see your availability</p>
+            <div class="sidebar-scroll" id="guild-list">
+              <!-- Generated by JS -->
+            </div>
           </div>
-          <div class="skeleton w-16 h-6 rounded-lg"></div>
-        </div>
-      </div>
-      <!-- Content -->
-      <div class="space-y-2 hidden" id="blacklist"></div>
-    </section>
 
-    <!-- Danger Zone -->
-    <section class="danger-zone rounded-2xl p-5">
-      <h2 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Danger Zone</h2>
-      <p class="text-sm text-muted mb-4">Permanent actions that cannot be undone</p>
-      
-      <button onclick="deleteAllData()" class="btn btn-danger px-4 py-2 text-sm">
-        Delete all my data
-      </button>
-    </section>
+          <!-- Blocked Users -->
+          <div class="sidebar-card flex-1">
+            <div class="sidebar-card-header">
+              <h3>Blocked Users</h3>
+              <button class="action-btn" onclick="showAddBlockModal()">+ Add</button>
+            </div>
+            <p class="sidebar-card-subtitle">Cannot see your availability</p>
+            <div class="sidebar-scroll" id="blacklist">
+              <!-- Generated by JS -->
+            </div>
+          </div>
+
+          <!-- Danger Zone -->
+          <div class="danger-card">
+            <h3>Danger Zone</h3>
+            <p>Permanent actions that cannot be undone</p>
+            <button onclick="showDeleteDataModal()" class="btn btn-danger btn-sm">Delete all my data</button>
+          </div>
+
+        </aside>
+
+      </div>
+    </main>
 
   </div>
 
-  <!-- Toast Container -->
-  <div id="toast-container" class="toast-container"></div>
-
   <!-- Clear All Confirmation Modal -->
-  <div id="clear-confirm-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
-    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl" style="border: 1px solid var(--danger-border);">
-      <h3 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Clear all availability?</h3>
-      <p class="text-sm text-muted mb-4">This will remove all your saved time slots. This action cannot be undone.</p>
-      <div class="flex gap-3 justify-end">
-        <button onclick="hideClearConfirmModal()" class="btn btn-ghost px-4 py-2 text-sm">
-          Cancel
-        </button>
-        <button onclick="confirmClearAll()" class="btn btn-danger px-4 py-2 text-sm">
-          Clear all
-        </button>
+  <div id="clear-confirm-modal" class="modal-backdrop">
+    <div class="modal danger">
+      <h3 class="modal-title">Clear all availability?</h3>
+      <p class="modal-description">This will remove all your saved time slots. This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button onclick="hideClearConfirmModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="confirmClearAll()" class="btn btn-danger">Clear all</button>
       </div>
     </div>
   </div>
 
   <!-- Delete All Data Modal -->
-  <div id="delete-data-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
-    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl" style="border: 1px solid var(--danger-border);">
-      <h3 class="text-lg font-medium mb-1" style="color: var(--danger-text)">Delete all your data?</h3>
-      <p class="text-sm text-muted mb-4">This will permanently delete your availability, guild settings, and blocked users. This action cannot be undone.</p>
-      <p class="text-xs text-muted mb-3">Type <strong class="text-primary">DELETE</strong> to confirm:</p>
-      <input 
-        type="text" 
-        id="delete-confirm-input"
-        placeholder="Type DELETE"
-        class="input w-full rounded-xl px-4 py-2.5 text-sm mb-4"
-        autocomplete="off"
-      >
-      <div class="flex gap-3 justify-end">
-        <button onclick="hideDeleteDataModal()" class="btn btn-ghost px-4 py-2 text-sm">
-          Cancel
-        </button>
-        <button onclick="confirmDeleteAllData()" class="btn btn-danger px-4 py-2 text-sm" id="delete-confirm-btn" disabled>
-          Delete everything
-        </button>
+  <div id="delete-data-modal" class="modal-backdrop">
+    <div class="modal danger">
+      <h3 class="modal-title">Delete all your data?</h3>
+      <p class="modal-description">This will permanently delete your availability, guild settings, and blocked users. This action cannot be undone.</p>
+      <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Type <strong style="color: var(--text-primary);">DELETE</strong> to confirm:</p>
+      <input type="text" id="delete-confirm-input" placeholder="Type DELETE" class="input" autocomplete="off">
+      <div class="modal-actions">
+        <button onclick="hideDeleteDataModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="confirmDeleteAllData()" class="btn btn-danger" id="delete-confirm-btn" disabled>Delete everything</button>
       </div>
     </div>
   </div>
 
-  <!-- Add user to blacklist modal -->
-  <div id="add-block-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm hidden items-center justify-center z-50">
-    <div class="glass rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
-      <h3 class="text-lg font-medium text-primary mb-1">Block a user</h3>
-      <p class="text-sm text-muted mb-4">They won't be able to see your availability</p>
-      <input 
-        type="text" 
-        id="block-username-input"
-        placeholder="Username or user ID"
-        class="input w-full rounded-xl px-4 py-2.5 text-sm mb-4"
-      >
-      <div class="flex gap-3 justify-end">
-        <button onclick="hideAddBlockModal()" class="btn btn-ghost px-4 py-2 text-sm">
-          Cancel
+  <!-- Add Block Modal -->
+  <div id="add-block-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Block a user</h3>
+      <p class="modal-description">They won't be able to see your availability</p>
+      <input type="text" id="block-username-input" placeholder="Username or user ID" class="input">
+      <div class="modal-actions">
+        <button onclick="hideAddBlockModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="addToBlacklist()" class="btn btn-primary">Block user</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Modal -->
+  <div id="session-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Session</h3>
+      <p class="modal-description">Manage your login session</p>
+      <div class="session-options">
+        <button onclick="doLogout()" class="session-btn">
+          <span class="session-btn-title">Log out</span>
+          <span class="session-btn-subtitle">I'll still try to remember you!</span>
         </button>
-        <button onclick="addToBlacklist()" class="btn btn-primary px-4 py-2 text-sm">
-          Block user
+        <button onclick="doClearSession()" class="session-btn session-btn-danger">
+          <span class="session-btn-title">Clear cookies and log out</span>
+          <span class="session-btn-subtitle">I won't know who you are!</span>
         </button>
+      </div>
+      <div class="modal-actions">
+        <button onclick="hideSessionModal()" class="btn btn-ghost">Cancel</button>
       </div>
     </div>
   </div>
 
   <script>
-    // ========== CONFIG & THEME ==========
+    // ========== CONFIG ==========
     let botName = 'Bot';
-    let botPrefix = '.';
 
     async function loadConfig() {
       try {
-        const response = await fetch('/api/config');
-        if (response.ok) {
-          const config = await response.json();
-          botName = config.botName || 'Bot';
-          botPrefix = config.prefix || '.';
-          document.title = `Settings — ${botName}`;
-          
-          // Update timezone command examples
-          const tzCmd = `${botPrefix}tz America/New_York`;
-          document.getElementById('tz-command').textContent = tzCmd;
-          document.getElementById('tz-command-overlay').textContent = tzCmd;
-          
-          if (config.themeColor) {
-            applyThemeColor(config.themeColor);
+        const res = await fetch('/api/config', { credentials: 'include' });
+        if (res.ok) {
+          const cfg = await res.json();
+          botName = cfg.botName || 'Bot';
+          document.getElementById('bot-credit').textContent = `served to you by ${botName}`;
+
+          if (cfg.themeColor) {
+            const hex = cfg.themeColor.replace('#', '');
+            document.documentElement.style.setProperty('--theme-r', parseInt(hex.slice(0, 2), 16));
+            document.documentElement.style.setProperty('--theme-g', parseInt(hex.slice(2, 4), 16));
+            document.documentElement.style.setProperty('--theme-b', parseInt(hex.slice(4, 6), 16));
           }
         }
       } catch (e) {
-        console.log('Config not available, using defaults');
+        console.error('Failed to load config:', e);
       }
     }
-
-    function applyThemeColor(hex) {
-      const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-      if (result) {
-        const r = parseInt(result[1], 16);
-        const g = parseInt(result[2], 16);
-        const b = parseInt(result[3], 16);
-        document.documentElement.style.setProperty('--theme-r', r);
-        document.documentElement.style.setProperty('--theme-g', g);
-        document.documentElement.style.setProperty('--theme-b', b);
-      }
-    }
-
-    // ========== AUTH ==========
-    window.currentUser = null;
 
     async function loadCurrentUser() {
       try {
-        const response = await fetch('/auth/me');
-        if (response.ok) {
-          const user = await response.json();
-          window.currentUser = user;
-          
-          // Check if re-auth is needed
-          if (user.needs_reauth) {
-            showReauthPrompt(user.reauth_message);
+        const res = await fetch('/auth/me', { credentials: 'include' });
+        if (res.status === 401) {
+          // Not logged in - show redirect overlay
+          document.getElementById('login-redirect-overlay').classList.add('visible');
+          return null;
+        }
+        if (res.ok) {
+          const user = await res.json();
+          // Check if user has timezone set - required to use settings
+          if (!user.hasTimezone) {
+            window.location.href = 'index.html';
+            return null;
           }
-          
-          // Setup timezone display/blocking
-          setupTimezone(user);
-          
-          return true;
-        } else if (response.status === 401) {
-          window.location.href = '/auth/login';
-          return false;
+          return user;
         }
       } catch (e) {
-        console.log('Auth check failed');
-        window.location.href = '/auth/login';
-        return false;
+        console.error('Failed to load current user:', e);
+        document.getElementById('login-redirect-overlay').classList.add('visible');
       }
+      return null;
     }
 
-    function setupTimezone(user) {
-      if (!user.hasTimezone) {
-        // No timezone set - show warning and block grid
-        document.getElementById('tz-warning').classList.remove('hidden');
-        document.getElementById('tz-badge').style.display = 'none';
-        document.getElementById('grid-blocked').classList.remove('hidden');
-        document.getElementById('save-btn').disabled = true;
-        document.getElementById('clear-btn').disabled = true;
+    // ========== STATE ==========
+    let currentUser = null;
+    let myAvailability = new Set();
+    let guilds = [];
+    let blacklist = [];
+
+    // ========== HELPERS ==========
+    const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
+
+    function updateUserPill(user) {
+      const avatar = document.getElementById('user-avatar');
+      const name = document.getElementById('user-name');
+      
+      if (user.avatar) {
+        avatar.innerHTML = `<img src="${user.avatar}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${(user.username || '?').charAt(0).toUpperCase()}'">`;
       } else {
-        // Has timezone - ensure overlay is hidden and controls enabled
-        document.getElementById('tz-warning').classList.add('hidden');
-        document.getElementById('tz-badge').style.display = '';
-        document.getElementById('grid-blocked').classList.add('hidden');
-        document.getElementById('save-btn').disabled = false;
-        document.getElementById('clear-btn').disabled = false;
-        // Show the IANA code directly (e.g., "America/New_York")
-        document.getElementById('tz-display').textContent = user.timezone;
+        avatar.textContent = (user.username || '?').charAt(0).toUpperCase();
       }
+      name.textContent = user.username || 'Unknown';
     }
 
-    function showReauthPrompt(message) {
-      const banner = document.createElement('div');
-      banner.className = 'fixed top-0 left-0 right-0 p-4 text-center text-sm z-50';
-      banner.style.background = 'var(--glass-bg)';
-      banner.style.borderBottom = '1px solid var(--glass-border)';
-      banner.style.backdropFilter = 'blur(12px)';
-      banner.innerHTML = `
-        <span class="text-secondary">${message || "Discord wants to verify it's you."}</span>
-        <a href="/auth/login" class="ml-3 px-3 py-1 rounded-lg text-primary" 
-           style="background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3)">
-          Re-authorize
-        </a>
-      `;
-      document.body.prepend(banner);
-      document.body.style.paddingTop = '60px';
+    function updateGuildCount() {
+      const count = guilds.length;
+      document.getElementById('guild-count').textContent = count === 1 ? '1 server' : `${count} servers`;
     }
 
-    function logout() {
-      window.location.href = '/auth/logout';
-    }
+    // ========== TIME DATA ==========
+    const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+    const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-    // ========== TIME SLOTS ==========
-    const times = [];
-    for (let hour = 0; hour < 24; hour++) {
-      for (let min = 0; min < 60; min += 15) {
-        let displayHour = hour;
-        let ampm = 'AM';
-        
-        if (hour === 0) displayHour = 12;
-        else if (hour === 12) { displayHour = 12; ampm = 'PM'; }
-        else if (hour > 12) { displayHour = hour - 12; ampm = 'PM'; }
-        
-        times.push({
-          key: `${hour.toString().padStart(2,'0')}${min.toString().padStart(2,'0')}`,
-          displayShort: `${displayHour}${ampm.toLowerCase()}`,
-          isHour: min === 0,
-          hour, min
+    const TIME_SLOTS = [];
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < 60; m += 15) {
+        TIME_SLOTS.push({
+          key: `${h.toString().padStart(2, '0')}${m.toString().padStart(2, '0')}`,
+          hour: h,
+          minute: m,
+          label: m === 0 ? formatHour(h) : ''
         });
       }
     }
 
-    const days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-
-    // ========== USER DATA ==========
-    const myAvailability = new Set();
-    let guilds = [];
-    let blacklist = [];
+    function formatHour(h) {
+      if (h === 0) return '12am';
+      if (h === 12) return '12pm';
+      return h > 12 ? `${h - 12}pm` : `${h}am`;
+    }
 
     // ========== DRAG STATE ==========
     let isDragging = false;
     let dragMode = null;
 
-    // ========== TIME UTILITIES ==========
-    function getCurrentTimeSlotIndex() {
+    // ========== BUILD DAY HEADERS ==========
+    function buildDayHeaders() {
+      const header = document.getElementById('grid-header');
       const now = new Date();
-      return Math.floor((now.getHours() * 60 + now.getMinutes()) / 15);
-    }
+      const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
 
-    function getCurrentDayIndex() {
-      const day = new Date().getDay();
-      return day === 0 ? 6 : day - 1; // Convert Sunday=0 to Sunday=6
-    }
+      // Get Monday of current week
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - todayIdx);
 
-    // ========== SKELETON BUILDER ==========
-    function buildSkeleton() {
-      const timeLabels = document.getElementById('skeleton-time-labels');
-      const cells = document.getElementById('skeleton-cells');
+      DAY_NAMES.forEach((day, i) => {
+        const date = new Date(monday);
+        date.setDate(monday.getDate() + i);
 
-      for (let i = 0; i < 96; i++) {
-        const label = document.createElement('div');
-        label.className = 'cell-h flex items-center justify-end pr-2';
-        if (i % 4 === 0) {
-          const textEl = document.createElement('div');
-          textEl.className = 'skeleton w-8 h-3 rounded';
-          label.appendChild(textEl);
-        }
-        timeLabels.appendChild(label);
-      }
+        const cell = document.createElement('div');
+        cell.className = 'header-cell day-header';
 
-      for (let i = 0; i < 96; i++) {
-        const row = document.createElement('div');
-        row.className = 'grid grid-cols-7 cell-h';
-        // Last row (i=95, 11:45pm) gets row-hour to visually wrap to 12am
-        if (i === 95) {
-          row.classList.add('row-hour');
-        } else {
-          row.classList.add((i + 1) % 4 === 0 ? 'row-hour' : 'row-quarter');
-        }
-        for (let j = 0; j < 7; j++) {
-          const cell = document.createElement('div');
-          cell.className = 'cell-h skeleton';
-          if (j < 6) cell.classList.add('col-separator');
-          row.appendChild(cell);
-        }
-        cells.appendChild(row);
-      }
-    }
+        const isToday = i === todayIdx;
 
-    // ========== LOAD DATA FROM API ==========
-    async function loadAvailability() {
-      try {
-        const response = await fetch('/api/availability');
-        if (response.ok) {
-          const data = await response.json();
-          myAvailability.clear();
-          for (const slot of data.slots || []) {
-            myAvailability.add(slot);
-            // Update grid cell if it exists
-            const cell = document.querySelector(`[data-key="${slot}"]`);
-            if (cell) {
-              cell.classList.remove('unavailable');
-              cell.classList.add('available');
-            }
-          }
-        }
-      } catch (e) {
-        console.error('Failed to load availability:', e);
-      }
-    }
+        cell.innerHTML = `
+          <span class="today-tag">${isToday ? 'Today' : ''}</span>
+          <span class="day-name">${day}</span>
+          <span class="day-date">${date.getDate()}/${date.getMonth() + 1}</span>
+        `;
 
-    async function loadGuilds() {
-      try {
-        const response = await fetch('/api/guilds');
-        if (response.ok) {
-          const data = await response.json();
-          guilds = data.guilds || [];
-          buildGuildList();
-        }
-      } catch (e) {
-        console.error('Failed to load guilds:', e);
-      }
-    }
-
-    async function loadBlacklist() {
-      try {
-        const response = await fetch('/api/blacklist');
-        if (response.ok) {
-          const data = await response.json();
-          blacklist = data.users || [];
-          buildBlacklist();
-        }
-      } catch (e) {
-        console.error('Failed to load blacklist:', e);
-      }
-    }
-
-    // ========== BUILD UI ==========
-    function buildTimeLabels() {
-      const container = document.getElementById('time-labels');
-      times.forEach(time => {
-        const label = document.createElement('div');
-        label.className = 'cell-h flex items-center justify-end pr-2 text-sm text-muted';
-        if (time.isHour) label.classList.add('row-hour-label');
-        label.textContent = time.isHour ? time.displayShort : '';
-        container.appendChild(label);
+        header.appendChild(cell);
       });
     }
 
+    // ========== BUILD GRID ==========
     function buildGrid() {
-      const grid = document.getElementById('availability-grid');
-      const currentSlot = getCurrentTimeSlotIndex();
-      const currentDay = getCurrentDayIndex();
+      const body = document.getElementById('grid-body');
+      const now = new Date();
+      const currentSlot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+      const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
 
-      times.forEach((time, timeIdx) => {
-        const row = document.createElement('div');
-        row.className = 'grid grid-cols-7 cell-h';
-        row.style.position = 'relative';
-        
-        // Add border class: last row (11:45pm) gets row-hour to visually wrap to 12am
-        if (timeIdx === times.length - 1) {
-          row.classList.add('row-hour');
-        } else {
-          row.classList.add(times[timeIdx + 1].isHour ? 'row-hour' : 'row-quarter');
+      TIME_SLOTS.forEach((slot, slotIdx) => {
+        // Time label
+        const label = document.createElement('div');
+        label.className = 'time-label';
+        if (slot.minute === 0) {
+          label.classList.add('hour');
+          label.textContent = slot.label;
         }
+        body.appendChild(label);
 
-        days.forEach((day, dayIdx) => {
-          const key = `${day}-${time.key}`;
-
+        // Day cells
+        DAYS.forEach((day, dayIdx) => {
+          const key = `${day}-${slot.key}`;
           const cell = document.createElement('div');
-          cell.className = 'grid-cell cell-h cursor-pointer unavailable';
+          cell.className = 'grid-cell';
           cell.dataset.key = key;
 
-          if (dayIdx < days.length - 1) {
-            cell.classList.add('col-separator');
+          // Add hour/half-hour markers
+          if (slot.minute === 0 && slotIdx > 0) {
+            cell.classList.add('hour-start');
+          } else if (slot.minute === 30) {
+            cell.classList.add('half-hour');
           }
 
+          // Set initial state
+          if (myAvailability.has(key)) {
+            cell.classList.add('available');
+          } else {
+            cell.classList.add('unavailable');
+          }
+
+          // Add time indicator
+          if (slotIdx === currentSlot && dayIdx === todayIdx) {
+            const indicator = document.createElement('div');
+            indicator.className = 'time-indicator';
+            cell.appendChild(indicator);
+          }
+
+          // Drag handlers
           cell.addEventListener('mousedown', (e) => {
-            if (!window.currentUser?.hasTimezone) return;
             e.preventDefault();
             isDragging = true;
             const isAvailable = myAvailability.has(key);
@@ -1058,7 +1437,6 @@
           });
 
           cell.addEventListener('mouseenter', () => {
-            if (!window.currentUser?.hasTimezone) return;
             if (isDragging) {
               if (dragMode === 'add' && !myAvailability.has(key)) {
                 toggleCell(cell, key);
@@ -1068,19 +1446,8 @@
             }
           });
 
-          row.appendChild(cell);
+          body.appendChild(cell);
         });
-
-        // Add time indicator for current time
-        if (timeIdx === currentSlot) {
-          const indicator = document.createElement('div');
-          indicator.className = 'time-indicator';
-          indicator.style.left = `${(currentDay / 7) * 100}%`;
-          indicator.style.width = `${100 / 7}%`;
-          row.appendChild(indicator);
-        }
-
-        grid.appendChild(row);
       });
 
       document.addEventListener('mouseup', () => {
@@ -1090,11 +1457,10 @@
     }
 
     function toggleCell(cell, key) {
-      // Add pulse animation
       cell.classList.remove('pulse');
-      void cell.offsetWidth; // Force reflow to restart animation
+      void cell.offsetWidth;
       cell.classList.add('pulse');
-      
+
       if (myAvailability.has(key)) {
         myAvailability.delete(key);
         cell.classList.remove('available');
@@ -1106,210 +1472,123 @@
       }
     }
 
-    // ========== TOAST NOTIFICATIONS ==========
-    function showToast(message, type = 'info') {
-      const container = document.getElementById('toast-container');
-      const toast = document.createElement('div');
-      toast.className = `toast ${type}`;
-      
-      const icons = {
-        success: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
-        error: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
-        info: '<svg class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
-      };
-      
-      toast.innerHTML = `${icons[type] || icons.info}<span class="toast-message">${message}</span>`;
-      container.appendChild(toast);
-      
-      // Trigger animation
-      requestAnimationFrame(() => {
-        toast.classList.add('show');
-      });
-      
-      // Auto dismiss
-      setTimeout(() => {
-        toast.classList.remove('show');
-        toast.classList.add('hiding');
-        setTimeout(() => toast.remove(), 300);
-      }, 3500);
-    }
-
-    // ========== CLEAR ALL MODAL ==========
-    function showClearConfirmModal() {
-      const modal = document.getElementById('clear-confirm-modal');
-      modal.classList.remove('hidden');
-      modal.classList.add('flex');
-    }
-
-    function hideClearConfirmModal() {
-      const modal = document.getElementById('clear-confirm-modal');
-      modal.classList.add('hidden');
-      modal.classList.remove('flex');
-    }
-
-    async function confirmClearAll() {
-      hideClearConfirmModal();
-      
+    // ========== BUILD GUILD LIST ==========
+    async function loadGuilds() {
       try {
-        const response = await fetch('/api/availability', { method: 'DELETE' });
-        if (response.ok) {
-          myAvailability.clear();
-          document.querySelectorAll('.grid-cell').forEach(cell => {
-            cell.classList.remove('available');
-            cell.classList.add('unavailable');
-          });
-          showToast('All availability cleared', 'success');
-        } else {
-          showToast('Failed to clear availability', 'error');
+        const res = await fetch('/api/guilds', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          guilds = data.guilds || [];
+          buildGuildList();
+          updateGuildCount();
         }
       } catch (e) {
-        console.error('Failed to clear availability:', e);
-        showToast('Failed to clear availability', 'error');
+        console.error('Failed to load guilds:', e);
+        showToast('Failed to load servers', 'error');
       }
     }
 
-    async function clearAllAvailability() {
-      showClearConfirmModal();
-    }
-
-    async function saveAvailability() {
-      // Double-check timezone requirement (backend will also enforce this)
-      if (!window.currentUser?.hasTimezone) {
-        showToast('Set your timezone in Discord first', 'error');
-        return;
-      }
-
-      const saveBtn = document.getElementById('save-btn');
-      const originalText = saveBtn.textContent;
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving...';
-
-      const slots = Array.from(myAvailability);
-      const count = slots.length;
-      const hours = (count * 15 / 60).toFixed(1);
-      
-      try {
-        const response = await fetch('/api/availability', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ slots })
-        });
-        
-        if (response.ok) {
-          showToast(`Saved! ${hours} hours per week`, 'success');
-        } else {
-          const data = await response.json();
-          showToast(data.error || 'Failed to save', 'error');
-        }
-      } catch (e) {
-        console.error('Failed to save availability:', e);
-        showToast('Failed to save availability', 'error');
-      } finally {
-        saveBtn.disabled = false;
-        saveBtn.textContent = originalText;
-      }
-    }
-
-    // ========== GUILD VISIBILITY ==========
     function buildGuildList() {
       const container = document.getElementById('guild-list');
-      
+
       if (guilds.length === 0) {
-        container.innerHTML = '<p class="text-sm text-muted py-2">No shared servers found</p>';
+        container.innerHTML = '<p class="list-empty">No shared servers</p>';
         return;
       }
-      
+
       container.innerHTML = guilds.map(g => `
-        <div class="flex items-center justify-between p-3 rounded-xl hover-item" data-guild-id="${g.id}">
-          <div class="flex items-center gap-3">
-            ${g.icon 
-              ? `<img src="${g.icon}" class="w-8 h-8 rounded-full" alt="">`
-              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">${g.name.charAt(0)}</div>`
-            }
-            <span class="text-sm text-primary">${g.name}</span>
+        <div class="list-item" data-guild-id="${g.id}">
+          <div class="list-item-left">
+            <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="">` : g.name.charAt(0)}</div>
+            <span class="list-item-name">${g.name}</span>
           </div>
-          <div 
-            class="toggle-switch ${g.enabled ? 'active' : ''}"
-            onclick="toggleGuild('${g.id}')"
-          ></div>
+          <div class="toggle-switch ${g.enabled ? 'active' : ''}" onclick="toggleGuild('${g.id}')"></div>
         </div>
       `).join('');
     }
 
     async function toggleGuild(id) {
-      const guild = guilds.find(g => String(g.id) === String(id));
+      const guild = guilds.find(g => g.id === id);
       if (!guild) return;
-      
-      // Find the toggle element directly instead of rebuilding
-      const guildRow = document.querySelector(`[data-guild-id="${id}"]`);
-      const toggle = guildRow?.querySelector('.toggle-switch');
-      if (!toggle) return;
-      
-      const wasEnabled = guild.enabled;
-      const newState = !wasEnabled;
-      
-      // Optimistic update - toggle immediately for smooth feel
-      guild.enabled = newState;
+
+      const toggle = document.querySelector(`[data-guild-id="${id}"] .toggle-switch`);
+      const newState = !guild.enabled;
+
+      // Optimistic UI update
       toggle.classList.toggle('active', newState);
-      
+
       try {
-        const response = await fetch(`/api/guilds/${id}/visibility`, {
+        const res = await fetch(`/api/guilds/${id}/visibility`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ visible: newState })
         });
-        
-        if (!response.ok) {
+
+        if (res.ok) {
+          guild.enabled = newState;
+          showToast(`${guild.name} ${newState ? 'enabled' : 'disabled'}`, 'success');
+        } else {
           // Revert on failure
-          guild.enabled = wasEnabled;
-          toggle.classList.toggle('active', wasEnabled);
+          toggle.classList.toggle('active', guild.enabled);
           showToast('Failed to update visibility', 'error');
         }
       } catch (e) {
         console.error('Failed to toggle guild:', e);
         // Revert on failure
-        guild.enabled = wasEnabled;
-        toggle.classList.toggle('active', wasEnabled);
+        toggle.classList.toggle('active', guild.enabled);
         showToast('Failed to update visibility', 'error');
       }
     }
 
-    // ========== BLACKLIST ==========
+    // ========== BUILD BLACKLIST ==========
+    async function loadBlacklist() {
+      try {
+        const res = await fetch('/api/blacklist', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          blacklist = data.blacklist || [];
+          buildBlacklist();
+        }
+      } catch (e) {
+        console.error('Failed to load blacklist:', e);
+        showToast('Failed to load blocked users', 'error');
+      }
+    }
+
     function buildBlacklist() {
       const container = document.getElementById('blacklist');
-      
+
       if (blacklist.length === 0) {
-        container.innerHTML = '<p class="text-sm text-muted py-2">No blocked users</p>';
+        container.innerHTML = '<p class="list-empty">No blocked users</p>';
         return;
       }
 
       container.innerHTML = blacklist.map(u => `
-        <div class="flex items-center justify-between p-3 rounded-xl hover-item">
-          <div class="flex items-center gap-3">
-            ${u.avatar 
-              ? `<img src="${u.avatar}" class="w-8 h-8 rounded-full" alt="">`
-              : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-sm" style="background: var(--bg-input)">${(u.username || '?').charAt(0).toUpperCase()}</div>`
-            }
-            <span class="text-sm text-primary">${u.username}</span>
+        <div class="list-item">
+          <div class="list-item-left">
+            <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="">` : u.username.charAt(0).toUpperCase()}</div>
+            <span class="list-item-name">${u.username}</span>
           </div>
-          <button 
-            onclick="removeFromBlacklist('${u.id}')"
-            class="text-xs px-2 py-1 rounded-lg hover-item"
-            style="color: var(--danger-text)"
-          >
-            Unblock
-          </button>
+          <button class="action-btn danger" onclick="removeFromBlacklist('${u.id}')">Unblock</button>
         </div>
       `).join('');
     }
 
     async function removeFromBlacklist(id) {
+      const user = blacklist.find(u => u.id === id);
+      if (!user) return;
+
       try {
-        const response = await fetch(`/api/blacklist/${id}`, { method: 'DELETE' });
-        if (response.ok) {
-          blacklist = blacklist.filter(u => String(u.id) !== String(id));
+        const res = await fetch(`/api/blacklist/${id}`, {
+          method: 'DELETE',
+          credentials: 'include'
+        });
+
+        if (res.ok) {
+          blacklist = blacklist.filter(u => u.id !== id);
           buildBlacklist();
-          showToast('User unblocked', 'success');
+          showToast(`${user.username} unblocked`, 'success');
         } else {
           showToast('Failed to unblock user', 'error');
         }
@@ -1319,306 +1598,276 @@
       }
     }
 
-    function showAddBlockModal() {
-      const modal = document.getElementById('add-block-modal');
-      modal.classList.remove('hidden');
-      modal.classList.add('flex');
-      document.getElementById('block-username-input').focus();
-      // Clear any previous results
-      const resultsDiv = document.getElementById('resolve-results');
-      if (resultsDiv) resultsDiv.remove();
+    // ========== MODALS ==========
+    function showClearConfirmModal() {
+      document.getElementById('clear-confirm-modal').classList.add('visible');
     }
 
-    function hideAddBlockModal() {
-      const modal = document.getElementById('add-block-modal');
-      modal.classList.add('hidden');
-      modal.classList.remove('flex');
-      document.getElementById('block-username-input').value = '';
-      const resultsDiv = document.getElementById('resolve-results');
-      if (resultsDiv) resultsDiv.remove();
+    function hideClearConfirmModal() {
+      document.getElementById('clear-confirm-modal').classList.remove('visible');
     }
 
-    async function addToBlacklist() {
-      const input = document.getElementById('block-username-input');
-      const query = input.value.trim();
-      if (!query) return;
+    function confirmClearAll() {
+      hideClearConfirmModal();
 
-      // Remove previous results
-      let resultsDiv = document.getElementById('resolve-results');
-      if (resultsDiv) resultsDiv.remove();
-
-      try {
-        const response = await fetch(`/api/users/resolve?query=${encodeURIComponent(query)}`);
-        const data = await response.json();
-        
-        if (!response.ok) {
-          showToast(data.error || 'Failed to search for user', 'error');
-          return;
-        }
-
-        if (data.found) {
-          if (data.multiple) {
-            // Show multiple results to choose from
-            showResolveResults(data.matches);
-          } else {
-            // Single result, block directly
-            await blockUser(data.id, data.username, data.avatar);
-          }
+      fetch('/api/availability', {
+        method: 'DELETE',
+        credentials: 'include'
+      }).then(res => {
+        if (res.ok) {
+          myAvailability.clear();
+          document.querySelectorAll('.grid-cell').forEach(cell => {
+            cell.classList.remove('available');
+            cell.classList.add('unavailable');
+          });
+          showToast('All availability cleared', 'success');
         } else {
-          // Not found - show message with option to enter ID
-          showNotFoundMessage(data.message);
+          showToast('Failed to clear availability', 'error');
+        }
+      }).catch(e => {
+        console.error('Failed to clear availability:', e);
+        showToast('Failed to clear availability', 'error');
+      });
+    }
+
+    function clearAllAvailability() {
+      showClearConfirmModal();
+    }
+
+    async function loadAvailability() {
+      if (!currentUser) return;
+      try {
+        const res = await fetch(`/api/users/${currentUser.id}/availability`, { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          myAvailability = new Set(data.slots || []);
+          renderAvailabilityGrid();
+        } else {
+          console.error('Failed to load availability:', res.status);
+          showToast('Failed to load availability', 'error');
         }
       } catch (e) {
-        console.error('Failed to resolve user:', e);
-        showToast('Failed to search for user', 'error');
+        console.error('Failed to load availability:', e);
+        showToast('Failed to load availability', 'error');
       }
     }
 
-    function showResolveResults(matches) {
-      let resultsDiv = document.getElementById('resolve-results');
-      if (!resultsDiv) {
-        resultsDiv = document.createElement('div');
-        resultsDiv.id = 'resolve-results';
-        resultsDiv.className = 'mt-2 max-h-48 overflow-y-auto space-y-1';
-        document.getElementById('block-username-input').parentNode.insertBefore(
-          resultsDiv, 
-          document.getElementById('block-username-input').nextSibling
-        );
-      }
-
-      resultsDiv.innerHTML = `
-        <p class="text-xs text-muted mb-2">Multiple users found. Select one:</p>
-        ${matches.map(u => `
-          <div class="flex items-center justify-between p-2 rounded-lg hover-item cursor-pointer"
-               onclick="blockUser('${u.id}', '${u.username.replace(/'/g, "\\'")}', '${u.avatar || ''}')">
-            <div class="flex items-center gap-2">
-              ${u.avatar 
-                ? `<img src="${u.avatar}" class="w-6 h-6 rounded-full" alt="">`
-                : `<div class="w-6 h-6 rounded-full flex items-center justify-center text-xs" style="background: var(--bg-input)">?</div>`
-              }
-              <span class="text-sm text-primary">${u.username}</span>
-            </div>
-            <span class="text-xs text-muted">${u.id}</span>
-          </div>
-        `).join('')}
-      `;
-    }
-
-    function showNotFoundMessage(message) {
-      let resultsDiv = document.getElementById('resolve-results');
-      if (!resultsDiv) {
-        resultsDiv = document.createElement('div');
-        resultsDiv.id = 'resolve-results';
-        resultsDiv.className = 'mt-2';
-        document.getElementById('block-username-input').parentNode.insertBefore(
-          resultsDiv, 
-          document.getElementById('block-username-input').nextSibling
-        );
-      }
-
-      resultsDiv.innerHTML = `
-        <p class="text-xs text-muted">${message}</p>
-        <p class="text-xs text-secondary mt-1">Enter a user ID directly and press Block again.</p>
-      `;
-    }
-
-    async function blockUser(id, username, avatar) {
-      try {
-        const response = await fetch(`/api/blacklist/${id}`, { method: 'POST' });
-        if (response.ok) {
-          blacklist.push({ id, username, avatar });
-          buildBlacklist();
-          hideAddBlockModal();
-          showToast('User blocked', 'success');
+    function renderAvailabilityGrid() {
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const slot = cell.dataset.key;
+        if (myAvailability.has(slot)) {
+          cell.classList.add('available');
+          cell.classList.remove('unavailable');
         } else {
-          const data = await response.json();
-          showToast(data.error || 'Failed to block user', 'error');
+          cell.classList.remove('available');
+          cell.classList.add('unavailable');
+        }
+      });
+    }
+
+    async function saveAvailability() {
+      try {
+        const res = await fetch('/api/availability', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ slots: Array.from(myAvailability) })
+        });
+
+        if (res.ok) {
+          const count = myAvailability.size;
+          const hours = (count * 15 / 60).toFixed(1);
+          showToast(`Saved! ${hours} hours per week`, 'success');
+        } else {
+          showToast('Failed to save availability', 'error');
         }
       } catch (e) {
-        console.error('Failed to block user:', e);
-        showToast('Failed to block user', 'error');
+        console.error('Failed to save availability:', e);
+        showToast('Failed to save availability', 'error');
       }
     }
 
-    document.getElementById('add-block-modal').addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) {
-        hideAddBlockModal();
-      }
-    });
-
-    document.getElementById('clear-confirm-modal')?.addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) hideClearConfirmModal();
-    });
-
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        hideAddBlockModal();
-        hideClearConfirmModal();
-        hideDeleteDataModal();
-      }
-    });
-
-    // ========== DANGER ZONE ==========
     function showDeleteDataModal() {
-      const modal = document.getElementById('delete-data-modal');
-      modal.classList.remove('hidden');
-      modal.classList.add('flex');
+      document.getElementById('delete-data-modal').classList.add('visible');
       document.getElementById('delete-confirm-input').value = '';
       document.getElementById('delete-confirm-btn').disabled = true;
       document.getElementById('delete-confirm-input').focus();
     }
 
     function hideDeleteDataModal() {
-      const modal = document.getElementById('delete-data-modal');
-      modal.classList.add('hidden');
-      modal.classList.remove('flex');
-      document.getElementById('delete-confirm-input').value = '';
+      document.getElementById('delete-data-modal').classList.remove('visible');
     }
 
-    // Enable delete button only when user types DELETE
     document.getElementById('delete-confirm-input')?.addEventListener('input', (e) => {
       document.getElementById('delete-confirm-btn').disabled = e.target.value !== 'DELETE';
     });
 
-    // Close delete modal on backdrop click
-    document.getElementById('delete-data-modal')?.addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) hideDeleteDataModal();
-    });
-
-    async function confirmDeleteAllData() {
-      const input = document.getElementById('delete-confirm-input');
-      if (input.value !== 'DELETE') return;
-      
+    function confirmDeleteAllData() {
+      if (document.getElementById('delete-confirm-input').value !== 'DELETE') return;
       hideDeleteDataModal();
-      
-      try {
-        const response = await fetch('/api/account', { method: 'DELETE' });
-        if (response.ok) {
-          showToast('All data deleted', 'success');
-          setTimeout(() => { window.location.href = '/'; }, 1500);
+
+      fetch('/api/account', {
+        method: 'DELETE',
+        credentials: 'include'
+      }).then(res => {
+        if (res.ok) {
+          showToast('All data deleted. Redirecting...', 'success');
+          setTimeout(() => {
+            // Clear all cookies then logout
+            document.cookie.split(';').forEach(c => {
+              document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+            });
+            window.location.href = '/auth/logout?clear=true';
+          }, 1500);
         } else {
           showToast('Failed to delete data', 'error');
         }
-      } catch (e) {
-        console.error('Failed to delete data:', e);
+      }).catch(e => {
+        console.error('Failed to delete account data:', e);
         showToast('Failed to delete data', 'error');
+      });
+    }
+
+    function showAddBlockModal() {
+      document.getElementById('add-block-modal').classList.add('visible');
+      document.getElementById('block-username-input').value = '';
+      document.getElementById('block-username-input').focus();
+    }
+
+    function hideAddBlockModal() {
+      document.getElementById('add-block-modal').classList.remove('visible');
+    }
+
+    function showSessionModal() {
+      document.getElementById('session-modal').classList.add('visible');
+    }
+
+    function hideSessionModal() {
+      document.getElementById('session-modal').classList.remove('visible');
+    }
+
+    function doLogout() {
+      window.location.href = '/auth/logout';
+    }
+
+    function doClearSession() {
+      // Clear all cookies then logout
+      document.cookie.split(';').forEach(c => {
+        document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+      });
+      window.location.href = '/auth/logout?clear=true';
+    }
+
+    async function addToBlacklist() {
+      const input = document.getElementById('block-username-input');
+      const username = input.value.trim();
+      if (!username) return;
+
+      try {
+        const res = await fetch('/api/blacklist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ username })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          blacklist.push(data.user);
+          buildBlacklist();
+          hideAddBlockModal();
+          showToast(`${username} blocked`, 'success');
+        } else if (res.status === 404) {
+          showToast('User not found', 'error');
+        } else {
+          showToast('Failed to block user', 'error');
+        }
+      } catch (e) {
+        console.error('Failed to add to blacklist:', e);
+        showToast('Failed to block user', 'error');
       }
     }
 
-    async function deleteAllData() {
-      showDeleteDataModal();
+    // Close modals on backdrop click
+    document.querySelectorAll('.modal-backdrop').forEach(modal => {
+      modal.addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) {
+          modal.classList.remove('visible');
+        }
+      });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-backdrop.visible').forEach(m => m.classList.remove('visible'));
+      }
+    });
+
+    // ========== TOAST ==========
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+
+      const icons = {
+        success: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+        info: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+      };
+
+      toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+      container.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 200);
+      }, 3000);
     }
 
     // ========== THEME ==========
     function toggleTheme() {
-      const body = document.body;
-      const isDark = body.classList.contains('dark');
-      
-      if (isDark) {
-        body.classList.remove('dark');
-        body.classList.add('light');
-      } else {
-        body.classList.remove('light');
-        body.classList.add('dark');
-      }
-      
-      localStorage.setItem('theme', body.classList.contains('dark') ? 'dark' : 'light');
+      document.body.classList.toggle('dark');
+      document.body.classList.toggle('light');
+      localStorage.setItem('theme', document.body.classList.contains('dark') ? 'dark' : 'light');
     }
 
     function initTheme() {
       const stored = localStorage.getItem('theme');
       const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      
       if (stored === 'light' || (!stored && !prefersDark)) {
         document.body.classList.remove('dark');
         document.body.classList.add('light');
       }
     }
 
-    // ========== SHOW LOADED CONTENT ==========
-    function showLoaded() {
-      // Remove skeletons
-      const gridSkeleton = document.getElementById('grid-skeleton');
-      const accountSkeleton = document.getElementById('account-skeleton');
-      const guildsSkeleton = document.getElementById('guilds-skeleton');
-      const blacklistSkeleton = document.getElementById('blacklist-skeleton');
-      
-      if (gridSkeleton) gridSkeleton.remove();
-      if (accountSkeleton) accountSkeleton.remove();
-      if (guildsSkeleton) guildsSkeleton.remove();
-      if (blacklistSkeleton) blacklistSkeleton.remove();
-
-      // Show content
-      document.getElementById('grid-content').classList.remove('hidden');
-      document.getElementById('account-content').classList.remove('hidden');
-      document.getElementById('guild-list').classList.remove('hidden');
-      document.getElementById('blacklist').classList.remove('hidden');
-
-      // Update user info
-      if (window.currentUser) {
-        document.getElementById('username').textContent = window.currentUser.username;
-        const avatarImg = document.getElementById('user-avatar');
-        const avatarContainer = document.getElementById('user-avatar-container');
-        if (avatarImg && avatarContainer && window.currentUser.avatar) {
-          avatarImg.onerror = function() {
-            this.style.display = 'none';
-            avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
-          };
-          avatarImg.onload = function() {
-            this.style.display = '';
-          };
-          avatarImg.src = window.currentUser.avatar;
-        } else if (avatarContainer) {
-          avatarContainer.textContent = window.currentUser?.username?.charAt(0) || '?';
-        }
-      }
-    }
-
-    // ========== TIME INDICATOR UPDATE ==========
-    function updateTimeIndicator() {
-      const indicator = document.querySelector('.time-indicator');
-      if (!indicator) return;
-
-      const currentSlot = getCurrentTimeSlotIndex();
-      const currentDay = getCurrentDayIndex();
-      const grid = document.getElementById('availability-grid');
-      if (!grid) return;
-
-      // Move indicator to correct row
-      const rows = grid.querySelectorAll('.grid');
-      if (rows[currentSlot]) {
-        // Remove from old parent
-        indicator.remove();
-        // Add to new row
-        rows[currentSlot].appendChild(indicator);
-        indicator.style.left = `${(currentDay / 7) * 100}%`;
-        indicator.style.width = `${100 / 7}%`;
-      }
-    }
-
     // ========== INIT ==========
     async function init() {
       initTheme();
-      buildSkeleton();
-      
       await loadConfig();
-      const authenticated = await loadCurrentUser();
-      if (!authenticated) return;
       
-      buildTimeLabels();
-      buildGrid();
-      
-      // Load data after grid is built so we can update cells
-      await loadAvailability();
-      await loadGuilds();
-      await loadBlacklist();
-      
-      showLoaded();
+      // Check auth FIRST before building UI
+      const user = await loadCurrentUser();
+      if (!user) {
+        // Redirect overlay already shown
+        return;
+      }
 
-      // Update time indicator every minute
-      setInterval(updateTimeIndicator, 60000);
+      // Update user pill with avatar/name
+      currentUser = user;
+      updateUserPill(user);
+
+      // Build static UI elements
+      buildDayHeaders();
+      buildGrid();
+
+      // Load data from APIs (can run in parallel)
+      await Promise.all([
+        loadGuilds(),
+        loadBlacklist(),
+        loadAvailability()
+      ]);
     }
-    
+
     init();
   </script>
 

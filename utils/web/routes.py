@@ -2,7 +2,8 @@
 
 This module provides REST API endpoints for:
 - /api/config: Public config (bot name, theme color)
-- /api/availability: Get/set user's availability slots
+- /api/availability: POST/DELETE user's availability slots
+- /api/users/{id}/availability: GET any user's availability (self or others)
 - /api/guilds: List user's guilds with visibility settings
 - /api/guilds/{guild_id}/visibility: Toggle guild visibility
 - /api/guilds/{guild_id}/viewable-users: Users visible in a specific guild (for heatmap)
@@ -11,7 +12,7 @@ This module provides REST API endpoints for:
 - /api/account: Delete all user data
 
 All routes except /api/config require authentication.
-When DEV_MODE is enabled, mock data is returned for UI testing.
+When WEB_MOCK_DATA is enabled, mock data is returned for UI testing.
 """
 
 import logging
@@ -118,8 +119,8 @@ async def get_config() -> JSONResponse:
     Returns:
         JSON with botName and optional themeColor.
     """
-    # DEV_MODE: Return mock config
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock config
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_config())
 
@@ -226,36 +227,6 @@ async def resolve_user(request: Request, query: str = "") -> JSONResponse:
     })
 
 
-@router.get("/availability")
-async def get_availability(request: Request) -> JSONResponse:
-    """Get the current user's availability slots.
-
-    Returns a list of time slot strings in format "day-HHMM" where:
-    - day is one of: mon, tue, wed, thu, fri, sat, sun
-    - HHMM is 24-hour time in 15-minute increments (0000, 0015, 0030, ...)
-
-    Args:
-        request: The incoming request.
-
-    Returns:
-        JSON with slots array, or 401 if not authenticated.
-    """
-    # DEV_MODE: Return mock availability
-    if config.DEV_MODE:
-        from utils.web import mock_data
-        return JSONResponse(content=mock_data.get_mock_availability())
-
-    user_id = await get_user_id(request)
-    if (error := require_auth(user_id)):
-        return error
-
-    bot = request.app.state.bot
-    slots = await bot.db_manager.schedule_get_availability(user_id)  # type: ignore[arg-type]
-    updated_at = await bot.db_manager.schedule_get_availability_updated_at(user_id)  # type: ignore[arg-type]
-
-    return JSONResponse(content={"slots": slots, "updated_at": updated_at})
-
-
 @router.post("/availability")
 async def set_availability(request: Request) -> JSONResponse:
     """Set the current user's availability slots.
@@ -315,8 +286,8 @@ async def set_availability(request: Request) -> JSONResponse:
 
         valid_slots.append(slot)
 
-    # DEV_MODE: Save to ephemeral mock store
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Save to ephemeral mock store
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.set_mock_availability(valid_slots))
 
@@ -350,8 +321,8 @@ async def clear_availability(request: Request) -> JSONResponse:
     Returns:
         JSON success message, or 401 if not authenticated.
     """
-    # DEV_MODE: Clear ephemeral mock store
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Clear ephemeral mock store
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.clear_mock_availability())
 
@@ -380,8 +351,8 @@ async def get_guilds(request: Request) -> JSONResponse:
     Returns:
         JSON with guilds array, or 401 if not authenticated.
     """
-    # DEV_MODE: Return mock guilds
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock guilds
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_guilds())
 
@@ -432,8 +403,8 @@ async def set_guild_visibility(request: Request, guild_id: str) -> JSONResponse:
     Returns:
         JSON success message, or 401/400 on error.
     """
-    # DEV_MODE: Toggle in ephemeral mock store
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Toggle in ephemeral mock store
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.toggle_mock_guild_visibility(guild_id))
 
@@ -491,8 +462,8 @@ async def get_blacklist(request: Request) -> JSONResponse:
     Returns:
         JSON with users array (id, username), or 401 if not authenticated.
     """
-    # DEV_MODE: Return mock blacklist
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock blacklist
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_blacklist())
 
@@ -528,8 +499,8 @@ async def add_to_blacklist(request: Request, blocked_user_id: str) -> JSONRespon
     Returns:
         JSON success message, or 401/400 on error.
     """
-    # DEV_MODE: Add to ephemeral mock blacklist
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Add to ephemeral mock blacklist
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.add_mock_blacklist(blocked_user_id))
 
@@ -571,8 +542,8 @@ async def remove_from_blacklist(request: Request, blocked_user_id: str) -> JSONR
     Returns:
         JSON success message, or 401 if not authenticated.
     """
-    # DEV_MODE: Remove from ephemeral mock blacklist
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Remove from ephemeral mock blacklist
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.remove_mock_blacklist(blocked_user_id))
 
@@ -602,6 +573,7 @@ async def delete_account(request: Request) -> JSONResponse:
     """Delete all user data (availability, visibility, blacklist).
 
     This is a destructive operation that cannot be undone.
+    Also deletes all sessions for the user.
 
     Args:
         request: The incoming request.
@@ -609,8 +581,8 @@ async def delete_account(request: Request) -> JSONResponse:
     Returns:
         JSON success message, or 401 if not authenticated.
     """
-    # DEV_MODE: Reset ephemeral mock state
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Reset ephemeral mock state
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.delete_mock_account())
 
@@ -621,10 +593,13 @@ async def delete_account(request: Request) -> JSONResponse:
     bot = request.app.state.bot
     await bot.db_manager.schedule_delete_all_user_data(user_id)  # type: ignore[arg-type]
 
-    # Clear session
-    request.session.clear()
+    # Delete all sessions for this user (CASCADE would handle this too via users table,
+    # but we do it explicitly since we're not deleting the users row)
+    await bot.db_manager.delete_user_sessions(user_id)  # type: ignore[arg-type]
 
-    logger.info(f"User {user_id} deleted all their schedule data")
+    logger.info(f"User {user_id} deleted all their schedule data and sessions")
+
+    return JSONResponse(content={"success": True})
 
     return JSONResponse(content={"success": True})
 
@@ -646,8 +621,8 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
     Returns:
         JSON with users array, or 401/403 on error.
     """
-    # DEV_MODE: Return mock viewable users
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock viewable users
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_viewable_users(guild_id))
 
@@ -760,8 +735,8 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
     Returns:
         JSON with users array including shared_guilds for each user.
     """
-    # DEV_MODE: Return mock all viewable users
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock all viewable users
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_all_viewable_users(focus_guild))
 
@@ -855,9 +830,10 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
 
 @router.get("/users/{target_user_id}/availability")
 async def get_user_availability(request: Request, target_user_id: str, guild_id: str = "0") -> JSONResponse:
-    """Get another user's availability.
+    """Get a user's availability (self or others).
 
-    Permission checks:
+    For self-requests: Returns data directly, no permission checks needed.
+    For other users:
     - Requester must share a guild with target where target has visibility enabled
     - Target must not have blocked requester
     - Requester must not have blocked target (mutual respect)
@@ -870,8 +846,8 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
     Returns:
         JSON with availability slots, or 401/403 on error.
     """
-    # DEV_MODE: Return mock user availability
-    if config.DEV_MODE:
+    # WEB_MOCK_DATA: Return mock user availability
+    if config.WEB_MOCK_DATA:
         from utils.web import mock_data
         return JSONResponse(content=mock_data.get_mock_user_availability(target_user_id))
 
@@ -888,16 +864,16 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
             content={"error": "Invalid user ID"},
         )
 
+    bot = request.app.state.bot
+
+    # Self-request: skip all permission checks, return directly
+    if target_user_id_int == user_id:
+        slots = await bot.db_manager.schedule_get_availability(user_id)  # type: ignore[arg-type]
+        updated_at = await bot.db_manager.schedule_get_availability_updated_at(user_id)  # type: ignore[arg-type]
+        return JSONResponse(content={"slots": slots, "updated_at": updated_at})
+
     # Note: guild_id parameter is reserved for future per-guild permission checks
     # Currently permissions are checked via get_user_guilds() overlap
-
-    if target_user_id_int == user_id:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Use /api/availability to view your own schedule"},
-        )
-
-    bot = request.app.state.bot
 
     # Check blacklists (mutual)
     my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))  # type: ignore[arg-type]
