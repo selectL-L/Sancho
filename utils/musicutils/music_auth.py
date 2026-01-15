@@ -363,9 +363,31 @@ class AudioFetchResult:
     residential_bytes: int = 0  # Bytes downloaded (for cost tracking)
     error: Optional[str] = None
 
+    # Prebuffered source for instant playback (Phase 5)
+    # When prefetch validates a URL, it stores the live FFmpeg source here.
+    # The source has audio buffered and is ready for immediate playback.
+    # Caller must call cleanup() if not using the prebuffered source.
+    prebuffered_source: Optional[Any] = None  # SeekableAudioSource (Any to avoid circular import)
+
+    # FFmpeg validation error (if prebuffer failed)
+    # Tells LIVE fetch what went wrong so it can retry smartly
+    ffmpeg_error_type: Optional[str] = None  # AudioErrorType.value
+
     def __bool__(self) -> bool:
         """Allow `if result:` to check success."""
         return self.success
+
+    def cleanup(self) -> None:
+        """Clean up prebuffered source if not used.
+
+        Call this when:
+        - Prefetch is invalidated (playlist changed)
+        - Prefetch failed and source needs cleanup
+        - Result is being discarded
+        """
+        if self.prebuffered_source is not None:
+            self.prebuffered_source.cleanup()
+            self.prebuffered_source = None
 
 
 @dataclass

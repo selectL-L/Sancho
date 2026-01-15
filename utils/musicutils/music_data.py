@@ -62,6 +62,27 @@ def _extract_video_id(url: str) -> Optional[str]:
 # ==========================================================================
 
 
+class AudioErrorType(Enum):
+    """Error types parsed from FFmpeg stderr.
+
+    Used by SeekableAudioSource.health to report why playback failed.
+    This enables smart retry logic: 403 means auth issue, 404 means
+    track removed, CONNECTION might be transient, etc.
+
+    TODO(Phase 3): These patterns are placeholders. Once we collect real
+    FFmpeg stderr output from failures, refine the parsing in
+    audio_source.py._parse_stderr_line() to match actual error formats.
+    """
+    NONE = "none"              # No error detected
+    HTTP_403 = "http_403"      # Auth failure - URL expired or blocked
+    HTTP_404 = "http_404"      # Track removed from YouTube
+    HTTP_OTHER = "http_other"  # Other HTTP error (5xx, etc.)
+    CONNECTION = "connection"  # Network failure (reset, refused, timeout)
+    FORMAT = "format"          # Corrupt or incompatible stream
+    TIMEOUT = "timeout"        # Prebuffer timeout (not currently used)
+    UNKNOWN = "unknown"        # EOF with no clear error in stderr
+
+
 class FetchContext(Enum):
     """Context for AudioFetcher.fetch() calls.
 
@@ -116,6 +137,33 @@ class LoopMode(Enum):
             LoopMode.ONE: LoopMode.ALL,
             LoopMode.ALL: LoopMode.OFF
         }[self]
+
+
+@dataclass
+class FFmpegHealth:
+    """Health status from an FFmpeg process.
+
+    Populated by SeekableAudioSource as it reads stderr. Used to report
+    why playback failed (instead of guessing from elapsed time).
+
+    TODO(Phase 3): The error_type classification depends on patterns in
+    _parse_stderr_line(). Once we have real FFmpeg error output, refine
+    those patterns and this dataclass may need additional fields.
+    """
+    error_type: 'AudioErrorType' = field(default_factory=lambda: AudioErrorType.NONE)
+    error_detail: Optional[str] = None  # Raw stderr line that triggered classification
+    frames_read: int = 0                # Frames successfully read before error
+    stderr_lines: list[str] = field(default_factory=list)  # All captured stderr
+
+    @property
+    def is_healthy(self) -> bool:
+        """True if no fatal error detected."""
+        return self.error_type == AudioErrorType.NONE
+
+    @property
+    def has_error(self) -> bool:
+        """True if a fatal error was detected."""
+        return self.error_type != AudioErrorType.NONE
 
 
 # ==========================================================================

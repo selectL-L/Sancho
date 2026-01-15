@@ -154,22 +154,34 @@ class ManagedPlayer:
     def play(
         self,
         track: TrackInfo,
-        audio_source: str,
+        audio_source: Optional[str] = None,
         *,
+        source: Optional[SeekableAudioSource] = None,
         http_headers: Optional[dict[str, str]] = None,
         start_position: float = 0.0,
     ) -> None:
         """Start playing a track.
+
+        Provide EITHER audio_source (URL/path to create new source) OR source
+        (pre-validated SeekableAudioSource from prefetch). Not both.
 
         If already playing, stops current playback (without triggering callback)
         and starts the new track.
 
         Args:
             track: Track info object.
-            audio_source: Path to local file or streaming URL.
-            http_headers: HTTP headers for streaming URLs.
-            start_position: Position in seconds to start from.
+            audio_source: Path to local file or streaming URL. Creates new source.
+            source: Pre-validated SeekableAudioSource with buffered audio.
+                Ownership transfers to ManagedPlayer - caller must NOT cleanup.
+            http_headers: HTTP headers for streaming URLs (only with audio_source).
+            start_position: Position in seconds to start from (only with audio_source).
         """
+        # Validate args: need exactly one of audio_source or source
+        if source is not None and audio_source is not None:
+            raise ValueError("Provide audio_source OR source, not both")
+        if source is None and audio_source is None:
+            raise ValueError("Must provide audio_source or source")
+
         # Increment generation to invalidate any pending callbacks from previous play.
         # This must happen BEFORE we call vc.stop() so callbacks from the old source
         # see the new generation and know they're stale.
@@ -193,19 +205,28 @@ class ManagedPlayer:
         if old_player is not None and old_player.is_alive():
             old_player.join(timeout=0.1)
 
-        # Clean up old source. Safe because any pending callback will exit early
-        # due to generation mismatch before trying to access the source.
+        # Clean up old source (but NOT the new prebuffered one we're taking ownership of)
         if self._source:
             self._source.cleanup()
             self._source = None
 
-        # Create new source and start playback
+        # Set up the source
         self._current_track = track
-        self._source = SeekableAudioSource(
-            audio_source,
-            start_position=start_position,
-            http_headers=http_headers,
-        )
+        if source is not None:
+            # Use pre-validated source from prefetch (instant playback)
+            self._source = source
+            is_prebuffered = True
+        else:
+            # Create new source from URL
+            # Type assertion: we validated above that audio_source is set when source is None
+            assert audio_source is not None, "audio_source must be set when source is None"
+            self._source = SeekableAudioSource(
+                audio_source,
+                start_position=start_position,
+                http_headers=http_headers,
+            )
+            is_prebuffered = False
+
         self._play_started_at = time.time()
 
         # Create callback that captures the current generation.
@@ -216,7 +237,13 @@ class ManagedPlayer:
         self._vc.play(self._source, after=after_callback)
         self._state = PlayerState.PLAYING
 
-        logger.info(f"[ManagedPlayer] Playing: {track.title}")
+        if is_prebuffered:
+            logger.info(
+                f"[ManagedPlayer] Playing (prebuffered): {track.title} "
+                f"({self._source.buffered_seconds:.1f}s buffered)"
+            )
+        else:
+            logger.info(f"[ManagedPlayer] Playing: {track.title}")
 
     def pause(self) -> bool:
         """Pause playback.
@@ -324,10 +351,30 @@ class ManagedPlayer:
     ) -> None:
         """Handle track end on the event loop.
 
+        Error detection pipeline:
+        1. Capture parsed error from FFmpeg stderr (may be NONE with placeholder patterns)
+        2. ALWAYS run heuristic check (lightweight, ensures we always get *something*)
+        3. Final error type = parsed if available, else heuristic's guess
+        4. Log both for pattern refinement
+
+        The heuristic is a safety net that ensures we never silently fail
+        without knowing FFmpeg died. It's not meant to be replaced - parsed
+        errors just give us more detail when available.
+
         Args:
-            error: Exception if playback failed.
-            elapsed: Time since play started, for detecting fast failures.
+            error: Exception if playback failed (from discord.py).
+            elapsed: Time since play started, for heuristic detection.
         """
+        from utils.musicutils.music_data import AudioErrorType
+
+        # Capture stderr and health before cleanup (for diagnosis)
+        # These are critical for refining error patterns - we need to see
+        # what FFmpeg actually says vs what we parse/guess.
+        stderr_lines = self._source.stderr_lines if self._source else []
+        health = self._source.health if self._source else None
+        parsed_error_type = health.error_type if health else AudioErrorType.NONE
+        parsed_error_detail = health.error_detail if health else None
+
         # Clean up source
         if self._source:
             self._source.cleanup()
@@ -335,9 +382,28 @@ class ManagedPlayer:
 
         self._state = PlayerState.STOPPED
 
-        # Detect suspiciously fast failures (likely stale URL)
         track = self._current_track
+
+        # -------------------------------------------------------------------
+        # HEURISTIC CHECK - ALWAYS RUNS
+        # -------------------------------------------------------------------
+        # This is a lightweight pass-through that ensures we always detect
+        # when FFmpeg died unexpectedly. Even if we have a parsed error,
+        # we want to know what the heuristic would have said for comparison.
+        heuristic_would_trigger = (
+            elapsed < 3.0 and
+            track is not None and
+            track.duration > 10
+        )
+
+        # -------------------------------------------------------------------
+        # DETERMINE FINAL ERROR STATE
+        # -------------------------------------------------------------------
+        # Pipeline: FFmpeg died → Read parsed error → Pass through heuristic
+        # → Use parsed if available, heuristic if not
+
         if error:
+            # Explicit error from discord.py (FFmpeg crashed, pipe broken, etc.)
             if elapsed < 3.0:
                 logger.warning(
                     f"[ManagedPlayer] Playback failed after {elapsed:.1f}s "
@@ -345,14 +411,56 @@ class ManagedPlayer:
                 )
             else:
                 logger.error(f"[ManagedPlayer] Playback error: {error}")
-        elif elapsed < 3.0 and track and track.duration > 10:
-            # Silent failure: track "ended" way too fast
+
+        elif heuristic_would_trigger and track is not None:
+            # Silent failure: track "ended" way too fast with no explicit error.
+            # Heuristic caught this - FFmpeg died without telling discord.py.
             logger.warning(
                 f"[ManagedPlayer] Track ended suspiciously fast ({elapsed:.1f}s) "
-                f"for {track.duration}s track - likely connection failure"
+                f"for {track.duration}s track - heuristic triggered"
             )
-            # Treat as error so retry logic can kick in
+            # Convert to error so retry logic kicks in
             error = ConnectionError("Playback ended too fast (likely 403)")
+
+        # -------------------------------------------------------------------
+        # FINAL ERROR TYPE RESOLUTION
+        # -------------------------------------------------------------------
+        # Use parsed error if FFmpeg told us something, otherwise fall back
+        # to heuristic's best guess (HTTP_403 for silent fast failures).
+        final_error_type = parsed_error_type
+
+        if error and parsed_error_type == AudioErrorType.NONE:
+            # FFmpeg gave us nothing - use heuristic's guess
+            final_error_type = AudioErrorType.HTTP_403
+            logger.info(
+                "[ManagedPlayer] No FFmpeg error parsed, "
+                "using heuristic guess: HTTP_403"
+            )
+
+        # -------------------------------------------------------------------
+        # LOGGING FOR PATTERN REFINEMENT
+        # -------------------------------------------------------------------
+        # ALWAYS log on failures - this is how we collect real error patterns
+        # to refine the placeholder patterns in _parse_stderr_line()
+        if error:
+            # Log structured data for pattern analysis:
+            # - What FFmpeg said (parsed error type)
+            # - What heuristic would say (elapsed-based check)
+            # - What we're actually using (final_error_type)
+            logger.info(
+                f"[ManagedPlayer] Failure analysis | "
+                f"elapsed={elapsed:.1f}s | "
+                f"parsed={parsed_error_type.value} | "
+                f"heuristic_triggered={heuristic_would_trigger} | "
+                f"final={final_error_type.value} | "
+                f"detail={parsed_error_detail}"
+            )
+            if stderr_lines:
+                # Log full stderr separately so it's easy to grep
+                logger.info(
+                    f"[ManagedPlayer] FFmpeg stderr ({len(stderr_lines)} lines): "
+                    f"{stderr_lines}"
+                )
 
         # Invoke the callback
         self._on_track_end_callback(error)
