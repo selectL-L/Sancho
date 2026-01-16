@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 # Track current phase for fold markers
 _current_phase: Optional[str] = None
 
+# Guard against duplicate shutdown calls (signal handlers use create_task,
+# so rapid SIGTERM signals can schedule multiple shutdown tasks)
+_is_shutting_down: bool = False
+
 
 def log_phase(phase: str) -> None:
     """Logs a phase separator with fold markers for Notepad++ collapsing.
@@ -181,6 +185,12 @@ async def shutdown_handler(
         is_restart: Whether this is a soft restart.
         log_path: Path to the current log file for finalization.
     """
+    global _is_shutting_down
+    if _is_shutting_down:
+        logging.debug(f"Ignoring duplicate {sig.name} signal, shutdown already in progress")
+        return
+    _is_shutting_down = True
+
     # ─── SHUTDOWN ───
     log_phase("SHUTDOWN")
     logging.info(f"Received exit signal {sig.name}")

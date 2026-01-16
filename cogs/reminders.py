@@ -391,7 +391,11 @@ class Reminders(BaseCog):
             sign = match.group(2)
             hour = int(match.group(3))
             # Invert sign: ISO 'GMT+5' means 5 hours ahead, but POSIX 'Etc/GMT-5' means the same
-            return f"Etc/GMT{-hour if sign == '+' else +hour}"
+            # Must explicitly include sign since f-string {+hour} doesn't produce "+5"
+            if sign == '+':
+                return f"Etc/GMT-{hour}"
+            else:
+                return f"Etc/GMT+{hour}"
         return tz_str
 
     @staticmethod
@@ -1508,8 +1512,10 @@ class Reminders(BaseCog):
             # Validate the timezone
             tz = pytz.timezone(final_tz_str)
 
-            # Store the pytz-compatible format
-            zone_to_store = final_tz_str
+            # Store the normalized/canonical timezone name from pytz
+            # This ensures proper capitalization (e.g., "europe/london" -> "Europe/London")
+            # Note: tz.zone is always str for named timezones, but typed as Optional[str]
+            zone_to_store = tz.zone or final_tz_str
 
             await self.db_manager.set_user_timezone(ctx.author.id, zone_to_store)
 
