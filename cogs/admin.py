@@ -396,11 +396,11 @@ class AdminCog(BaseCog):
                         self.logger.debug(f"Table starboard_entries not available for export: {e}")
 
                     try:
-                        bod_usage = await self.db_manager.db_fetchall("SELECT * FROM bod_usage")
+                        bod_players = await self.db_manager.db_fetchall("SELECT * FROM bod_players")
                         tables_to_export.append(
-                            ("bod_usage", [dict(row) for row in bod_usage]))
+                            ("bod_players", [dict(row) for row in bod_players]))
                     except Exception as e:
-                        self.logger.debug(f"Table bod_usage not available for export: {e}")
+                        self.logger.debug(f"Table bod_players not available for export: {e}")
 
                     try:
                         bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
@@ -809,9 +809,11 @@ class AdminCog(BaseCog):
             usage = await resource_tracker.get_current_usage_async()
             cpu_percent = usage['cpu']
             ram_mb = usage['ram']
+            ram_total_mb = usage['ram_total']
         else:
             cpu_percent = 0.0
             ram_mb = 0.0
+            ram_total_mb = 0.0
 
         # =====================================================================
         # UPTIME
@@ -985,6 +987,7 @@ class AdminCog(BaseCog):
             db_latency=db_latency,
             cpu_percent=cpu_percent,
             ram_mb=ram_mb,
+            ram_total_mb=ram_total_mb,
             # Uptime
             start_timestamp=start_timestamp,
             uptime_str=uptime_str,

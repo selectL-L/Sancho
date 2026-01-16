@@ -189,24 +189,6 @@ class ResourceTracker:
         # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
         return self.process.cpu_percent(interval=None) / self._cpu_count
 
-    def get_current_usage(self) -> Dict[str, float]:
-        """Returns current RAM usage and a non-blocking CPU sample.
-
-        Note: For accurate instantaneous CPU readings, use get_current_usage_async().
-        This method is intended for internal sampling where blocking is not acceptable.
-
-        Returns:
-            Dict containing 'cpu' (percentage since last call) and 'ram' (MB) keys.
-        """
-        try:
-            memory_info = self.process.memory_info()
-            cpu_usage = self._get_non_blocking_cpu()
-            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
-            return {'cpu': cpu_usage, 'ram': ram_usage}
-        except Exception as e:
-            self._logger.error(f"Error getting current usage: {e}")
-            return {'cpu': 0.0, 'ram': 0.0}
-
     async def get_current_usage_async(self) -> Dict[str, float]:
         """Returns LIVE, accurate CPU and RAM usage (async-safe).
 
@@ -214,17 +196,22 @@ class ResourceTracker:
         to avoid blocking the event loop while providing accurate readings.
 
         Returns:
-            Dict containing 'cpu' (percentage) and 'ram' (MB) keys.
+            Dict containing 'cpu' (percentage), 'ram' (RSS in MB),
+            and 'ram_total' (USS - unique private memory in MB) keys.
         """
         try:
-            memory_info = self.process.memory_info()
+            # memory_full_info() reads /proc on Linux (~10ms), run in thread
+            memory_info = await asyncio.to_thread(self.process.memory_full_info)
             # Run blocking CPU measurement in thread pool
             cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
-            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
-            return {'cpu': cpu_usage, 'ram': ram_usage}
+            ram_rss = memory_info.rss / (1024 * 1024)
+            # USS (Unique Set Size) = memory unique to this process (not shared)
+            # This is the true "private" memory on both Windows and Linux
+            ram_total = memory_info.uss / (1024 * 1024)
+            return {'cpu': cpu_usage, 'ram': ram_rss, 'ram_total': ram_total}
         except Exception as e:
             self._logger.error(f"Error getting current usage (async): {e}")
-            return {'cpu': 0.0, 'ram': 0.0}
+            return {'cpu': 0.0, 'ram': 0.0, 'ram_total': 0.0}
 
     async def _sample_cpu(self) -> None:
         """Takes a single CPU sample and adds it to the accumulator."""
@@ -257,12 +244,21 @@ class ResourceTracker:
         For regular snapshots, uses averaged CPU from accumulated samples.
         For labeled snapshots (Startup/Shutdown), uses instantaneous readings.
 
+        Reports both RSS (resident in physical RAM) and USS (unique private memory).
+        RSS can drop when memory is paged out under pressure, while USS stays
+        constant - useful for detecting paging vs actual leaks.
+
         Args:
             label: Optional label for the snapshot (e.g., 'Startup', 'Shutdown').
         """
         try:
-            memory_info = self.process.memory_info()
-            ram_usage = memory_info.rss / (1024 * 1024)
+            # memory_full_info() reads /proc on Linux (~10ms), run in thread
+            memory_info = await asyncio.to_thread(self.process.memory_full_info)
+            ram_rss = memory_info.rss / (1024 * 1024)
+
+            # USS (Unique Set Size) = memory unique to this process (not shared)
+            # This is the true "private" memory on both Windows and Linux
+            ram_total = memory_info.uss / (1024 * 1024)
 
             # For labeled snapshots (startup/shutdown), use instantaneous reading
             # For regular interval snapshots, use averaged CPU
@@ -275,10 +271,16 @@ class ResourceTracker:
             self.usage_history.append({
                 'timestamp': timestamp,
                 'cpu': cpu_usage,
-                'ram': ram_usage,
+                'ram': ram_rss,
+                'ram_total': ram_total,
                 'label': label
             })
-            self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_usage:.2f}MB, Label={label}")
+
+            # Only show both values if they diverge (paging detected)
+            if abs(ram_total - ram_rss) > 5:  # More than 5MB difference
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (USS: {ram_total:.2f}MB), Label={label}")
+            else:
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB, Label={label}")
         except Exception as e:
             self._logger.error(f"Error recording usage snapshot: {e}")
 

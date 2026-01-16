@@ -1444,7 +1444,8 @@ class StatusData:
     roundtrip_latency: float  # ms
     db_latency: float  # ms
     cpu_percent: float
-    ram_mb: float
+    ram_mb: float  # RSS (resident in physical RAM)
+    ram_total_mb: float  # Total allocated (including paged out)
 
     # Uptime
     start_timestamp: int  # Unix timestamp
@@ -1674,10 +1675,15 @@ class StatusView(discord.ui.LayoutView):
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
         # Quick Stats
+        # Show paging indicator if RSS and total diverge significantly (>5MB)
+        if abs(d.ram_total_mb - d.ram_mb) > 5:
+            memory_str = f"{d.ram_mb:.0f} MB (alloc: {d.ram_total_mb:.0f} MB)"
+        else:
+            memory_str = f"{d.ram_mb:.0f} MB"
         quick_stats = (
             f"### Quick Stats\n"
             f"**Uptime:** {d.uptime_str}    **Latency:** {d.gateway_latency:.0f}ms\n"
-            f"**Memory:** {d.ram_mb:.0f} MB    **Cogs:** {len(d.loaded_cogs)}/{d.total_cogs}"
+            f"**Memory:** {memory_str}    **Cogs:** {len(d.loaded_cogs)}/{d.total_cogs}"
         )
         container.add_item(ui.TextDisplay(quick_stats))
 
@@ -1722,11 +1728,20 @@ class StatusView(discord.ui.LayoutView):
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
         # Resources section
-        resources_text = (
-            f"### Resources\n"
-            f"**CPU:** {d.cpu_percent:.1f}%\n"
-            f"**RAM:** {d.ram_mb:.2f} MB"
-        )
+        # Show both RSS and total if they diverge (indicates paging)
+        if abs(d.ram_total_mb - d.ram_mb) > 5:
+            resources_text = (
+                f"### Resources\n"
+                f"**CPU:** {d.cpu_percent:.1f}%\n"
+                f"**RAM:** {d.ram_mb:.2f} MB (resident)\n"
+                f"**Allocated:** {d.ram_total_mb:.2f} MB (incl. paged)"
+            )
+        else:
+            resources_text = (
+                f"### Resources\n"
+                f"**CPU:** {d.cpu_percent:.1f}%\n"
+                f"**RAM:** {d.ram_mb:.2f} MB"
+            )
         container.add_item(ui.TextDisplay(resources_text))
 
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
