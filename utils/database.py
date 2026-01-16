@@ -1146,7 +1146,7 @@ class DatabaseManager:
     async def schedule_can_view(self, requester_id: int, target_id: int, guild_id: int) -> bool:
         """Checks if requester can view target's availability in a guild.
 
-        Checks: (1) target enabled visibility for guild, (2) requester not blacklisted.
+        Checks: (1) target enabled visibility for guild, (2) mutual blacklist (both directions).
 
         Used By: cogs/schedule.py (NLP query handlers)
 
@@ -1176,12 +1176,20 @@ class DatabaseManager:
             if await cursor.fetchone():
                 return False
 
+            # Check if requester has blocked target (mutual blocking)
+            cursor = await db.execute(
+                "SELECT 1 FROM schedule_user_blacklist WHERE user_id = ? AND blocked_user_id = ?",
+                (requester_id, target_id)
+            )
+            if await cursor.fetchone():
+                return False
+
             return True
 
     async def schedule_get_guild_availability(self, guild_id: int, requester_id: int) -> Dict[int, List[str]]:
         """Gets availability for all visible users in a guild.
 
-        Filters by: guild visibility enabled AND requester not blacklisted.
+        Filters by: guild visibility enabled AND mutual blacklist check (both directions).
 
         Used By: cogs/schedule.py (NLP query handlers)
 
@@ -1194,7 +1202,7 @@ class DatabaseManager:
         """
         async with aiosqlite.connect(self.db_path) as db:
             # Get all users who have enabled visibility for this guild
-            # and haven't blacklisted the requester
+            # Excludes: users who blocked requester, AND users requester has blocked
             cursor = await db.execute("""
                 SELECT DISTINCT gv.user_id
                 FROM schedule_guild_visibility gv
@@ -1203,7 +1211,11 @@ class DatabaseManager:
                     SELECT bl.user_id FROM schedule_user_blacklist bl
                     WHERE bl.blocked_user_id = ?
                 )
-            """, (guild_id, requester_id))
+                AND gv.user_id NOT IN (
+                    SELECT bl.blocked_user_id FROM schedule_user_blacklist bl
+                    WHERE bl.user_id = ?
+                )
+            """, (guild_id, requester_id, requester_id))
 
             visible_users = [row[0] for row in await cursor.fetchall()]
 
