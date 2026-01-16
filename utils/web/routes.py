@@ -384,6 +384,7 @@ async def get_guilds(request: Request) -> JSONResponse:
                 "name": guild.name,
                 "icon": guild.icon.url if guild.icon else None,
                 "enabled": visibility_map.get(guild_id, False),
+                "member_count": guild.member_count,
             })
 
     # Sort by name

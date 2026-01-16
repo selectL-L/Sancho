@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settings</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
@@ -1352,6 +1353,7 @@
     // ========== DRAG STATE ==========
     let isDragging = false;
     let dragMode = null;
+    let lastPaintedCell = null; // For paint interpolation
 
     // ========== BUILD DAY HEADERS ==========
     function buildDayHeaders() {
@@ -1405,6 +1407,8 @@
           const cell = document.createElement('div');
           cell.className = 'grid-cell';
           cell.dataset.key = key;
+          cell.dataset.slotIdx = slotIdx;
+          cell.dataset.dayIdx = dayIdx;
 
           // Add hour/half-hour markers
           if (slot.minute === 0 && slotIdx > 0) {
@@ -1433,26 +1437,75 @@
             isDragging = true;
             const isAvailable = myAvailability.has(key);
             dragMode = isAvailable ? 'remove' : 'add';
+            lastPaintedCell = { slotIdx, dayIdx };
             toggleCell(cell, key);
-          });
-
-          cell.addEventListener('mouseenter', () => {
-            if (isDragging) {
-              if (dragMode === 'add' && !myAvailability.has(key)) {
-                toggleCell(cell, key);
-              } else if (dragMode === 'remove' && myAvailability.has(key)) {
-                toggleCell(cell, key);
-              }
-            }
           });
 
           body.appendChild(cell);
         });
       });
 
+      // Document-level mousemove for paint interpolation (fixes fast drag skipping)
+      document.getElementById('grid-body').addEventListener('mousemove', (e) => {
+        if (!isDragging || !lastPaintedCell) return;
+        
+        const target = e.target.closest('.grid-cell');
+        if (!target || !target.dataset.slotIdx) return;
+        
+        const slotIdx = parseInt(target.dataset.slotIdx);
+        const dayIdx = parseInt(target.dataset.dayIdx);
+        
+        // Same cell, nothing to do
+        if (slotIdx === lastPaintedCell.slotIdx && dayIdx === lastPaintedCell.dayIdx) return;
+        
+        // Interpolate between last painted cell and current (Bresenham line algorithm)
+        const cells = Array.from(document.querySelectorAll('.grid-cell'));
+        const startSlot = lastPaintedCell.slotIdx;
+        const startDay = lastPaintedCell.dayIdx;
+        
+        const dSlot = Math.abs(slotIdx - startSlot);
+        const dDay = Math.abs(dayIdx - startDay);
+        const sSlot = startSlot < slotIdx ? 1 : -1;
+        const sDay = startDay < dayIdx ? 1 : -1;
+        let err = dSlot - dDay;
+        let curSlot = startSlot;
+        let curDay = startDay;
+        
+        while (true) {
+          // Paint current cell if not the starting cell (already painted)
+          if (curSlot !== startSlot || curDay !== startDay) {
+            const idx = curSlot * 7 + curDay;
+            const cell = cells[idx];
+            if (cell) {
+              const key = cell.dataset.key;
+              if (dragMode === 'add' && !myAvailability.has(key)) {
+                toggleCell(cell, key);
+              } else if (dragMode === 'remove' && myAvailability.has(key)) {
+                toggleCell(cell, key);
+              }
+            }
+          }
+          
+          if (curSlot === slotIdx && curDay === dayIdx) break;
+          
+          const e2 = 2 * err;
+          if (e2 > -dDay) {
+            err -= dDay;
+            curSlot += sSlot;
+          }
+          if (e2 < dSlot) {
+            err += dSlot;
+            curDay += sDay;
+          }
+        }
+        
+        lastPaintedCell = { slotIdx, dayIdx };
+      });
+
       document.addEventListener('mouseup', () => {
         isDragging = false;
         dragMode = null;
+        lastPaintedCell = null;
       });
     }
 
