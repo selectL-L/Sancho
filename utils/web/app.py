@@ -81,6 +81,7 @@ def create_app(bot: "CoreBot") -> FastAPI:
         ]
 
         if len(_rate_limit_storage[client_ip]) >= RATE_LIMIT_REQUESTS:
+            logger.warning(f"Rate limited {client_ip}: {request.url.path}")
             return JSONResponse(
                 status_code=429,
                 content={"error": "Too many requests. Please slow down."},

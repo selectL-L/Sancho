@@ -173,6 +173,7 @@ class Reminders(BaseCog):
                        f"It was due at <t:{reminder['reminder_time']}:F> (<t:{reminder['reminder_time']}:R>).")
                 await targetable_dest.send(msg)
                 await self.db_manager.delete_reminders([reminder_id])
+                self.logger.info(f"Delivered missed reminder {reminder_id} to user {user_id}.")
 
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
             self.logger.error(f"Discord error handling missed reminder {reminder_id}: {e}. Deleting to prevent loops.")
@@ -220,6 +221,7 @@ class Reminders(BaseCog):
                 msg_body = f"\nMissed times:\n{list_str}"
 
             await targetable.send(msg_header + msg_body)
+            self.logger.info(f"Delivered missed recurring reminder {reminder['id']} to user {user.id} ({count} missed occurrences).")
 
             # 2. Reschedule to Next Future Time.
             next_occurrence = rule.after(now_dt)
@@ -337,6 +339,8 @@ class Reminders(BaseCog):
                     # Cast to Messageable to satisfy static analysis.
                     targetable_dest = cast(discord.abc.Messageable, targetable)
                     await targetable_dest.send(msg_content)
+
+                self.logger.info(f"Delivered reminder {reminder['id']} to user {user_id}.")
 
             # Handle Recurrence or Deletion.
             if reminder.get('is_recurring') and reminder.get('recurrence_rule'):
@@ -975,7 +979,7 @@ class Reminders(BaseCog):
                 self._is_complementary_pair, front_time_str, back_time_str, 'UTC'
             )
             if use_combined:
-                self.logger.info(f"Combined time '{combined_candidate}' is a valid complementary pair.")
+                self.logger.debug(f"Combined time '{combined_candidate}' is a valid complementary pair.")
 
             if use_combined:
                 final_time_string = combined_candidate
@@ -1000,7 +1004,7 @@ class Reminders(BaseCog):
                     message_words = words[:len(words) - back_word_count]
                 else:
                     # Tied scores → fall back to interactive flow.
-                    self.logger.warning(
+                    self.logger.info(
                         f"Tied scores ({front_score}). Cannot determine time. Falling back to interactive."
                     )
                     return None
@@ -1342,7 +1346,6 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
-        self.logger.info(f"Handling NLP request for checking reminders from user {ctx.author.id}.")
         try:
             reminders = await self.db_manager.get_user_reminders(ctx.author.id)
 
@@ -1384,8 +1387,6 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
-        self.logger.info(f"Handling NLP request for deleting reminders from user {ctx.author.id}: '{query}'")
-
         # Find all numbers in the query string to allow for deleting multiple reminders at once.
         numbers_found = re.findall(r'\d+', query)
 

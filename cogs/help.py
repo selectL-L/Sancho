@@ -59,7 +59,6 @@ class Help(BaseCog):
             ctx (commands.Context): The command context.
             command_name (Optional[str]): The command to show detailed help for.
         """
-        self.logger.info(f"Help command used by {ctx.author} for command: {command_name or 'general'}")
         if command_name:
             command = self.bot.get_command(command_name)
 
@@ -90,7 +89,6 @@ class Help(BaseCog):
             ctx (commands.Context): The command context.
             command (commands.Command): The command to show help for.
         """
-        self.logger.info(f"Generating help for command: {command.name}")
         if not command.enabled:
             self.logger.warning(f"Attempted to get help for disabled command: {command.name}")
             return
@@ -110,24 +108,23 @@ class Help(BaseCog):
         param_descriptions = {}
         # The bot's command tree holds the slash commands
         if hasattr(self.bot, 'tree'):
-            self.logger.info("Bot has a command tree. Searching for corresponding app command...")
             app_command = self.bot.tree.get_command(command.name)
 
             if app_command and isinstance(app_command, app_commands.Command):
-                self.logger.info(f"Found matching app command: {app_command.name}")
                 for param in app_command.parameters:
                     param_descriptions[param.name] = param.description
-                self.logger.info(f"Extracted parameter descriptions: {param_descriptions}")
+                self.logger.debug(f"[Help] '{command.name}': found app_command, {len(param_descriptions)} param descriptions")
             else:
-                self.logger.warning(f"Could not find a matching app command for '{command.name}'.")
-
                 # Fallback to reading the decorator directly from the callback
                 if hasattr(command.callback, '__discord_app_commands_param_description__'):
-                    self.logger.info(f"Falling back to reading decorator directly for '{command.name}'.")
                     descriptions = getattr(command.callback, '__discord_app_commands_param_description__', {})
                     if descriptions:
                         param_descriptions.update(descriptions)
-                        self.logger.info(f"Extracted descriptions from decorator: {param_descriptions}")
+                        self.logger.debug(f"[Help] '{command.name}': fallback to decorator, {len(param_descriptions)} param descriptions")
+                    else:
+                        self.logger.debug(f"[Help] '{command.name}': decorator exists but empty")
+                else:
+                    self.logger.debug(f"[Help] '{command.name}': no app_command or decorator found")
 
         else:
             self.logger.warning("Bot does not have a command tree, cannot look for app command descriptions.")
@@ -215,6 +212,7 @@ class Help(BaseCog):
             cog for cog_name, cog in self.bot.cogs.items()
             if cog.get_commands() and cog_name not in ["Help"]  # Exclude the Help cog itself
         ]
+        self.logger.debug(f"[Help] Building general help: {len(cogs_with_commands)} cogs with visible commands")
 
         # Add a field for each cog with its list of commands.
         for cog in cogs_with_commands:

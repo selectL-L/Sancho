@@ -333,8 +333,6 @@ class ImageCog(BaseCog):
                 else:
                     # Send both avatars
                     await ctx.send(content=f"Here are {target.display_name}'s avatars:", embeds=embeds)
-
-                self.logger.info(f"Fetched {len(avatars)} avatar(s) for {target} (requested by {ctx.author}).")
         except Exception as e:
             self.logger.error(f"Failed to fetch avatar: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to fetch that profile picture.")
@@ -381,8 +379,6 @@ class ImageCog(BaseCog):
                 else:
                     # Send both banners
                     await ctx.send(content=f"Here are {target.display_name}'s banners:", embeds=embeds)
-
-                self.logger.info(f"Fetched {len(banners)} banner(s) for {target} (requested by {ctx.author}).")
         except Exception as e:
             self.logger.error(f"Failed to fetch banner: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to fetch that banner.")
@@ -468,8 +464,6 @@ class ImageCog(BaseCog):
 
                 filename = f"resized_{attachment.filename}"
                 await ctx.send(f"Here is the image resized to {new_size[0]}x{new_size[1]}:", file=discord.File(buffer, filename=filename))
-
-            self.logger.info(f"Resized image for {ctx.author} to {new_size[0]}x{new_size[1]}.")
         except Exception as e:
             self.logger.error(f"Failed to resize image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to resize that image.")
@@ -542,8 +536,6 @@ class ImageCog(BaseCog):
                 new_filename = f"{base_filename}.{target_format.lower()}"
 
                 await ctx.send(f"Here is the image converted to {target_format}:", file=discord.File(buffer, filename=new_filename))
-
-            self.logger.info(f"Converted image for {ctx.author} to {target_format}.")
         except Exception as e:
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to convert that image.")

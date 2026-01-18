@@ -1896,6 +1896,8 @@ class Music(MusicCommandsMixin, BaseCog):
             # Create managed player for this session
             self._player = ManagedPlayer(vc, self._on_player_track_end)
 
+            self.logger.info(f"Started voice session in {channel.name} (guild={channel.guild.id}, channel={channel.id})")
+
             # Start playback from current track
             await self._play_current_track()
 

@@ -17,6 +17,7 @@ Exports:
 
 import io
 import logging
+import sys
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Protocol, cast
@@ -1445,7 +1446,8 @@ class StatusData:
     db_latency: float  # ms
     cpu_percent: float
     ram_mb: float  # RSS (resident in physical RAM)
-    ram_total_mb: float  # Total allocated (including paged out)
+    ram_private_mb: float  # USS (private bytes, unique to this process)
+    ram_swap_mb: float  # Swap usage in MB (Linux only, 0 on Windows)
 
     # Uptime
     start_timestamp: int  # Unix timestamp
@@ -1675,11 +1677,15 @@ class StatusView(discord.ui.LayoutView):
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
         # Quick Stats
-        # Show paging indicator if RSS and total diverge significantly (>5MB)
-        if abs(d.ram_total_mb - d.ram_mb) > 5:
-            memory_str = f"{d.ram_mb:.0f} MB (alloc: {d.ram_total_mb:.0f} MB)"
+        # Platform-aware memory display:
+        # - Windows: Show private bytes (USS) - useful for paging detection
+        # - Linux: Show swap if any (RSS vs USS gap is just shared libs)
+        if sys.platform == 'win32':
+            memory_str = f"{d.ram_mb:.0f} MB (private: {d.ram_private_mb:.0f} MB)"
+        elif d.ram_swap_mb > 0:
+            memory_str = f"{d.ram_mb:.0f} MB (paged: {d.ram_swap_mb:.0f} MB)"
         else:
-            memory_str = f"{d.ram_mb:.0f} MB"
+            memory_str = f"{d.ram_mb:.0f} MB (paged: 0 MB)"
         quick_stats = (
             f"### Quick Stats\n"
             f"**Uptime:** {d.uptime_str}    **Latency:** {d.gateway_latency:.0f}ms\n"
@@ -1728,19 +1734,29 @@ class StatusView(discord.ui.LayoutView):
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
         # Resources section
-        # Show both RSS and total if they diverge (indicates paging)
-        if abs(d.ram_total_mb - d.ram_mb) > 5:
+        # Platform-aware memory display:
+        # - Windows: Show private bytes (USS) - useful for paging detection
+        # - Linux: Show swap if any (RSS vs USS gap is just shared libs)
+        if sys.platform == 'win32':
             resources_text = (
                 f"### Resources\n"
                 f"**CPU:** {d.cpu_percent:.1f}%\n"
                 f"**RAM:** {d.ram_mb:.2f} MB (resident)\n"
-                f"**Allocated:** {d.ram_total_mb:.2f} MB (incl. paged)"
+                f"**Private:** {d.ram_private_mb:.2f} MB"
+            )
+        elif d.ram_swap_mb > 0:
+            resources_text = (
+                f"### Resources\n"
+                f"**CPU:** {d.cpu_percent:.1f}%\n"
+                f"**RAM:** {d.ram_mb:.2f} MB\n"
+                f"**Paged:** {d.ram_swap_mb:.2f} MB"
             )
         else:
             resources_text = (
                 f"### Resources\n"
                 f"**CPU:** {d.cpu_percent:.1f}%\n"
-                f"**RAM:** {d.ram_mb:.2f} MB"
+                f"**RAM:** {d.ram_mb:.2f} MB\n"
+                f"**Paged:** 0 MB"
             )
         container.add_item(ui.TextDisplay(resources_text))
 

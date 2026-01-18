@@ -250,7 +250,6 @@ class Math(BaseCog):
                 f"{description}"
             )
             await ctx.send(response)
-            self.logger.info(f"Limbus roll by {ctx.author}. Result: {final_result}")
 
         except asyncio.TimeoutError:
             await ctx.send("You took too long to answer, so I cancelled the roll.")

@@ -26,6 +26,9 @@ import config
 from utils.extensions import discover_cogs
 from utils.lifecycle import startup_handler
 
+# Module-level logger for bot infrastructure
+logger = logging.getLogger(__name__)
+
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
 if TYPE_CHECKING:
@@ -107,7 +110,7 @@ class CoreBot(commands.Bot):
             return False
 
         self._current_visibility = self._visibility_map[status]
-        logging.info(f"Visibility changed to: {status}")
+        logger.info(f"Visibility changed to: {status}")
 
         # Apply the new visibility immediately
         # If invisible, clear activity; otherwise preserve current activity
@@ -181,7 +184,7 @@ class CoreBot(commands.Bot):
                 await loop.run_in_executor(None, lambda: method(ctx, query=query))
         except Exception:
             try:
-                logging.getLogger(__name__).exception("Error dispatching NLP query")
+                logger.exception("Error dispatching NLP query")
             except Exception:
                 pass
 
@@ -226,12 +229,12 @@ class CoreBot(commands.Bot):
 
         cog = self.get_cog(cog_name)
         if not cog:
-            logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
+            logger.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
             return None
 
         method = getattr(cog, method_name, None)
         if not method:
-            logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' not found.")
+            logger.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' not found.")
             return None
 
         return cog, method, method_name
@@ -260,7 +263,7 @@ class CoreBot(commands.Bot):
 
         async def _nlp_app(interaction: discord.Interaction, query: str):
             # Log command usage similar to how prefix-based NLP does it.
-            logging.info(f"slash NLP query from '{interaction.user}': '{query}'")
+            logger.info(f"slash NLP query from '{interaction.user}': '{query}'")
             try:
                 # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
                 await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
@@ -278,7 +281,7 @@ class CoreBot(commands.Bot):
 
         cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
         self.tree.add_command(cmd)
-        logging.info("Registered /nlp application command")
+        logger.info("Registered /nlp application command")
 
     class InteractionContextAdapter:
         """A thin adapter that exposes the subset of `commands.Context` used by NLP handlers.
@@ -379,7 +382,7 @@ class CoreBot(commands.Bot):
 
         # Handle permission errors gracefully. `NotOwner` is a subclass of `CheckFailure`.
         if isinstance(error, commands.CheckFailure):
-            logging.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
+            logger.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
             # Send a silent or ephemeral message if possible, or just a simple public one.
             try:
                 await ctx.send("Sorry, you don't have permission to use this command!", delete_after=8)
@@ -388,13 +391,13 @@ class CoreBot(commands.Bot):
             return
 
         # For all other errors, log the full traceback for debugging purposes.
-        logging.error(f"Unhandled error in command '{ctx.command}'", exc_info=error)
+        logger.error(f"Unhandled error in command '{ctx.command}'", exc_info=error)
 
         # Notify the user that a generic, unexpected error occurred.
         try:
             await ctx.send("Sorry, an unexpected error occurred. The issue has been logged. Please contact my author!")
         except discord.HTTPException:
-            logging.error(f"Failed to send error message to channel {ctx.channel.id}")
+            logger.error(f"Failed to send error message to channel {ctx.channel.id}")
 
     async def on_message(self, message: discord.Message) -> None:
         """The main event handler for processing all incoming messages.
@@ -439,7 +442,7 @@ class CoreBot(commands.Bot):
             return
 
         query_lower = query.lower()
-        logging.info(f"prefix NLP query from '{message.author}': '{query}'")
+        logger.info(f"prefix NLP query from '{message.author}': '{query}'")
 
         # Use the NLP matcher to find the handler.
         handler = self.find_nlp_handler(query_lower)
@@ -455,7 +458,7 @@ class CoreBot(commands.Bot):
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, lambda: method(ctx, query=query))
         except Exception as e:
-            logging.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
+            logger.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
             await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
 
     def _get_case_insensitive_prefix(self, bot: "CoreBot", message: discord.Message) -> list[str]:
@@ -494,27 +497,27 @@ class CoreBot(commands.Bot):
         if self.console_task and not self.console_task.done():
             self.console_task.cancel()
 
-        logging.info("Closing bot connection...")
+        logger.info("Closing bot connection...")
         await super().close()
-        logging.info("Connection closed.")
+        logger.info("Connection closed.")
 
     async def reload_all_cogs(self):
         """Asynchronously discovers and reloads all cogs.
 
         Handles new, removed, and updated extensions.
         """
-        logging.info("Starting cog reload process...")
+        logger.info("Starting cog reload process...")
 
         # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.math'})
         loaded_cogs = set(self.extensions.keys())
-        logging.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
+        logger.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
 
         # Discover the cogs currently present in the filesystem.
         try:
             discovered_cogs = set(discover_cogs(config.COGS_PATH))
-            logging.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
+            logger.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
         except Exception as e:
-            logging.error(f"Failed to discover cogs: {e}", exc_info=True)
+            logger.error(f"Failed to discover cogs: {e}", exc_info=True)
             return
 
         # --- Determine which cogs to load, unload, and reload ---
@@ -526,27 +529,27 @@ class CoreBot(commands.Bot):
         for extension in cogs_to_unload:
             try:
                 await self.unload_extension(extension)
-                logging.info(f"Successfully unloaded removed extension: {extension}")
+                logger.info(f"Successfully unloaded removed extension: {extension}")
             except Exception:
-                logging.error(f'Failed to unload extension {extension}.', exc_info=True)
+                logger.error(f'Failed to unload extension {extension}.', exc_info=True)
 
         # Load new cogs that have been added.
         for extension in cogs_to_load:
             try:
                 await self.load_extension(extension)
-                logging.info(f"Successfully loaded new extension: {extension}")
+                logger.info(f"Successfully loaded new extension: {extension}")
             except Exception:
-                logging.error(f'Failed to load new extension {extension}.', exc_info=True)
+                logger.error(f'Failed to load new extension {extension}.', exc_info=True)
 
         # Reload existing cogs to apply any changes.
         for extension in cogs_to_reload:
             try:
                 await self.reload_extension(extension)
-                logging.info(f"Successfully reloaded extension: {extension}")
+                logger.info(f"Successfully reloaded extension: {extension}")
             except Exception:
-                logging.error(f'Failed to reload extension {extension}.', exc_info=True)
+                logger.error(f'Failed to reload extension {extension}.', exc_info=True)
 
-        logging.info("Finished reloading cogs.")
+        logger.info("Finished reloading cogs.")
 
     async def ready_all_cogs(self) -> None:
         """Calls cog_ready() on all loaded cogs.
@@ -560,4 +563,4 @@ class CoreBot(commands.Bot):
                 try:
                     await cog_ready_method()
                 except Exception as e:
-                    logging.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)
+                    logger.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)

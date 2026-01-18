@@ -94,7 +94,6 @@ class TestFunCommandDataclass:
         assert cmd.content is None
         assert cmd.file is None
         assert cmd.attr is None
-        assert cmd.image_cog is None
         assert cmd.random is True
         assert cmd.require_query is False
         assert cmd.query_error == "You need to provide something!"  # Has default

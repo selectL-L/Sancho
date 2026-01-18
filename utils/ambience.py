@@ -24,6 +24,7 @@ Music is special:
 """
 from __future__ import annotations
 
+import logging
 import random
 import time
 import tomllib
@@ -32,6 +33,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import config
+
+# Module-level logger for ambience/personality system
+logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TOML CONFIG LOADING
@@ -761,6 +765,7 @@ def initialize() -> None:
     _current_mood = random.choice(list(MOODS.keys()))
     mood = MOODS[_current_mood]
     _current_activity = random.choice(list(mood.activities.values()))
+    logger.info(f"[Ambience] Initialized: mood={_current_mood}, activity={_current_activity.id}")
 
 
 def get_current_mood() -> Optional[Mood]:
@@ -897,6 +902,7 @@ def maybe_cycle() -> bool:
             mood = MOODS[_current_mood]
             _current_activity = random.choice(list(mood.activities.values()))
             _music_state.last_mood_change = time.time()
+            logger.debug(f"[Ambience] Mood changed: {old_mood} -> {_current_mood}, activity={_current_activity.id}")
             return True
 
     elif roll < 0.2 + music_weight * 0.5:
@@ -906,6 +912,7 @@ def maybe_cycle() -> bool:
             if "listening_music" in mood.activities:
                 _current_activity = mood.activities["listening_music"]
                 _music_state.last_mood_change = time.time()
+                logger.debug(f"[Ambience] Switched to music activity in mood={_current_mood}")
                 return True
 
     else:
@@ -914,6 +921,7 @@ def maybe_cycle() -> bool:
         cycle_activity()
         if _current_activity != old_activity:
             _music_state.last_mood_change = time.time()
+            logger.debug(f"[Ambience] Activity cycled: {old_activity.id if old_activity else None} -> {_current_activity.id if _current_activity else None}")
             return True
 
     return False
@@ -1065,8 +1073,8 @@ def _notify_playlist_change(playlist_url: Optional[str], description: Optional[s
     for callback in _playlist_callbacks:
         try:
             callback(playlist_url, description)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[Ambience] Playlist callback failed: {e}")
 
 
 def get_music_state() -> MusicState:
@@ -1127,6 +1135,7 @@ def start_music(music_mood: Optional[str] = None) -> tuple[Optional[str], Option
     _music_state.playlist_description = description
     _music_state.last_mood_change = time.time()
 
+    logger.info(f"[Ambience] Starting music: mood={selected}, playlist={playlist}")
     _notify_playlist_change(playlist, description)
     return playlist, description
 
@@ -1143,6 +1152,7 @@ def stop_music() -> None:
     _music_state.playlist_description = None
 
     if was_playing:
+        logger.info("[Ambience] Stopping music.")
         _notify_playlist_change(None, None)
 
 
@@ -1176,12 +1186,14 @@ def switch_music_mood(music_mood: Optional[str] = None) -> tuple[Optional[str], 
 
     description = get_playlist_description(selected)
 
+    old_mood = _music_state.current_mood
     _music_state.current_mood = selected
     _music_state.current_playlist = playlist
     _music_state.playlist_description = description
     _music_state.is_playing = True
     _music_state.last_mood_change = time.time()
 
+    logger.info(f"[Ambience] Switching music mood: {old_mood} -> {selected}")
     _notify_playlist_change(playlist, description)
     return playlist, description
 

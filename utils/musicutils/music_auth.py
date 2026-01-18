@@ -646,7 +646,7 @@ class AudioFetcher:
         """Attempt residential proxy download."""
         # Check attempt limit
         if state.residential_attempts >= self.RESIDENTIAL_MAX:
-            self.logger.debug(
+            self.logger.info(
                 f"[AudioFetcher] Residential exhausted ({state.residential_attempts}/{self.RESIDENTIAL_MAX})"
             )
             return AudioFetchResult(

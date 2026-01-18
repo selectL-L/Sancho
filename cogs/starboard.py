@@ -91,6 +91,7 @@ class Starboard(BaseCog):
         """Clean up resources when the cog is unloaded."""
         if self.http_session:
             await self.http_session.close()
+        self.logger.info("Starboard cog unloaded.")
 
     async def get_starboard_config(self, guild_id: int) -> Tuple[Optional[int], str, int]:
         """Fetches starboard configuration for a guild, with defaults.
@@ -757,7 +758,7 @@ class Starboard(BaseCog):
                         sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, starboard_id)
                         missing_sb = False
                     except discord.NotFound:
-                        self.logger.info(f"Starboard message {starboard_id} not found (404). Treating as missing.")
+                        self.logger.info(f"Starboard message {starboard_id} not found (404). Will attempt recovery.")
                         missing_sb = True
                     except Exception as e:
                         self.logger.warning(f"Error fetching starboard message {starboard_id}: {e}. Treating as missing.")
@@ -842,6 +843,7 @@ class Starboard(BaseCog):
 
                             if updated:
                                 await self.db_manager.update_starboard_entry(entry)
+                                self.logger.info(f"Fixed entry {original_id}: recovered metadata from embed.")
                                 fixed_count += 1
                             else:
                                 verified_count += 1
@@ -908,6 +910,7 @@ class Starboard(BaseCog):
                         await self.db_manager.remove_starboard_entry(original_id)
 
                         await self.post_to_starboard(found_msg, starboard_channel_id, starboard_emoji, star_count)
+                        self.logger.info(f"Fixed entry {original_id}: found original message, reposted to starboard.")
                         fixed_count += 1
 
                     # Step 4: Tombstone Creation
@@ -968,7 +971,7 @@ class Starboard(BaseCog):
                 try:
                     message = await channel.fetch_message(payload.message_id)
                 except discord.NotFound:
-                    self.logger.warning(f"Starboard: Message {payload.message_id} not found.")
+                    self.logger.debug(f"Starboard: Message {payload.message_id} not found (deleted before processing).")
                     return
 
                 # Find the reaction count for the correct emoji
@@ -999,7 +1002,7 @@ class Starboard(BaseCog):
 
         existing_entry = await self.db_manager.get_starboard_entry(message.id)
         content = f"{starboard_emoji} **{star_count}** in <#{message.channel.id}>"
-        self.logger.info(f"Starboard post content: {content}")
+        self.logger.debug(f"Starboard post content: {content}")
 
         if existing_entry:
             # Safety check: if starboard_message_id is missing, we can't fetch it.
@@ -1092,6 +1095,7 @@ class Starboard(BaseCog):
             starboard_message = await starboard_channel.send(content=content, embed=embed, files=files)
             if message.guild:
                 await self.db_manager.add_starboard_entry(message.id, starboard_message.id, message.guild.id, message.channel.id)
+            self.logger.info(f"Created starboard post {starboard_message.id} for original message {message.id}.")
         except discord.HTTPException as e:
             self.logger.error(f"Failed to create single starboard post: {e}")
         finally:
@@ -1331,9 +1335,10 @@ class Starboard(BaseCog):
                         reply_context_message = await starboard_channel.fetch_message(existing_entry['starboard_reply_id'])
                         await reply_context_message.delete()
                     except discord.NotFound:
-                        self.logger.warning(f"Starboard reply context message {existing_entry['starboard_reply_id']} not found for deletion.")
+                        self.logger.debug(f"Starboard reply context message {existing_entry['starboard_reply_id']} not found for deletion.")
 
                 await self.db_manager.remove_starboard_entry(message.id)
+                self.logger.info(f"Removed starboard entry for message {message.id} (reactions dropped below threshold).")
             else:
                 content = f"{starboard_emoji} **{star_count}** in <#{message.channel.id}>"
                 await starboard_message.edit(content=content)

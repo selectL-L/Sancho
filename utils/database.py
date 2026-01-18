@@ -1414,7 +1414,10 @@ class DatabaseManager:
                 (cutoff,)
             )
             await db.commit()
-            return cursor.rowcount
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} stale sessions older than {max_age_days} days.")
+            return deleted_count
 
     # ==========================================================================
     # SKILLS COG METHODS

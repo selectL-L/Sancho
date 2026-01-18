@@ -15,7 +15,6 @@ import time
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
@@ -25,6 +24,45 @@ from discord.ext import commands
 import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
+
+
+# =============================================================================
+# COG CALL TYPES
+# =============================================================================
+
+
+@dataclass
+class CogCallResult:
+    """Complete, ready-to-post result from a delegated cog method.
+
+    Target method does ALL processing and returns this.
+    Fun dispatcher just posts it verbatim.
+
+    Attributes:
+        content: Text message to send.
+        file: File attachment to send.
+        embed: Embed to send.
+    """
+
+    content: Optional[str] = None
+    file: Optional[discord.File] = None
+    embed: Optional[discord.Embed] = None
+
+
+class CogCallError(Exception):
+    """Base exception for cog_call failures."""
+
+
+class CogCallNoInput(CogCallError):
+    """No valid input provided (no attachment, no reply, no URL)."""
+
+
+class CogCallInvalidInput(CogCallError):
+    """Input was provided but couldn't be processed (wrong format, too large, etc.)."""
+
+
+class CogCallProcessingFailed(CogCallError):
+    """Processing started but failed (ffmpeg error, API timeout, etc.)."""
 
 
 # =============================================================================
@@ -46,7 +84,9 @@ class FunCommand:
         content: Literal value - text string OR image filename in ASSETS_PATH.
         file: Read lines from this text file in ASSETS_PATH.
         attr: Read items from self.{attr} at runtime.
-        image_cog: Call ImageCog.{method}(ctx, query) to get image bytes.
+        cog_call: Tuple of (CogName, method_name) to delegate processing.
+        cog_call_errors: Dict mapping exception types to error messages.
+            Keys: 'no_input', 'invalid_input', 'processing_failed', 'unavailable'
         random: If True and source has multiple items, pick randomly.
         require_query: If True, user must provide text after trigger.
         query_error: Message shown when require_query=True but query is empty.
@@ -63,7 +103,8 @@ class FunCommand:
     content: Optional[str] = None
     file: Optional[str] = None
     attr: Optional[str] = None
-    image_cog: Optional[str] = None
+    cog_call: Optional[Tuple[str, str]] = None
+    cog_call_errors: Optional[Dict[str, str]] = None
 
     # Behavior modifiers
     random: bool = True
@@ -213,6 +254,11 @@ class Fun(BaseCog):
             ctx: The command context.
             query: The user's full query string.
         """
+        # Route cog_call commands to dedicated handler
+        if cmd.cog_call is not None:
+            await self._handle_cog_call(cmd, ctx)
+            return
+
         # Check query requirement
         if cmd.require_query:
             pattern = '|'.join(cmd.patterns)
@@ -233,17 +279,11 @@ class Fun(BaseCog):
 
             # Send output
             if cmd.is_image:
-                if cmd.image_cog:
-                    # item is already processed bytes from ImageCog
-                    await ctx.reply(file=discord.File(BytesIO(item), filename=f"{cmd.name}.png"))
-                else:
-                    # item is filename in ASSETS_PATH
-                    path = os.path.join(config.ASSETS_PATH, item)
-                    await ctx.reply(file=discord.File(path))
+                # item is filename in ASSETS_PATH
+                path = os.path.join(config.ASSETS_PATH, item)
+                await ctx.reply(file=discord.File(path))
             else:
                 await ctx.reply(item)
-
-            self.logger.info(f"Fun command '{cmd.name}' used by {ctx.author}")
 
         except FileNotFoundError:
             await ctx.reply(cmd.error_msg)
@@ -277,21 +317,97 @@ class Fun(BaseCog):
             # Read from runtime attribute
             return getattr(self, cmd.attr, [])
 
-        elif cmd.image_cog is not None:
-            # Call ImageCog method - returns bytes
-            image_cog = self.bot.get_cog('ImageCog')
-            if not image_cog:
-                self.logger.warning(f"ImageCog not available for '{cmd.name}'")
-                return []
-            method = getattr(image_cog, cmd.image_cog, None)
-            if not method:
-                self.logger.error(f"ImageCog has no method '{cmd.image_cog}'")
-                return []
-            # Note: For image_cog, we'd need to pass ctx/query and await
-            # This is a placeholder - actual implementation depends on ImageCog API
-            return []
-
         return []
+
+    # ==========================================================================
+    # Cog Call Dispatcher
+    # ==========================================================================
+
+    async def _resolve_cog_call_input(
+        self,
+        ctx: commands.Context
+    ) -> Optional[discord.Attachment]:
+        """Resolve input for cog_call: prefer direct attachment over reply.
+
+        Priority:
+        1. Direct attachment on the command message
+        2. Attachment on replied-to message
+        3. None (target method should raise CogCallNoInput)
+
+        Args:
+            ctx: The command context.
+
+        Returns:
+            The resolved attachment, or None if no attachment found.
+        """
+        # 1. Direct attachment
+        if ctx.message.attachments:
+            return ctx.message.attachments[0]
+
+        # 2. Replied-to message
+        if ctx.message.reference and ctx.message.reference.resolved:
+            ref_msg = ctx.message.reference.resolved
+            if isinstance(ref_msg, discord.Message) and ref_msg.attachments:
+                return ref_msg.attachments[0]
+
+        return None
+
+    async def _handle_cog_call(
+        self,
+        cmd: FunCommand,
+        ctx: commands.Context
+    ) -> None:
+        """Execute a cog_call command by delegating to another cog's method.
+
+        Resolves input, calls the target method, and posts the result.
+        Maps CogCallError subclasses to user-friendly error messages.
+
+        Args:
+            cmd: The FunCommand definition with cog_call set.
+            ctx: The command context.
+        """
+        cog_name, method_name = cmd.cog_call  # type: ignore[misc]
+        errors = cmd.cog_call_errors or {}
+
+        # Get cog and method
+        cog = self.bot.get_cog(cog_name)
+        if not cog:
+            await ctx.reply(errors.get('unavailable', cmd.error_msg))
+            self.logger.warning(f"Cog '{cog_name}' not available for cog_call '{cmd.name}'")
+            return
+
+        method = getattr(cog, method_name, None)
+        if not method:
+            await ctx.reply(errors.get('unavailable', cmd.error_msg))
+            self.logger.error(f"Cog '{cog_name}' has no method '{method_name}'")
+            return
+
+        # Resolve input
+        attachment = await self._resolve_cog_call_input(ctx)
+
+        try:
+            result: CogCallResult = await method(attachment)
+
+            # Build reply kwargs - only include non-None values
+            reply_kwargs: Dict[str, Any] = {}
+            if result.content is not None:
+                reply_kwargs['content'] = result.content
+            if result.file is not None:
+                reply_kwargs['file'] = result.file
+            if result.embed is not None:
+                reply_kwargs['embed'] = result.embed
+
+            await ctx.reply(**reply_kwargs)
+
+        except CogCallNoInput:
+            await ctx.reply(errors.get('no_input', "You need to provide something to process!"))
+        except CogCallInvalidInput:
+            await ctx.reply(errors.get('invalid_input', "I can't process that type of input."))
+        except CogCallProcessingFailed:
+            await ctx.reply(errors.get('processing_failed', "Something went wrong during processing."))
+        except Exception as e:
+            await ctx.reply(cmd.error_msg)
+            self.logger.error(f"Unexpected error in cog_call '{cmd.name}': {e}", exc_info=True)
 
     # ==========================================================================
     # BOD Fate System Helpers
@@ -864,7 +980,6 @@ class Fun(BaseCog):
                     break
 
         await ctx.reply(embed=embed)
-        self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
 
 
 async def setup(bot: CoreBot) -> None:

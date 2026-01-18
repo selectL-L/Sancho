@@ -5,7 +5,6 @@ viewing bot status and managing configurations.
 """
 
 import asyncio
-import logging
 import os
 import platform
 import shutil
@@ -72,6 +71,7 @@ class AdminCog(BaseCog):
             return
         await self.db_manager.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
+        self.logger.warning(f"Admin {ctx.author} set global skill limit to {limit}.")
 
     @commands.hybrid_command(
         name="user_limit",
@@ -97,6 +97,7 @@ class AdminCog(BaseCog):
             return
         await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
+        self.logger.warning(f"Admin {ctx.author} set skill limit for {user} ({user.id}) to {limit}.")
 
     @commands.hybrid_command(
         name="report",
@@ -365,49 +366,49 @@ class AdminCog(BaseCog):
                         tables_to_export.append(
                             ("skill_aliases", [dict(row) for row in skill_aliases]))
                     except Exception as e:
-                        self.logger.debug(f"Table skill_aliases not available for export: {e}")
+                        self.logger.warning(f"Table skill_aliases not available for export: {e}")
 
                     try:
                         user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
                         tables_to_export.append(
                             ("user_settings", [dict(row) for row in user_settings]))
                     except Exception as e:
-                        self.logger.debug(f"Table user_settings not available for export: {e}")
+                        self.logger.warning(f"Table user_settings not available for export: {e}")
 
                     try:
                         bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
                         tables_to_export.append(
                             ("bot_settings", [dict(row) for row in bot_settings]))
                     except Exception as e:
-                        self.logger.debug(f"Table bot_settings not available for export: {e}")
+                        self.logger.warning(f"Table bot_settings not available for export: {e}")
 
                     try:
                         guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
                         tables_to_export.append(
                             ("guild_settings", [dict(row) for row in guild_settings]))
                     except Exception as e:
-                        self.logger.debug(f"Table guild_settings not available for export: {e}")
+                        self.logger.warning(f"Table guild_settings not available for export: {e}")
 
                     try:
                         starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
                         tables_to_export.append(
                             ("starboard_entries", [dict(row) for row in starboard_entries]))
                     except Exception as e:
-                        self.logger.debug(f"Table starboard_entries not available for export: {e}")
+                        self.logger.warning(f"Table starboard_entries not available for export: {e}")
 
                     try:
                         bod_players = await self.db_manager.db_fetchall("SELECT * FROM bod_players")
                         tables_to_export.append(
                             ("bod_players", [dict(row) for row in bod_players]))
                     except Exception as e:
-                        self.logger.debug(f"Table bod_players not available for export: {e}")
+                        self.logger.warning(f"Table bod_players not available for export: {e}")
 
                     try:
                         bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
                         tables_to_export.append(
                             ("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
                     except Exception as e:
-                        self.logger.debug(f"Table bod_leaderboard not available for export: {e}")
+                        self.logger.warning(f"Table bod_leaderboard not available for export: {e}")
 
                     for table_name, data in tables_to_export:
                         json_data["tables"][table_name] = {
@@ -462,7 +463,7 @@ class AdminCog(BaseCog):
             )
 
         except Exception as e:
-            logging.error("Error generating dashboard:", exc_info=True)
+            self.logger.error(f"Error generating dashboard: {e}", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(
@@ -543,6 +544,7 @@ class AdminCog(BaseCog):
                     if msg.content.lower() in ['yes', 'y']:
                         await self.db_manager.delete_skill(skill['user_id'], entry_id)
                         await ctx.send("✅ Skill deleted.")
+                        self.logger.warning(f"Admin {ctx.author} deleted skill #{entry_id} (user={skill['user_id']}, name={skill['name']}).")
                         return
                     else:
                         await ctx.send("Deletion cancelled.")
@@ -551,6 +553,7 @@ class AdminCog(BaseCog):
                 if updates:
                     await self.db_manager.update_skill(entry_id, skill['user_id'], updates)
                     await ctx.send("✅ Skill updated.")
+                    self.logger.warning(f"Admin {ctx.author} updated skill #{entry_id}: {updates}")
 
             elif entry_type == 'reminder':
                 # --- EDIT REMINDER ---
@@ -602,6 +605,7 @@ class AdminCog(BaseCog):
                     if msg.content.lower() in ['yes', 'y']:
                         await self.db_manager.delete_reminders([entry_id])
                         await ctx.send("✅ Reminder deleted.")
+                        self.logger.warning(f"Admin {ctx.author} deleted reminder #{entry_id} (user={rem['user_id']}).")
                         return
                     else:
                         await ctx.send("Deletion cancelled.")
@@ -610,10 +614,11 @@ class AdminCog(BaseCog):
                 if updates:
                     await self.db_manager.update_reminder(entry_id, rem['user_id'], updates)
                     await ctx.send("✅ Reminder updated.")
+                    self.logger.warning(f"Admin {ctx.author} updated reminder #{entry_id}: {updates}")
 
         except Exception as e:
-            logging.error(
-                f"Error editing entry {entry_id}: {e}", exc_info=True)
+            self.logger.error(
+                f"Error editing {entry_type} #{entry_id}: {e}", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(
@@ -706,7 +711,7 @@ class AdminCog(BaseCog):
             new_activity = ambience.get_current_activity()
             activity_info = f" (now: {new_activity.status})" if new_activity else ""
             await ctx.send(f"✅ Mood changed to `{mood_name}`{activity_info}")
-            self.logger.info(f"Mood changed to {mood_name} by {ctx.author}")
+            self.logger.warning(f"Admin {ctx.author} changed mood to {mood_name}.")
         else:
             await ctx.send(f"❌ Failed to set mood to `{mood_name}`.")
 
@@ -771,7 +776,6 @@ class AdminCog(BaseCog):
         # Delete the loading message and show the status view
         await message.delete()
         await show_status(ctx, data, refresh_callback=refresh_callback)
-        logging.info(f"Status command used by {ctx.author}.")
 
     async def _gather_status_data(self, ctx: commands.Context, message: Optional[discord.Message] = None) -> StatusData:
         """Gather all data needed for the status view.
@@ -809,11 +813,13 @@ class AdminCog(BaseCog):
             usage = await resource_tracker.get_current_usage_async()
             cpu_percent = usage['cpu']
             ram_mb = usage['ram']
-            ram_total_mb = usage['ram_total']
+            ram_private_mb = usage['ram_private']
+            ram_swap_mb = usage['ram_swap']
         else:
             cpu_percent = 0.0
             ram_mb = 0.0
-            ram_total_mb = 0.0
+            ram_private_mb = 0.0
+            ram_swap_mb = 0.0
 
         # =====================================================================
         # UPTIME
@@ -987,7 +993,8 @@ class AdminCog(BaseCog):
             db_latency=db_latency,
             cpu_percent=cpu_percent,
             ram_mb=ram_mb,
-            ram_total_mb=ram_total_mb,
+            ram_private_mb=ram_private_mb,
+            ram_swap_mb=ram_swap_mb,
             # Uptime
             start_timestamp=start_timestamp,
             uptime_str=uptime_str,
@@ -1221,7 +1228,6 @@ class AdminCog(BaseCog):
             success_embed.set_thumbnail(url=track_info['thumbnail'])
 
         await status_msg.edit(content=None, embed=success_embed)
-        self.logger.info(f"[Download] Completed download: {result.filename}")
 
     # ==========================================================================
     # MUSIC CACHE MANAGEMENT COMMANDS
@@ -1285,6 +1291,7 @@ class AdminCog(BaseCog):
             if str(reaction.emoji) == "✅":
                 deleted = await cache_manager.clear_orphaned()
                 await confirm_msg.edit(content=f"✅ Cleared {deleted} orphaned files.")
+                self.logger.warning(f"Admin {ctx.author} cleared {deleted} orphaned music files.")
             else:
                 await confirm_msg.edit(content="❌ Clear cancelled.")
         except TimeoutError:
@@ -1367,6 +1374,10 @@ class AdminCog(BaseCog):
             )
 
             await status_msg.edit(content=None, embed=result_embed)
+            self.logger.info(
+                f"Cache refresh completed: {len(playlists)} playlists, "
+                f"{queued} queued, {expired} expired orphans cleaned."
+            )
 
         except Exception as e:
             self.logger.error(f"Cache refresh error: {e}", exc_info=True)
@@ -1531,13 +1542,13 @@ class AdminCog(BaseCog):
             if os.path.isfile(cookie_path):
                 backup_path = cookie_path + '.backup'
                 shutil.copy2(cookie_path, backup_path)
-                self.logger.info(f"Backed up existing cookies to {backup_path}")
+                self.logger.debug(f"Backed up existing cookies to {backup_path}")
 
             # Write new cookies
             with open(cookie_path, 'w', encoding='utf-8') as f:
                 f.write(text)
 
-            self.logger.info(f"Saved YouTube cookies to {cookie_path}")
+            self.logger.warning(f"Admin {ctx.author} uploaded YouTube cookies to {cookie_path}.")
 
             # Reset auth detection cache
             auth_status = get_youtube_auth_status()
@@ -1629,10 +1640,10 @@ class AdminCog(BaseCog):
         try:
             await self.db_manager.add_bod_fate(user.id, tier_upper, count)
             await ctx.send(f"✅ Added {count}x {tier_upper} fate to {user.display_name}.", ephemeral=True)
-            self.logger.info(f"Admin {ctx.author} blessed {user} with {count}x {tier_upper} fate.")
+            self.logger.warning(f"Admin {ctx.author} blessed {user} ({user.id}) with {count}x {tier_upper} fate.")
         except Exception as e:
             await ctx.send(f"❌ Failed to add fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to add fate: {e}", exc_info=True)
+            self.logger.error(f"Failed to add {count}x {tier_upper} fate to {user.id}: {e}", exc_info=True)
 
     @commands.hybrid_command(
         name="bod_fate",
@@ -1683,7 +1694,7 @@ class AdminCog(BaseCog):
             await ctx.send(embed=embed, ephemeral=True)
         except Exception as e:
             await ctx.send(f"❌ Failed to get fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to get fate: {e}", exc_info=True)
+            self.logger.error(f"Failed to get fate for {target.id}: {e}", exc_info=True)
 
     @commands.hybrid_command(
         name="bod_clear",
@@ -1719,10 +1730,10 @@ class AdminCog(BaseCog):
                 await ctx.send(f"✅ Cleared {tier_upper} fate from {user.display_name}.", ephemeral=True)
             else:
                 await ctx.send(f"✅ Cleared all fate from {user.display_name}.", ephemeral=True)
-            self.logger.info(f"Admin {ctx.author} cleared {'all' if not tier_upper else tier_upper} fate from {user}.")
+            self.logger.warning(f"Admin {ctx.author} cleared {'all' if not tier_upper else tier_upper} fate from {user} ({user.id}).")
         except Exception as e:
             await ctx.send(f"❌ Failed to clear fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to clear fate: {e}", exc_info=True)
+            self.logger.error(f"Failed to clear {'all' if not tier_upper else tier_upper} fate from {user.id}: {e}", exc_info=True)
 
     @commands.hybrid_command(
         name="visibility",
@@ -1770,7 +1781,7 @@ class AdminCog(BaseCog):
             }
             emoji = status_emoji.get(status_lower, '')
             await ctx.send(f"{emoji} Visibility set to **{status_lower}**.", ephemeral=True)
-            self.logger.info(f"Admin {ctx.author} set visibility to {status_lower}.")
+            self.logger.warning(f"Admin {ctx.author} set visibility to {status_lower}.")
         else:
             await ctx.send(
                 "❌ Invalid status. Use: online, idle, dnd, invisible.",

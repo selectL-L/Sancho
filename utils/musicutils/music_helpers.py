@@ -393,6 +393,7 @@ async def get_audio_url(
             best = max(audio_only, key=lambda f: f.get('abr') or f.get('tbr') or 0)
             # Format may have its own headers that override
             fmt_headers = best.get('http_headers', http_headers)
+            logger.info(f"[Audio] Got audio-only URL for: {track.title}")
             return AudioUrlResult(
                 url=best.get('url'),
                 thumbnail=thumbnail_url,

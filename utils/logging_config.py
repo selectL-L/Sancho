@@ -133,9 +133,10 @@ class ResourceTracker:
     an in-memory history for the current session. On shutdown, the history
     is appended to the log file.
 
-    For snapshot history, CPU usage is averaged over each interval period
-    (sampled every 30 seconds) to provide a representative view of resource
-    consumption, rather than a single point-in-time measurement.
+    For snapshot history, CPU and RAM usage are averaged over each interval
+    period (sampled every SAMPLE_INTERVAL seconds). Peak values are also
+    tracked to detect spikes - if the peak exceeds the average by more than
+    SPIKE_THRESHOLD_PERCENT, it's flagged in the snapshot.
 
     Attributes:
         interval_minutes: Minutes between automatic snapshots.
@@ -143,8 +144,11 @@ class ResourceTracker:
         start_time: Timestamp when tracking began.
     """
 
-    # How often to sample CPU for averaging (in seconds)
-    CPU_SAMPLE_INTERVAL = 30
+    # How often to sample CPU/RAM for averaging (in seconds)
+    SAMPLE_INTERVAL = 10
+
+    # If peak exceeds average by this percentage, flag as a spike
+    SPIKE_THRESHOLD_PERCENT = 50
 
     def __init__(self, interval_minutes: int = 15):
         """Initializes the ResourceTracker.
@@ -159,8 +163,15 @@ class ResourceTracker:
         self.interval_minutes = interval_minutes
         self._tracking_task: Optional[asyncio.Task] = None
         self._sampling_task: Optional[asyncio.Task] = None
-        self._cpu_samples: List[float] = []  # Accumulated CPU samples for averaging
-        self._cpu_samples_lock = asyncio.Lock()
+        # Accumulated samples for averaging
+        self._cpu_samples: List[float] = []
+        self._ram_samples: List[float] = []
+        self._ram_private_samples: List[float] = []
+        self._ram_swap_samples: List[float] = []
+        # Peak tracking for spike detection
+        self._cpu_peak: float = 0.0
+        self._ram_peak: float = 0.0
+        self._samples_lock = asyncio.Lock()
         self.start_time: float = time.time()
         self._logger = logging.getLogger("logging")
 
@@ -176,72 +187,102 @@ class ResourceTracker:
         """
         # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
         return self.process.cpu_percent(interval=0.5) / self._cpu_count
+    async def _get_memory_stats_async(self) -> Dict[str, float]:
+        """Gets current memory statistics (async-safe).
 
-    def _get_non_blocking_cpu(self) -> float:
-        """Gets CPU usage since last call (non-blocking).
-
-        Returns the CPU percentage since the previous call to any cpu_percent method.
-        Used for sampling/averaging purposes.
+        Runs memory_full_info() in a thread pool since it reads /proc on Linux.
 
         Returns:
-            CPU usage percentage since last measurement (normalized to 0-100% scale).
+            Dict with 'ram' (RSS in MB), 'ram_private' (USS in MB),
+            and 'ram_swap' (swap in MB, Linux only).
         """
-        # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
-        return self.process.cpu_percent(interval=None) / self._cpu_count
-
+        memory_info = await asyncio.to_thread(self.process.memory_full_info)
+        return {
+            'ram': memory_info.rss / (1024 * 1024),
+            'ram_private': memory_info.uss / (1024 * 1024),
+            'ram_swap': getattr(memory_info, 'swap', 0) / (1024 * 1024),
+        }
     async def get_current_usage_async(self) -> Dict[str, float]:
         """Returns LIVE, accurate CPU and RAM usage (async-safe).
 
-        This method measures CPU usage over a 0.1 second interval in a thread pool
+        This method measures CPU usage over a 0.5 second interval in a thread pool
         to avoid blocking the event loop while providing accurate readings.
 
         Returns:
             Dict containing 'cpu' (percentage), 'ram' (RSS in MB),
-            and 'ram_total' (USS - unique private memory in MB) keys.
+            'ram_private' (USS in MB), and 'ram_swap' (swap in MB, Linux only).
         """
         try:
-            # memory_full_info() reads /proc on Linux (~10ms), run in thread
-            memory_info = await asyncio.to_thread(self.process.memory_full_info)
-            # Run blocking CPU measurement in thread pool
-            cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
-            ram_rss = memory_info.rss / (1024 * 1024)
-            # USS (Unique Set Size) = memory unique to this process (not shared)
-            # This is the true "private" memory on both Windows and Linux
-            ram_total = memory_info.uss / (1024 * 1024)
-            return {'cpu': cpu_usage, 'ram': ram_rss, 'ram_total': ram_total}
+            # Run both in parallel since they're independent
+            cpu_task = asyncio.to_thread(self._get_instantaneous_cpu)
+            mem_task = self._get_memory_stats_async()
+            cpu_usage, mem_stats = await asyncio.gather(cpu_task, mem_task)
+
+            return {
+                'cpu': cpu_usage,
+                **mem_stats,
+            }
         except Exception as e:
             self._logger.error(f"Error getting current usage (async): {e}")
-            return {'cpu': 0.0, 'ram': 0.0, 'ram_total': 0.0}
+            return {'cpu': 0.0, 'ram': 0.0, 'ram_private': 0.0, 'ram_swap': 0.0}
 
-    async def _sample_cpu(self) -> None:
-        """Takes a single CPU sample and adds it to the accumulator."""
+    async def _sample_resources(self) -> None:
+        """Takes a single CPU and RAM sample and adds them to the accumulators."""
         try:
-            cpu = await asyncio.to_thread(self._get_instantaneous_cpu)
-            async with self._cpu_samples_lock:
+            cpu_task = asyncio.to_thread(self._get_instantaneous_cpu)
+            mem_task = self._get_memory_stats_async()
+            cpu, mem_stats = await asyncio.gather(cpu_task, mem_task)
+
+            async with self._samples_lock:
                 self._cpu_samples.append(cpu)
+                self._ram_samples.append(mem_stats['ram'])
+                self._ram_private_samples.append(mem_stats['ram_private'])
+                self._ram_swap_samples.append(mem_stats['ram_swap'])
+                # Track peaks for spike detection
+                self._cpu_peak = max(self._cpu_peak, cpu)
+                self._ram_peak = max(self._ram_peak, mem_stats['ram'])
         except Exception as e:
-            self._logger.debug(f"Error sampling CPU: {e}")
+            self._logger.debug(f"Error sampling resources: {e}")
 
-    async def _get_averaged_cpu(self) -> float:
-        """Returns the average of accumulated CPU samples and clears them.
+    async def _get_averaged_stats(self) -> tuple[float, Dict[str, float], float, float]:
+        """Returns averaged CPU and RAM stats from accumulated samples and clears them.
 
-        If no samples are available, takes an instantaneous reading.
+        If no samples are available, takes instantaneous readings.
 
         Returns:
-            Average CPU usage percentage.
+            Tuple of (cpu_average, memory_stats_dict, cpu_peak, ram_peak).
         """
-        async with self._cpu_samples_lock:
+        async with self._samples_lock:
             if self._cpu_samples:
-                avg = sum(self._cpu_samples) / len(self._cpu_samples)
+                cpu_avg = sum(self._cpu_samples) / len(self._cpu_samples)
+                ram_avg = sum(self._ram_samples) / len(self._ram_samples)
+                ram_private_avg = sum(self._ram_private_samples) / len(self._ram_private_samples)
+                ram_swap_avg = sum(self._ram_swap_samples) / len(self._ram_swap_samples)
+                cpu_peak = self._cpu_peak
+                ram_peak = self._ram_peak
+
                 self._cpu_samples.clear()
-                return avg
-        # Fallback to instantaneous if no samples
-        return await asyncio.to_thread(self._get_instantaneous_cpu)
+                self._ram_samples.clear()
+                self._ram_private_samples.clear()
+                self._ram_swap_samples.clear()
+                self._cpu_peak = 0.0
+                self._ram_peak = 0.0
+
+                return cpu_avg, {
+                    'ram': ram_avg,
+                    'ram_private': ram_private_avg,
+                    'ram_swap': ram_swap_avg,
+                }, cpu_peak, ram_peak
+
+        # Fallback to instantaneous if no samples (no peaks to report)
+        cpu = await asyncio.to_thread(self._get_instantaneous_cpu)
+        mem_stats = await self._get_memory_stats_async()
+        return cpu, mem_stats, cpu, mem_stats['ram']
 
     async def take_snapshot_async(self, label: Optional[str] = None) -> None:
         """Records a snapshot of current resource usage to history (async).
 
-        For regular snapshots, uses averaged CPU from accumulated samples.
+        For regular snapshots, uses averaged CPU/RAM from accumulated samples.
         For labeled snapshots (Startup/Shutdown), uses instantaneous readings.
 
         Reports both RSS (resident in physical RAM) and USS (unique private memory).
@@ -252,35 +293,57 @@ class ResourceTracker:
             label: Optional label for the snapshot (e.g., 'Startup', 'Shutdown').
         """
         try:
-            # memory_full_info() reads /proc on Linux (~10ms), run in thread
-            memory_info = await asyncio.to_thread(self.process.memory_full_info)
-            ram_rss = memory_info.rss / (1024 * 1024)
-
-            # USS (Unique Set Size) = memory unique to this process (not shared)
-            # This is the true "private" memory on both Windows and Linux
-            ram_total = memory_info.uss / (1024 * 1024)
-
             # For labeled snapshots (startup/shutdown), use instantaneous reading
-            # For regular interval snapshots, use averaged CPU
+            # For regular interval snapshots, use averaged values with peak tracking
+            cpu_peak: Optional[float] = None
+            ram_peak: Optional[float] = None
+
             if label:
                 cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
+                mem_stats = await self._get_memory_stats_async()
             else:
-                cpu_usage = await self._get_averaged_cpu()
+                cpu_usage, mem_stats, cpu_peak, ram_peak = await self._get_averaged_stats()
+
+            ram_rss = mem_stats['ram']
+            ram_private = mem_stats['ram_private']
+            ram_swap = mem_stats['ram_swap']
+
+            # Detect spikes (peak significantly exceeds average)
+            threshold = self.SPIKE_THRESHOLD_PERCENT / 100
+            cpu_spike = cpu_peak is not None and cpu_usage > 0 and (cpu_peak - cpu_usage) / cpu_usage > threshold
+            ram_spike = ram_peak is not None and ram_rss > 0 and (ram_peak - ram_rss) / ram_rss > threshold
 
             timestamp = datetime.utcnow()
             self.usage_history.append({
                 'timestamp': timestamp,
                 'cpu': cpu_usage,
                 'ram': ram_rss,
-                'ram_total': ram_total,
+                'ram_private': ram_private,
+                'ram_swap': ram_swap,
+                'cpu_peak': cpu_peak,
+                'ram_peak': ram_peak,
+                'cpu_spike': cpu_spike,
+                'ram_spike': ram_spike,
                 'label': label
             })
 
-            # Only show both values if they diverge (paging detected)
-            if abs(ram_total - ram_rss) > 5:  # More than 5MB difference
-                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (USS: {ram_total:.2f}MB), Label={label}")
+            # Build log message with spike indicators
+            spike_info = []
+            if cpu_spike:
+                spike_info.append(f"CPU spike: {cpu_peak:.1f}%")
+            if ram_spike:
+                spike_info.append(f"RAM spike: {ram_peak:.1f}MB")
+            spike_str = f" ⚠️ {', '.join(spike_info)}" if spike_info else ""
+
+            # Platform-aware logging:
+            # - Windows: Show private bytes (useful for paging detection)
+            # - Linux: Show swap if any (RSS vs USS gap is just shared libs)
+            if sys.platform == 'win32':
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (private: {ram_private:.2f}MB), Label={label}{spike_str}")
+            elif ram_swap > 0:
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (paged: {ram_swap:.2f}MB), Label={label}{spike_str}")
             else:
-                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB, Label={label}")
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB, Label={label}{spike_str}")
         except Exception as e:
             self._logger.error(f"Error recording usage snapshot: {e}")
 
@@ -293,11 +356,11 @@ class ResourceTracker:
         return self.usage_history.copy()
 
     async def _sampling_loop(self) -> None:
-        """Background task that samples CPU at regular intervals for averaging."""
+        """Background task that samples CPU and RAM at regular intervals for averaging."""
         try:
             while True:
-                await self._sample_cpu()
-                await asyncio.sleep(self.CPU_SAMPLE_INTERVAL)
+                await self._sample_resources()
+                await asyncio.sleep(self.SAMPLE_INTERVAL)
         except asyncio.CancelledError:
             pass
 
@@ -323,7 +386,7 @@ class ResourceTracker:
         await self.take_snapshot_async(label="Startup")
         self._sampling_task = asyncio.create_task(self._sampling_loop())
         self._tracking_task = asyncio.create_task(self._tracking_loop())
-        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} min, sampling: {self.CPU_SAMPLE_INTERVAL}s)")
+        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} min, sampling: {self.SAMPLE_INTERVAL}s)")
 
     async def stop(self) -> None:
         """Stops tracking and takes a final 'Shutdown' snapshot.
@@ -361,9 +424,19 @@ class ResourceTracker:
         startup = self.usage_history[0] if self.usage_history else None
         shutdown = self.usage_history[-1] if len(self.usage_history) > 1 else None
 
-        # Calculate peak values across all snapshots
-        peak_cpu = max(e['cpu'] for e in self.usage_history)
-        peak_ram = max(e['ram'] for e in self.usage_history)
+        # Calculate peak values across all snapshots (use per-interval peaks if available)
+        peak_cpu = max(
+            e.get('cpu_peak') or e['cpu']
+            for e in self.usage_history
+        )
+        peak_ram = max(
+            e.get('ram_peak') or e['ram']
+            for e in self.usage_history
+        )
+
+        # Count spikes
+        cpu_spikes = sum(1 for e in self.usage_history if e.get('cpu_spike'))
+        ram_spikes = sum(1 for e in self.usage_history if e.get('ram_spike'))
 
         # Build compact summary
         parts = [f"Snapshots: {len(self.usage_history)}"]
@@ -372,18 +445,33 @@ class ResourceTracker:
         if shutdown and shutdown != startup:
             parts.append(f"End: {shutdown['cpu']:.1f}% CPU, {shutdown['ram']:.1f}MB RAM")
         parts.append(f"Peak: {peak_cpu:.1f}% CPU, {peak_ram:.1f}MB RAM")
+        if cpu_spikes or ram_spikes:
+            parts.append(f"Spikes: {cpu_spikes} CPU, {ram_spikes} RAM")
 
         # Build detailed snapshot table with fold markers
         snapshot_lines = [
             "",
             "#region ─── ResourceTracker Snapshots ───────────────────",
-            f"  {'Timestamp':<19} | {'CPU %':>6} | {'RAM MB':>8} | Label",
-            "  " + "-" * 55
+            f"  {'Timestamp':<19} | {'CPU %':>6} | {'Peak':>6} | {'RAM MB':>8} | {'Peak':>8} | Flags",
+            "  " + "-" * 75
         ]
         for entry in self.usage_history:
             ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            label = entry.get('label') or ""
-            snapshot_lines.append(f"  {ts:<19} | {entry['cpu']:>6.1f} | {entry['ram']:>8.1f} | {label}")
+            cpu_peak_str = f"{entry['cpu_peak']:.1f}" if entry.get('cpu_peak') is not None else "-"
+            ram_peak_str = f"{entry['ram_peak']:.1f}" if entry.get('ram_peak') is not None else "-"
+
+            flags = []
+            if entry.get('label'):
+                flags.append(entry['label'])
+            if entry.get('cpu_spike'):
+                flags.append("⚠CPU")
+            if entry.get('ram_spike'):
+                flags.append("⚠RAM")
+            flags_str = " ".join(flags)
+
+            snapshot_lines.append(
+                f"  {ts:<19} | {entry['cpu']:>6.1f} | {cpu_peak_str:>6} | {entry['ram']:>8.1f} | {ram_peak_str:>8} | {flags_str}"
+            )
         snapshot_lines.append("#endregion ResourceTracker Snapshots")
         snapshot_lines.append("")  # Trailing blank line for consistency
 
@@ -398,13 +486,26 @@ class ResourceTracker:
         if not self.usage_history:
             return "No historical data recorded."
 
-        lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<15}"]
-        lines.append("-" * 70)
+        lines = [f"{'Timestamp':<25} | {'CPU (%)':>8} | {'CPU Peak':>9} | {'RAM (MB)':>9} | {'RAM Peak':>9} | Flags"]
+        lines.append("-" * 95)
 
         for entry in self.usage_history:
             ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            label = entry.get('label') or ""
-            lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<15}")
+            cpu_peak_str = f"{entry['cpu_peak']:.1f}" if entry.get('cpu_peak') is not None else "-"
+            ram_peak_str = f"{entry['ram_peak']:.1f}" if entry.get('ram_peak') is not None else "-"
+
+            flags = []
+            if entry.get('label'):
+                flags.append(entry['label'])
+            if entry.get('cpu_spike'):
+                flags.append("⚠CPU")
+            if entry.get('ram_spike'):
+                flags.append("⚠RAM")
+            flags_str = " ".join(flags)
+
+            lines.append(
+                f"{ts:<25} | {entry['cpu']:>8.1f} | {cpu_peak_str:>9} | {entry['ram']:>9.2f} | {ram_peak_str:>9} | {flags_str}"
+            )
 
         return "\n".join(lines)
 

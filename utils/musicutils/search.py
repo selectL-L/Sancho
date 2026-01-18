@@ -833,15 +833,15 @@ def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> floa
     artist_conf = calculate_artist_confidence(original, candidate)
     title_match = calculate_title_match(original.title, candidate.title)
 
-    logger.info(
-        f"Scoring candidate: '{candidate.title}' by '{candidate.artist}' | "
+    logger.debug(
+        f"[Star Scoring] Candidate: '{candidate.title}' by '{candidate.artist}' | "
         f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
     )
 
     # Perfect title match always passes (regardless of artist)
     if title_match >= 0.95:
         score = (artist_conf * 0.4) + (title_match * 0.6)
-        logger.info(f"  → AUTO-PASS (perfect title match): score={score:.2f}")
+        logger.debug(f"[Star Scoring]   → AUTO-PASS (perfect title): score={score:.2f}")
         return score
 
     # Sliding threshold: title_threshold = 1.05 - (0.8 * artist_conf)
@@ -851,28 +851,24 @@ def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> floa
     title_threshold = 1.05 - (artist_conf * 0.8)
 
     if title_match < title_threshold:
-        logger.info(
-            f"  → FAILED: title_match {title_match:.2f} < threshold {title_threshold:.2f} "
+        logger.debug(
+            f"[Star Scoring]   → FAILED: title_match {title_match:.2f} < threshold {title_threshold:.2f} "
             f"(required for artist_conf={artist_conf:.2f})"
         )
         return 0.0
 
     # Combined score: weighted average
     score = (artist_conf * 0.4) + (title_match * 0.6)
-    logger.info(f"  → PASSED: score={score:.2f} (threshold was {title_threshold:.2f})")
+    logger.debug(f"[Star Scoring]   → PASSED: score={score:.2f} (threshold was {title_threshold:.2f})")
 
     # Log edge cases for threshold validation
     if score < STAR_THRESHOLD and score >= 0.5:
-        logger.info(
-            f"[Star Near-Miss] '{candidate.title}' by '{candidate.artist}' | "
-            f"score={score:.2f} < threshold={STAR_THRESHOLD} | "
-            f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
+        logger.debug(
+            f"[Star Scoring] Near-miss: '{candidate.title}' score={score:.2f} < threshold={STAR_THRESHOLD}"
         )
     elif score >= STAR_THRESHOLD and score < 0.7:
-        logger.info(
-            f"[Star Near-Hit] '{candidate.title}' by '{candidate.artist}' | "
-            f"score={score:.2f} (barely passed) | "
-            f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
+        logger.debug(
+            f"[Star Scoring] Near-hit: '{candidate.title}' score={score:.2f} (barely passed)"
         )
 
     return score
