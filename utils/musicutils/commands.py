@@ -300,7 +300,7 @@ class MusicCommandsMixin:
                         await self._start_session(channel, ctx)
 
                         # Mark session as waiting and start 5-minute timeout
-                        self.active_session.waiting_for_users = True  # type: ignore
+                        self.active_session.waiting_for_users = True
                         self.idle_timeout_task = self.bot.loop.create_task(
                             self._idle_timeout_loop()
                         )
@@ -460,7 +460,7 @@ class MusicCommandsMixin:
                     origin_channel_id=ctx.channel.id,
                 )
 
-                self._player = ManagedPlayer(vc, self._on_player_track_end)  # type: ignore
+                self._player = ManagedPlayer(vc, self._on_player_track_end)  # type: ignore[arg-type]
                 await self._play_current_track()
 
                 if len(tracks_to_add) == 1:

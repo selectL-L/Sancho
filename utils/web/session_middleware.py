@@ -55,12 +55,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Get session ID from cookie
         session_id = request.cookies.get(COOKIE_NAME)
-        logger.debug(f"dispatch: path={request.url.path}, session_id={session_id[:8] if session_id else None}...")
 
         if session_id:
             await self._process_session(request, session_id)
-
-        logger.debug(f"dispatch: after _process_session, user_id={request.state.user_id}")
 
         # Process the request
         response = await call_next(request)

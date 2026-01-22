@@ -418,10 +418,10 @@ class NowPlayingView(ui.LayoutView):
         loop_btn = ui.Button(style=discord.ButtonStyle.secondary, emoji="🔁", custom_id="np_loop")
 
         # Bind callbacks to view methods
-        play_pause_btn.callback = self._handle_play_pause  # type: ignore[method-assign]
-        skip_btn.callback = self._handle_skip  # type: ignore[method-assign]
-        shuffle_btn.callback = self._handle_shuffle  # type: ignore[method-assign]
-        loop_btn.callback = self._handle_loop  # type: ignore[method-assign]
+        play_pause_btn.callback = self._handle_play_pause
+        skip_btn.callback = self._handle_skip
+        shuffle_btn.callback = self._handle_shuffle
+        loop_btn.callback = self._handle_loop
 
         action_row.add_item(play_pause_btn)
         action_row.add_item(skip_btn)
@@ -743,6 +743,11 @@ def _format_view_count(count: Optional[int]) -> str:
     return f"{count} views"
 
 
+def _strip_leading_stars(title: str) -> str:
+    """Strip leading star emojis from a title to avoid confusion with our recommendation badge."""
+    return title.lstrip('⭐').lstrip()
+
+
 @dataclass
 class _SlottedTrack:
     """Internal wrapper pairing a track with its display slot number."""
@@ -849,7 +854,7 @@ class TrackSelectionView(ui.LayoutView):
         # User's URL section (slot 0)
         if self._user_track:
             t = self._user_track
-            title_display = truncate_visual(t.title, 45)
+            title_display = truncate_visual(_strip_leading_stars(t.title), 45)
             artist_display = truncate_visual(t.artist, 35)
             duration_str = _format_duration(t.duration)
             view_str = _format_view_count(t.view_count)
@@ -876,7 +881,7 @@ class TrackSelectionView(ui.LayoutView):
                 slotted = self._slots.get(slot_num)
                 is_rec = slotted.is_recommended if slotted else False
 
-                title_display = truncate_visual(t.title, 40)
+                title_display = truncate_visual(_strip_leading_stars(t.title), 40)
                 artist_display = truncate_visual(t.artist, 30)
                 duration_str = _format_duration(t.duration)
                 view_str = _format_view_count(t.view_count)
@@ -910,7 +915,7 @@ class TrackSelectionView(ui.LayoutView):
             yt_text = "### 📺 YouTube\n"
             for i, t in enumerate(self._yt_tracks):
                 slot_num = yt_start + i
-                title_display = truncate_visual(t.title, 40)
+                title_display = truncate_visual(_strip_leading_stars(t.title), 40)
                 artist_display = truncate_visual(t.artist, 30)
                 duration_str = _format_duration(t.duration)
                 view_str = _format_view_count(t.view_count)
@@ -1326,7 +1331,7 @@ class DashboardView(discord.ui.View):
                 await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
             view.stop()
 
-        back_button.callback = back_callback  # type: ignore[method-assign]
+        back_button.callback = back_callback
         view.add_item(back_button)
 
         await interaction.response.edit_message(embed=self.skill_pages[0], view=view)
@@ -1349,7 +1354,7 @@ class DashboardView(discord.ui.View):
                 await interaction.response.edit_message(embed=self.dashboard_embed, view=self)
             view.stop()
 
-        back_button.callback = back_callback  # type: ignore[method-assign]
+        back_button.callback = back_callback
         view.add_item(back_button)
 
         await interaction.response.edit_message(embed=self.reminder_pages[0], view=view)
@@ -1606,7 +1611,7 @@ class StatusView(discord.ui.LayoutView):
                 for i, (emoji, name) in enumerate(self.PAGE_NAMES)
             ]
         )
-        page_select.callback = self._handle_page_select  # type: ignore[method-assign]
+        page_select.callback = self._handle_page_select
         select_row.add_item(page_select)
         self.add_item(select_row)
 
@@ -1619,7 +1624,7 @@ class StatusView(discord.ui.LayoutView):
             custom_id="status_prev",
             disabled=(self.current_page == 0)
         )
-        prev_btn.callback = self._handle_prev  # type: ignore[method-assign]
+        prev_btn.callback = self._handle_prev
 
         page_indicator = ui.Button(
             style=discord.ButtonStyle.secondary,
@@ -1634,7 +1639,7 @@ class StatusView(discord.ui.LayoutView):
             custom_id="status_next",
             disabled=(self.current_page == len(self.PAGE_NAMES) - 1)
         )
-        next_btn.callback = self._handle_next  # type: ignore[method-assign]
+        next_btn.callback = self._handle_next
 
         refresh_btn = ui.Button(
             style=discord.ButtonStyle.primary,
@@ -1642,7 +1647,7 @@ class StatusView(discord.ui.LayoutView):
             label="Refresh",
             custom_id="status_refresh"
         )
-        refresh_btn.callback = self._handle_refresh  # type: ignore[method-assign]
+        refresh_btn.callback = self._handle_refresh
 
         nav_row.add_item(prev_btn)
         nav_row.add_item(page_indicator)

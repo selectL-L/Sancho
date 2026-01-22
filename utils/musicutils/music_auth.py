@@ -386,6 +386,14 @@ class AudioFetchResult:
         - Result is being discarded
         """
         if self.prebuffered_source is not None:
+            buffered_secs = getattr(self.prebuffered_source, 'buffered_seconds', 0.0)
+            frame_count = len(getattr(self.prebuffered_source, '_prebuffer', []))
+            # Estimate memory: ~3840 bytes per frame (20ms of stereo 48kHz audio)
+            mem_mb = (frame_count * 3840) / (1024 * 1024)
+            logger.info(
+                f"[AudioFetchResult] Cleaning up prebuffered source: "
+                f"{buffered_secs:.1f}s buffered, {frame_count} frames (~{mem_mb:.1f}MB)"
+            )
             self.prebuffered_source.cleanup()
             self.prebuffered_source = None
 

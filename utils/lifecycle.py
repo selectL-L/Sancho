@@ -187,7 +187,7 @@ async def shutdown_handler(
     """
     global _is_shutting_down
     if _is_shutting_down:
-        logging.debug(f"Ignoring duplicate {sig.name} signal, shutdown already in progress")
+        logging.warning(f"Ignoring duplicate {sig.name} signal, shutdown already in progress")
         return
     _is_shutting_down = True
 

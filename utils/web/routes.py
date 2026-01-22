@@ -304,7 +304,7 @@ async def set_availability(request: Request) -> JSONResponse:
             content={"error": "You must set your timezone before saving availability. Use the timezone command in Discord."},
         )
 
-    await bot.db_manager.schedule_set_availability(user_id, valid_slots)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_set_availability(user_id, valid_slots)
 
     logger.info(f"User {user_id} saved {len(valid_slots)} availability slots")
 
@@ -331,7 +331,7 @@ async def clear_availability(request: Request) -> JSONResponse:
         return error
 
     bot = request.app.state.bot
-    await bot.db_manager.schedule_clear_availability(user_id)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_clear_availability(user_id)
 
     logger.info(f"User {user_id} cleared all availability")
 
@@ -370,7 +370,7 @@ async def get_guilds(request: Request) -> JSONResponse:
     shared_guild_ids = set(user_guild_ids) & bot_guild_ids
 
     # Get visibility settings from database
-    visibility_settings = await bot.db_manager.schedule_get_guild_visibility(user_id)  # type: ignore[arg-type]
+    visibility_settings = await bot.db_manager.schedule_get_guild_visibility(user_id)
     visibility_map = {v["guild_id"]: bool(v["enabled"]) for v in visibility_settings}
 
     # Build guild list
@@ -446,7 +446,7 @@ async def set_guild_visibility(request: Request, guild_id: str) -> JSONResponse:
         )
 
     bot = request.app.state.bot
-    await bot.db_manager.schedule_set_guild_visibility(user_id, guild_id_int, visible)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_set_guild_visibility(user_id, guild_id_int, visible)
 
     logger.info(f"User {user_id} set visibility in guild {guild_id_int} to {visible}")
 
@@ -473,7 +473,7 @@ async def get_blacklist(request: Request) -> JSONResponse:
         return error
 
     bot = request.app.state.bot
-    blacklist = await bot.db_manager.schedule_get_blacklist(user_id)  # type: ignore[arg-type]
+    blacklist = await bot.db_manager.schedule_get_blacklist(user_id)
 
     # Enrich with usernames from Discord
     users = []
@@ -525,7 +525,7 @@ async def add_to_blacklist(request: Request, blocked_user_id: str) -> JSONRespon
         )
 
     bot = request.app.state.bot
-    await bot.db_manager.schedule_add_to_blacklist(user_id, blocked_user_id_int)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_add_to_blacklist(user_id, blocked_user_id_int)
 
     logger.info(f"User {user_id} blocked user {blocked_user_id_int}")
 
@@ -562,7 +562,7 @@ async def remove_from_blacklist(request: Request, blocked_user_id: str) -> JSONR
         )
 
     bot = request.app.state.bot
-    await bot.db_manager.schedule_remove_from_blacklist(user_id, blocked_user_id_int)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_remove_from_blacklist(user_id, blocked_user_id_int)
 
     logger.info(f"User {user_id} unblocked user {blocked_user_id_int}")
 
@@ -592,11 +592,11 @@ async def delete_account(request: Request) -> JSONResponse:
         return error
 
     bot = request.app.state.bot
-    await bot.db_manager.schedule_delete_all_user_data(user_id)  # type: ignore[arg-type]
+    await bot.db_manager.schedule_delete_all_user_data(user_id)
 
     # Delete all sessions for this user (CASCADE would handle this too via users table,
     # but we do it explicitly since we're not deleting the users row)
-    await bot.db_manager.delete_user_sessions(user_id)  # type: ignore[arg-type]
+    await bot.db_manager.delete_user_sessions(user_id)
 
     logger.info(f"User {user_id} deleted all their schedule data and sessions")
 
@@ -642,7 +642,6 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
 
     # Verify user is in this guild
     user_guild_ids = await get_user_guilds(request)
-    logger.debug(f"viewable-users: user {user_id} requesting guild {guild_id_int}, user guilds: {user_guild_ids}")
     if guild_id_int not in user_guild_ids:
         logger.warning(f"viewable-users: user {user_id} not in guild {guild_id_int}")
         return JSONResponse(
@@ -652,21 +651,17 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
 
     bot = request.app.state.bot
     guild = bot.get_guild(guild_id_int)
-    logger.debug(f"viewable-users: bot.get_guild({guild_id_int}) = {guild}")
     if not guild:
         return JSONResponse(
             status_code=404,
             content={"error": "Guild not found"},
         )
 
-    logger.debug(f"viewable-users: guild has {guild.member_count} members, cached: {len(guild.members)}")
-
     # Get users who have enabled visibility for this guild
-    visible_user_ids = await bot.db_manager.schedule_get_visible_users_in_guild(guild_id_int)  # type: ignore[arg-type]
-    logger.debug(f"viewable-users: visible_user_ids for guild {guild_id_int}: {visible_user_ids}")
+    visible_user_ids = await bot.db_manager.schedule_get_visible_users_in_guild(guild_id_int)
 
     # Get requester's blacklist
-    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))  # type: ignore[arg-type]
+    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))
 
     # Build user list (include self for heatmap, marked with isSelf flag)
     users = []
@@ -678,7 +673,7 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
 
         # Check if target has blocked requester (but not self)
         if target_id != user_id:
-            target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))  # type: ignore[arg-type]
+            target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))
             if user_id in target_blacklist:
                 logger.debug(f"viewable-users: skipping {target_id} (blocked me)")
                 continue
@@ -688,12 +683,10 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
         if not member:
             try:
                 member = await guild.fetch_member(target_id)
-                logger.debug(f"viewable-users: fetched member {target_id} from API")
+                logger.debug(f"viewable-users: fetched member {target_id} from API (cache miss)")
             except Exception as e:
                 logger.warning(f"viewable-users: failed to fetch member {target_id}: {e}")
                 member = None
-        else:
-            logger.debug(f"viewable-users: got member {target_id} from cache")
 
         if member:
             # Get last-modified timestamp
@@ -706,9 +699,9 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
                 "isSelf": target_id == user_id,
             })
         else:
-            logger.warning(f"viewable-users: member {target_id} not found in guild {guild_id_int} cache")
+            logger.warning(f"viewable-users: member {target_id} not found in guild {guild_id_int}")
 
-    logger.debug(f"viewable-users: returning {len(users)} users: {[u['id'] for u in users]}")
+    logger.info(f"viewable-users: returning {len(users)} users for guild {guild.name}")
 
     # Sort by username
     users.sort(key=lambda u: u["username"].lower())
@@ -757,7 +750,7 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
     user_guild_ids = await get_user_guilds(request)
 
     # Get requester's blacklist once
-    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))  # type: ignore[arg-type]
+    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))
 
     # Aggregate: user_id -> {info, shared_guilds: []}
     user_data: dict[int, dict[str, Any]] = {}
@@ -768,7 +761,7 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
             continue
 
         # Get users who have enabled visibility for this guild
-        visible_user_ids = await bot.db_manager.schedule_get_visible_users_in_guild(guild_id)  # type: ignore[arg-type]
+        visible_user_ids = await bot.db_manager.schedule_get_visible_users_in_guild(guild_id)
 
         for target_id in visible_user_ids:
             # Skip self (we'll handle self separately at the end)
@@ -781,7 +774,7 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
 
             # Check if target has blocked me (cache this check per-user)
             if target_id not in user_data:
-                target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))  # type: ignore[arg-type]
+                target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))
                 if user_id in target_blacklist:
                     continue
 
@@ -869,16 +862,16 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
 
     # Self-request: skip all permission checks, return directly
     if target_user_id_int == user_id:
-        slots = await bot.db_manager.schedule_get_availability(user_id)  # type: ignore[arg-type]
-        updated_at = await bot.db_manager.schedule_get_availability_updated_at(user_id)  # type: ignore[arg-type]
+        slots = await bot.db_manager.schedule_get_availability(user_id)
+        updated_at = await bot.db_manager.schedule_get_availability_updated_at(user_id)
         return JSONResponse(content={"slots": slots, "updated_at": updated_at})
 
     # Note: guild_id parameter is reserved for future per-guild permission checks
     # Currently permissions are checked via get_user_guilds() overlap
 
     # Check blacklists (mutual)
-    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))  # type: ignore[arg-type]
-    target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_user_id_int))  # type: ignore[arg-type]
+    my_blacklist = set(await bot.db_manager.schedule_get_blacklist(user_id))
+    target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_user_id_int))
 
     if target_user_id_int in my_blacklist:
         return JSONResponse(
@@ -896,7 +889,7 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
     user_guild_ids = set(await get_user_guilds(request))
 
     # Get target's visibility settings
-    target_visibility = await bot.db_manager.schedule_get_guild_visibility(target_user_id_int)  # type: ignore[arg-type]
+    target_visibility = await bot.db_manager.schedule_get_guild_visibility(target_user_id_int)
     enabled_guild_ids = {v["guild_id"] for v in target_visibility if v["enabled"]}
 
     # Find shared guilds where target has visibility enabled
@@ -909,8 +902,8 @@ async def get_user_availability(request: Request, target_user_id: str, guild_id:
         )
 
     # Get availability
-    slots = await bot.db_manager.schedule_get_availability(target_user_id_int)  # type: ignore[arg-type]
-    updated_at = await bot.db_manager.schedule_get_availability_updated_at(target_user_id_int)  # type: ignore[arg-type]
+    slots = await bot.db_manager.schedule_get_availability(target_user_id_int)
+    updated_at = await bot.db_manager.schedule_get_availability_updated_at(target_user_id_int)
 
     # Convert slots to viewer's timezone
     target_tz = await bot.db_manager.get_user_timezone(target_user_id_int)

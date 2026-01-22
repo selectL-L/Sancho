@@ -2001,7 +2001,7 @@ class Music(MusicCommandsMixin, BaseCog):
             return
 
         # Ignore bot's own state changes
-        if member.id == self.bot.user.id:  # type: ignore
+        if member.id == self.bot.user.id:
             return
 
         vc = self.active_session.voice_client

@@ -366,7 +366,8 @@ class Fun(BaseCog):
             cmd: The FunCommand definition with cog_call set.
             ctx: The command context.
         """
-        cog_name, method_name = cmd.cog_call  # type: ignore[misc]
+        assert cmd.cog_call is not None  # Guaranteed by caller
+        cog_name, method_name = cmd.cog_call
         errors = cmd.cog_call_errors or {}
 
         # Get cog and method

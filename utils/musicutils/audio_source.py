@@ -504,9 +504,14 @@ class SeekableAudioSource(discord.AudioSource):
 
     def cleanup(self) -> None:
         """Clean up resources. Called when source is no longer needed."""
+        frame_count = len(self._prebuffer)
+        if frame_count > 0:
+            # Estimate memory: ~3840 bytes per frame (20ms of stereo 48kHz audio)
+            mem_mb = (frame_count * 3840) / (1024 * 1024)
+            logger.info(f"[SeekableAudioSource] Releasing {frame_count} frames (~{mem_mb:.1f}MB)")
         self._prebuffer.clear()  # Release buffer memory
         self._cleanup_process()
-        logger.debug("[SeekableAudioSource] Cleaned up")
+        logger.info("[SeekableAudioSource] Cleaned up")
 
     @property
     def stderr_lines(self) -> list[str]:

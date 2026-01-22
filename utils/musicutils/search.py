@@ -25,7 +25,7 @@ try:
     from ytmusicapi import YTMusic
     YTMUSIC_AVAILABLE = True
 except ImportError:
-    YTMusic = None  # type: ignore[misc, assignment]
+    YTMusic = None  # type: ignore[assignment,misc]
     YTMUSIC_AVAILABLE = False
 
 try:
@@ -71,10 +71,9 @@ VERSION_LABELS = {
 # Scoring thresholds
 STAR_THRESHOLD = 0.6  # Minimum combined score to award star
 GARBAGE_SIMILARITY_THRESHOLD = 0.3  # Below this = garbage (same-script only)
-# Cross-script results get a lower threshold because YTM is more selective about
-# returning cross-language results. This is for data gathering - we trust YTM
-# but log what we see to validate that trust over time.
-CROSS_SCRIPT_GARBAGE_THRESHOLD = 0.2
+# Cross-script results get a slightly lower threshold because transliteration
+# may not perfectly capture all representations.
+CROSS_SCRIPT_GARBAGE_THRESHOLD = 0.25
 
 # Thumbnail constants
 THUMBNAIL_WIDTH = 720  # Target width for resized thumbnails
@@ -84,10 +83,10 @@ THUMBNAIL_WIDTH = 720  # Target width for resized thumbnails
 # YTMUSIC SINGLETON
 # ==========================================================================
 
-_ytm: Optional[YTMusic] = None  # type: ignore[assignment]
+_ytm: Optional[YTMusic] = None  # type: ignore[type-arg]
 
 
-def _get_ytm() -> Optional[YTMusic]:  # type: ignore[return]
+def _get_ytm() -> Optional[YTMusic]:  # type: ignore[type-arg]
     """Get or create the YTMusic singleton instance.
 
     Returns:
@@ -126,29 +125,52 @@ def _get_ytm() -> Optional[YTMusic]:  # type: ignore[return]
 # "Murasaki Shion" AND "紫咲シオン" extracted from video tags).
 
 # Japanese: pykakasi (Hepburn romanization)
+# Note: pykakasi loads ~150MB of dictionary data on import
 try:
+    import psutil
+    _proc = psutil.Process()
+    _mem_before = _proc.memory_info().rss / (1024 * 1024)
     import pykakasi
     _kakasi = pykakasi.kakasi()
+    _mem_after = _proc.memory_info().rss / (1024 * 1024)
+    logger.info(f"[CJK Libraries] pykakasi loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
     PYKAKASI_AVAILABLE = True
+    del _proc, _mem_before, _mem_after
 except ImportError:
     _kakasi = None
     PYKAKASI_AVAILABLE = False
+    logger.info("[CJK Libraries] pykakasi not available")
 
 # Chinese: pypinyin (Pinyin romanization)
+# Note: pypinyin loads Chinese character -> pinyin mappings
 try:
+    import psutil
+    _proc = psutil.Process()
+    _mem_before = _proc.memory_info().rss / (1024 * 1024)
     from pypinyin import lazy_pinyin
+    _mem_after = _proc.memory_info().rss / (1024 * 1024)
+    logger.info(f"[CJK Libraries] pypinyin loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
     PYPINYIN_AVAILABLE = True
+    del _proc, _mem_before, _mem_after
 except ImportError:
     lazy_pinyin = None  # type: ignore[assignment]
     PYPINYIN_AVAILABLE = False
+    logger.info("[CJK Libraries] pypinyin not available")
 
 # Korean: korean-romanizer (Revised Romanization of Korean)
 try:
+    import psutil
+    _proc = psutil.Process()
+    _mem_before = _proc.memory_info().rss / (1024 * 1024)
     from korean_romanizer.romanizer import Romanizer
+    _mem_after = _proc.memory_info().rss / (1024 * 1024)
+    logger.info(f"[CJK Libraries] korean_romanizer loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
     KOREAN_ROMANIZER_AVAILABLE = True
+    del _proc, _mem_before, _mem_after
 except ImportError:
-    Romanizer = None  # type: ignore[misc, assignment]
+    Romanizer = None  # type: ignore[assignment,misc]
     KOREAN_ROMANIZER_AVAILABLE = False
+    logger.info("[CJK Libraries] korean_romanizer not available")
 
 
 def has_japanese(text: str) -> bool:
@@ -323,6 +345,26 @@ def expand_text(text: str) -> set[str]:
     return representations
 
 
+def extract_words(text: str) -> set[str]:
+    """Extract words from text for comparison.
+
+    Simple word extraction for detecting content mismatches.
+
+    Args:
+        text: Text to extract words from.
+
+    Returns:
+        Set of lowercase words (2+ characters).
+    """
+    words = set()
+    for word in text.lower().split():
+        # Strip punctuation from edges (including CJK brackets)
+        cleaned = word.strip('()[]【】「」『』〔〕.,!?&-')  # noqa: RUF001
+        if len(cleaned) >= 2:
+            words.add(cleaned)
+    return words
+
+
 def extract_words_expanded(text: str) -> set[str]:
     """Extract words from ALL script representations of text.
 
@@ -489,72 +531,50 @@ def clean_microformat_title(title: str) -> str:
     return title
 
 
-def extract_words(text: str) -> set[str]:
-    """Extract words from text for comparison.
-
-    Simple word extraction without any filtering. Used for detecting
-    content mismatches where one title has words the other doesn't.
-
-    Args:
-        text: Text to extract words from.
-
-    Returns:
-        Set of lowercase words (2+ characters).
-    """
-    # Simple: split on non-word characters, keep words 2+ chars
-    words = set()
-    for word in text.lower().split():
-        # Strip punctuation from edges (including CJK brackets)
-        # Yes Ruff, those are intentional Japanese brackets, not typos.
-        # You'd know that if you ever listened to J-pop.
-        cleaned = word.strip('()[]【】「」『』〔〕.,!?&-')  # noqa: RUF001
-        if len(cleaned) >= 2:
-            words.add(cleaned)
-    return words
+# Keywords that indicate YTM mapped a remix/alternate version instead of the original.
+# If these appear in videoDetails but NOT in microformat, it's a catalog mismatch.
+CATALOG_MISMATCH_KEYWORDS = frozenset({
+    'slowed', 'reverb', 'remix', 'nightcore', 'sped', 'speedup',
+    'speed', 'bass', 'boosted', 'bassboosted', '8d', 'audio',
+    'lofi', 'lo-fi', 'acoustic', 'instrumental', 'karaoke',
+    'cover', 'live', 'concert', 'extended', 'edit', 'mashup',
+})
 
 
-def has_ytm_catalog_mismatch(
-    vd_title: str,
-    vd_author: str,
-    mf_title: str
-) -> bool:
-    """Detect if YTM videoDetails has wrong metadata (catalog mismatch).
+def has_ytm_catalog_mismatch(vd_title: str, mf_title: str) -> bool:
+    """Detect if YTM videoDetails points to a wrong version (catalog mismatch).
 
-    YTM's catalog sometimes maps the wrong song to a video ID. We detect this
-    by checking if videoDetails introduces significant new content words that
-    don't appear in the microformat title.
+    YTM's catalog sometimes maps the wrong song variant to a video ID. For example,
+    the original song's ID might return metadata for a "Slowed + Reverb" version.
 
-    The key insight: formatting differences ("ft." vs "&", bracket styles) are
-    fine, but **new content words** (like "Slowed", "Reverb") indicate a mismatch.
+    We detect this by checking if videoDetails contains specific remix/version
+    keywords that don't appear in the microformat (raw YouTube) title. Only these
+    keywords trigger a mismatch—author differences are ignored (channel name vs
+    artist name is expected and doesn't pollute search results significantly).
 
     Args:
         vd_title: Title from videoDetails.
-        vd_author: Author from videoDetails.
-        mf_title: Cleaned title from microformat.
+        mf_title: Cleaned title from microformat (raw YouTube title).
 
     Returns:
-        True if mismatch detected, False if videoDetails seems trustworthy.
+        True if mismatch detected (use microformat instead), False otherwise.
     """
-    # Combine author + title like "Artist - Title" for comparison
-    vd_combined = f"{vd_author} - {vd_title}" if vd_author else vd_title
-
-    vd_words = extract_words(vd_combined)
+    # Compare only titles, not author—author differences are expected
+    # (channel name vs artist name is normal, not a mismatch)
+    vd_words = extract_words(vd_title)
     mf_words = extract_words(mf_title)
 
-    # Words in videoDetails but NOT in microformat = potential new content
+    # Words in videoDetails but NOT in microformat
     extra_in_vd = vd_words - mf_words
 
-    # Filter out very short extras (single chars that slipped through)
-    # and common connector words that might appear differently
-    extra_in_vd = {w for w in extra_in_vd if len(w) >= 3}
+    # Check if any are catalog mismatch keywords
+    mismatch_words = extra_in_vd & CATALOG_MISMATCH_KEYWORDS
 
-    # 2+ extra content words = suspicious
-    # Examples that trigger: "Slowed + Reverb" (2 words), "Nightcore Remix" (2 words)
-    # Examples that don't: "ft" vs "&" (connector difference, not content)
-    if len(extra_in_vd) >= 2:
+    if mismatch_words:
         logger.warning(
             f"[YTM Metadata] Catalog mismatch detected: "
-            f"videoDetails='{vd_combined}' has extra words {extra_in_vd} vs microformat='{mf_title}'"
+            f"videoDetails='{vd_title}' has version keywords {mismatch_words} "
+            f"not in microformat='{mf_title}'"
         )
         return True
 
@@ -658,7 +678,7 @@ def is_relevant(query: str, result: SearchResult) -> bool:
     word_overlap = query_words & result_words
     if word_overlap:
         if is_cross_script:
-            logger.debug(
+            logger.info(
                 f"[Cross-Script Verified] query='{query}' | "
                 f"result='{result.title}' by '{result.artist}' | "
                 f"overlapping_words={word_overlap}"
@@ -673,7 +693,7 @@ def is_relevant(query: str, result: SearchResult) -> bool:
             r_norm = normalize_text(r_repr)
             if q_norm in r_norm or r_norm in q_norm:
                 if is_cross_script:
-                    logger.debug(
+                    logger.info(
                         f"[Cross-Script Containment] query='{query}' ({q_repr}) | "
                         f"result='{result.title}' ({r_repr})"
                     )
@@ -690,7 +710,7 @@ def is_relevant(query: str, result: SearchResult) -> bool:
 
     # Log borderline cases for threshold tuning
     if threshold - 0.1 <= best_sim < threshold + 0.1:
-        logger.debug(
+        logger.info(
             f"[Garbage Filter Borderline] query='{query}' | "
             f"result='{result.title}' by '{result.artist}' | "
             f"title_sim={title_sim:.2f}, combined_sim={combined_sim:.2f} | "
@@ -701,28 +721,7 @@ def is_relevant(query: str, result: SearchResult) -> bool:
     if best_sim >= threshold:
         return True
 
-    # Cross-script: trust YTM even if our verification failed
-    # WHY: YTM wouldn't return cross-language results unless they're confident.
-    # We've tried to verify with transliteration above. If verification failed,
-    # it could mean:
-    # 1. Our transliteration is incomplete (e.g., unusual kanji readings)
-    # 2. The match is semantic, not lexical (e.g., translated titles)
-    # 3. YTM knows something we don't (internal metadata matching)
-    #
-    # FUTURE WORK: If logs show garbage escaping through this path, we can:
-    # - Tighten the cross-script threshold
-    # - Add more transliteration rules
-    # - Require minimum similarity even for cross-script
-    if is_cross_script:
-        logger.debug(
-            f"[Cross-Script Blind Trust] query='{query}' | "
-            f"result='{result.title}' by '{result.artist}' | "
-            f"sim={best_sim:.2f} below threshold {threshold}, but trusting YTM | "
-            f"MONITOR: verification failed, relying on YTM's cross-language matching"
-        )
-        return True
-
-    logger.debug(f"Filtered as garbage: {result.title} (sim={title_sim:.2f})")
+    logger.info(f"Filtered as garbage: {result.title} (sim={best_sim:.2f})")
     return False
 
 
@@ -874,10 +873,35 @@ def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> floa
     return score
 
 
+def _title_length_ratio(orig_title: str, cand_title: str) -> float:
+    """Calculate length ratio for containment tiebreaking.
+
+    When multiple candidates pass containment check, prefer the one
+    closest in length to the original. This prevents "(Instrumental)"
+    or "(Slowed)" versions from winning over the exact match.
+
+    Args:
+        orig_title: Original video title.
+        cand_title: Candidate title.
+
+    Returns:
+        Ratio between 0.0 and 1.0 (1.0 = same length).
+    """
+    orig_norm = normalize_text(orig_title)
+    cand_norm = normalize_text(cand_title)
+
+    shorter = min(len(orig_norm), len(cand_norm))
+    longer = max(len(orig_norm), len(cand_norm))
+
+    return shorter / longer if longer > 0 else 1.0
+
+
 def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Optional[SearchResult]:
     """Find the best ATV candidate to star.
 
-    Walks candidates in order, scores each ATV, returns first above threshold.
+    Scores each ATV candidate. If multiple candidates tie (same score),
+    uses title length ratio as tiebreaker to prefer exact matches over
+    variants like "(Instrumental)" or "(Remix)".
 
     Args:
         original: Metadata from original video.
@@ -886,8 +910,8 @@ def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Opt
     Returns:
         Best candidate above threshold, or None.
     """
-    best_candidate: Optional[SearchResult] = None
-    best_score = 0.0
+    # Collect all passing candidates with their scores
+    passing: List[tuple[SearchResult, float]] = []
 
     for candidate in candidates:
         # Only consider ATVs for starring
@@ -895,12 +919,35 @@ def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Opt
             continue
 
         score = score_candidate(original, candidate)
-        if score > best_score and score >= STAR_THRESHOLD:
-            best_score = score
-            best_candidate = candidate
+        if score >= STAR_THRESHOLD:
+            passing.append((candidate, score))
 
-    if best_candidate:
-        logger.info(f"Star assigned to: {best_candidate.title} (score={best_score:.2f})")
+    if not passing:
+        return None
+
+    # Find the best score
+    best_score = max(score for _, score in passing)
+
+    # Get all candidates with the best score (ties)
+    tied = [(cand, score) for cand, score in passing if score == best_score]
+
+    if len(tied) == 1:
+        # No tie, just return the winner
+        best_candidate = tied[0][0]
+    else:
+        # Multiple candidates tied—use length ratio as tiebreaker
+        # Prefer the candidate whose title is closest in length to original
+        best_candidate = max(
+            tied,
+            key=lambda x: _title_length_ratio(original.title, x[0].title)
+        )[0]
+        logger.debug(
+            f"[Star Scoring] Tiebreaker: {len(tied)} candidates tied at {best_score:.2f}, "
+            f"selected '{best_candidate.title}' by length ratio"
+        )
+
+    logger.info(f"Star assigned to: {best_candidate.title} (score={best_score:.2f})")
+    return best_candidate
 
     return best_candidate
 
@@ -1789,9 +1836,20 @@ async def search_url_mode(
 
     video_details = metadata.get('videoDetails', {})
 
-    # Check if already an ATV - return it with proper metadata, no alternatives needed
+    # Check if already an ATV - search YTM by ID to get full metadata (album, explicit, etc.)
     if is_atv(metadata):
-        logger.info(f"[URL Mode] {video_id} is already an ATV, returning with metadata")
+        logger.info(f"[URL Mode] {video_id} is already an ATV, fetching full metadata from YTM")
+
+        # Search YTM by video ID - this gives us the complete SearchResult with album info
+        ytm_results = await search_ytm(video_id, limit=1)
+        for result in ytm_results:
+            if result.video_id == video_id:
+                logger.debug(f"[URL Mode] Found ATV in YTM search: album='{result.album}'")
+                return result, [], [], video_id
+
+        # Fallback: build from get_song() metadata if YTM search didn't find it
+        # (This can happen if the ATV is region-locked or very new)
+        logger.debug("[URL Mode] ATV not found in YTM search, using get_song() metadata")
         # For ATVs, videoDetails.author IS the clean artist name (not channel)
         atv_title = video_details.get('title', 'Unknown')
         atv_artist = video_details.get('author', 'Unknown')
@@ -1834,21 +1892,18 @@ async def search_url_mode(
     mf_title_raw = microformat.get('title', '')
     mf_title = clean_microformat_title(mf_title_raw) if mf_title_raw else ''
 
-    # Check for YTM catalog mismatch (videoDetails points to wrong song)
-    # If detected, prefer microformat title over videoDetails
-    if mf_title and has_ytm_catalog_mismatch(vd_title, vd_author, mf_title):
+    # Check for YTM catalog mismatch (videoDetails points to wrong song).
+    # This happens when YTM's catalog maps the wrong song to a video ID.
+    # If detected, use microformat title for SEARCHING (it's the raw YouTube title),
+    # but keep videoDetails author for display. We don't parse the microformat—
+    # just use it as-is since it contains the accurate video title.
+    mismatch_detected = mf_title and has_ytm_catalog_mismatch(vd_title, mf_title)
+    if mismatch_detected:
         logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
-        # Microformat is "Artist - Title" format, use as-is for display
-        title = mf_title
-        # Try to extract artist from "Artist - Title" format
-        if ' - ' in mf_title:
-            parts = mf_title.split(' - ', 1)
-            author = parts[0].strip()
-            title = parts[1].strip() if len(parts) > 1 else mf_title
-        else:
-            author = vd_author  # Fall back to videoDetails author
+        title = mf_title  # Use full microformat title for search
+        author = vd_author  # Keep videoDetails author for display
     else:
-        # Trust videoDetails
+        # No mismatch—trust videoDetails
         title = vd_title
         author = vd_author
 
@@ -1876,8 +1931,20 @@ async def search_url_mode(
         view_count=view_count,
     )
 
-    # Multi-query search: primary query + Japanese name variants
-    queries = [f"{title} {author}"]
+    # Multi-query search for CJK content.
+    # Query order depends on data quality:
+    # - No mismatch (clean metadata): "{author} {title}" (conventional artist-first)
+    # - Mismatch (raw YT title): "{title} {author}" (title is more reliable)
+    # Additional queries are added ONLY when Japanese name variants are detected
+    # in the video tags (e.g., artist name in kanji/romaji). This helps find
+    # YTM songs that might be indexed under different name spellings.
+    if mismatch_detected:
+        # Title is raw YouTube title (more reliable), author may be just channel name
+        queries = [f"{title} {author}"]
+    else:
+        # Clean metadata—use conventional "Artist Song" order
+        queries = [f"{author} {title}"]
+
     for jp_name in jp_names[:2]:
         queries.append(f"{title} {jp_name}")
 

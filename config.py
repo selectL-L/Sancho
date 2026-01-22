@@ -47,7 +47,7 @@ def get_internal_path() -> str:
     as the application path.
     """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        return sys._MEIPASS  # type: ignore
+        return sys._MEIPASS  # type: ignore[attr-defined,return-value]
     return os.path.dirname(os.path.abspath(__file__))
 
 

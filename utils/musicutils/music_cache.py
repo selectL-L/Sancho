@@ -1108,7 +1108,7 @@ class MusicCacheManager:
 
             def do_download() -> Dict[str, Any]:
                 with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                    return ydl.extract_info(track.url, download=True)  # type: ignore
+                    return ydl.extract_info(track.url, download=True)  # type: ignore[return-value]
 
             await asyncio.wait_for(
                 asyncio.to_thread(do_download),

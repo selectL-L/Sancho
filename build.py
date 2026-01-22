@@ -1,6 +1,6 @@
 import os
 import sys
-import PyInstaller.__main__  # type: ignore
+import PyInstaller.__main__  # type: ignore[import-not-found]
 
 import config
 
@@ -9,7 +9,7 @@ import config
 #   - Linux: System default is usually UTF-8; no reconfiguration needed
 if sys.platform == "win32":
     # Pylance doesn't know sys.stdout is a TextIOWrapper here
-    sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
+    sys.stdout.reconfigure(encoding='utf-8')  # type: ignore[attr-defined]
 
 # Get the absolute path to the workspace root
 HERE = os.path.dirname(os.path.abspath(__file__))

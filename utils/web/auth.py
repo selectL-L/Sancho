@@ -352,7 +352,6 @@ async def get_user_id(request: Request) -> int | None:
         User ID if logged in, None otherwise.
     """
     user_id = getattr(request.state, "user_id", None)
-    logger.debug(f"get_user_id: request.state.user_id = {user_id}")
     return user_id
 
 
@@ -406,11 +405,10 @@ async def get_user_guilds(request: Request) -> list[int]:
             pass
 
     if uncached_count > 0:
-        logger.debug(f"get_user_guilds for {user_id}: {len(shared_guilds)} shared, {uncached_count} required API lookup")
+        logger.debug(f"get_user_guilds: {uncached_count} guilds required API lookup for user {user_id}")
 
     # Cache on request state for subsequent calls in same request
     request.state._user_guilds = shared_guilds
-    logger.debug(f"get_user_guilds for {user_id}: {shared_guilds}")
     return shared_guilds
 
 

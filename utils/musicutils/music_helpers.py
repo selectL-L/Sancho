@@ -31,9 +31,9 @@ try:
     from mutagen._util import MutagenError  # type: ignore[attr-defined]
     MUTAGEN_AVAILABLE = True
 except ImportError:
-    APIC = ID3 = TALB = TIT2 = TPE1 = TRCK = TYER = TCON = COMM = None  # type: ignore[misc, assignment]
-    MP3 = None  # type: ignore[misc, assignment]
-    MutagenError = Exception  # type: ignore[misc, assignment]
+    APIC = ID3 = TALB = TIT2 = TPE1 = TRCK = TYER = TCON = COMM = None  # type: ignore[assignment,misc]
+    MP3 = None  # type: ignore[assignment,misc]
+    MutagenError = Exception  # type: ignore[assignment,misc]
     MUTAGEN_AVAILABLE = False
 
 try:
@@ -365,7 +365,7 @@ async def get_audio_url(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(track.url, download=False)  # type: ignore
+                return ydl.extract_info(track.url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
@@ -487,7 +487,7 @@ async def search_youtube(
 
         def search() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(search_query, download=False)  # type: ignore
+                return ydl.extract_info(search_query, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(search)
 
@@ -672,7 +672,7 @@ async def fetch_url_info(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=False)  # type: ignore
+                return ydl.extract_info(url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
@@ -785,7 +785,7 @@ async def fetch_playlist_metadata(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(playlist_url, download=False)  # type: ignore
+                return ydl.extract_info(playlist_url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
@@ -945,7 +945,7 @@ async def download_track_as_mp3(
 
         def do_download() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, download_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=True)  # type: ignore
+                return ydl.extract_info(url, download=True)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(do_download)
 
@@ -1016,23 +1016,23 @@ async def download_track_as_mp3(
                 pass  # Tags already exist - expected
 
             # Set metadata tags
-            audio.tags.add(TIT2(encoding=3, text=final_title))  # type: ignore[misc]  # Title
-            audio.tags.add(TPE1(encoding=3, text=final_artist))  # type: ignore[misc]  # Artist
+            audio.tags.add(TIT2(encoding=3, text=final_title))  # type: ignore[union-attr,misc]
+            audio.tags.add(TPE1(encoding=3, text=final_artist))  # type: ignore[union-attr,misc]
 
             if final_album:
-                audio.tags.add(TALB(encoding=3, text=final_album))  # type: ignore[misc]  # Album
+                audio.tags.add(TALB(encoding=3, text=final_album))  # type: ignore[union-attr,misc]
 
             if final_year:
-                audio.tags.add(TYER(encoding=3, text=final_year))  # type: ignore[misc]  # Year
+                audio.tags.add(TYER(encoding=3, text=final_year))  # type: ignore[union-attr,misc]
 
             if custom_genre:
-                audio.tags.add(TCON(encoding=3, text=custom_genre))  # type: ignore[misc]  # Genre
+                audio.tags.add(TCON(encoding=3, text=custom_genre))  # type: ignore[union-attr,misc]
 
             if custom_track_num:
-                audio.tags.add(TRCK(encoding=3, text=custom_track_num))  # type: ignore[misc]  # Track number
+                audio.tags.add(TRCK(encoding=3, text=custom_track_num))  # type: ignore[union-attr,misc]
 
             if custom_comment:
-                audio.tags.add(COMM(encoding=3, lang='eng', desc='', text=custom_comment))  # type: ignore[misc]  # Comment
+                audio.tags.add(COMM(encoding=3, lang='eng', desc='', text=custom_comment))  # type: ignore[union-attr,misc]
 
             # Embed thumbnail as cover art
             if embed_thumbnail:
@@ -1120,7 +1120,7 @@ async def _embed_thumbnail_in_mp3(
 
     if thumbnail_data:
         try:
-            audio.tags.add(APIC(  # type: ignore[misc]
+            audio.tags.add(APIC(  # type: ignore[union-attr,misc]
                 encoding=3,
                 mime='image/jpeg',  # fetch_thumbnail_bytes returns original format
                 type=3,  # Front cover
@@ -1166,7 +1166,7 @@ async def get_track_info_for_download(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=False)  # type: ignore
+                return ydl.extract_info(url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 

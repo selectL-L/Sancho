@@ -1718,7 +1718,7 @@ class Reminders(BaseCog):
             channel = self.bot.get_channel(int(dest_pref))
             # Check if channel has a name attribute (TextChannel, VoiceChannel, etc.)
             if channel and hasattr(channel, 'name'):
-                display_dest = f"#{getattr(channel, 'name')}"  # noqa: B009 (getattr bypasses Pylance's incomplete type narrowing)
+                display_dest = f"#{channel.name}"  # type: ignore[union-attr]
             else:
                 display_dest = f"Unknown Channel (ID: {dest_pref})"
         elif dest_pref == 'channel':  # Handle legacy value
