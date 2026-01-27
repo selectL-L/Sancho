@@ -38,10 +38,15 @@ OAUTH_STATE_MAX_AGE = 300  # 5 minutes - plenty of time for OAuth flow
 
 
 def _to_display_format(tz_str: str | None) -> str | None:
-    """Convert pytz/IANA timezone string to user-friendly display format.
+    """Convert IANA/pytz timezone string to user-friendly display format.
 
-    Converts Etc/GMT format back to familiar GMT notation.
-    IANA names are returned unchanged.
+    Examples:
+        - "Etc/GMT-5" -> "GMT+5" (POSIX sign inversion)
+        - "Etc/GMT+0" -> "GMT"
+        - "America/New_York" -> "New York"
+        - "Europe/London" -> "London"
+        - "America/Indiana/Indianapolis" -> "Indianapolis"
+        - "GMT+3" -> "GMT+3" (pass-through)
 
     Args:
         tz_str: The timezone string from the database.
@@ -52,6 +57,7 @@ def _to_display_format(tz_str: str | None) -> str | None:
     if tz_str is None:
         return None
 
+    # Handle Etc/GMT format (POSIX sign inversion)
     match = re.match(r'^Etc/GMT([+-]?)(\d+)$', tz_str)
     if match:
         sign_part = match.group(1)
@@ -64,6 +70,18 @@ def _to_display_format(tz_str: str | None) -> str | None:
         else:
             return f"GMT-{hour}"
 
+    # Handle GMT/UTC offset strings - pass through as-is
+    if re.match(r'^(GMT|UTC)([+-]\d+)?$', tz_str, re.IGNORECASE):
+        return tz_str
+
+    # IANA timezone: extract city name and format
+    # "America/New_York" -> "New York"
+    # "America/Indiana/Indianapolis" -> "Indianapolis"
+    if '/' in tz_str:
+        city = tz_str.split('/')[-1]
+        return city.replace('_', ' ')
+
+    # Unknown format, return as-is
     return tz_str
 
 

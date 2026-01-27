@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+  <!-- External CSS -->
+  <link rel="stylesheet" href="/web-css/variables.css">
+  <link rel="stylesheet" href="/web-css/components.css">
+  <link rel="stylesheet" href="/web-css/desktop.css">
+  <style>
+    /* Settings-specific styles not in shared CSS */
+    .grid-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border-default);
+      background: var(--bg-card);
+    }
+
+    .grid-footer-tip {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+    }
+
+    .grid-footer-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .grid-cell.available {
+      background: var(--heatmap-available);
+    }
+
+    .grid-cell.unavailable {
+      background: transparent;
+    }
+
+    .grid-cell.pulse {
+      animation: cellPulse 0.2s ease-out;
+    }
+
+    @keyframes cellPulse {
+      0% { transform: scale(1.1); }
+      100% { transform: scale(1); }
+    }
+
+    /* Danger card */
+    .danger-card {
+      background: var(--danger-bg);
+      border: 1px solid var(--danger-border);
+      border-radius: 0.75rem;
+      padding: 1rem;
+    }
+
+    .danger-card h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--danger-text);
+      margin-bottom: 0.25rem;
+    }
+
+    .danger-card p {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+    }
+
+    /* Settings sidebar with flex layout */
+    .sidebar-card.flex-1 {
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* List items */
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem;
+      border-radius: 0.375rem;
+      transition: background 0.15s;
+    }
+
+    .list-item:hover {
+      background: var(--bg-card-elevated);
+    }
+
+    .list-item-left {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      min-width: 0;
+    }
+
+    .list-item-icon {
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      background: var(--bg-card-elevated);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.625rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .list-item-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 50%;
+    }
+
+    .list-item-name {
+      font-size: 0.8125rem;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .list-empty {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 1rem;
+    }
+
+    /* Action buttons */
+    .action-btn {
+      padding: 0.25rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      border-radius: 0.25rem;
+      border: 1px solid var(--border-default);
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .action-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .action-btn.danger {
+      color: var(--danger-text);
+      border-color: var(--danger-border);
+    }
+
+    .action-btn.danger:hover {
+      background: var(--danger-bg);
+    }
+
+    /* Session modal options */
+    .session-options {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .session-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.125rem;
+      padding: 0.75rem 1rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.5rem;
+      cursor: pointer;
+      transition: all 0.15s;
+      width: 100%;
+      text-align: left;
+    }
+
+    .session-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .session-btn-danger {
+      border-color: var(--danger-border);
+    }
+
+    .session-btn-danger:hover {
+      background: var(--danger-bg);
+    }
+
+    .session-btn-title {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .session-btn-danger .session-btn-title {
+      color: var(--danger-text);
+    }
+
+    .session-btn-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    /* Login redirect overlay */
+    .login-redirect-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-page);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+
+    .login-redirect-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .login-redirect-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: 1rem;
+      padding: 2rem;
+      text-align: center;
+      max-width: 24rem;
+    }
+
+    .login-redirect-card h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
+    }
+
+    .login-redirect-card p {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+      line-height: 1.5;
+    }
+
+    .login-redirect-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.25rem;
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.9);
+      color: white;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border-radius: 0.5rem;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+
+    .login-redirect-btn:hover {
+      background: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+    }
+
+    .login-redirect-btn svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+
+    /* Back button */
+    .back-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 0.5rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+      text-decoration: none;
+    }
+
+    .back-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+      color: var(--text-primary);
+    }
+
+    .back-btn svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+
+    /* Page header left */
+    .page-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+  </style>
+</head>
+<body class="dark">
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Login Redirect Overlay -->
+  <div class="login-redirect-overlay" id="login-redirect-overlay">
+    <div class="login-redirect-card">
+      <h2>Oops, you're not logged in!</h2>
+      <p>You landed on the settings page without logging in first.<br>Please return to the main page to log in with Discord.</p>
+      <a href="/index.html" class="login-redirect-btn">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+        </svg>
+        Go to Availability Tracker
+      </a>
+    </div>
+  </div>
+
+  <!-- Main Page -->
+  <div class="page" id="main-page">
+
+    <!-- Page Header -->
+    <header class="page-header">
+      <!-- Left: Back + Title -->
+      <div class="page-header-left">
+        <a href="/index.html" class="back-btn" id="back-link" onclick="return handleBackClick(event)">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+        </a>
+        <div class="page-header-title">
+          <h1>Settings</h1>
+          <span class="bot-credit" id="bot-credit"></span>
+        </div>
+      </div>
+
+      <!-- Right: Controls -->
+      <div class="page-header-controls">
+        <!-- TZ badge -->
+        <div class="tz-badge" id="tz-badge">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span id="tz-label">Local</span>
+        </div>
+
+        <!-- Theme toggle -->
+        <button class="theme-toggle" id="theme-toggle" onclick="handleThemeToggle()" title="Toggle theme">
+          <svg class="icon-sun" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+          <svg class="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-unit">
+      <div class="unit-inner">
+
+      <!-- Grid Card -->
+      <div class="grid-card" id="grid-card">
+
+        <!-- Grid Header -->
+        <div class="grid-header" id="grid-header">
+          <div class="header-cell time-corner"></div>
+          <!-- Day headers generated by JS -->
+        </div>
+
+        <!-- Grid Scroll Container -->
+        <div class="grid-scroll" id="grid-scroll">
+          <div class="grid-body" id="grid-body">
+            <!-- Cells generated by JS -->
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="grid-footer">
+          <span class="grid-footer-tip">Click and drag to paint when you're free</span>
+          <div class="grid-footer-actions">
+            <button onclick="handleDiscard()" class="btn btn-discard" id="discard-btn" disabled>Discard</button>
+            <button onclick="handleSave()" class="btn btn-primary" id="save-btn" disabled>Save changes</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Sidebar -->
+      <aside class="sidebar">
+
+        <!-- User Pill -->
+        <div class="user-pill" id="user-pill" onclick="showSessionModal()" style="cursor: pointer;">
+          <div class="avatar" id="user-avatar">?</div>
+          <span class="user-pill-text" id="user-name">Loading...</span>
+        </div>
+
+        <!-- Guild Visibility -->
+        <div class="sidebar-card flex-1">
+          <div class="sidebar-card-header">
+            <h3>Guild Visibility</h3>
+            <span class="count" id="guild-count"></span>
+          </div>
+          <p class="sidebar-card-subtitle">Who can see your availability</p>
+          <div class="sidebar-scroll" id="guild-list">
+            <!-- Generated by JS -->
+          </div>
+        </div>
+
+        <!-- Blocked Users -->
+        <div class="sidebar-card flex-1">
+          <div class="sidebar-card-header">
+            <h3>Blocked Users</h3>
+            <button class="action-btn" onclick="showAddBlockModal()">+ Add</button>
+          </div>
+          <p class="sidebar-card-subtitle">Cannot see your availability</p>
+          <div class="sidebar-scroll" id="blacklist">
+            <!-- Generated by JS -->
+          </div>
+        </div>
+
+        <!-- Danger Zone -->
+        <div class="danger-card">
+          <h3>Danger Zone</h3>
+          <p>Permanent actions that cannot be undone</p>
+          <button onclick="showDeleteDataModal()" class="btn btn-danger btn-sm">Delete all my data</button>
+        </div>
+
+      </aside>
+
+      </div>
+    </main>
+
+  </div>
+
+  <!-- Delete All Data Modal -->
+  <div id="delete-data-modal" class="modal-backdrop">
+    <div class="modal danger">
+      <h3 class="modal-title">Delete all your data?</h3>
+      <p class="modal-description">This will permanently delete your availability, guild settings, and blocked users. This action cannot be undone.</p>
+      <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Type <strong style="color: var(--text-primary);">DELETE</strong> to confirm:</p>
+      <input type="text" id="delete-confirm-input" placeholder="Type DELETE" class="input" autocomplete="off">
+      <div class="modal-actions">
+        <button onclick="hideDeleteDataModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="confirmDeleteAllData()" class="btn btn-danger" id="delete-confirm-btn" disabled>Delete everything</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Block Modal -->
+  <div id="add-block-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Block a user</h3>
+      <p class="modal-description">They won't be able to see your availability</p>
+      <input type="text" id="block-username-input" placeholder="Username or user ID" class="input">
+      <div class="modal-actions">
+        <button onclick="hideAddBlockModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="addToBlacklist()" class="btn btn-primary">Block user</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Modal -->
+  <div id="session-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Session</h3>
+      <p class="modal-description">Manage your login session</p>
+      <div class="session-options">
+        <button onclick="doLogout()" class="session-btn">
+          <span class="session-btn-title">Log out</span>
+          <span class="session-btn-subtitle">I'll still try to remember you!</span>
+        </button>
+        <button onclick="doClearSession()" class="session-btn session-btn-danger">
+          <span class="session-btn-title">Clear cookies and log out</span>
+          <span class="session-btn-subtitle">I won't know who you are!</span>
+        </button>
+      </div>
+      <div class="modal-actions">
+        <button onclick="hideSessionModal()" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Core modules -->
+  <script type="module">
+    import * as api from '/web-core/api.js';
+    import * as state from '/web-core/state.js';
+    import * as grid from '/web-core/grid.js';
+    import * as theme from '/web-core/theme.js';
+    import * as utils from '/web-core/utils.js';
+
+    // ========== CONSTANTS ==========
+    const { DAYS, DAY_LABELS, getWeekDates, isToday } = utils;
+
+    // ========== DOM REFERENCES ==========
+    const $loginRedirectOverlay = document.getElementById('login-redirect-overlay');
+    const $mainPage = document.getElementById('main-page');
+    const $botCredit = document.getElementById('bot-credit');
+    const $tzLabel = document.getElementById('tz-label');
+    const $userAvatar = document.getElementById('user-avatar');
+    const $userName = document.getElementById('user-name');
+    const $gridHeader = document.getElementById('grid-header');
+    const $gridBody = document.getElementById('grid-body');
+    const $guildList = document.getElementById('guild-list');
+    const $guildCount = document.getElementById('guild-count');
+    const $blacklist = document.getElementById('blacklist');
+    const $toastContainer = document.getElementById('toast-container');
+    const $discardBtn = document.getElementById('discard-btn');
+    const $saveBtn = document.getElementById('save-btn');
+
+    // ========== LOCAL STATE ==========
+    let currentUser = null;
+    let myAvailability = new Set();
+    let originalAvailability = new Set();
+    let guilds = [];
+    let blacklistUsers = [];
+    let hasUnsavedChanges = false;
+
+    // Drag state
+    let isDragging = false;
+    let dragMode = null;
+    let lastPaintedCell = null;
+
+    // ========== UTILITIES ==========
+    function formatHour(h) {
+      if (h === 0) return '12am';
+      if (h === 12) return '12pm';
+      return h > 12 ? `${h - 12}pm` : `${h}am`;
+    }
+
+    function formatDateShort(date) {
+      return `${date.getDate()}/${date.getMonth() + 1}`;
+    }
+
+    // ========== TOAST ==========
+    function showToast(message, type = 'info') {
+      const icons = {
+        success: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+        info: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+      };
+
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+      $toastContainer.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 200);
+      }, 3000);
+    }
+
+    // ========== GRID BUILDING ==========
+    function buildDayHeaders() {
+      const corner = $gridHeader.querySelector('.time-corner');
+      $gridHeader.innerHTML = '';
+      $gridHeader.appendChild(corner);
+
+      const weekDates = getWeekDates();
+      weekDates.forEach((date, i) => {
+        const cell = document.createElement('div');
+        cell.className = 'header-cell day-header';
+        cell.innerHTML = `
+          <span class="today-tag">${isToday(date) ? 'Today' : ''}</span>
+          <span class="day-name">${DAY_LABELS[i]}</span>
+          <span class="day-date">${formatDateShort(date)}</span>
+        `;
+        $gridHeader.appendChild(cell);
+      });
+    }
+
+    function buildGrid() {
+      $gridBody.innerHTML = '';
+      const timeSlots = grid.generateTimeSlots();
+      const now = new Date();
+      const currentSlot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+      const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
+
+      timeSlots.forEach((slot, slotIdx) => {
+        // Time label
+        const label = document.createElement('div');
+        label.className = `time-label${slot.isHour ? ' hour' : ''}`;
+        if (slot.isHour) label.textContent = slot.label;
+        $gridBody.appendChild(label);
+
+        // Day cells
+        DAYS.forEach((day, dayIdx) => {
+          const key = `${day}-${slot.key}`;
+          const cell = document.createElement('div');
+          let cls = 'grid-cell';
+          if (slot.isHour && slotIdx !== 0) cls += ' hour-start';
+          if (slot.isHalfHour) cls += ' half-hour';
+          cell.className = cls;
+          cell.dataset.key = key;
+          cell.dataset.slotIdx = slotIdx;
+          cell.dataset.dayIdx = dayIdx;
+
+          // Set initial state
+          if (myAvailability.has(key)) {
+            cell.classList.add('available');
+          } else {
+            cell.classList.add('unavailable');
+          }
+
+          // Add time indicator for current time
+          if (slotIdx === currentSlot && dayIdx === todayIdx) {
+            const indicator = document.createElement('div');
+            indicator.className = 'time-indicator';
+            cell.appendChild(indicator);
+          }
+
+          // Mouse handlers for drag painting
+          cell.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isDragging = true;
+            const isAvailable = myAvailability.has(key);
+            dragMode = isAvailable ? 'remove' : 'add';
+            lastPaintedCell = { slotIdx, dayIdx };
+            toggleCell(cell, key);
+          });
+
+          $gridBody.appendChild(cell);
+        });
+      });
+
+      // Document-level mousemove for paint interpolation
+      $gridBody.addEventListener('mousemove', (e) => {
+        if (!isDragging || !lastPaintedCell) return;
+        
+        const target = e.target.closest('.grid-cell');
+        if (!target || !target.dataset.slotIdx) return;
+        
+        const slotIdx = parseInt(target.dataset.slotIdx);
+        const dayIdx = parseInt(target.dataset.dayIdx);
+        
+        if (slotIdx === lastPaintedCell.slotIdx && dayIdx === lastPaintedCell.dayIdx) return;
+        
+        // Bresenham line interpolation
+        const cells = Array.from(document.querySelectorAll('.grid-cell'));
+        const startSlot = lastPaintedCell.slotIdx;
+        const startDay = lastPaintedCell.dayIdx;
+        
+        const dSlot = Math.abs(slotIdx - startSlot);
+        const dDay = Math.abs(dayIdx - startDay);
+        const sSlot = startSlot < slotIdx ? 1 : -1;
+        const sDay = startDay < dayIdx ? 1 : -1;
+        let err = dSlot - dDay;
+        let curSlot = startSlot;
+        let curDay = startDay;
+        
+        while (true) {
+          if (curSlot !== startSlot || curDay !== startDay) {
+            const idx = curSlot * 7 + curDay;
+            const cell = cells[idx];
+            if (cell) {
+              const key = cell.dataset.key;
+              if (dragMode === 'add' && !myAvailability.has(key)) {
+                toggleCell(cell, key);
+              } else if (dragMode === 'remove' && myAvailability.has(key)) {
+                toggleCell(cell, key);
+              }
+            }
+          }
+          
+          if (curSlot === slotIdx && curDay === dayIdx) break;
+          
+          const e2 = 2 * err;
+          if (e2 > -dDay) {
+            err -= dDay;
+            curSlot += sSlot;
+          }
+          if (e2 < dSlot) {
+            err += dSlot;
+            curDay += sDay;
+          }
+        }
+        
+        lastPaintedCell = { slotIdx, dayIdx };
+      });
+
+      document.addEventListener('mouseup', () => {
+        isDragging = false;
+        dragMode = null;
+        lastPaintedCell = null;
+      });
+    }
+
+    function toggleCell(cell, key) {
+      cell.classList.remove('pulse');
+      void cell.offsetWidth;
+      cell.classList.add('pulse');
+
+      if (myAvailability.has(key)) {
+        myAvailability.delete(key);
+        cell.classList.remove('available');
+        cell.classList.add('unavailable');
+      } else {
+        myAvailability.add(key);
+        cell.classList.remove('unavailable');
+        cell.classList.add('available');
+      }
+      
+      markUnsavedChanges();
+    }
+
+    function markUnsavedChanges() {
+      if (myAvailability.size !== originalAvailability.size) {
+        hasUnsavedChanges = true;
+      } else {
+        hasUnsavedChanges = ![...myAvailability].every(s => originalAvailability.has(s));
+      }
+      updateButtonStates();
+    }
+
+    function updateButtonStates() {
+      $discardBtn.disabled = !hasUnsavedChanges;
+      $saveBtn.disabled = !hasUnsavedChanges;
+    }
+
+    function renderAvailabilityGrid() {
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const slot = cell.dataset.key;
+        if (myAvailability.has(slot)) {
+          cell.classList.add('available');
+          cell.classList.remove('unavailable');
+        } else {
+          cell.classList.remove('available');
+          cell.classList.add('unavailable');
+        }
+      });
+    }
+
+    // ========== USER PILL ==========
+    function updateUserPill(user) {
+      if (user.avatar) {
+        $userAvatar.innerHTML = `<img src="${user.avatar}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${(user.username || '?').charAt(0).toUpperCase()}'">`;
+      } else {
+        $userAvatar.textContent = (user.username || '?').charAt(0).toUpperCase();
+      }
+      $userName.textContent = user.username || 'Unknown';
+    }
+
+    // ========== GUILD LIST ==========
+    function updateGuildCount() {
+      $guildCount.textContent = guilds.length === 1 ? '1 server' : `${guilds.length} servers`;
+    }
+
+    function buildGuildList() {
+      if (guilds.length === 0) {
+        $guildList.innerHTML = '<p class="list-empty">No shared servers</p>';
+      } else {
+        $guildList.innerHTML = guilds.map(g => `
+          <div class="list-item" data-guild-id="${g.id}">
+            <div class="list-item-left">
+              <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="">` : g.name.charAt(0)}</div>
+              <span class="list-item-name">${g.name}</span>
+            </div>
+            <div class="toggle-switch ${g.enabled ? 'active' : ''}" onclick="toggleGuild('${g.id}')"></div>
+          </div>
+        `).join('');
+      }
+    }
+
+    async function toggleGuild(id) {
+      const guild = guilds.find(g => g.id === id);
+      if (!guild) return;
+
+      const toggle = document.querySelector(`[data-guild-id="${id}"] .toggle-switch`);
+      const newState = !guild.enabled;
+
+      toggle.classList.toggle('active', newState);
+
+      try {
+        const res = await fetch(`/api/guilds/${id}/visibility`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ visible: newState })
+        });
+
+        if (res.ok) {
+          guild.enabled = newState;
+          showToast(`${guild.name} ${newState ? 'enabled' : 'disabled'}`, 'success');
+        } else {
+          toggle.classList.toggle('active', guild.enabled);
+          showToast('Failed to update visibility', 'error');
+        }
+      } catch (e) {
+        console.error('Failed to toggle guild:', e);
+        toggle.classList.toggle('active', guild.enabled);
+        showToast('Failed to update visibility', 'error');
+      }
+    }
+    window.toggleGuild = toggleGuild;
+
+    // ========== BLACKLIST ==========
+    function buildBlacklist() {
+      if (blacklistUsers.length === 0) {
+        $blacklist.innerHTML = '<p class="list-empty">No blocked users</p>';
+      } else {
+        $blacklist.innerHTML = blacklistUsers.map(u => `
+          <div class="list-item">
+            <div class="list-item-left">
+              <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="">` : u.username.charAt(0).toUpperCase()}</div>
+              <span class="list-item-name">${u.username}</span>
+            </div>
+            <button class="action-btn danger" onclick="removeFromBlacklist('${u.id}')">Unblock</button>
+          </div>
+        `).join('');
+      }
+    }
+
+    async function removeFromBlacklist(id) {
+      const user = blacklistUsers.find(u => u.id === id);
+      if (!user) return;
+
+      try {
+        const res = await fetch(`/api/blacklist/${id}`, {
+          method: 'DELETE',
+          credentials: 'include'
+        });
+
+        if (res.ok) {
+          blacklistUsers = blacklistUsers.filter(u => u.id !== id);
+          buildBlacklist();
+          showToast(`${user.username} unblocked`, 'success');
+        } else {
+          showToast('Failed to unblock user', 'error');
+        }
+      } catch (e) {
+        console.error('Failed to remove from blacklist:', e);
+        showToast('Failed to unblock user', 'error');
+      }
+    }
+    window.removeFromBlacklist = removeFromBlacklist;
+
+    // ========== SAVE / CLEAR ==========
+    async function handleSave() {
+      try {
+        await api.saveAvailability(Array.from(myAvailability));
+        const count = myAvailability.size;
+        const hours = (count * 15 / 60).toFixed(1);
+        showToast(`Saved! ${hours} hours per week`, 'success');
+        
+        originalAvailability = new Set(myAvailability);
+        hasUnsavedChanges = false;
+      } catch (e) {
+        console.error('Failed to save availability:', e);
+        showToast('Failed to save availability', 'error');
+      }
+    }
+    window.handleSave = handleSave;
+
+    function handleDiscard() {
+      // Revert to last saved state
+      myAvailability = new Set(originalAvailability);
+      renderAvailabilityGrid();
+      hasUnsavedChanges = false;
+      updateButtonStates();
+      showToast('Changes discarded', 'info');
+    }
+    window.handleDiscard = handleDiscard;
+
+    // ========== DELETE DATA MODAL ==========
+    function showDeleteDataModal() {
+      document.getElementById('delete-data-modal').classList.add('visible');
+      document.getElementById('delete-confirm-input').value = '';
+      document.getElementById('delete-confirm-btn').disabled = true;
+      document.getElementById('delete-confirm-input').focus();
+    }
+    window.showDeleteDataModal = showDeleteDataModal;
+
+    function hideDeleteDataModal() {
+      document.getElementById('delete-data-modal').classList.remove('visible');
+    }
+    window.hideDeleteDataModal = hideDeleteDataModal;
+
+    document.getElementById('delete-confirm-input')?.addEventListener('input', (e) => {
+      document.getElementById('delete-confirm-btn').disabled = e.target.value !== 'DELETE';
+    });
+
+    async function confirmDeleteAllData() {
+      if (document.getElementById('delete-confirm-input').value !== 'DELETE') return;
+      hideDeleteDataModal();
+
+      try {
+        await api.deleteAccount();
+        showToast('All data deleted. Redirecting...', 'success');
+        setTimeout(() => {
+          document.cookie.split(';').forEach(c => {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+          });
+          window.location.href = '/auth/logout?clear=true';
+        }, 1500);
+      } catch (e) {
+        console.error('Failed to delete account data:', e);
+        showToast('Failed to delete data', 'error');
+      }
+    }
+    window.confirmDeleteAllData = confirmDeleteAllData;
+
+    // ========== ADD BLOCK MODAL ==========
+    function showAddBlockModal() {
+      document.getElementById('add-block-modal').classList.add('visible');
+      document.getElementById('block-username-input').value = '';
+      document.getElementById('block-username-input').focus();
+    }
+    window.showAddBlockModal = showAddBlockModal;
+
+    function hideAddBlockModal() {
+      document.getElementById('add-block-modal').classList.remove('visible');
+    }
+    window.hideAddBlockModal = hideAddBlockModal;
+
+    async function addToBlacklist() {
+      const input = document.getElementById('block-username-input');
+      const username = input.value.trim();
+      if (!username) return;
+
+      try {
+        const user = await api.blockUser(username);
+        blacklistUsers.push(user);
+        buildBlacklist();
+        hideAddBlockModal();
+        showToast(`${username} blocked`, 'success');
+      } catch (e) {
+        if (e.message?.includes('404')) {
+          showToast('User not found', 'error');
+        } else {
+          showToast('Failed to block user', 'error');
+        }
+      }
+    }
+    window.addToBlacklist = addToBlacklist;
+
+    // ========== SESSION MODAL ==========
+    function showSessionModal() {
+      document.getElementById('session-modal').classList.add('visible');
+    }
+    window.showSessionModal = showSessionModal;
+
+    function hideSessionModal() {
+      document.getElementById('session-modal').classList.remove('visible');
+    }
+    window.hideSessionModal = hideSessionModal;
+
+    function doLogout() {
+      api.logout();
+    }
+    window.doLogout = doLogout;
+
+    function doClearSession() {
+      document.cookie.split(';').forEach(c => {
+        document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+      });
+      window.location.href = '/auth/logout?clear=true';
+    }
+    window.doClearSession = doClearSession;
+
+    // ========== MODAL HANDLERS ==========
+    document.querySelectorAll('.modal-backdrop').forEach(modal => {
+      modal.addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) {
+          modal.classList.remove('visible');
+        }
+      });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-backdrop.visible').forEach(m => m.classList.remove('visible'));
+      }
+    });
+
+    // ========== NAVIGATION GUARD ==========
+    function handleBackClick(event) {
+      if (hasUnsavedChanges) {
+        event.preventDefault();
+        if (confirm('You have unsaved changes. Are you sure you want to leave?')) {
+          hasUnsavedChanges = false;
+          window.location.href = '/index.html';
+        }
+        return false;
+      }
+      return true;
+    }
+    window.handleBackClick = handleBackClick;
+
+    window.addEventListener('beforeunload', (e) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    });
+
+    // ========== GLOBAL HANDLERS ==========
+    window.handleThemeToggle = () => theme.toggleTheme();
+
+    // ========== INITIALIZATION ==========
+    async function init() {
+      // Initialize theme
+      theme.initTheme();
+
+      // Load config
+      try {
+        const config = await api.getConfig();
+        $botCredit.textContent = `served to you by ${config.botName || 'Bot'}`;
+        if (config.themeColor) {
+          theme.setThemeColor(config.themeColor);
+        }
+      } catch (e) {
+        console.error('Failed to load config:', e);
+      }
+
+      // Load current user
+      try {
+        const user = await api.getMe();
+        if (!user) {
+          $loginRedirectOverlay.classList.add('visible');
+          return;
+        }
+
+        // Check if user has timezone set - required to use settings
+        if (!user.hasTimezone) {
+          window.location.href = '/index.html';
+          return;
+        }
+
+        currentUser = user;
+        state.setState('currentUser', user);
+        $tzLabel.textContent = user.timezone || 'Local';
+        updateUserPill(user);
+
+      } catch (e) {
+        console.error('Failed to load current user:', e);
+        $loginRedirectOverlay.classList.add('visible');
+        return;
+      }
+
+      // Build static UI elements
+      buildDayHeaders();
+      buildGrid();
+
+      // Load data from APIs
+      try {
+        // Load guilds
+        const guildsData = await api.getGuilds();
+        guilds = guildsData.guilds || [];
+        buildGuildList();
+        updateGuildCount();
+      } catch (e) {
+        console.error('Failed to load guilds:', e);
+        showToast('Failed to load servers', 'error');
+      }
+
+      try {
+        // Load blacklist
+        const blacklistData = await api.getBlacklist();
+        blacklistUsers = blacklistData.blacklist || [];
+        buildBlacklist();
+      } catch (e) {
+        console.error('Failed to load blacklist:', e);
+        showToast('Failed to load blocked users', 'error');
+      }
+
+      try {
+        // Load availability
+        const availData = await api.getMyAvailability();
+        myAvailability = new Set(availData.slots || []);
+        originalAvailability = new Set(myAvailability);
+        renderAvailabilityGrid();
+      } catch (e) {
+        console.error('Failed to load availability:', e);
+        showToast('Failed to load availability', 'error');
+      }
+    }
+
+    init();
+  </script>
+
+</body>
+</html>

@@ -120,8 +120,81 @@ def create_app(bot: "CoreBot") -> FastAPI:
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
     app.include_router(api_router, prefix="/api", tags=["api"])
 
-    # Static files (web UI) - mounted last so API routes take precedence
+    # ============================================================================
+    # Web UI serving
+    # ============================================================================
+    from fastapi.responses import FileResponse
+
+    # Base path for web assets
     web_assets_dir = os.path.join(config.ASSETS_PATH, "web")
+
+    # Serve web-core JS modules
+    @app.get("/web-core/{file_path:path}")
+    async def serve_web_core(file_path: str):
+        """Serve web-core module files."""
+        full_path = os.path.join(web_assets_dir, "web-core", file_path)
+        if os.path.exists(full_path) and full_path.endswith('.js'):
+            return FileResponse(full_path, media_type="application/javascript")
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    # Serve web-css stylesheets
+    @app.get("/web-css/{file_path:path}")
+    async def serve_web_css(file_path: str):
+        """Serve web-css stylesheet files."""
+        full_path = os.path.join(web_assets_dir, "web-css", file_path)
+        if os.path.exists(full_path) and full_path.endswith('.css'):
+            return FileResponse(full_path, media_type="text/css")
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    # ============================================================================
+    # Web UI Routing - UA-based desktop/mobile detection
+    # ============================================================================
+
+    def is_mobile_request(request: Request) -> bool:
+        """Check if request is from a mobile device based on User-Agent."""
+        user_agent = request.headers.get("user-agent", "").lower()
+        mobile_keywords = ["mobile", "android", "iphone", "ipad", "ipod", "blackberry", "windows phone"]
+        return any(keyword in user_agent for keyword in mobile_keywords)
+
+    @app.get("/")
+    async def serve_root():
+        """Redirect root to /index for future homepage flexibility."""
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/index", status_code=302)
+
+    @app.get("/index")
+    @app.get("/index.html")
+    async def serve_index(request: Request):
+        """Serve appropriate index.html based on device type."""
+        if is_mobile_request(request):
+            return FileResponse(
+                os.path.join(web_assets_dir, "mobile", "index.html"),
+                media_type="text/html"
+            )
+        return FileResponse(
+            os.path.join(web_assets_dir, "desktop", "index.html"),
+            media_type="text/html"
+        )
+
+    @app.get("/settings")
+    @app.get("/settings.html")
+    async def serve_settings(request: Request):
+        """Serve appropriate settings.html based on device type."""
+        if is_mobile_request(request):
+            return FileResponse(
+                os.path.join(web_assets_dir, "mobile", "settings.html"),
+                media_type="text/html"
+            )
+        return FileResponse(
+            os.path.join(web_assets_dir, "desktop", "settings.html"),
+            media_type="text/html"
+        )
+
+    # ============================================================================
+    # END Web UI serving
+    # ============================================================================
+
+    # Static files (web UI) - mounted last so API routes take precedence
     app.mount("/", StaticFiles(directory=web_assets_dir, html=True), name="static")
 
     @app.on_event("startup")

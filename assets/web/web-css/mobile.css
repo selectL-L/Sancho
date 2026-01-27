@@ -1,0 +1,1056 @@
+/*
+ * mobile.css - Mobile-Specific Layout & Components
+ * For mobile shells only (web-mobile-index.html, web-mobile-settings.html)
+ */
+
+/* ========== MOBILE SCALING ========== */
+html {
+  font-size: 16px;
+}
+
+/* ========== MOBILE CSS VARIABLES ========== */
+:root {
+  --mobile-header-height: 6rem;
+  --mobile-drawer-peek-empty: 5rem;
+  --mobile-drawer-peek-populated: 8.5rem;
+  --mobile-drawer-peek: 5rem;
+  --mobile-cell-height: 2.5rem;
+  --mobile-time-label-width: 3.5rem;
+  --mobile-visible-days: 3;
+}
+
+/* ========== MOBILE BODY ========== */
+body {
+  height: 100vh;
+  height: 100dvh;
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+/* ========== PAGE STRUCTURE ========== */
+.page {
+  padding: 0;
+  gap: 0;
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ========== MOBILE HEADER (Two-Row) ========== */
+.page-header {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.page-header-left {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.page-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  justify-content: flex-start;
+}
+
+.page-header-title h1 {
+  font-size: 1.25rem;
+}
+
+.page-header-title .bot-credit {
+  font-size: 0.75rem;
+}
+
+.page-header-controls {
+  justify-content: space-between;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  container-type: inline-size;
+  container-name: header-controls;
+}
+
+/* ========== MOBILE CONTROL ELEMENTS ========== */
+.mobile-tz-badge {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  display: flex;
+}
+
+.mobile-zoom-controls {
+  display: flex;
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.mobile-zoom-btn {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.mobile-zoom-btn:first-child {
+  border-right: 1px solid var(--border-default);
+}
+
+.mobile-zoom-btn:active {
+  background: var(--bg-card-elevated);
+}
+
+/* Guild selector on mobile */
+.guild-selector {
+  position: relative;
+}
+
+.guild-selector-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: all 200ms ease;
+}
+
+.guild-selector-btn:hover {
+  background: var(--bg-card-elevated);
+  border-color: var(--border-strong);
+}
+
+.guild-selector-btn > span {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guild-selector-btn > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  color: var(--text-muted);
+  transition: transform 200ms ease;
+  flex-shrink: 0;
+}
+
+.guild-selector.open .guild-selector-btn > svg {
+  transform: rotate(180deg);
+}
+
+/* Collapse guild selector to icon-only when header is narrow */
+@container header-controls (max-width: 22rem) {
+  .guild-selector-btn > span {
+    display: none;
+  }
+  .guild-selector-btn {
+    padding: 0.5rem;
+  }
+}
+
+.guild-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.guild-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-soft);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-0.5rem);
+  transition: all 180ms ease;
+  z-index: 100;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.guild-selector.open .guild-dropdown {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.guild-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.guild-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.light .guild-option:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.guild-option.selected {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12);
+}
+
+/* Back button on mobile */
+.back-btn {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+.back-btn svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* Theme toggle on mobile */
+.theme-toggle {
+  padding: 0.5rem;
+}
+
+.theme-toggle svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* Hide desktop TZ badge on mobile */
+.tz-badge {
+  display: none;
+}
+
+/* ========== MAIN UNIT - MOBILE ========== */
+.main-unit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  position: relative;
+}
+
+.unit-inner {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  display: flex;
+  gap: 0;
+  padding: 0;
+}
+
+/* ========== GRID CARD - MOBILE ========== */
+.grid-card {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  transition: opacity 300ms ease;
+  background: var(--bg-card);
+  border: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.grid-card.inactive {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+/* ========== MOBILE GRID HEADER ========== */
+.grid-header {
+  display: grid;
+  grid-template-columns: var(--mobile-time-label-width) repeat(var(--mobile-visible-days), 1fr);
+  flex-shrink: 0;
+  border-bottom: 2px solid var(--border-strong);
+}
+
+.header-cell {
+  height: var(--header-row-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.header-cell.time-corner {
+  width: var(--mobile-time-label-width);
+  flex-shrink: 0;
+  justify-content: flex-end;
+  padding-right: 0.5rem;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.header-cell.day-header {
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  padding: 0.5rem 0.25rem;
+  border-left: 1px solid var(--border-strong);
+}
+
+.header-cell.day-header:last-child {
+  border-right: 1px solid var(--border-strong);
+}
+
+.header-cell .today-tag {
+  font-size: 0.5rem;
+  font-weight: 600;
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  height: 0.75rem;
+}
+
+.header-cell .day-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.header-cell .day-date {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ========== MOBILE GRID SCROLL ========== */
+.grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* Hide scrollbar but keep functionality */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+
+.grid-scroll::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}
+
+/* ========== MOBILE GRID BODY ========== */
+.grid-body {
+  display: grid;
+  grid-template-columns: var(--mobile-time-label-width) repeat(var(--mobile-visible-days), 1fr);
+  min-height: 100%;
+}
+
+/* ========== MOBILE TIME LABELS ========== */
+.time-label {
+  height: var(--mobile-cell-height);
+  font-size: 0.75rem;
+  padding-right: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  color: transparent;
+}
+
+.time-label.hour {
+  color: var(--text-secondary);
+}
+
+/* ========== MOBILE GRID CELLS ========== */
+.grid-cell {
+  height: var(--mobile-cell-height);
+  min-width: 0;
+  border-left: 1px solid var(--border-strong);
+  background: var(--cell-bg, transparent);
+  cursor: pointer;
+  transition: filter 150ms ease;
+  position: relative;
+}
+
+/* Last cell in each row gets right border - handled via JS data attribute */
+.grid-cell[data-last-col="true"] {
+  border-right: 1px solid var(--border-strong);
+}
+
+.grid-cell.hour-start {
+  border-top: 1px solid var(--border-default);
+}
+
+.grid-cell.half-hour {
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.grid-cell.filled {
+  /* Background set via inline style */
+}
+
+.grid-cell.locked {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.8);
+  z-index: 5;
+  position: relative;
+}
+
+.grid-cell:active {
+  filter: brightness(1.3);
+}
+
+/* Cell states for settings/editing */
+.grid-cell.available {
+  --cell-bg: var(--heatmap-available);
+}
+
+.grid-cell.unavailable {
+  --cell-bg: transparent;
+}
+
+/* ========== TOUCH HANDLING FOR SETTINGS GRID ========== */
+/* On settings page, single-finger is for painting, not scrolling */
+/* The grid-body gets touch-action: none so JS handles all touches */
+body.settings-page .grid-scroll {
+  touch-action: pan-y; /* Allow vertical scroll with momentum on container */
+  overflow-y: auto;
+}
+
+body.settings-page .grid-body {
+  touch-action: none; /* Disable browser touch handling, JS handles painting */
+}
+
+body.settings-page .grid-cell {
+  touch-action: none; /* Cells capture touches for painting */
+}
+
+/* ========== HIDE DESKTOP ELEMENTS ========== */
+.legend,
+.grid-footer,
+.sidebar {
+  display: none;
+}
+
+/* ========== MOBILE DRAWER ========== */
+.mobile-drawer {
+  background: var(--bg-card);
+  border-top: 1px solid var(--border-strong);
+  border-radius: 0;
+  flex-shrink: 0;
+  transition: height 300ms cubic-bezier(0.4, 0, 0.2, 1), border-radius 300ms ease;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 20;
+}
+
+/* Peek state - part of flex layout, takes space from grid */
+.mobile-drawer.peek {
+  position: relative;
+  height: var(--mobile-drawer-peek-empty);
+  border-radius: 0;
+}
+
+.mobile-drawer.peek.populated {
+  height: var(--mobile-drawer-peek-populated);
+}
+
+/* Expanded state - absolute overlay, grid stays frozen */
+.mobile-drawer.expanded {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60vh;
+  border-radius: 1rem 1rem 0 0;
+}
+
+/* ========== DRAWER HEADER ========== */
+.drawer-header {
+  padding: 0.875rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.drawer-title {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.drawer-title strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Drawer peek actions (Save/Discard buttons) */
+.drawer-peek-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.drawer-expand-btn {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 150ms ease;
+}
+
+.drawer-expand-btn:active {
+  background: var(--bg-card-elevated);
+  transform: scale(0.95);
+}
+
+.drawer-expand-btn svg {
+  width: 1rem;
+  height: 1rem;
+  transition: transform 200ms ease;
+}
+
+.mobile-drawer.expanded .drawer-expand-btn svg {
+  transform: rotate(180deg);
+}
+
+/* ========== DRAWER PEEK CONTENT (Index - Avatars) ========== */
+.drawer-peek-avatars {
+  padding: 0 1rem 0.875rem;
+  display: flex;
+  gap: 0.625rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mobile-drawer.expanded .drawer-peek-avatars {
+  display: none;
+}
+
+.drawer-avatar {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+  background: linear-gradient(135deg,
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3),
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15)
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.125rem;
+  font-weight: 500;
+  overflow: hidden;
+  box-shadow: 0 0 0 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+}
+
+.drawer-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.drawer-avatar.overflow {
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.drawer-avatar.viewing {
+  width: 3rem;
+  height: 3rem;
+  font-size: 1.125rem;
+  box-shadow: 0 0 0 3px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+}
+
+/* ========== DRAWER ACTIONS BAR (Settings) ========== */
+.drawer-actions {
+  padding: 0.875rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.drawer-btn-group {
+  display: flex;
+  flex: 1;
+  gap: 0.5rem;
+}
+
+.drawer-btn {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 150ms ease;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.drawer-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.drawer-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.drawer-btn svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* Save button - green */
+.drawer-btn.save {
+  background: rgba(34, 197, 94, 0.2);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  color: #4ade80;
+}
+
+.drawer-btn.save:active:not(:disabled) {
+  background: rgba(34, 197, 94, 0.35);
+}
+
+/* Discard button - red */
+.drawer-btn.discard {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+}
+
+.drawer-btn.discard:active:not(:disabled) {
+  background: rgba(239, 68, 68, 0.35);
+}
+
+/* Primary button */
+.drawer-btn.primary {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35);
+  border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
+  color: var(--text-primary);
+}
+
+.drawer-btn.primary:active {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+}
+
+/* Ghost button */
+.drawer-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+
+.drawer-btn.ghost:active {
+  background: var(--bg-input);
+}
+
+/* ========== DRAWER SCROLL CONTENT ========== */
+.drawer-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: none;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mobile-drawer.expanded .drawer-scroll {
+  display: block;
+}
+
+.drawer-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: none;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mobile-drawer.expanded .drawer-content {
+  display: block;
+}
+
+/* ========== DRAWER SECTIONS ========== */
+.drawer-section {
+  padding: 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.drawer-section:last-child {
+  border-bottom: none;
+}
+
+.drawer-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.drawer-section-title {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.drawer-section-count {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.drawer-section-subtitle {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.drawer-section-placeholder {
+  font-size: 0.9375rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 1rem 0;
+}
+
+/* ========== DRAWER PERSON ROW (Index) ========== */
+.drawer-person-row {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.625rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.drawer-person-row:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.light .drawer-person-row:active {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.drawer-person-row.selected {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15);
+}
+
+.drawer-person-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.drawer-person-name {
+  font-size: 1rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drawer-person-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ========== DRAWER USER PILL ========== */
+.drawer-user-pill {
+  margin: 1rem;
+  padding: 0.375rem 1.25rem 0.375rem 0.375rem;
+  background: linear-gradient(135deg,
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12),
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.06)
+  );
+  border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2);
+  border-radius: 2.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.drawer-user-pill:active {
+  background: linear-gradient(135deg,
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2),
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12)
+  );
+}
+
+.drawer-user-pill .drawer-avatar {
+  box-shadow: 0 0 0 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+}
+
+.drawer-user-pill-text,
+.drawer-user-text {
+  flex: 1;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+/* ========== DRAWER LIST (Settings) ========== */
+.drawer-list {
+  display: block;
+}
+
+.drawer-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.75rem 0;
+}
+
+.drawer-list-item + .drawer-list-item {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.drawer-list-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: var(--bg-input);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.drawer-list-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.drawer-list-name {
+  flex: 1;
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+}
+
+/* ========== DRAWER TOGGLE SWITCH ========== */
+.drawer-toggle {
+  position: relative;
+  width: 3rem;
+  height: 1.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.875rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 200ms ease;
+}
+
+.drawer-toggle.active {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
+  border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.4);
+}
+
+.drawer-toggle::after {
+  content: '';
+  position: absolute;
+  top: 0.1875rem;
+  left: 0.1875rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  background: var(--text-primary);
+  border-radius: 50%;
+  transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.drawer-toggle.active::after {
+  transform: translateX(1.25rem);
+}
+
+/* ========== DRAWER UNBLOCK BUTTON ========== */
+.drawer-unblock-btn {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.375rem 0.625rem;
+  border-radius: 0.375rem;
+  transition: all 150ms ease;
+}
+
+.drawer-unblock-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+/* ========== DRAWER ADD BLOCK BUTTON ========== */
+.drawer-add-block-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+  background: var(--bg-input);
+  border: 1px dashed var(--border-default);
+  border-radius: 0.5rem;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.drawer-add-block-btn:active {
+  background: var(--bg-card-elevated);
+  border-color: var(--border-strong);
+  color: var(--text-secondary);
+}
+
+/* ========== DRAWER DANGER ZONE ========== */
+.drawer-danger-section {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  margin: 1rem;
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.drawer-danger-section .drawer-section-title {
+  color: var(--danger-text);
+}
+
+.drawer-danger-btn {
+  width: 100%;
+  padding: 0.875rem;
+  background: transparent;
+  border: 1px solid var(--danger-border);
+  border-radius: 0.5rem;
+  color: var(--danger-text);
+  font-family: inherit;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.drawer-danger-btn:active {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* ========== MOBILE TOAST ========== */
+.toast-container {
+  top: auto;
+  bottom: 5rem;
+  left: 1rem;
+  right: 1rem;
+}
+
+.toast {
+  padding: 0.875rem 1rem;
+}
+
+.toast span {
+  font-size: 0.9375rem;
+}
+
+/* ========== MOBILE TOOLTIP - DISABLED ========== */
+.tooltip {
+  display: none;
+}
+
+/* ========== MOBILE MODALS ========== */
+.modal {
+  margin: 1rem;
+  padding: 1.25rem;
+}
+
+.modal-title {
+  font-size: 1.125rem;
+}
+
+.modal-description {
+  font-size: 0.9375rem;
+}
+
+/* ========== MOBILE LOGIN OVERLAY ========== */
+.login-card {
+  margin: 1rem;
+  padding: 2rem 1.5rem;
+}
+
+.login-card h2 {
+  font-size: 1.375rem;
+}
+
+.login-card p {
+  font-size: 0.9375rem;
+}
+
+.login-btn {
+  padding: 1rem 1.5rem;
+  font-size: 1rem;
+}
+
+.login-redirect-card {
+  margin: 1rem;
+  padding: 2rem 1.5rem;
+}
+
+.login-redirect-card h2 {
+  font-size: 1.25rem;
+}
+
+.login-redirect-card p {
+  font-size: 0.9375rem;
+}
+
+/* ========== VISIBILITY TOGGLES ========== */
+.mobile-only {
+  display: flex;
+}
+
+.desktop-only {
+  display: none;
+}
