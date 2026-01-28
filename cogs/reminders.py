@@ -63,6 +63,11 @@ class Reminders(BaseCog):
         This runs in POST-READY phase to ensure Discord connection is established
         before attempting to send any missed reminder notifications.
         """
+        # Idempotency guard: Don't start another scheduler if one is already running
+        if self.scheduler_task is not None and not self.scheduler_task.done():
+            self.logger.info("Reminder scheduler already running, skipping start")
+            return
+
         self.logger.info("Starting reminder system...")
         # Process missed reminders first (Catch-Up Phase).
         await self._process_missed_reminders()

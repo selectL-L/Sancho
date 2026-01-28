@@ -223,16 +223,21 @@ class Music(MusicCommandsMixin, BaseCog):
         Returns:
             True if server started successfully, False otherwise.
         """
+        # Idempotency guard: Don't start another server if one is already running
+        if self._pot_server_process is not None and self._pot_server_process.returncode is None:
+            self.logger.info("POT server already running, skipping start")
+            return self._pot_server_healthy
+
         pot_script = getattr(config, 'POT_PROVIDER_PATH', None)
         pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
 
         # If port not configured, POT system is disabled
         if pot_port is None:
-            self.logger.debug("POT_PROVIDER_PORT not configured, skipping POT server")
+            self.logger.info("POT_PROVIDER_PORT not configured, skipping POT server")
             return False
 
         if not pot_script or not os.path.isfile(pot_script):
-            self.logger.debug(f"POT provider script not found at {pot_script}")
+            self.logger.info(f"POT provider script not found at {pot_script}")
             return False
 
         # Check if node is available
@@ -332,6 +337,11 @@ class Music(MusicCommandsMixin, BaseCog):
 
     async def cog_ready(self) -> None:
         """Called after the bot is fully ready. Sets up ambience subscription and loads playlist."""
+        # Idempotency guard: Check if we've already initialized
+        if self.presence_task is not None and not self.presence_task.done():
+            self.logger.info("Music cog already initialized, skipping cog_ready")
+            return
+
         if not YTDLP_AVAILABLE:
             self.logger.warning(
                 "yt-dlp is not installed. Music cog will be limited.")

@@ -60,6 +60,11 @@ class Schedule(BaseCog):
 
     async def cog_ready(self) -> None:
         """Called when bot is ready. Start the web server if enabled."""
+        # Idempotency guard: Don't start another server if one is already running
+        if self._server_task is not None and not self._server_task.done():
+            self.logger.info("Web server already running, skipping start")
+            return
+
         if not config.WEB_ENABLED:
             self.logger.info("Web server disabled (WEB_ENABLED=False)")
             return
@@ -120,7 +125,17 @@ class Schedule(BaseCog):
             )
             self._server_started.set()
 
-            await self._uvicorn_server.serve()
+            try:
+                await self._uvicorn_server.serve()
+            except SystemExit as e:
+                # Uvicorn calls sys.exit(1) on port binding failure - don't let it crash the bot
+                if e.code == 1:
+                    self.logger.error(
+                        f"Web server failed to start (port {config.WEB_PORT} likely in use). "
+                        "The bot will continue without the web interface."
+                    )
+                else:
+                    raise
 
         except ImportError as e:
             self.logger.error(

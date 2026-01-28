@@ -35,6 +35,10 @@ _current_phase: Optional[str] = None
 # so rapid SIGTERM signals can schedule multiple shutdown tasks)
 _is_shutting_down: bool = False
 
+# Guard against duplicate on_ready calls (Discord.py fires on_ready after every
+# reconnect, not just initial connection). We only want cog_ready() once.
+_has_initialized: bool = False
+
 
 def log_phase(phase: str) -> None:
     """Logs a phase separator with fold markers for Notepad++ collapsing.
@@ -161,6 +165,14 @@ async def startup_handler(bot: "CoreBot") -> None:
     await bot.change_presence(status=bot.current_visibility)
     if bot.current_visibility != discord.Status.online:
         logging.info(f"Initial visibility set to: {bot.current_visibility.name}")
+
+    # Guard: Discord.py fires on_ready after every reconnect, not just initial startup.
+    # We only want to run cog_ready() once to avoid duplicate servers, tasks, etc.
+    global _has_initialized
+    if _has_initialized:
+        logging.info("Reconnect detected (on_ready fired again). Skipping cog_ready() calls.")
+        return
+    _has_initialized = True
 
     # Call cog_ready() on all cogs to start their background tasks
     await bot.ready_all_cogs()

@@ -756,10 +756,20 @@ _current_activity: Optional[Activity] = None
 _music_state: MusicState = MusicState()
 _playlist_callbacks: list[Callable[[Optional[str], Optional[str]], None]] = []
 
+# Guard against re-initialization (would reset user's mood selection)
+_initialized: bool = False
+
 
 def initialize() -> None:
     """Initialize ambience state on bot startup. Call this in on_ready."""
-    global _current_mood, _current_activity
+    global _current_mood, _current_activity, _initialized
+
+    # Idempotency guard: Don't reset state if already initialized
+    # Re-initialization would silently corrupt user's mood selection
+    if _initialized:
+        logger.info("[Ambience] Already initialized, skipping")
+        return
+    _initialized = True
 
     # Fresh start - pick a random mood and activity
     _current_mood = random.choice(list(MOODS.keys()))
