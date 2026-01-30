@@ -187,6 +187,7 @@ class ResourceTracker:
         """
         # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
         return self.process.cpu_percent(interval=0.5) / self._cpu_count
+
     async def _get_memory_stats_async(self) -> Dict[str, float]:
         """Gets current memory statistics (async-safe).
 
@@ -202,6 +203,7 @@ class ResourceTracker:
             'ram_private': memory_info.uss / (1024 * 1024),
             'ram_swap': getattr(memory_info, 'swap', 0) / (1024 * 1024),
         }
+
     async def get_current_usage_async(self) -> Dict[str, float]:
         """Returns LIVE, accurate CPU and RAM usage (async-safe).
 

@@ -77,17 +77,26 @@ def is_system_rebooting() -> bool:
     try:
         result = subprocess.run(
             ['systemctl', 'list-jobs'],
-            capture_output=True, text=True, check=False
+            capture_output=True, text=True, check=False, timeout=5
         )
         output = result.stdout
+        # Log the output for diagnostics
+        if output.strip():
+            logging.debug(f"systemctl list-jobs output: {output.strip()}")
         # If a reboot or shutdown job is running, we consider it a system reboot.
         if 'reboot.target' in output or 'shutdown.target' in output:
             logging.info("System reboot or shutdown detected via systemctl.")
             return True
+        # Log when no reboot detected to help diagnose false negatives
+        logging.warning("No reboot/shutdown target found in systemctl list-jobs.")
     except FileNotFoundError:
         # This will be triggered if systemctl is not found on a Linux system.
         logging.warning("Running on Linux, but 'systemctl' command not found. Assuming not a systemd reboot.")
-        return False
+    except subprocess.TimeoutExpired:
+        logging.warning("systemctl list-jobs timed out. Assuming system reboot in progress.")
+        return True
+    except Exception as e:
+        logging.warning(f"systemctl list-jobs failed: {e}. Assuming not a systemd reboot.")
     return False
 
 
@@ -207,6 +216,10 @@ async def shutdown_handler(
     log_phase("SHUTDOWN")
     logging.info(f"Received exit signal {sig.name}")
 
+    # Capture reboot state NOW, before slow operations.
+    # By the time cogs are unloaded, systemctl jobs may have completed.
+    system_rebooting = is_system_rebooting()
+
     # Unload all cogs gracefully (this calls cog_unload on each)
     cog_names = list(bot.extensions.keys())
     for ext in cog_names:
@@ -224,7 +237,8 @@ async def shutdown_handler(
     log_phase("GOODBYE")
 
     # Determine the shutdown reason and prepare the message.
-    rebooting = is_system_rebooting() or is_restart
+    # Use the cached system_rebooting value captured at the start of shutdown.
+    rebooting = system_rebooting or is_restart
     if rebooting:
         logging.info("Shutdown initiated by a system reboot or soft restart. Service should be back shortly...")
         embed = discord.Embed(
