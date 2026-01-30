@@ -597,15 +597,15 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
     ],
     # Schedule Group - Weekly availability scheduler
-    # Patterns TBD - handlers exist in cog but patterns need priority tuning
     [
-        # Who's available at a time
-        ((), 'Schedule', 'who_available_nlp'),
-        # View someone's schedule
-        ((), 'Schedule', 'view_schedule_nlp'),
-        # Find overlapping availability
-        ((), 'Schedule', 'find_overlap_nlp'),
-        # Edit availability (returns web link)
-        ((), 'Schedule', 'edit_availability_nlp'),
+        # Check availability for mentioned user(s) - REQUIRES a mention to avoid false positives
+        # "when is @user free", "is @user available", "are @user @user2 free saturday 3pm"
+        ((r'\b(when|is|are)\b.*<@!?\d+>.*\b(free|available)\b', r'\b(free|available)\b.*<@!?\d+>'), 'Schedule', 'check_availability_nlp'),
+        # Who's available query (reverse: time → people)
+        # "who's free", "who is available saturday", "whos free at 3pm"
+        ((r"\bwho('?s| is| are)\s*(free|available)\b",), 'Schedule', 'who_available_nlp'),
+        # Get schedule link
+        # "schedule link", "schedule url", "edit my availability", "set my schedule"
+        ((r'\bschedule\s*(link|url)\b', r'\b(edit|set|update)\s+(my\s+)?(availability|schedule)\b'), 'Schedule', 'schedule_link_nlp'),
     ],
 ]
