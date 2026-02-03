@@ -649,6 +649,8 @@
       $guildSelector.classList.toggle('open');
     }
 
+    window.toggleGuildDropdown = toggleGuildDropdown;
+
     document.addEventListener('click', e => {
       if (!$guildSelector.contains(e.target)) {
         $guildSelector.classList.remove('open');
