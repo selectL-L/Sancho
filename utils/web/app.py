@@ -112,6 +112,15 @@ def create_app(bot: "CoreBot") -> FastAPI:
 
         return await call_next(request)
 
+    # Security headers middleware - prevent clickjacking and MIME sniffing
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        """Add security headers to all responses."""
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     # Server-side session middleware
     # Stores tokens in database, only session_id in cookie
     app.add_middleware(ServerSessionMiddleware)
