@@ -507,7 +507,7 @@
     import * as utils from '/web-core/utils.js';
 
     // ========== CONSTANTS ==========
-    const { DAYS, DAY_LABELS, getWeekDates, isToday } = utils;
+    const { DAYS, DAY_LABELS, getWeekDates, isToday, escapeHtml } = utils;
 
     // ========== DOM REFERENCES ==========
     const $loginRedirectOverlay = document.getElementById('login-redirect-overlay');
@@ -751,7 +751,15 @@
     // ========== USER PILL ==========
     function updateUserPill(user) {
       if (user.avatar) {
-        $userAvatar.innerHTML = `<img src="${user.avatar}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${(user.username || '?').charAt(0).toUpperCase()}'">`;
+        const img = document.createElement('img');
+        img.src = user.avatar;
+        img.alt = '';
+        img.onerror = () => {
+          img.style.display = 'none';
+          $userAvatar.textContent = (user.username || '?').charAt(0).toUpperCase();
+        };
+        $userAvatar.innerHTML = '';
+        $userAvatar.appendChild(img);
       } else {
         $userAvatar.textContent = (user.username || '?').charAt(0).toUpperCase();
       }
@@ -770,14 +778,22 @@
         $guildList.innerHTML = guilds.map(g => `
           <div class="list-item" data-guild-id="${g.id}">
             <div class="list-item-left">
-              <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="">` : g.name.charAt(0)}</div>
-              <span class="list-item-name">${g.name}</span>
+              <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="">` : escapeHtml(g.name.charAt(0))}</div>
+              <span class="list-item-name">${escapeHtml(g.name)}</span>
             </div>
-            <div class="toggle-switch ${g.enabled ? 'active' : ''}" onclick="toggleGuild('${g.id}')"></div>
+            <div class="toggle-switch ${g.enabled ? 'active' : ''}" data-toggle-guild="${g.id}"></div>
           </div>
         `).join('');
       }
     }
+
+    // Event delegation for guild toggles
+    $guildList.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-toggle-guild]');
+      if (toggle) {
+        toggleGuild(toggle.dataset.toggleGuild);
+      }
+    });
 
     async function toggleGuild(id) {
       const guild = guilds.find(g => g.id === id);
@@ -798,7 +814,7 @@
 
         if (res.ok) {
           guild.enabled = newState;
-          showToast(`${guild.name} ${newState ? 'enabled' : 'disabled'}`, 'success');
+          showToast(`${escapeHtml(guild.name)} ${newState ? 'enabled' : 'disabled'}`, 'success');
         } else {
           toggle.classList.toggle('active', guild.enabled);
           showToast('Failed to update visibility', 'error');
@@ -817,16 +833,24 @@
         $blacklist.innerHTML = '<p class="list-empty">No blocked users</p>';
       } else {
         $blacklist.innerHTML = blacklistUsers.map(u => `
-          <div class="list-item">
+          <div class="list-item" data-user-id="${u.id}">
             <div class="list-item-left">
-              <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="">` : u.username.charAt(0).toUpperCase()}</div>
-              <span class="list-item-name">${u.username}</span>
+              <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="">` : escapeHtml((u.username || '?').charAt(0).toUpperCase())}</div>
+              <span class="list-item-name">${escapeHtml(u.username || 'Unknown')}</span>
             </div>
-            <button class="action-btn danger" onclick="removeFromBlacklist('${u.id}')">Unblock</button>
+            <button class="action-btn danger" data-unblock="${u.id}">Unblock</button>
           </div>
         `).join('');
       }
     }
+
+    // Event delegation for unblock buttons
+    $blacklist.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-unblock]');
+      if (btn) {
+        removeFromBlacklist(btn.dataset.unblock);
+      }
+    });
 
     async function removeFromBlacklist(id) {
       const user = blacklistUsers.find(u => u.id === id);
@@ -841,7 +865,7 @@
         if (res.ok) {
           blacklistUsers = blacklistUsers.filter(u => u.id !== id);
           buildBlacklist();
-          showToast(`${user.username} unblocked`, 'success');
+          showToast(`${escapeHtml(user.username)} unblocked`, 'success');
         } else {
           showToast('Failed to unblock user', 'error');
         }

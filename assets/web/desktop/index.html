@@ -195,7 +195,7 @@
     import * as utils from '/web-core/utils.js';
 
     // ========== CONSTANTS ==========
-    const { DAYS, DAY_LABELS, DAY_LABELS_SHORT, formatRelativeTime, getWeekDates, isToday, debounce } = utils;
+    const { DAYS, DAY_LABELS, DAY_LABELS_SHORT, formatRelativeTime, getWeekDates, isToday, debounce, escapeHtml } = utils;
     const DEBOUNCE_DELAY = 300;
     const EVERYONE_TIMEOUT = 5000;
     const DEFAULT_AVATAR = 'https://cdn.discordapp.com/embed/avatars/0.png';
@@ -509,13 +509,17 @@
           $availableList.innerHTML = available.map((person, i) => `
             <div class="person-row" style="transition-delay: ${i * 50}ms;">
               <div class="avatar">
-                <img src="${getAvatarUrl(person)}" alt="" onerror="handleAvatarError(this, '${(person.username || '').charAt(0)}')">
+                <img src="${getAvatarUrl(person)}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
               </div>
               <div class="person-info">
-                <div class="person-name">${person.username || 'Unknown'}</div>
+                <div class="person-name">${escapeHtml(person.username || 'Unknown')}</div>
               </div>
             </div>
           `).join('');
+          // Attach error handlers for avatars
+          $availableList.querySelectorAll('img[data-initial]').forEach(img => {
+            img.onerror = () => handleAvatarError(img, img.dataset.initial);
+          });
           requestAnimationFrame(() => {
             $availableList.querySelectorAll('.person-row').forEach(r => r.classList.add('visible'));
           });
@@ -553,7 +557,7 @@
         r.classList.toggle('selected', r.dataset.userId === person.id);
       });
 
-      $availableSearching.querySelector('.searching-text').textContent = `Looking up ${person.username}'s schedule...`;
+      $availableSearching.querySelector('.searching-text').textContent = `Looking up ${person.username || 'user'}'s schedule...`;
       $availablePlaceholder.style.display = 'none';
       $availableSearching.classList.add('visible');
       $availableList.innerHTML = '';
@@ -594,7 +598,7 @@
         $availableSearching.classList.remove('visible');
         $availableCount.textContent = `${slots.length} slots`;
         $timeLabel.textContent = `~${hours} hours/week`;
-        $availablePlaceholder.innerHTML = `<span>Viewing when <strong class="viewing-name">${person.username}</strong> is available. Click their name again to deselect.</span>`;
+        $availablePlaceholder.innerHTML = `<span>Viewing when <strong class="viewing-name">${escapeHtml(person.username)}</strong> is available. Click their name again to deselect.</span>`;
         $availablePlaceholder.style.display = 'flex';
       } catch (e) {
         console.error('Failed to load person availability:', e);
@@ -610,10 +614,16 @@
       clearHover();
     }
 
-    // Make viewPerson available globally for onclick handlers
-    window.viewPerson = viewPerson;
-
     // ========== EVERYONE LIST ==========
+    // Event delegation for person clicks (avoids HTML escaping issues with inline onclick)
+    $everyoneList.addEventListener('click', (e) => {
+      const row = e.target.closest('.person-row');
+      if (!row) return;
+      const userId = row.dataset.userId;
+      const person = allViewableUsers.find(p => p.id === userId);
+      if (person) viewPerson(person);
+    });
+
     function renderEveryoneList() {
       clearTimeout(everyoneTimeout);
 
@@ -628,16 +638,20 @@
 
       $everyoneCount.textContent = allViewableUsers.length;
       $everyoneList.innerHTML = allViewableUsers.map((person, i) => `
-        <div class="person-row" data-user-id="${person.id}" onclick='viewPerson(${JSON.stringify(person).replace(/'/g, "\\'")})' style="transition-delay: ${i * 50}ms;">
+        <div class="person-row" data-user-id="${person.id}" style="transition-delay: ${i * 50}ms;">
           <div class="avatar">
-            <img src="${getAvatarUrl(person)}" alt="" onerror="handleAvatarError(this, '${(person.username || '').charAt(0)}')">
+            <img src="${getAvatarUrl(person)}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
           </div>
           <div class="person-info">
-            <div class="person-name">${person.username || 'Unknown'}</div>
+            <div class="person-name">${escapeHtml(person.username || 'Unknown')}</div>
             <div class="person-meta">${person.updated_at ? `Updated ${formatRelativeTime(person.updated_at)}` : 'No availability set'}</div>
           </div>
         </div>
       `).join('');
+      // Attach error handlers for avatars
+      $everyoneList.querySelectorAll('img[data-initial]').forEach(img => {
+        img.onerror = () => handleAvatarError(img, img.dataset.initial);
+      });
 
       requestAnimationFrame(() => {
         $everyoneList.querySelectorAll('.person-row').forEach(r => r.classList.add('visible'));
@@ -657,14 +671,22 @@
       }
     });
 
+    // Event delegation for guild dropdown
+    $guildDropdown.addEventListener('click', (e) => {
+      const option = e.target.closest('.guild-option');
+      if (!option) return;
+      const guildId = option.dataset.guildId;
+      if (guildId) selectGuild(guildId);
+    });
+
     function renderGuildDropdown(guilds, selectedGuildId) {
       $guildDropdown.innerHTML = guilds.map(g => `
-        <div class="guild-option ${g.id === selectedGuildId ? 'selected' : ''}" onclick="selectGuild('${g.id}')">
+        <div class="guild-option ${g.id === selectedGuildId ? 'selected' : ''}" data-guild-id="${g.id}">
           ${g.icon
             ? `<img src="${g.icon}" alt="" class="guild-icon">`
-            : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${g.name.charAt(0)}</div>`
+            : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${escapeHtml(g.name.charAt(0))}</div>`
           }
-          <span style="font-size: 0.8125rem;">${g.name}</span>
+          <span style="font-size: 0.8125rem;">${escapeHtml(g.name)}</span>
         </div>
       `).join('');
     }

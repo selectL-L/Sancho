@@ -251,3 +251,36 @@ export function throttle(fn, ms) {
 export function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
+
+// ============================================================================
+// HTML ESCAPING
+// ============================================================================
+
+/**
+ * Escape HTML entities in a string to prevent XSS attacks.
+ * 
+ * Use this for ANY user-controlled content inserted into HTML:
+ * - Usernames, display names
+ * - Guild/server names
+ * - Any text from API responses that originated from users
+ * 
+ * @param {string} str - String to escape
+ * @returns {string} Escaped string safe for HTML insertion
+ * 
+ * @example
+ * escapeHtml("<script>alert('xss')</script>")
+ * // "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+ * 
+ * escapeHtml("Matthew's Server")
+ * // "Matthew&#39;s Server"
+ */
+export function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str).replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c]));
+}

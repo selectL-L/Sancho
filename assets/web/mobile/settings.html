@@ -608,6 +608,7 @@
   <script type="module">
     import { getConfig } from '/web-core/api.js';
     import { initTheme, toggleTheme, setThemeColor } from '/web-core/theme.js';
+    import { escapeHtml } from '/web-core/utils.js';
 
     // ========== DOM CACHE ==========
     const $toastContainer = document.getElementById('toast-container');
@@ -1120,18 +1121,29 @@
     function updateUserPill(user) {
       if (!$mobileUserPill || !user) return;
       
-      const avatarHtml = user.avatar
-        ? `<img src="${user.avatar}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${(user.username || '?').charAt(0).toUpperCase()}'">` 
-        : (user.username || '?').charAt(0).toUpperCase();
+      const avatarDiv = document.createElement('div');
+      avatarDiv.className = 'drawer-avatar';
       
-      $mobileUserPill.innerHTML = `
-        <div class="drawer-avatar">${avatarHtml}</div>
-        <span class="drawer-user-text">${user.username || 'Unknown'}</span>
-      `;
-    }
-
-    // ========== TZ BADGE ==========
-    function updateTzBadge() {
+      if (user.avatar) {
+        const img = document.createElement('img');
+        img.src = user.avatar;
+        img.alt = '';
+        img.onerror = () => {
+          img.style.display = 'none';
+          avatarDiv.textContent = (user.username || '?').charAt(0).toUpperCase();
+        };
+        avatarDiv.appendChild(img);
+      } else {
+        avatarDiv.textContent = (user.username || '?').charAt(0).toUpperCase();
+      }
+      
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'drawer-user-text';
+      nameSpan.textContent = user.username || 'Unknown';
+      
+      $mobileUserPill.innerHTML = '';
+      $mobileUserPill.appendChild(avatarDiv);
+      $mobileUserPill.appendChild(nameSpan);
       const tz = (currentUser && currentUser.timezone) || 'Local';
       if ($tzLabel) $tzLabel.textContent = tz;
     }
@@ -1162,13 +1174,28 @@
       $mobileGuildList.innerHTML = guilds.map(g => `
         <div class="list-item" data-guild-id="${g.id}">
           <div class="list-item-left">
-            <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${g.name.charAt(0)}'">` : g.name.charAt(0)}</div>
-            <span class="list-item-name">${g.name}</span>
+            <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="" data-fallback="${escapeHtml(g.name.charAt(0))}">` : escapeHtml(g.name.charAt(0))}</div>
+            <span class="list-item-name">${escapeHtml(g.name)}</span>
           </div>
-          <div class="toggle-switch ${g.enabled ? 'active' : ''}" onclick="toggleGuild('${g.id}')"></div>
+          <div class="toggle-switch ${g.enabled ? 'active' : ''}" data-toggle-guild="${g.id}"></div>
         </div>
       `).join('');
+      // Attach error handlers for guild icons
+      $mobileGuildList.querySelectorAll('img[data-fallback]').forEach(img => {
+        img.onerror = () => {
+          img.style.display = 'none';
+          img.parentElement.textContent = img.dataset.fallback;
+        };
+      });
     }
+
+    // Event delegation for guild toggles
+    $mobileGuildList?.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-toggle-guild]');
+      if (toggle) {
+        toggleGuild(toggle.dataset.toggleGuild);
+      }
+    });
 
     window.toggleGuild = async function(id) {
       const guild = guilds.find(g => g.id === id);
@@ -1189,7 +1216,7 @@
 
         if (res.ok) {
           guild.enabled = newState;
-          showToast(`${guild.name} ${newState ? 'enabled' : 'disabled'}`, 'success');
+          showToast(`${escapeHtml(guild.name)} ${newState ? 'enabled' : 'disabled'}`, 'success');
         } else {
           toggle.classList.toggle('active', guild.enabled);
           showToast('Failed to update visibility', 'error');
@@ -1225,15 +1252,30 @@
       }
       
       $mobileBlacklist.innerHTML = blacklist.map(u => `
-        <div class="list-item">
+        <div class="list-item" data-user-id="${u.id}">
           <div class="list-item-left">
-            <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="" onerror="this.style.display='none'; this.parentElement.textContent='${(u.username || '?').charAt(0).toUpperCase()}'">` : (u.username || '?').charAt(0).toUpperCase()}</div>
-            <span class="list-item-name">${u.username || u.id}</span>
+            <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="" data-fallback="${escapeHtml((u.username || '?').charAt(0).toUpperCase())}">` : escapeHtml((u.username || '?').charAt(0).toUpperCase())}</div>
+            <span class="list-item-name">${escapeHtml(u.username || u.id)}</span>
           </div>
-          <button class="action-btn danger" onclick="removeFromBlacklist('${u.id}')">Unblock</button>
+          <button class="action-btn danger" data-unblock="${u.id}">Unblock</button>
         </div>
       `).join('');
+      // Attach error handlers for avatar icons
+      $mobileBlacklist.querySelectorAll('img[data-fallback]').forEach(img => {
+        img.onerror = () => {
+          img.style.display = 'none';
+          img.parentElement.textContent = img.dataset.fallback;
+        };
+      });
     }
+
+    // Event delegation for unblock buttons
+    $mobileBlacklist?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-unblock]');
+      if (btn) {
+        removeFromBlacklist(btn.dataset.unblock);
+      }
+    });
 
     window.removeFromBlacklist = async function(id) {
       const user = blacklist.find(u => u.id === id);
@@ -1248,7 +1290,7 @@
         if (res.ok) {
           blacklist = blacklist.filter(u => u.id !== id);
           buildBlacklist();
-          showToast(`${user.username} unblocked`, 'success');
+          showToast(`${escapeHtml(user.username)} unblocked`, 'success');
         } else {
           showToast('Failed to unblock user', 'error');
         }

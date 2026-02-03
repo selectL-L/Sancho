@@ -245,7 +245,7 @@
     import * as state from '/web-core/state.js';
     import * as grid from '/web-core/grid.js';
     import * as theme from '/web-core/theme.js';
-    import { DAYS, DAY_LABELS, formatTime, formatHourLabel, formatRelativeTime as formatRelativeTimeUtil, getWeekDates, isToday, formatDateShort } from '/web-core/utils.js';
+    import { DAYS, DAY_LABELS, formatTime, formatHourLabel, formatRelativeTime as formatRelativeTimeUtil, getWeekDates, isToday, formatDateShort, escapeHtml } from '/web-core/utils.js';
 
     // ========== DOM REFERENCES ==========
     const $loginOverlay = document.getElementById('login-overlay');
@@ -345,14 +345,22 @@
       }
     });
 
+    // Event delegation for guild dropdown
+    $guildDropdown.addEventListener('click', (e) => {
+      const option = e.target.closest('.guild-option');
+      if (!option) return;
+      const guildId = option.dataset.guildId;
+      if (guildId) selectGuild(guildId);
+    });
+
     function renderGuildDropdown(guildList, currentGuildId) {
       $guildDropdown.innerHTML = guildList.map(g => `
-        <div class="guild-option ${g.id === currentGuildId ? 'selected' : ''}" onclick="selectGuild('${g.id}')">
+        <div class="guild-option ${g.id === currentGuildId ? 'selected' : ''}" data-guild-id="${g.id}">
           ${g.icon 
             ? `<img src="${g.icon}" class="guild-icon" alt="">`
-            : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${g.name.charAt(0)}</div>`
+            : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${escapeHtml(g.name.charAt(0))}</div>`
           }
-          <span style="font-size: 0.8125rem;">${g.name}</span>
+          <span style="font-size: 0.8125rem;">${escapeHtml(g.name)}</span>
         </div>
       `).join('');
     }
@@ -559,12 +567,12 @@
 
     function updateDrawerContent() {
       if (viewingPerson) {
-        $drawerTitle.innerHTML = `Viewing <strong>${viewingPerson.username}'s</strong> schedule`;
+        $drawerTitle.innerHTML = `Viewing <strong>${escapeHtml(viewingPerson.username)}'s</strong> schedule`;
         $drawerPeekAvatars.innerHTML = `
           <div class="drawer-avatar viewing">
             ${viewingPerson.avatar 
               ? `<img src="${getAvatarUrl(viewingPerson)}" alt="">` 
-              : viewingPerson.username?.charAt(0).toUpperCase() || '?'}
+              : escapeHtml(viewingPerson.username?.charAt(0).toUpperCase() || '?')}
           </div>
         `;
         $drawer.classList.add('populated');
@@ -587,7 +595,7 @@
             <div class="drawer-avatar">
               ${person.avatar 
                 ? `<img src="${getAvatarUrl(person)}" alt="">` 
-                : person.username?.charAt(0).toUpperCase() || '?'}
+                : escapeHtml(person.username?.charAt(0).toUpperCase() || '?')}
             </div>
           `).join('');
           
@@ -611,10 +619,10 @@
               <div class="drawer-avatar">
                 ${person.avatar 
                   ? `<img src="${getAvatarUrl(person)}" alt="">` 
-                  : person.username?.charAt(0).toUpperCase() || '?'}
+                  : escapeHtml(person.username?.charAt(0).toUpperCase() || '?')}
               </div>
               <div class="drawer-person-info">
-                <div class="drawer-person-name">${person.username || 'Unknown'}</div>
+                <div class="drawer-person-name">${escapeHtml(person.username || 'Unknown')}</div>
                 <div class="drawer-person-meta">${person.updated_at ? `Updated ${formatRelativeTime(person.updated_at)}` : ''}</div>
               </div>
             </div>
@@ -632,6 +640,15 @@
       }
     }
 
+    // Event delegation for person clicks (avoids HTML escaping issues with inline onclick)
+    $drawerEveryoneList.addEventListener('click', (e) => {
+      const row = e.target.closest('.drawer-person-row');
+      if (!row) return;
+      const userId = row.dataset.userId;
+      const person = allViewableUsers.find(p => p.id === userId);
+      if (person) viewPerson(person);
+    });
+
     function renderEveryoneList() {
       // Hide searching indicator
       $drawerEveryoneSearching.classList.remove('visible');
@@ -647,14 +664,14 @@
       $drawerEveryonePlaceholder.style.display = 'none';
       $drawerEveryoneList.innerHTML = allViewableUsers.map(person => `
         <div class="drawer-person-row ${viewingPerson && viewingPerson.id === person.id ? 'selected' : ''}" 
-             onclick='viewPerson(${JSON.stringify(person).replace(/'/g, "\\'")})'>
+             data-user-id="${person.id}">
           <div class="drawer-avatar">
             ${person.avatar 
               ? `<img src="${getAvatarUrl(person)}" alt="">` 
-              : person.username?.charAt(0).toUpperCase() || '?'}
+              : escapeHtml((person.username || '?').charAt(0).toUpperCase())}
           </div>
           <div class="drawer-person-info">
-            <div class="drawer-person-name">${person.username || 'Unknown'}</div>
+            <div class="drawer-person-name">${escapeHtml(person.username || 'Unknown')}</div>
             <div class="drawer-person-meta">${person.updated_at ? `Updated ${formatRelativeTime(person.updated_at)}` : 'No availability set'}</div>
           </div>
         </div>
