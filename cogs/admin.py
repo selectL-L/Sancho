@@ -1610,13 +1610,13 @@ class AdminCog(BaseCog):
     @commands.is_owner()
     @app_commands.describe(
         user="The user to bless.",
-        tier="Fate tier: LUCKY, BLESSED, or GUARANTEED.",
+        tier="Fate tier: SILENT, LUCKY, BLESSED, or GUARANTEED.",
         count="Amount of fate to add (default 1)."
     )
     async def bod_bless(
         self,
         ctx: commands.Context,
-        user: discord.Member,
+        user: discord.User,
         tier: str,
         count: int = 1
     ) -> None:
@@ -1624,13 +1624,13 @@ class AdminCog(BaseCog):
 
         Args:
             ctx: The command context.
-            user: The target user.
-            tier: LUCKY, BLESSED, or GUARANTEED.
+            user: The target user (works for any user, not just server members).
+            tier: SILENT, LUCKY, BLESSED, or GUARANTEED.
             count: Amount to add.
         """
         tier_upper = tier.upper()
-        if tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
-            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
+        if tier_upper not in ('SILENT', 'LUCKY', 'BLESSED', 'GUARANTEED'):
+            await ctx.send("❌ Invalid tier. Use SILENT, LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
             return
 
         if count < 1:
@@ -1639,7 +1639,8 @@ class AdminCog(BaseCog):
 
         try:
             await self.db_manager.add_bod_fate(user.id, tier_upper, count)
-            await ctx.send(f"✅ Added {count}x {tier_upper} fate to {user.display_name}.", ephemeral=True)
+            display = getattr(user, 'display_name', None) or user.name
+            await ctx.send(f"✅ Added {count}x {tier_upper} fate to {display}.", ephemeral=True)
             self.logger.warning(f"Admin {ctx.author} blessed {user} ({user.id}) with {count}x {tier_upper} fate.")
         except Exception as e:
             await ctx.send(f"❌ Failed to add fate: {e}", ephemeral=True)
@@ -1657,28 +1658,27 @@ class AdminCog(BaseCog):
     async def bod_fate(
         self,
         ctx: commands.Context,
-        user: Optional[discord.Member] = None
+        user: Optional[discord.User] = None
     ) -> None:
         """View a user's BOD fate bank.
 
         Args:
             ctx: The command context.
-            user: User to check, or self if None.
+            user: User to check (works for any user), or self if None.
         """
         target = user or ctx.author
-        if not isinstance(target, discord.Member):
-            await ctx.send("❌ Could not resolve user.", ephemeral=True)
-            return
 
         try:
             fate = await self.db_manager.get_bod_fate(target.id)
+            display = getattr(target, 'display_name', None) or target.name
 
             embed = discord.Embed(
-                title=f"BOD Fate Bank: {target.display_name}",
+                title=f"BOD Fate Bank: {display}",
                 color=discord.Color.purple()
             )
 
             fate_lines = [
+                f"🔇 **Silent** (100%, no flavor): {fate.get('silent', 0)}",
                 f"⚡ **Guaranteed** (100%): {fate.get('guaranteed', 0)}",
                 f"🌟 **Blessed** (75%): {fate.get('blessed', 0)}",
                 f"✨ **Lucky** (50%): {fate.get('lucky', 0)}",
@@ -1709,27 +1709,28 @@ class AdminCog(BaseCog):
     async def bod_clear(
         self,
         ctx: commands.Context,
-        user: discord.Member,
+        user: discord.User,
         tier: Optional[str] = None
     ) -> None:
         """Clear fate from a user's BOD bank.
 
         Args:
             ctx: The command context.
-            user: The target user.
+            user: The target user (works for any user, not just server members).
             tier: Specific tier or None for all.
         """
         tier_upper = tier.upper() if tier else None
-        if tier_upper and tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
-            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
+        if tier_upper and tier_upper not in ('SILENT', 'LUCKY', 'BLESSED', 'GUARANTEED'):
+            await ctx.send("❌ Invalid tier. Use SILENT, LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
             return
 
         try:
             await self.db_manager.clear_bod_fate(user.id, tier_upper)
+            display = getattr(user, 'display_name', None) or user.name
             if tier_upper:
-                await ctx.send(f"✅ Cleared {tier_upper} fate from {user.display_name}.", ephemeral=True)
+                await ctx.send(f"✅ Cleared {tier_upper} fate from {display}.", ephemeral=True)
             else:
-                await ctx.send(f"✅ Cleared all fate from {user.display_name}.", ephemeral=True)
+                await ctx.send(f"✅ Cleared all fate from {display}.", ephemeral=True)
             self.logger.warning(f"Admin {ctx.author} cleared {'all' if not tier_upper else tier_upper} fate from {user} ({user.id}).")
         except Exception as e:
             await ctx.send(f"❌ Failed to clear fate: {e}", ephemeral=True)

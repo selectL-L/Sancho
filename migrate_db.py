@@ -242,7 +242,8 @@ TABLE_SCHEMAS = {
             last_channel_id INTEGER NOT NULL DEFAULT 0,
             fate_lucky INTEGER NOT NULL DEFAULT 0,
             fate_blessed INTEGER NOT NULL DEFAULT 0,
-            fate_guaranteed INTEGER NOT NULL DEFAULT 0
+            fate_guaranteed INTEGER NOT NULL DEFAULT 0,
+            fate_silent INTEGER NOT NULL DEFAULT 0
         )
     """,
     "bod_leaderboard": """
@@ -725,6 +726,8 @@ def migrate_database() -> None:
                                 elif col == 'created_at':
                                     values.append(int(time.time()))
                                 elif col == 'achieved_at':
+                                    values.append(0)
+                                elif col == 'fate_silent':
                                     values.append(0)
                                 else:
                                     values.append(None)

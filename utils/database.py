@@ -172,7 +172,8 @@ class DatabaseManager:
                         last_channel_id INTEGER NOT NULL DEFAULT 0,
                         fate_lucky INTEGER NOT NULL DEFAULT 0,
                         fate_blessed INTEGER NOT NULL DEFAULT 0,
-                        fate_guaranteed INTEGER NOT NULL DEFAULT 0
+                        fate_guaranteed INTEGER NOT NULL DEFAULT 0,
+                        fate_silent INTEGER NOT NULL DEFAULT 0
                     )''',
                 "bod_leaderboard": '''CREATE TABLE IF NOT EXISTS bod_leaderboard (
                         user_id INTEGER PRIMARY KEY,
@@ -240,7 +241,7 @@ class DatabaseManager:
                 "bot_settings": {"key", "value"},
                 "guild_settings": {"guild_id", "key", "value"},
                 "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
-                "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed"},
+                "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed", "fate_silent"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
                 "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"},
                 "users": {"user_id", "username", "avatar", "last_seen"},
@@ -407,19 +408,19 @@ class DatabaseManager:
         Returns:
             Dict[str, Any]: A dictionary containing player data with keys:
                             'last_used_timestamp', 'current_chain', 'last_channel_id',
-                            'fate_lucky', 'fate_blessed', 'fate_guaranteed'.
+                            'fate_lucky', 'fate_blessed', 'fate_guaranteed', 'fate_silent'.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT last_used_timestamp, current_chain, last_channel_id, fate_lucky, fate_blessed, fate_guaranteed "
+                "SELECT last_used_timestamp, current_chain, last_channel_id, fate_lucky, fate_blessed, fate_guaranteed, fate_silent "
                 "FROM bod_players WHERE user_id = ?", (user_id,)
             )
             row = await cursor.fetchone()
             if row:
                 return dict(row)
             return {'last_used_timestamp': 0, 'current_chain': 0, 'last_channel_id': 0,
-                    'fate_lucky': 0, 'fate_blessed': 0, 'fate_guaranteed': 0}
+                    'fate_lucky': 0, 'fate_blessed': 0, 'fate_guaranteed': 0, 'fate_silent': 0}
 
     async def update_bod_player(self, user_id: int, last_used_timestamp: int, current_chain: int, channel_id: Optional[int] = None) -> None:
         """Updates or inserts a user's BOD player data.
@@ -529,17 +530,17 @@ class DatabaseManager:
             user_id (int): The Discord user ID.
 
         Returns:
-            Dict with keys 'lucky', 'blessed', 'guaranteed' and their counts.
+            Dict with keys 'lucky', 'blessed', 'guaranteed', 'silent' and their counts.
         """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "SELECT fate_lucky, fate_blessed, fate_guaranteed FROM bod_players WHERE user_id = ?",
+                "SELECT fate_lucky, fate_blessed, fate_guaranteed, fate_silent FROM bod_players WHERE user_id = ?",
                 (user_id,)
             )
             row = await cursor.fetchone()
             if row:
-                return {'lucky': row[0], 'blessed': row[1], 'guaranteed': row[2]}
-            return {'lucky': 0, 'blessed': 0, 'guaranteed': 0}
+                return {'lucky': row[0], 'blessed': row[1], 'guaranteed': row[2], 'silent': row[3]}
+            return {'lucky': 0, 'blessed': 0, 'guaranteed': 0, 'silent': 0}
 
     async def add_bod_fate(self, user_id: int, tier: str, count: int = 1) -> None:
         """Add fate to a user's bank.
@@ -553,7 +554,7 @@ class DatabaseManager:
         """
         tier_lower = tier.lower()
         column = f"fate_{tier_lower}"
-        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed', 'fate_silent'):
             raise ValueError(f"Invalid fate tier: {tier}")
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -580,7 +581,7 @@ class DatabaseManager:
         """
         tier_lower = tier.lower()
         column = f"fate_{tier_lower}"
-        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+        if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed', 'fate_silent'):
             raise ValueError(f"Invalid fate tier: {tier}")
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -615,14 +616,14 @@ class DatabaseManager:
             if tier is None:
                 # Clear all fate
                 await db.execute(
-                    "UPDATE bod_players SET fate_lucky = 0, fate_blessed = 0, fate_guaranteed = 0 "
+                    "UPDATE bod_players SET fate_lucky = 0, fate_blessed = 0, fate_guaranteed = 0, fate_silent = 0 "
                     "WHERE user_id = ?",
                     (user_id,)
                 )
             else:
                 tier_lower = tier.lower()
                 column = f"fate_{tier_lower}"
-                if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed'):
+                if column not in ('fate_lucky', 'fate_blessed', 'fate_guaranteed', 'fate_silent'):
                     raise ValueError(f"Invalid fate tier: {tier}")
                 await db.execute(
                     f"UPDATE bod_players SET {column} = 0 WHERE user_id = ?",

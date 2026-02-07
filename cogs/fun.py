@@ -501,20 +501,20 @@ class Fun(BaseCog):
     async def _consume_fate_and_get_tier(self, user_id: int) -> str:
         """Consume fate from bank, returning the tier used.
 
-        Checks tiers in order: GUARANTEED > BLESSED > LUCKY > NORMAL.
+        Checks tiers in order: SILENT > GUARANTEED > BLESSED > LUCKY > NORMAL.
 
         Args:
             user_id: The Discord user ID.
 
         Returns:
-            Tier string: 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
+            Tier string: 'SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
         """
         db_manager = self.bot.db_manager
         if not db_manager:
             return "NORMAL"
 
-        # Check in priority order
-        for tier in ('GUARANTEED', 'BLESSED', 'LUCKY'):
+        # Check in priority order (SILENT first for admin-rigged rolls without flavor text)
+        for tier in ('SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY'):
             if await db_manager.consume_bod_fate(user_id, tier):
                 self.logger.info(f"Consumed {tier} fate for user {user_id}")
                 return tier
@@ -525,12 +525,14 @@ class Fun(BaseCog):
         """Roll 1d4 with modified probability based on tier.
 
         Args:
-            tier: One of 'GUARANTEED', 'BLESSED', 'LUCKY', 'NORMAL'.
+            tier: One of 'SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY', 'NORMAL'.
 
         Returns:
             Roll result 1-4.
         """
-        if tier == "GUARANTEED":
+        if tier == "SILENT":
+            return 4
+        elif tier == "GUARANTEED":
             return 4
         elif tier == "BLESSED":
             # 75% chance of success
