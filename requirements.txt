@@ -67,6 +67,11 @@ syncedlyrics
 # Required for Discord voice support (encryption).
 PyNaCl
 
+# Asyncio-native D-Bus client for deterministic shutdown detection on Linux.
+# Used to listen for logind's PrepareForShutdown signal (system reboot/poweroff).
+# No-ops gracefully on Windows or systems without D-Bus.
+dbus-fast
+
 # Testing dependencies (tests are included but these libraries are not required for normal operation).
 pytest
 pytest-asyncio

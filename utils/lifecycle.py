@@ -11,13 +11,19 @@ Startup Phases:
 Shutdown Phases:
     SHUTDOWN: Signal received, cog cleanup, resource tracker stop
     GOODBYE: Shutdown message, log finalization, connection close
+
+Shutdown Detection:
+    Uses two layered mechanisms on Linux/systemd for deterministic detection:
+    1. RestartKillSignal=SIGUSR1 in the systemd unit file — distinguishes restart vs stop
+    2. logind PrepareForShutdown D-Bus signal — distinguishes system reboot/poweroff vs manual stop
+    See Impls/SHUTDOWN_DETECTION_OVERHAUL.md for full design rationale.
 """
 
 import asyncio
+import enum
 import logging
 import os
 import signal
-import subprocess
 import sys
 from typing import Optional, TYPE_CHECKING
 
@@ -27,6 +33,29 @@ import config
 
 if TYPE_CHECKING:
     from .bot_class import CoreBot
+
+
+# ─── Shutdown Reason ─────────────────────────────────────────────────────────
+
+class ShutdownReason(enum.Enum):
+    """Why the bot is shutting down. Determined from signal type and D-Bus flags.
+
+    The enum preserves granularity for future use (e.g. different messages for
+    restart vs reboot), even though the current goodbye-message logic groups
+    them into two buckets: "returning" (reboot.gif) and "going away" (shutdown.gif).
+    """
+    MANUAL_STOP = "manual_stop"          # systemctl stop / exit command / Ctrl+C
+    RESTART = "restart"                  # systemctl restart (SIGUSR1) or soft restart (TCP/console)
+    SYSTEM_REBOOT = "system_reboot"      # System reboot detected via PrepareForShutdown
+    SYSTEM_POWEROFF = "system_poweroff"  # System poweroff detected via PrepareForShutdown
+
+    @property
+    def is_returning(self) -> bool:
+        """Whether the bot is expected to come back shortly."""
+        return self in (ShutdownReason.RESTART, ShutdownReason.SYSTEM_REBOOT)
+
+
+# ─── Module-Level State ──────────────────────────────────────────────────────
 
 # Track current phase for fold markers
 _current_phase: Optional[str] = None
@@ -38,6 +67,22 @@ _is_shutting_down: bool = False
 # Guard against duplicate on_ready calls (Discord.py fires on_ready after every
 # reconnect, not just initial connection). We only want cog_ready() once.
 _has_initialized: bool = False
+
+# Set True by the PrepareForShutdown D-Bus handler BEFORE SIGTERM arrives.
+# Checked by resolve_shutdown_reason() when a SIGTERM is received.
+_system_shutdown_flag: bool = False
+
+# "reboot", "poweroff", or "halt" — from PrepareForShutdownWithMetadata (systemd 255+).
+# None if metadata wasn't available or D-Bus detection is inactive.
+_shutdown_type: Optional[str] = None
+
+# File descriptor for the logind delay inhibitor lock. Held from startup until
+# PrepareForShutdown fires (or teardown). Keeps logind from proceeding until
+# we've recorded the shutdown type.
+_inhibitor_fd: Optional[int] = None
+
+# Reference to the D-Bus connection for cleanup on shutdown/restart.
+_dbus_connection: Optional[object] = None
 
 
 def log_phase(phase: str) -> None:
@@ -61,43 +106,192 @@ def log_phase(phase: str) -> None:
     _current_phase = phase
 
 
-def is_system_rebooting() -> bool:
-    """Checks if the system is in the process of rebooting or shutting down.
+# ─── D-Bus Shutdown Detection ────────────────────────────────────────────────
 
-    Platform behavior:
-        - Linux (systemd): Queries `systemctl list-jobs` to detect reboot/shutdown targets.
-        - Windows: Always returns False (no equivalent detection; shows generic shutdown message).
+async def setup_shutdown_detection() -> None:
+    """Connects to the system D-Bus and subscribes to logind's PrepareForShutdown signal.
 
-    Returns:
-        bool: True if a reboot/shutdown is detected, False otherwise.
+    On Linux with D-Bus available, this:
+    1. Takes a "delay" inhibitor lock from logind — guarantees we hear the
+       PrepareForShutdown broadcast before systemd starts sending SIGTERM.
+    2. Subscribes to PrepareForShutdown (or PrepareForShutdownWithMetadata on
+       systemd 255+) to set the _system_shutdown_flag before our signal handler runs.
+
+    On Windows or systems without D-Bus, this no-ops gracefully.
     """
-    if not sys.platform.startswith('linux'):
-        return False
+    global _dbus_connection, _inhibitor_fd
+
+    if sys.platform != 'linux':
+        logging.debug("Shutdown detection skipped (not Linux)")
+        return
 
     try:
-        result = subprocess.run(
-            ['systemctl', 'list-jobs'],
-            capture_output=True, text=True, check=False, timeout=5
+        from dbus_fast.aio import MessageBus
+        from dbus_fast import BusType
+    except ImportError:
+        logging.debug("Shutdown detection skipped (dbus-fast not installed)")
+        return
+
+    try:
+        bus = await asyncio.wait_for(
+            MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect(),
+            timeout=5.0
         )
-        output = result.stdout
-        # Log the output for diagnostics
-        if output.strip():
-            logging.debug(f"systemctl list-jobs output: {output.strip()}")
-        # If a reboot or shutdown job is running, we consider it a system reboot.
-        if 'reboot.target' in output or 'shutdown.target' in output:
-            logging.info("System reboot or shutdown detected via systemctl.")
-            return True
-        # Log when no reboot detected to help diagnose false negatives
-        logging.warning("No reboot/shutdown target found in systemctl list-jobs.")
-    except FileNotFoundError:
-        # This will be triggered if systemctl is not found on a Linux system.
-        logging.warning("Running on Linux, but 'systemctl' command not found. Assuming not a systemd reboot.")
-    except subprocess.TimeoutExpired:
-        logging.warning("systemctl list-jobs timed out. Assuming system reboot in progress.")
-        return True
+        _dbus_connection = bus
+
+        # Get the logind Manager interface
+        introspection = await asyncio.wait_for(
+            bus.introspect('org.freedesktop.login1', '/org/freedesktop/login1'),
+            timeout=5.0
+        )
+        proxy = bus.get_proxy_object('org.freedesktop.login1', '/org/freedesktop/login1', introspection)
+        manager = proxy.get_interface('org.freedesktop.login1.Manager')
+
+        # Take a delay inhibitor lock — logind will wait for us to release it
+        # before telling systemd to begin stopping services.
+        # Without the lock, there's a race: logind could broadcast PrepareForShutdown
+        # and systemd could send SIGTERM before our D-Bus handler runs.
+        # So signal subscription is contingent on having the lock.
+        try:
+            fd = await asyncio.wait_for(
+                manager.call_inhibit(
+                    'shutdown',             # what
+                    config.BOT_NAME,        # who
+                    'Detecting shutdown type',  # why
+                    'delay'                 # mode
+                ),
+                timeout=5.0
+            )
+            _inhibitor_fd = fd
+            logging.info(f"Acquired logind delay inhibitor lock (fd={fd})")
+        except Exception as e:
+            logging.warning(f"Failed to acquire logind inhibitor lock: {e!r} — shutdown type detection disabled")
+            # Without the lock we can't guarantee the PrepareForShutdown handler
+            # runs before SIGTERM arrives, so subscribing would be unreliable.
+            logging.info("Shutdown detection inactive (no inhibitor lock)")
+            return
+
+        # Subscribe to PrepareForShutdownWithMetadata first (systemd 255+),
+        # falling back to PrepareForShutdown for older versions.
+        try:
+            manager.on_prepare_for_shutdown_with_metadata(_on_prepare_for_shutdown_with_metadata)
+            logging.debug("Subscribed to PrepareForShutdownWithMetadata (systemd 255+)")
+        except AttributeError:
+            # Signal not available — older systemd, fall back
+            manager.on_prepare_for_shutdown(_on_prepare_for_shutdown)
+            logging.debug("Subscribed to PrepareForShutdown (pre-255 fallback)")
+
+        logging.info("Shutdown detection active (D-Bus)")
+
+    except asyncio.TimeoutError:
+        logging.warning("Shutdown detection timed out during D-Bus setup — continuing without it")
+        _dbus_connection = None
     except Exception as e:
-        logging.warning(f"systemctl list-jobs failed: {e}. Assuming not a systemd reboot.")
-    return False
+        # D-Bus unavailable (container, no systemd, etc.) — degrade gracefully
+        logging.debug(f"Shutdown detection unavailable: {e}")
+        _dbus_connection = None
+
+
+def _on_prepare_for_shutdown(active: bool) -> None:
+    """Handler for logind's PrepareForShutdown signal (pre-systemd 255).
+
+    Fires before systemd begins stopping services. Sets the flag and releases
+    the inhibitor lock so logind can proceed.
+
+    Args:
+        active: True when shutdown is starting, False when it's cancelled.
+    """
+    global _system_shutdown_flag
+
+    if active:
+        _system_shutdown_flag = True
+        logging.info("PrepareForShutdown received — system is shutting down")
+        _release_inhibitor()
+
+
+def _on_prepare_for_shutdown_with_metadata(active: bool, metadata: dict) -> None:
+    """Handler for logind's PrepareForShutdownWithMetadata signal (systemd 255+).
+
+    Same as above, but also records the shutdown type (reboot vs poweroff).
+
+    Args:
+        active: True when shutdown is starting, False when it's cancelled.
+        metadata: Dict with 'type' key ('reboot', 'poweroff', 'halt').
+    """
+    global _system_shutdown_flag, _shutdown_type
+
+    if active:
+        _system_shutdown_flag = True
+        # Extract the type variant value if present
+        shutdown_type = metadata.get('type')
+        if shutdown_type is not None and hasattr(shutdown_type, 'value'):
+            shutdown_type = shutdown_type.value
+        _shutdown_type = str(shutdown_type) if shutdown_type is not None else None
+        logging.info(f"PrepareForShutdownWithMetadata received — type={_shutdown_type}")
+        _release_inhibitor()
+
+
+def _release_inhibitor() -> None:
+    """Releases the logind delay inhibitor lock by closing the file descriptor."""
+    global _inhibitor_fd
+
+    if _inhibitor_fd is not None:
+        try:
+            os.close(_inhibitor_fd)
+            logging.debug(f"Released logind inhibitor lock (fd={_inhibitor_fd})")
+        except OSError as e:
+            logging.warning(f"Failed to release inhibitor lock: {e}")
+        _inhibitor_fd = None
+
+
+async def teardown_shutdown_detection() -> None:
+    """Disconnects from D-Bus and releases the inhibitor lock if still held.
+
+    Called before module purge on soft restart, and during normal shutdown cleanup.
+    Safe to call multiple times or when detection was never set up.
+    """
+    global _dbus_connection, _system_shutdown_flag, _shutdown_type
+
+    _release_inhibitor()
+
+    if _dbus_connection is not None:
+        try:
+            _dbus_connection.disconnect()  # type: ignore[union-attr]
+            logging.debug("D-Bus connection closed")
+        except Exception as e:
+            logging.debug(f"D-Bus disconnect error (non-fatal): {e}")
+        _dbus_connection = None
+
+    # Reset flags for clean state on soft restart
+    _system_shutdown_flag = False
+    _shutdown_type = None
+
+
+def resolve_shutdown_reason(sig: signal.Signals) -> ShutdownReason:
+    """Determines the shutdown reason from the received signal and D-Bus flags.
+
+    Logic:
+        - SIGUSR1 → RESTART (systemd RestartKillSignal)
+        - SIGTERM + _system_shutdown_flag → SYSTEM_REBOOT or SYSTEM_POWEROFF
+        - SIGTERM without flag → MANUAL_STOP
+        - SIGINT → MANUAL_STOP (dev Ctrl+C)
+
+    Args:
+        sig: The signal that triggered shutdown.
+
+    Returns:
+        The resolved ShutdownReason.
+    """
+    if sys.platform == 'linux' and sig.value == signal.SIGUSR1.value:
+        return ShutdownReason.RESTART
+
+    if _system_shutdown_flag:
+        if _shutdown_type == 'poweroff':
+            return ShutdownReason.SYSTEM_POWEROFF
+        # 'reboot', 'halt', or unknown type — treat as reboot
+        return ShutdownReason.SYSTEM_REBOOT
+
+    return ShutdownReason.MANUAL_STOP
 
 
 async def startup_handler(bot: "CoreBot") -> None:
@@ -195,7 +389,7 @@ async def startup_handler(bot: "CoreBot") -> None:
 async def shutdown_handler(
     sig: signal.Signals,
     bot: "CoreBot",
-    is_restart: bool = False,
+    reason: Optional[ShutdownReason] = None,
     log_path: Optional[str] = None
 ) -> None:
     """Handles the graceful shutdown of the bot with structured phases.
@@ -203,7 +397,8 @@ async def shutdown_handler(
     Args:
         sig: The signal that triggered the shutdown.
         bot: The CoreBot instance.
-        is_restart: Whether this is a soft restart.
+        reason: The shutdown reason, if known by the caller (e.g. control commands).
+            When None, the reason is resolved from the signal type and D-Bus flags.
         log_path: Path to the current log file for finalization.
     """
     global _is_shutting_down
@@ -216,9 +411,10 @@ async def shutdown_handler(
     log_phase("SHUTDOWN")
     logging.info(f"Received exit signal {sig.name}")
 
-    # Capture reboot state NOW, before slow operations.
-    # By the time cogs are unloaded, systemctl jobs may have completed.
-    system_rebooting = is_system_rebooting()
+    # Resolve shutdown reason from signal + D-Bus flags if not explicitly provided
+    if reason is None:
+        reason = resolve_shutdown_reason(sig)
+    logging.info(f"Shutdown reason: {reason.value}")
 
     # Unload all cogs gracefully (this calls cog_unload on each)
     cog_names = list(bot.extensions.keys())
@@ -233,21 +429,31 @@ async def shutdown_handler(
         await bot.resource_tracker.stop()
         logging.info("[ResourceTracker] Stopped, history logged")
 
+    # Clean up D-Bus connection
+    await teardown_shutdown_detection()
+
     # ─── GOODBYE ───
     log_phase("GOODBYE")
 
-    # Determine the shutdown reason and prepare the message.
-    # Use the cached system_rebooting value captured at the start of shutdown.
-    rebooting = system_rebooting or is_restart
-    if rebooting:
-        logging.info("Shutdown initiated by a system reboot or soft restart. Service should be back shortly...")
+    # Build goodbye message based on shutdown reason.
+    # Two GIF buckets: "returning" (reboot.gif) vs "going away" (shutdown.gif).
+    # Each reason is logged individually for traceability / future differentiation.
+    if reason == ShutdownReason.RESTART:
+        logging.info("Shutdown initiated by service restart. Service should be back shortly...")
+    elif reason == ShutdownReason.SYSTEM_REBOOT:
+        logging.info("Shutdown initiated by system reboot. Service should be back shortly...")
+    elif reason == ShutdownReason.SYSTEM_POWEROFF:
+        logging.info("Shutdown initiated by system poweroff.")
+    else:
+        logging.info("Shutdown initiated by manual stop or exit.")
+
+    if reason.is_returning:
         embed = discord.Embed(
             title=f"{config.BOT_NAME} is taking a small nap, {config.BOT_NAME} will be back shortly!",
         )
         gif_path = os.path.join(config.ASSETS_PATH, "reboot.gif")
         attachment_name = "reboot.gif"
     else:
-        logging.info("Shutdown initiated by a manual stop or exit.")
         embed = discord.Embed(
             title=f"{config.BOT_NAME} is heading to bed. Goodnight!",
         )
@@ -269,7 +475,7 @@ async def shutdown_handler(
             except discord.HTTPException as e:
                 logging.error(f"Failed to send shutdown message to channel {config.SYSTEM_CHANNEL_ID}: {e}")
         else:
-            logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} was configuered but not found or not a text channel.")
+            logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} was configured but not found or not a text channel.")
 
     logging.info("Closing Discord connection...")
 
