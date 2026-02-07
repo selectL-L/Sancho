@@ -8,6 +8,27 @@ This module provides search functionality across YTM and YouTube with:
 
 Philosophy: "Right enough" over "perfectly accurate" — present good options,
 recommend one with a star, and trust the user to choose.
+
+Glossary (YTM video types):
+    ATV  — Audio Track Version. Audio-only track in YTM's catalog with square
+           album art. These are the "songs" YTM serves — highest quality metadata.
+    OMV  — Official Music Video. The artist's canonical music video.
+    UGC  — User-Generated Content. Covers, fan videos, unofficial uploads.
+
+    "Star" refers to the recommended track indicator shown in the selection UI.
+    When a user provides a URL, the module scores ATV candidates against the
+    original and marks the best match with a star so the user can one-click it.
+
+Architecture: Top-to-bottom data flow
+─────────────────────────────────────
+1. ENTRY POINTS      - What external code calls
+2. ORCHESTRATION     - High-level flow coordination
+3. API LAYER         - External service interaction
+4. RESULT PROCESSING - Parsing, filtering, scoring
+5. TEXT ANALYSIS      - String comparison, relevance
+6. CJK SUPPORT       - Transliteration, script detection
+7. PURE UTILITIES    - Stateless helpers
+8. THUMBNAILS        - Separate concern (could be own file)
 """
 
 from __future__ import annotations
@@ -50,9 +71,9 @@ from .music_data import Track
 logger = logging.getLogger(__name__)
 
 
-# ==========================================================================
-# CONSTANTS
-# ==========================================================================
+# =============================================================================
+# IMPORTS & CONSTANTS
+# =============================================================================
 
 # Video type constants from YTM
 MUSIC_VIDEO_TYPE_ATV = "MUSIC_VIDEO_TYPE_ATV"
@@ -79,9 +100,519 @@ CROSS_SCRIPT_GARBAGE_THRESHOLD = 0.25
 THUMBNAIL_WIDTH = 720  # Target width for resized thumbnails
 
 
-# ==========================================================================
-# YTMUSIC SINGLETON
-# ==========================================================================
+# =============================================================================
+# CJK TRANSLITERATION LIBRARIES
+# =============================================================================
+# These libraries convert CJK text to romanized forms for cross-script matching.
+# All conversions are rule-based dictionary lookups - same input always produces
+# same output. This is NOT machine learning, just linguistic rules.
+#
+# WHY THIS MATTERS:
+# When a user searches "Murasaki Shion", YTM might return results titled "紫咲シオン".
+# Without transliteration, we can't verify if "紫咲シオン" matches "Murasaki Shion"
+# because they share zero characters. With transliteration, we can convert
+# "紫咲シオン" → "murasaki shion" and detect the match.
+#
+# CURRENT LIMITATION:
+# Transliteration helps with VERIFICATION but not DISCOVERY. If YTM doesn't
+# return the Japanese result in the first place, transliteration can't help.
+# That's why we still need the multi-query approach (searching with both
+# "Murasaki Shion" AND "紫咲シオン" extracted from video tags).
+
+# Japanese: pykakasi (Hepburn romanization)
+try:
+    import pykakasi
+    _kakasi = pykakasi.kakasi()
+    PYKAKASI_AVAILABLE = True
+except ImportError:
+    _kakasi = None
+    PYKAKASI_AVAILABLE = False
+    logger.info("[CJK Libraries] pykakasi not available")
+
+# Chinese: pypinyin (Pinyin romanization)
+try:
+    from pypinyin import lazy_pinyin
+    PYPINYIN_AVAILABLE = True
+except ImportError:
+    lazy_pinyin = None  # type: ignore[assignment]
+    PYPINYIN_AVAILABLE = False
+    logger.info("[CJK Libraries] pypinyin not available")
+
+# Korean: korean-romanizer (Revised Romanization of Korean)
+try:
+    from korean_romanizer.romanizer import Romanizer
+    KOREAN_ROMANIZER_AVAILABLE = True
+except ImportError:
+    Romanizer = None  # type: ignore[assignment,misc]
+    KOREAN_ROMANIZER_AVAILABLE = False
+    logger.info("[CJK Libraries] korean_romanizer not available")
+
+
+# =============================================================================
+# DATA TYPES
+# =============================================================================
+
+
+@dataclass
+class SearchResult:
+    """Internal representation of a search result during selection flow.
+
+    Contains search-specific metadata that Track doesn't need for playback,
+    plus display fields (version_label, view_count) for UI presentation.
+    """
+    video_id: str
+    title: str
+    artist: str
+    artist_id: Optional[str] = None
+    album: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    thumbnail_url: Optional[str] = None
+    thumbnail_is_square: bool = False
+    source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
+    video_type: Optional[str] = None
+    is_explicit: Optional[bool] = None
+
+    # NEW: Display fields
+    version_label: str = "Video"
+    view_count: Optional[int] = None
+
+    def to_track(self) -> Track:
+        """Convert to Track for playback."""
+        return Track(
+            title=self.title,
+            artist=self.artist,
+            url=f"https://www.youtube.com/watch?v={self.video_id}",
+            duration=self.duration_seconds or 0,
+            thumbnail=self.thumbnail_url,
+            thumbnail_is_square=self.thumbnail_is_square,
+            video_id=self.video_id,
+            album=self.album,
+            source=self.source,
+            is_explicit=self.is_explicit,
+            version_label=self.version_label,
+            view_count=self.view_count,
+        )
+
+
+@dataclass
+class OriginalMetadata:
+    """Metadata from the original video for comparison during star scoring."""
+    title: str
+    artist: str
+    artist_id: Optional[str] = None
+
+
+# =============================================================================
+# SECTION 1: ENTRY POINTS
+# =============================================================================
+# The only functions external code should call.
+# These read like a table of contents for what the module does.
+
+
+async def search_url_mode(
+    url_or_id: str
+) -> Tuple[SearchResult, List[SearchResult], List[SearchResult], Optional[str]]:
+    """Search for alternatives to a user-provided URL (URL Mode).
+
+    If the URL is already an ATV, returns it directly with proper metadata and
+    empty alternatives (no selection UI needed). Otherwise, searches for matching
+    ATVs and related videos using multi-query with Japanese name extraction.
+
+    Args:
+        url_or_id: YouTube video URL or video ID.
+
+    Returns:
+        Tuple of (original, songs, videos, recommended_id):
+        - original: SearchResult for user's URL (always present)
+        - songs: Up to 3 ATVs (empty if original is already an ATV)
+        - videos: Up to 3 related videos (empty if original is already an ATV)
+        - recommended_id: Video ID of recommended song (original's ID if ATV)
+
+    Raises:
+        ValueError: If video ID cannot be extracted from url_or_id.
+    """
+    # Normalize input: extract video ID if a URL was passed
+    video_id = extract_video_id(url_or_id)
+    if not video_id:
+        raise ValueError(f"Could not extract video ID from: {url_or_id}")
+
+    # Phase 1: Fetch and classify the original video
+    metadata, already_atv = await _fetch_and_validate_original(video_id)
+
+    if metadata is None:
+        logger.debug(f"[URL Mode] No metadata for {video_id}, returning original only")
+        original_fallback = SearchResult(
+            video_id=video_id,
+            title="Unknown",
+            artist="Unknown",
+            source='youtube',
+            version_label='Video',
+        )
+        return original_fallback, [], [], None
+
+    # Phase 2: If already an ATV, return it directly
+    if already_atv:
+        atv_result = await _build_atv_result(video_id, metadata)
+        return atv_result, [], [], video_id
+
+    # Phase 3: Build original SearchResult and extract search parameters
+    original, title, author, jp_names, mismatch_detected = _build_original_metadata(video_id, metadata)
+
+    # Phase 4: Search for alternatives
+    songs, videos, original_found_as_atv = await _search_alternatives(
+        title, author, jp_names, video_id, original, mismatch_detected
+    )
+
+    # Phase 5: Pick recommendation
+    recommended_id, star = _select_recommendation(
+        original, songs, original_found_as_atv, title, author
+    )
+
+    # Select top 3 songs, but ensure starred track is included if found
+    top_songs = songs[:3]
+    if star and star not in top_songs:
+        # Replace last slot with starred track so it's visible
+        logger.info(f"[URL Mode] Moving starred track '{star.title}' into visible results")
+        top_songs = songs[:2] + [star]
+
+    # Select top 3 videos
+    top_videos = videos[:3]
+
+    logger.info(f"[URL Mode] {video_id} -> {len(top_songs)} songs, {len(top_videos)} videos")
+
+    return original, top_songs, top_videos, recommended_id
+
+
+async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[SearchResult], Optional[str]]:
+    """Search for a user query (Query Mode).
+
+    Searches both YTM and YouTube in parallel, deduplicates, applies
+    language-aware garbage filtering, and returns results split into
+    songs (ATVs) and videos.
+
+    Args:
+        query: User's search query.
+
+    Returns:
+        Tuple of (songs, videos, recommended_id):
+        - songs: Up to 3 ATVs
+        - videos: Up to 3 videos
+        - recommended_id: First non-garbage ATV's video_id, or None
+    """
+    # Parallel search
+    ytm_task = search_ytm(query, limit=10)
+    yt_task = search_youtube(query, limit=6)
+
+    ytm_results, yt_results = await asyncio.gather(
+        ytm_task, yt_task, return_exceptions=True
+    )
+
+    # Handle exceptions
+    if isinstance(ytm_results, Exception):
+        logger.warning(f"[Query Mode] YTM search failed: {ytm_results}")
+        ytm_results = []
+    if isinstance(yt_results, Exception):
+        logger.warning(f"[Query Mode] YT search failed: {yt_results}")
+        yt_results = []
+
+    # Dedupe (prefer YTM)
+    ytm_results, yt_results = dedupe_results(
+        cast(List[SearchResult], ytm_results),
+        cast(List[SearchResult], yt_results)
+    )
+
+    # Language-aware garbage filter
+    ytm_results = [r for r in ytm_results if is_relevant(query, r)]
+    yt_results = [r for r in yt_results if is_relevant(query, r)]
+
+    # Split into songs (ATVs) and videos
+    songs = [r for r in ytm_results if r.source == 'ytm_song']
+    ytm_videos = [r for r in ytm_results if r.source == 'ytm_video']
+    videos = ytm_videos + yt_results
+
+    # First ATV gets recommended (query mode has no original to compare against)
+    recommended_id = songs[0].video_id if songs else None
+
+    logger.info(
+        f"[Query Mode] '{query}' -> {len(songs[:3])} songs + {len(videos[:3])} videos"
+    )
+
+    return songs[:3], videos[:3], recommended_id
+
+
+# =============================================================================
+# SECTION 2: ORCHESTRATION HELPERS
+# =============================================================================
+# Break down the complex flows in entry points into named steps.
+# These are "private" to the module — called only by entry points.
+
+
+async def _fetch_and_validate_original(video_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Fetch metadata for original video, determine if ATV.
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        Tuple of (metadata, is_atv). metadata is None if unavailable.
+    """
+    metadata = await get_ytm_metadata(video_id)
+    if not metadata:
+        return None, False
+    return metadata, is_atv(metadata)
+
+
+async def _build_atv_result(video_id: str, metadata: Dict[str, Any]) -> SearchResult:
+    """Construct SearchResult for a confirmed ATV.
+
+    Tries YTM search first (for full metadata with album info), falls back
+    to building from get_song() metadata.
+
+    Args:
+        video_id: YouTube video ID.
+        metadata: Raw metadata from get_ytm_metadata().
+
+    Returns:
+        SearchResult with ATV metadata.
+    """
+    logger.info(f"[URL Mode] {video_id} is already an ATV, fetching full metadata from YTM")
+
+    # Search YTM by video ID - this gives us the complete SearchResult with album info
+    ytm_results = await search_ytm(video_id, limit=1)
+    for result in ytm_results:
+        if result.video_id == video_id:
+            logger.debug(f"[URL Mode] Found ATV in YTM search: album='{result.album}'")
+            return result
+
+    # Fallback: build from get_song() metadata if YTM search didn't find it
+    # (This can happen if the ATV is region-locked or very new)
+    logger.debug("[URL Mode] ATV not found in YTM search, using get_song() metadata")
+    video_details = metadata.get('videoDetails', {})
+
+    # For ATVs, videoDetails.author IS the clean artist name (not channel)
+    atv_title = video_details.get('title', 'Unknown')
+    atv_artist = video_details.get('author', 'Unknown')
+    atv_duration = int(video_details.get('lengthSeconds', 0) or 0)
+    atv_view_count = extract_view_count(metadata)
+
+    # ATVs have square thumbnails
+    thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
+    atv_thumb_url = None
+    if thumbnails:
+        # Get largest thumbnail and resize
+        raw_url = thumbnails[-1].get('url')
+        if raw_url:
+            atv_thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
+
+    return SearchResult(
+        video_id=video_id,
+        title=atv_title,
+        artist=atv_artist,
+        duration_seconds=atv_duration,
+        thumbnail_url=atv_thumb_url,
+        thumbnail_is_square=True,  # ATVs always have square art
+        source='ytm_song',
+        video_type=MUSIC_VIDEO_TYPE_ATV,
+        version_label='Official Audio',
+        view_count=atv_view_count,
+    )
+
+
+def _build_original_metadata(
+    video_id: str,
+    metadata: Dict[str, Any],
+) -> Tuple[SearchResult, str, str, List[str], bool]:
+    """Extract search parameters and build original SearchResult from metadata.
+
+    Handles catalog mismatch detection (microformat vs videoDetails title)
+    and Japanese name extraction from tags.
+
+    Args:
+        video_id: YouTube video ID.
+        metadata: Raw metadata from get_ytm_metadata().
+
+    Returns:
+        Tuple of:
+        - original_result: SearchResult built from the video's metadata.
+        - title: Best title for searching (microformat if mismatch, else videoDetails).
+        - author: Author/channel name for searching.
+        - jp_names: CJK artist name variants extracted from video tags.
+        - mismatch_detected: True if videoDetails title diverged from raw YouTube title.
+    """
+    video_details = metadata.get('videoDetails', {})
+
+    # Start with videoDetails (structured metadata)
+    vd_title = video_details.get('title', 'Unknown')
+    vd_author = video_details.get('author', 'Unknown')
+    duration = int(video_details.get('lengthSeconds', 0) or 0)
+    view_count = extract_view_count(metadata)
+
+    # Extract microformat (raw YouTube title) for comparison
+    microformat = metadata.get('microformat', {}).get('microformatDataRenderer', {})
+    mf_title_raw = microformat.get('title', '')
+    mf_title = clean_microformat_title(mf_title_raw) if mf_title_raw else ''
+
+    # Check for YTM catalog mismatch (videoDetails points to wrong song).
+    # This happens when YTM's catalog maps the wrong song to a video ID.
+    # If detected, use microformat title for SEARCHING (it's the raw YouTube title),
+    # but keep videoDetails author for display. We don't parse the microformat—
+    # just use it as-is since it contains the accurate video title.
+    mismatch_detected = bool(mf_title) and has_ytm_catalog_mismatch(vd_title, mf_title)
+    if mismatch_detected:
+        logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
+        title = mf_title  # Use full microformat title for search
+        author = vd_author  # Keep videoDetails author for display
+    else:
+        # No mismatch—trust videoDetails
+        title = vd_title
+        author = vd_author
+
+    # Extract tags for Japanese name extraction
+    tags = microformat.get('tags', [])
+    jp_names = extract_jp_names(tags, video_title=title, author=author)
+
+    # Build original SearchResult
+    thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
+    thumb_url = thumbnails[-1].get('url') if thumbnails else None
+
+    original = SearchResult(
+        video_id=video_id,
+        title=title,
+        artist=author,
+        artist_id=None,
+        duration_seconds=duration,
+        thumbnail_url=thumb_url,
+        thumbnail_is_square=False,
+        source='youtube',
+        version_label='Video',
+        view_count=view_count,
+    )
+
+    return original, title, author, jp_names, mismatch_detected
+
+
+async def _search_alternatives(
+    title: str,
+    author: str,
+    jp_names: List[str],
+    video_id: str,
+    original: SearchResult,
+    mismatch_detected: bool,
+) -> Tuple[List[SearchResult], List[SearchResult], bool]:
+    """Run multi-query search across YTM and YouTube.
+
+    Args:
+        title: Video title (may be microformat title if mismatch detected).
+        author: Video author.
+        jp_names: Japanese name variants extracted from tags.
+        video_id: Original video ID to exclude from results.
+        original: The original SearchResult (mutated to attach artist_id if found).
+        mismatch_detected: Whether a catalog mismatch was detected.
+
+    Returns:
+        Tuple of (songs, videos, original_found_as_atv).
+    """
+    # Multi-query search for CJK content.
+    # Query order depends on data quality:
+    # - No mismatch (clean metadata): "{author} {title}" (conventional artist-first)
+    # - Mismatch (raw YT title): "{title} {author}" (title is more reliable)
+    # Additional queries are added ONLY when Japanese name variants are detected
+    # in the video tags (e.g., artist name in kanji/romaji). This helps find
+    # YTM songs that might be indexed under different name spellings.
+    if mismatch_detected:
+        # Title is raw YouTube title (more reliable), author may be just channel name
+        queries = [f"{title} {author}"]
+    else:
+        # Clean metadata—use conventional "Artist Song" order
+        queries = [f"{author} {title}"]
+
+    for jp_name in jp_names[:2]:
+        queries.append(f"{title} {jp_name}")
+
+    # Search YTM with all queries, collecting unique results
+    all_ytm_results: List[SearchResult] = []
+    seen_ids: set[str] = set()
+    original_found_as_atv = False
+    original_artist_id: Optional[str] = None
+
+    for query in queries:
+        results = await search_ytm(query, limit=5)
+        for r in results:
+            # Capture artist_id from original if it appears in YTM
+            if r.video_id == video_id and r.artist_id and not original_artist_id:
+                original_artist_id = r.artist_id
+                original.artist_id = original_artist_id
+                logger.debug(f"[URL Mode] Found original in YTM with artist_id={r.artist_id}")
+
+            if r.video_id not in seen_ids:
+                seen_ids.add(r.video_id)
+                all_ytm_results.append(r)
+                if r.video_id == video_id and r.source == 'ytm_song':
+                    original_found_as_atv = True
+                    logger.info(f"[URL Mode] Original {video_id} found as ATV in YTM")
+
+    # Search YouTube (title only), excluding IDs already seen
+    yt_results = await search_youtube(title, limit=6)
+    yt_results = [r for r in yt_results if r.video_id not in seen_ids and r.video_id != video_id]
+
+    # Split into songs and videos
+    songs = [r for r in all_ytm_results if r.source == 'ytm_song']
+    videos = [r for r in all_ytm_results if r.source == 'ytm_video'] + yt_results
+
+    # Garbage filter videos only - YTM ATVs are curated, trust them
+    videos = [r for r in videos if is_relevant(title, r)]
+
+    return songs, videos, original_found_as_atv
+
+
+def _select_recommendation(
+    original: SearchResult,
+    songs: List[SearchResult],
+    original_found_as_atv: bool,
+    title: str,
+    author: str,
+) -> Tuple[Optional[str], Optional[SearchResult]]:
+    """Apply star scoring to pick recommended track.
+
+    Args:
+        original: The original SearchResult.
+        songs: List of ATV candidates.
+        original_found_as_atv: Whether the original was found as an ATV in search.
+        title: Video title used for scoring.
+        author: Video author used for scoring.
+
+    Returns:
+        Tuple of (recommended_id, star_result). star_result is None if
+        recommendation is the original itself or no star was found.
+    """
+    video_id = original.video_id
+
+    if original_found_as_atv:
+        # The user's URL IS the ATV - perfect match
+        logger.info(f"[URL Mode] Original {video_id} IS the ATV - 100% match")
+        return video_id, None
+
+    if not songs:
+        return None, None
+
+    # Use confidence-based star scoring
+    original_meta = OriginalMetadata(
+        title=title,
+        artist=author,
+        artist_id=original.artist_id,
+    )
+    star = find_star(original_meta, songs)
+    if star:
+        return star.video_id, star
+
+    return None, None
+
+
+# =============================================================================
+# SECTION 3: API LAYER
+# =============================================================================
+# Direct interaction with external services.
+# These return raw or lightly-processed data.
 
 _ytm: Optional[YTMusic] = None  # type: ignore[type-arg]
 
@@ -105,72 +636,726 @@ def _get_ytm() -> Optional[YTMusic]:  # type: ignore[type-arg]
     return _ytm
 
 
-# ==========================================================================
-# CJK TRANSLITERATION (Rule-based, deterministic)
-# ==========================================================================
-# These libraries convert CJK text to romanized forms for cross-script matching.
-# All conversions are rule-based dictionary lookups - same input always produces
-# same output. This is NOT machine learning, just linguistic rules.
-#
-# WHY THIS MATTERS:
-# When a user searches "Murasaki Shion", YTM might return results titled "紫咲シオン".
-# Without transliteration, we can't verify if "紫咲シオン" matches "Murasaki Shion"
-# because they share zero characters. With transliteration, we can convert
-# "紫咲シオン" → "murasaki shion" and detect the match.
-#
-# CURRENT LIMITATION:
-# Transliteration helps with VERIFICATION but not DISCOVERY. If YTM doesn't
-# return the Japanese result in the first place, transliteration can't help.
-# That's why we still need the multi-query approach (searching with both
-# "Murasaki Shion" AND "紫咲シオン" extracted from video tags).
+async def get_ytm_metadata(video_id: str) -> Optional[Dict[str, Any]]:
+    """Get metadata for a video from YouTube Music.
 
-# Japanese: pykakasi (Hepburn romanization)
-# Note: pykakasi loads ~150MB of dictionary data on import
-try:
-    import psutil
-    _proc = psutil.Process()
-    _mem_before = _proc.memory_info().rss / (1024 * 1024)
-    import pykakasi
-    _kakasi = pykakasi.kakasi()
-    _mem_after = _proc.memory_info().rss / (1024 * 1024)
-    logger.info(f"[CJK Libraries] pykakasi loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
-    PYKAKASI_AVAILABLE = True
-    del _proc, _mem_before, _mem_after
-except ImportError:
-    _kakasi = None
-    PYKAKASI_AVAILABLE = False
-    logger.info("[CJK Libraries] pykakasi not available")
+    Args:
+        video_id: YouTube video ID.
 
-# Chinese: pypinyin (Pinyin romanization)
-# Note: pypinyin loads Chinese character -> pinyin mappings
-try:
-    import psutil
-    _proc = psutil.Process()
-    _mem_before = _proc.memory_info().rss / (1024 * 1024)
-    from pypinyin import lazy_pinyin
-    _mem_after = _proc.memory_info().rss / (1024 * 1024)
-    logger.info(f"[CJK Libraries] pypinyin loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
-    PYPINYIN_AVAILABLE = True
-    del _proc, _mem_before, _mem_after
-except ImportError:
-    lazy_pinyin = None  # type: ignore[assignment]
-    PYPINYIN_AVAILABLE = False
-    logger.info("[CJK Libraries] pypinyin not available")
+    Returns:
+        Raw metadata dict from get_song(), or None if unavailable.
+    """
+    ytm = _get_ytm()
+    if not ytm:
+        return None
 
-# Korean: korean-romanizer (Revised Romanization of Korean)
-try:
-    import psutil
-    _proc = psutil.Process()
-    _mem_before = _proc.memory_info().rss / (1024 * 1024)
-    from korean_romanizer.romanizer import Romanizer
-    _mem_after = _proc.memory_info().rss / (1024 * 1024)
-    logger.info(f"[CJK Libraries] korean_romanizer loaded: +{_mem_after - _mem_before:.1f}MB (total: {_mem_after:.1f}MB)")
-    KOREAN_ROMANIZER_AVAILABLE = True
-    del _proc, _mem_before, _mem_after
-except ImportError:
-    Romanizer = None  # type: ignore[assignment,misc]
-    KOREAN_ROMANIZER_AVAILABLE = False
-    logger.info("[CJK Libraries] korean_romanizer not available")
+    try:
+        def do_get() -> Dict[str, Any]:
+            return ytm.get_song(video_id)  # type: ignore[union-attr]
+
+        result = await asyncio.wait_for(
+            asyncio.to_thread(do_get),
+            timeout=15.0
+        )
+
+        video_details = result.get('videoDetails', {})
+        if not video_details.get('title'):
+            logger.debug(f"[YTM Metadata] No valid data for {video_id}")
+            return None
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"[YTM Metadata] Error getting metadata for {video_id}: {e}")
+        return None
+
+
+async def search_ytm(query: str, limit: int = 10) -> List[SearchResult]:
+    """Search YouTube Music for tracks.
+
+    Performs unfiltered search (songs + videos) and filtered songs search
+    in parallel to get both mixed results AND album info for ATVs.
+
+    Args:
+        query: Search query string.
+        limit: Maximum results to return.
+
+    Returns:
+        List of SearchResult objects (songs and videos mixed).
+    """
+    ytm = _get_ytm()
+    if not ytm:
+        logger.debug("[YTM Search] YTMusic not available")
+        return []
+
+    try:
+        def do_unfiltered_search() -> List[Dict[str, Any]]:
+            return ytm.search(query, limit=limit)  # type: ignore[union-attr]
+
+        def do_songs_search() -> List[Dict[str, Any]]:
+            return ytm.search(query, filter="songs", limit=limit)  # type: ignore[union-attr]
+
+        # Run both searches in parallel
+        unfiltered_task = asyncio.to_thread(do_unfiltered_search)
+        songs_task = asyncio.to_thread(do_songs_search)
+
+        unfiltered_results, songs_results = await asyncio.wait_for(
+            asyncio.gather(unfiltered_task, songs_task),
+            timeout=15.0
+        )
+
+        # Build maps from filtered songs search (has album + explicit info)
+        album_map: Dict[str, Optional[str]] = {}
+        explicit_map: Dict[str, Optional[bool]] = {}
+        for item in songs_results:
+            video_id = item.get('videoId')
+            if video_id:
+                album_info = item.get('album')
+                if album_info:
+                    album_map[video_id] = album_info.get('name')
+                explicit_map[video_id] = item.get('isExplicit')
+
+        # Parse unfiltered results
+        parsed: List[SearchResult] = []
+        for item in unfiltered_results:
+            result = _parse_ytm_result(item)
+            if result:
+                # Attach album and explicit info from filtered search
+                if result.video_id in album_map:
+                    result.album = album_map[result.video_id]
+                if result.video_id in explicit_map:
+                    result.is_explicit = explicit_map[result.video_id]
+                parsed.append(result)
+
+        # Fetch metadata for results missing duration or view_count
+        # Collect all results that need metadata fetching
+        results_needing_metadata = [
+            r for r in parsed
+            if r.video_id and (r.duration_seconds is None or r.view_count is None)
+        ]
+
+        if results_needing_metadata:
+            # Fetch metadata in parallel for efficiency
+            async def fetch_and_update(result: SearchResult) -> None:
+                metadata = await get_ytm_metadata(result.video_id)
+                if metadata:
+                    video_details = metadata.get('videoDetails', {})
+                    if result.duration_seconds is None:
+                        length = video_details.get('lengthSeconds')
+                        if length:
+                            result.duration_seconds = int(length)
+                    if result.view_count is None:
+                        result.view_count = extract_view_count(metadata)
+
+            await asyncio.gather(*[fetch_and_update(r) for r in results_needing_metadata])
+
+        # Log results
+        songs = sum(1 for r in parsed if r.source == 'ytm_song')
+        videos = sum(1 for r in parsed if r.source == 'ytm_video')
+        logger.info(f"[YTM Search] '{query}' -> {songs} songs, {videos} videos")
+
+        return parsed
+
+    except Exception as e:
+        logger.warning(f"[YTM Search] Error searching: {e}")
+        return []
+
+
+YTDLP_SEARCH_OPTIONS = {
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'no_warnings': True,
+    'extract_flat': 'in_playlist',
+    'noplaylist': True,
+}
+
+
+async def search_youtube(query: str, limit: int = 6) -> List[SearchResult]:
+    """Search YouTube using yt-dlp.
+
+    Args:
+        query: Search query string.
+        limit: Maximum results to return.
+
+    Returns:
+        List of SearchResult objects.
+    """
+    if not yt_dlp:
+        logger.debug("[YT Search] yt-dlp not available")
+        return []
+
+    try:
+        search_query = f"ytsearch{limit}:{query}"
+
+        def do_search() -> Dict[str, Any]:
+            with yt_dlp.YoutubeDL(cast(Any, YTDLP_SEARCH_OPTIONS)) as ydl:  # type: ignore[union-attr]
+                return ydl.extract_info(search_query, download=False)  # type: ignore[return-value]
+
+        info = await asyncio.wait_for(
+            asyncio.to_thread(do_search),
+            timeout=15.0
+        )
+
+        if not info:
+            return []
+
+        results: List[SearchResult] = []
+        entries = info.get('entries', [])
+
+        for entry in entries:
+            if not entry:
+                continue
+
+            view_count = entry.get('view_count')
+            results.append(SearchResult(
+                video_id=entry.get('id', ''),
+                title=entry.get('title', 'Unknown Title'),
+                artist=entry.get('uploader', entry.get('channel', 'Unknown')),
+                duration_seconds=int(entry.get('duration', 0) or 0),
+                thumbnail_url=entry.get('thumbnail'),
+                thumbnail_is_square=False,
+                source='youtube',
+                version_label='Video',
+                view_count=int(view_count) if view_count else None,
+            ))
+
+        logger.info(f"[YT Search] '{query}' -> {len(results)} results")
+        return results
+
+    except Exception as e:
+        logger.warning(f"[YT Search] Error searching: {e}")
+        return []
+
+
+# =============================================================================
+# SECTION 4: RESULT PROCESSING
+# =============================================================================
+# Transform API responses into SearchResults, filter, dedupe, score.
+
+
+def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
+    """Parse a YTM search result item into a SearchResult.
+
+    Args:
+        item: Raw result from ytm.search().
+
+    Returns:
+        SearchResult or None if not playable.
+    """
+    result_type = item.get('resultType')
+
+    # Skip non-playable types
+    if result_type in ('artist', 'album', 'playlist', 'podcast'):
+        return None
+
+    video_type = item.get('videoType', '')
+    if video_type == 'MUSIC_VIDEO_TYPE_PODCAST_EPISODE':
+        return None
+
+    video_id = item.get('videoId')
+    if not video_id:
+        return None
+
+    # Determine source and version label
+    is_atv_result = video_type == MUSIC_VIDEO_TYPE_ATV
+    source = 'ytm_song' if is_atv_result else 'ytm_video'
+    version_label = determine_version_label(video_type, source)
+
+    # Extract artist info
+    artists = item.get('artists', [])
+    artist_name = artists[0].get('name', 'Unknown') if artists else item.get('author', 'Unknown')
+    artist_id = artists[0].get('id') if artists else None
+
+    # Extract album
+    album_info = item.get('album', {})
+    album_name = album_info.get('name') if isinstance(album_info, dict) else None
+
+    # Extract thumbnail
+    thumbnails = item.get('thumbnails', [])
+    thumb_url = None
+    thumb_is_square = False
+    if thumbnails:
+        largest = thumbnails[-1]
+        thumb_is_square = largest.get('width') == largest.get('height')
+        raw_url = largest.get('url')
+        if raw_url and thumb_is_square:
+            thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
+        else:
+            thumb_url = raw_url
+
+    return SearchResult(
+        video_id=video_id,
+        title=item.get('title', 'Unknown'),
+        artist=artist_name,
+        artist_id=artist_id,
+        album=album_name,
+        duration_seconds=item.get('duration_seconds'),
+        thumbnail_url=thumb_url,
+        thumbnail_is_square=thumb_is_square,
+        source=source,
+        video_type=video_type,
+        version_label=version_label,
+    )
+
+
+def dedupe_results(
+    ytm_results: List[SearchResult],
+    yt_results: List[SearchResult],
+    exclude_id: Optional[str] = None
+) -> Tuple[List[SearchResult], List[SearchResult]]:
+    """Deduplicate results, preferring YTM versions.
+
+    Same video ID = same video. Prefer YTM metadata (better quality).
+
+    Args:
+        ytm_results: Results from YTM search.
+        yt_results: Results from yt-dlp search.
+        exclude_id: Optional video ID to exclude from yt_results.
+
+    Returns:
+        Tuple of (ytm_results, filtered_yt_results).
+    """
+    ytm_ids = {r.video_id for r in ytm_results}
+
+    filtered_yt = []
+    for r in yt_results:
+        if r.video_id in ytm_ids:
+            continue  # Duplicate of YTM result
+        if r.video_id == exclude_id:
+            continue
+        filtered_yt.append(r)
+
+    logger.debug(
+        f"[Dedupe] YTM={len(ytm_results)}, YT={len(filtered_yt)} (excluded={exclude_id})"
+    )
+
+    return ytm_results, filtered_yt
+
+
+def is_relevant(query: str, result: SearchResult) -> bool:
+    """Determine if a search result is relevant to the query.
+
+    Uses language-aware filtering with transliteration support:
+    - Expands CJK text to romanized forms for cross-script verification
+    - Cross-script matches: attempt verification, fall back to trusting YTM
+    - Same-script matches: use similarity/containment checks
+
+    DESIGN PHILOSOPHY (Data Gathering Phase):
+    We currently TRUST YTM for cross-script results while LOGGING what we see.
+    YTM is more selective about returning cross-language results, so their
+    cross-script results are generally higher quality. However, we want to
+    gather data on:
+    1. How often transliteration verification succeeds vs fails
+    2. What similarity scores cross-script results typically get
+    3. Whether blind trust ever lets through garbage
+
+    This logging will help us decide if/when to tighten cross-script filtering.
+
+    Args:
+        query: Original search query.
+        result: Search result to evaluate.
+
+    Returns:
+        True if result should be kept, False if garbage.
+    """
+    query_has_cjk = has_cjk(query)
+    title_has_cjk = has_cjk(result.title)
+    is_cross_script = query_has_cjk != title_has_cjk
+
+    combined = f"{result.title} {result.artist}"
+
+    # Extract words from ALL representations (original + transliterated)
+    # This is the key to cross-script verification: "紫咲シオン" expands to
+    # include "murasaki", "shion" which can match query "Murasaki Shion"
+    query_words = extract_words_expanded(query)
+    result_words = extract_words_expanded(combined)
+
+    # Word overlap in ANY representation = definitely relevant
+    word_overlap = query_words & result_words
+    if word_overlap:
+        if is_cross_script:
+            logger.info(
+                f"[Cross-Script Verified] query='{query}' | "
+                f"result='{result.title}' by '{result.artist}' | "
+                f"overlapping_words={word_overlap}"
+            )
+        return True
+
+    # Containment check across all representations
+    # Check if any representation of query is contained in any representation of result
+    for q_repr in expand_text(query):
+        q_norm = normalize_text(q_repr)
+        for r_repr in expand_text(combined):
+            r_norm = normalize_text(r_repr)
+            if q_norm in r_norm or r_norm in q_norm:
+                if is_cross_script:
+                    logger.info(
+                        f"[Cross-Script Containment] query='{query}' ({q_repr}) | "
+                        f"result='{result.title}' ({r_repr})"
+                    )
+                return True
+
+    # Similarity fallback (on original text - transliteration handled above)
+    title_sim = text_similarity(query, result.title)
+    combined_sim = text_similarity(query, combined)
+    best_sim = max(title_sim, combined_sim)
+
+    # Use script-appropriate threshold
+    # Cross-script gets lower threshold because YTM is more selective
+    threshold = CROSS_SCRIPT_GARBAGE_THRESHOLD if is_cross_script else GARBAGE_SIMILARITY_THRESHOLD
+
+    # Log borderline cases for threshold tuning
+    if threshold - 0.1 <= best_sim < threshold + 0.1:
+        logger.info(
+            f"[Garbage Filter Borderline] query='{query}' | "
+            f"result='{result.title}' by '{result.artist}' | "
+            f"title_sim={title_sim:.2f}, combined_sim={combined_sim:.2f} | "
+            f"threshold={threshold} ({'cross-script' if is_cross_script else 'same-script'}) | "
+            f"{'KEPT' if best_sim >= threshold else 'FILTERED'}"
+        )
+
+    if best_sim >= threshold:
+        return True
+
+    logger.info(f"Filtered as garbage: {result.title} (sim={best_sim:.2f})")
+    return False
+
+
+def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Optional[SearchResult]:
+    """Find the best ATV candidate to recommend ("star").
+
+    The "star" is the recommended track shown in the selection UI — the one
+    the user can accept with a single click. This function scores each ATV
+    candidate against the original video's metadata and picks the best match
+    above STAR_THRESHOLD.
+
+    If multiple candidates tie (same score), uses title length ratio as
+    tiebreaker to prefer exact matches over variants like "(Instrumental)"
+    or "(Remix)".
+
+    Args:
+        original: Metadata from original video.
+        candidates: List of search result candidates.
+
+    Returns:
+        Best candidate above threshold, or None.
+    """
+    # Collect all passing candidates with their scores
+    passing: List[tuple[SearchResult, float]] = []
+
+    for candidate in candidates:
+        # Only consider ATVs for starring
+        if candidate.video_type != MUSIC_VIDEO_TYPE_ATV:
+            continue
+
+        score = score_candidate(original, candidate)
+        if score >= STAR_THRESHOLD:
+            passing.append((candidate, score))
+
+    if not passing:
+        return None
+
+    # Find the best score
+    best_score = max(score for _, score in passing)
+
+    # Get all candidates with the best score (ties)
+    tied = [(cand, score) for cand, score in passing if score == best_score]
+
+    if len(tied) == 1:
+        # No tie, just return the winner
+        best_candidate = tied[0][0]
+    else:
+        # Multiple candidates tied—use length ratio as tiebreaker
+        # Prefer the candidate whose title is closest in length to original
+        best_candidate = max(
+            tied,
+            key=lambda x: _title_length_ratio(original.title, x[0].title)
+        )[0]
+        logger.debug(
+            f"[Star Scoring] Tiebreaker: {len(tied)} candidates tied at {best_score:.2f}, "
+            f"selected '{best_candidate.title}' by length ratio"
+        )
+
+    logger.info(f"Star assigned to: {best_candidate.title} (score={best_score:.2f})")
+    return best_candidate
+
+
+def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> float:
+    """Score a candidate for star assignment.
+
+    Sliding scale: higher artist confidence → lower title threshold required.
+    Perfect title match always passes regardless of artist.
+
+    Thresholds (approximate):
+        - Artist 100% → Title 25%
+        - Artist 75%  → Title 45%
+        - Artist 50%  → Title 65%
+
+    Args:
+        original: Metadata from original video.
+        candidate: Search result candidate.
+
+    Returns:
+        Combined score if candidate passes, 0.0 if fails.
+    """
+    artist_conf = calculate_artist_confidence(original, candidate)
+    title_match = calculate_title_match(original.title, candidate.title)
+
+    logger.debug(
+        f"[Star Scoring] Candidate: '{candidate.title}' by '{candidate.artist}' | "
+        f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
+    )
+
+    # Perfect title match always passes (regardless of artist)
+    if title_match >= 0.95:
+        score = (artist_conf * 0.4) + (title_match * 0.6)
+        logger.debug(f"[Star Scoring]   → AUTO-PASS (perfect title): score={score:.2f}")
+        return score
+
+    # Sliding threshold: title_threshold = 1.05 - (0.8 * artist_conf)
+    # Artist 1.0 → title needs 0.25
+    # Artist 0.75 → title needs 0.45
+    # Artist 0.5 → title needs 0.65
+    title_threshold = 1.05 - (artist_conf * 0.8)
+
+    if title_match < title_threshold:
+        logger.debug(
+            f"[Star Scoring]   → FAILED: title_match {title_match:.2f} < threshold {title_threshold:.2f} "
+            f"(required for artist_conf={artist_conf:.2f})"
+        )
+        return 0.0
+
+    # Combined score: weighted average
+    score = (artist_conf * 0.4) + (title_match * 0.6)
+    logger.debug(f"[Star Scoring]   → PASSED: score={score:.2f} (threshold was {title_threshold:.2f})")
+
+    # Log edge cases for threshold validation
+    if score < STAR_THRESHOLD and score >= 0.5:
+        logger.debug(
+            f"[Star Scoring] Near-miss: '{candidate.title}' score={score:.2f} < threshold={STAR_THRESHOLD}"
+        )
+    elif score >= STAR_THRESHOLD and score < 0.7:
+        logger.debug(
+            f"[Star Scoring] Near-hit: '{candidate.title}' score={score:.2f} (barely passed)"
+        )
+
+    return score
+
+
+def calculate_artist_confidence(original: OriginalMetadata, candidate: SearchResult) -> float:
+    """Calculate confidence that candidate is by the same artist as original.
+
+    Artist ID match is a BONUS, not a gate. Text similarity is the base.
+
+    Args:
+        original: Metadata from original video.
+        candidate: Search result candidate.
+
+    Returns:
+        Confidence score between 0.0 and 1.0.
+    """
+    # Base: text similarity
+    base_sim = text_similarity(original.artist, candidate.artist)
+
+    # ID match bonus: if both have IDs and they match, boost to at least 0.85
+    if original.artist_id and candidate.artist_id:
+        if original.artist_id == candidate.artist_id:
+            return max(base_sim, 0.85)
+
+    return base_sim
+
+
+def calculate_title_match(orig_title: str, cand_title: str) -> float:
+    """Calculate how well candidate title matches original.
+
+    Uses transliteration expansion for cross-script matching.
+    Containment-first (if one contains the other, high match).
+    Word overlap ratio as secondary signal.
+    Similarity-fallback.
+
+    Args:
+        orig_title: Original video title.
+        cand_title: Candidate title.
+
+    Returns:
+        Match score between 0.0 and 1.0.
+    """
+    # Expand both titles to all representations (original + transliterated)
+    orig_representations = expand_text(orig_title)
+    cand_representations = expand_text(cand_title)
+
+    best_match = 0.0
+
+    # Check all combinations of representations
+    for orig_repr in orig_representations:
+        orig_norm = normalize_text(orig_repr)
+
+        for cand_repr in cand_representations:
+            cand_norm = normalize_text(cand_repr)
+
+            # Containment: strong signal
+            if orig_norm in cand_norm or cand_norm in orig_norm:
+                best_match = max(best_match, 0.9)
+                continue
+
+            # Word overlap ratio
+            orig_words = set(orig_norm.split())
+            cand_words = set(cand_norm.split())
+
+            if orig_words and cand_words:
+                overlap = len(orig_words & cand_words)
+                total = max(len(orig_words), len(cand_words))
+                ratio = overlap / total
+                best_match = max(best_match, ratio)
+
+            # Similarity as final fallback
+            sim = text_similarity(orig_repr, cand_repr)
+            best_match = max(best_match, sim)
+
+    return best_match
+
+
+def _title_length_ratio(orig_title: str, cand_title: str) -> float:
+    """Calculate length ratio for containment tiebreaking.
+
+    When multiple candidates pass containment check, prefer the one
+    closest in length to the original. This prevents "(Instrumental)"
+    or "(Slowed)" versions from winning over the exact match.
+
+    Args:
+        orig_title: Original video title.
+        cand_title: Candidate title.
+
+    Returns:
+        Ratio between 0.0 and 1.0 (1.0 = same length).
+    """
+    orig_norm = normalize_text(orig_title)
+    cand_norm = normalize_text(cand_title)
+
+    shorter = min(len(orig_norm), len(cand_norm))
+    longer = max(len(orig_norm), len(cand_norm))
+
+    return shorter / longer if longer > 0 else 1.0
+
+
+# =============================================================================
+# SECTION 5: TEXT ANALYSIS
+# =============================================================================
+# String comparison, similarity, relevance checking.
+# No API calls, no SearchResult knowledge — just text in, scores out.
+
+
+def text_similarity(a: str, b: str) -> float:
+    """Calculate similarity ratio between two strings.
+
+    Args:
+        a: First string.
+        b: Second string.
+
+    Returns:
+        Similarity ratio between 0.0 and 1.0.
+    """
+    if not a or not b:
+        return 0.0
+    a_norm = normalize_text(a)
+    b_norm = normalize_text(b)
+    return SequenceMatcher(None, a_norm, b_norm).ratio()
+
+
+def text_contains(haystack: str, needle: str) -> bool:
+    """Check if one text contains the other (normalized).
+
+    Args:
+        haystack: Text to search in.
+        needle: Text to search for.
+
+    Returns:
+        True if needle is contained in haystack.
+    """
+    return normalize_text(needle) in normalize_text(haystack)
+
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison (lowercase, strip, normalize unicode).
+
+    Args:
+        text: Text to normalize.
+
+    Returns:
+        Normalized text.
+    """
+    text = unicodedata.normalize('NFKC', text)
+    text = text.lower().strip()
+    return text
+
+
+def extract_words(text: str) -> set[str]:
+    """Extract words from text for comparison.
+
+    Simple word extraction for detecting content mismatches.
+
+    Args:
+        text: Text to extract words from.
+
+    Returns:
+        Set of lowercase words (2+ characters).
+    """
+    words = set()
+    for word in text.lower().split():
+        # Strip punctuation from edges (including CJK brackets)
+        cleaned = word.strip('()[]【】「」『』〔〕.,!?&-')  # noqa: RUF001
+        if len(cleaned) >= 2:
+            words.add(cleaned)
+    return words
+
+
+def extract_words_expanded(text: str) -> set[str]:
+    """Extract words from ALL script representations of text.
+
+    Combines extract_words() across all transliterated forms. This enables
+    cross-script word matching: "紫咲シオン" expands to include "murasaki"
+    and "shion", which can then match a query for "Murasaki Shion".
+
+    Args:
+        text: Text to extract words from.
+
+    Returns:
+        Set of lowercase words (2+ characters) from all representations.
+    """
+    words: set[str] = set()
+    for representation in expand_text(text):
+        words.update(extract_words(representation))
+    return words
+
+
+# =============================================================================
+# SECTION 6: CJK SUPPORT
+# =============================================================================
+# Japanese/Chinese/Korean detection and transliteration.
+# Also tag extraction for cross-language matching.
+
+# --- Script Detection ---
+
+
+def has_cjk(text: str) -> bool:
+    """Check if text contains CJK (Chinese/Japanese/Korean) characters.
+
+    Args:
+        text: String to check.
+
+    Returns:
+        True if any CJK characters are present.
+    """
+    for char in text:
+        if '\u4e00' <= char <= '\u9fff':  # CJK Unified Ideographs
+            return True
+        if '\u3040' <= char <= '\u309f':  # Hiragana
+            return True
+        if '\u30a0' <= char <= '\u30ff':  # Katakana
+            return True
+        if '\uac00' <= char <= '\ud7af':  # Korean Hangul
+            return True
+    return False
 
 
 def has_japanese(text: str) -> bool:
@@ -226,6 +1411,9 @@ def has_korean(text: str) -> bool:
     """
     # Hangul Syllables: U+AC00 to U+D7AF
     return any('\uac00' <= char <= '\ud7af' for char in text)
+
+
+# --- Transliteration ---
 
 
 def transliterate_japanese(text: str) -> Optional[str]:
@@ -345,616 +1533,11 @@ def expand_text(text: str) -> set[str]:
     return representations
 
 
-def extract_words(text: str) -> set[str]:
-    """Extract words from text for comparison.
+# --- Tag Confidence & Extraction ---
 
-    Simple word extraction for detecting content mismatches.
-
-    Args:
-        text: Text to extract words from.
-
-    Returns:
-        Set of lowercase words (2+ characters).
-    """
-    words = set()
-    for word in text.lower().split():
-        # Strip punctuation from edges (including CJK brackets)
-        cleaned = word.strip('()[]【】「」『』〔〕.,!?&-')  # noqa: RUF001
-        if len(cleaned) >= 2:
-            words.add(cleaned)
-    return words
-
-
-def extract_words_expanded(text: str) -> set[str]:
-    """Extract words from ALL script representations of text.
-
-    Combines extract_words() across all transliterated forms. This enables
-    cross-script word matching: "紫咲シオン" expands to include "murasaki"
-    and "shion", which can then match a query for "Murasaki Shion".
-
-    Args:
-        text: Text to extract words from.
-
-    Returns:
-        Set of lowercase words (2+ characters) from all representations.
-    """
-    words: set[str] = set()
-    for representation in expand_text(text):
-        words.update(extract_words(representation))
-    return words
-
-
-# ==========================================================================
-# SEARCH RESULT DATACLASS
-# ==========================================================================
-
-
-@dataclass
-class SearchResult:
-    """Internal representation of a search result during selection flow.
-
-    Contains search-specific metadata that Track doesn't need for playback,
-    plus display fields (version_label, view_count) for UI presentation.
-    """
-    video_id: str
-    title: str
-    artist: str
-    artist_id: Optional[str] = None
-    album: Optional[str] = None
-    duration_seconds: Optional[int] = None
-    thumbnail_url: Optional[str] = None
-    thumbnail_is_square: bool = False
-    source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
-    video_type: Optional[str] = None
-    is_explicit: Optional[bool] = None
-
-    # NEW: Display fields
-    version_label: str = "Video"
-    view_count: Optional[int] = None
-
-    def to_track(self) -> Track:
-        """Convert to Track for playback."""
-        return Track(
-            title=self.title,
-            artist=self.artist,
-            url=f"https://www.youtube.com/watch?v={self.video_id}",
-            duration=self.duration_seconds or 0,
-            thumbnail=self.thumbnail_url,
-            thumbnail_is_square=self.thumbnail_is_square,
-            video_id=self.video_id,
-            album=self.album,
-            source=self.source,
-            is_explicit=self.is_explicit,
-            version_label=self.version_label,
-            view_count=self.view_count,
-        )
-
-
-# ==========================================================================
-# VIDEO ID EXTRACTION
-# ==========================================================================
-
-
-def extract_video_id(url: str) -> Optional[str]:
-    """Extracts the YouTube video ID from a URL.
-
-    Handles various YouTube URL formats:
-    - https://www.youtube.com/watch?v=VIDEO_ID
-    - https://youtu.be/VIDEO_ID
-    - https://www.youtube.com/embed/VIDEO_ID
-    - https://music.youtube.com/watch?v=VIDEO_ID
-
-    Args:
-        url: YouTube video URL.
-
-    Returns:
-        11-character video ID, or None if not found.
-    """
-    patterns = [
-        r'(?:v=|/v/|youtu\.be/|/embed/)([a-zA-Z0-9_-]{11})',
-        r'^([a-zA-Z0-9_-]{11})$'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-
-# ==========================================================================
-# HELPER FUNCTIONS
-# ==========================================================================
-
-
-def determine_version_label(video_type: Optional[str], source: str) -> str:
-    """Map video type to human-readable label.
-
-    Args:
-        video_type: YTM video type constant (e.g., MUSIC_VIDEO_TYPE_ATV)
-        source: Source identifier ('ytm_song', 'ytm_video', 'youtube')
-
-    Returns:
-        Human-readable label for display.
-    """
-    if video_type and video_type in VERSION_LABELS:
-        return VERSION_LABELS[video_type]
-    return "Video"
-
-
-def has_cjk(text: str) -> bool:
-    """Check if text contains CJK (Chinese/Japanese/Korean) characters.
-
-    Args:
-        text: String to check.
-
-    Returns:
-        True if any CJK characters are present.
-    """
-    for char in text:
-        if '\u4e00' <= char <= '\u9fff':  # CJK Unified Ideographs
-            return True
-        if '\u3040' <= char <= '\u309f':  # Hiragana
-            return True
-        if '\u30a0' <= char <= '\u30ff':  # Katakana
-            return True
-        if '\uac00' <= char <= '\ud7af':  # Korean Hangul
-            return True
-    return False
-
-
-def normalize_text(text: str) -> str:
-    """Normalize text for comparison (lowercase, strip, normalize unicode).
-
-    Args:
-        text: Text to normalize.
-
-    Returns:
-        Normalized text.
-    """
-    text = unicodedata.normalize('NFKC', text)
-    text = text.lower().strip()
-    return text
-
-
-def clean_microformat_title(title: str) -> str:
-    """Strip YouTube suffixes from microformat title.
-
-    Args:
-        title: Raw microformat title.
-
-    Returns:
-        Cleaned title without YouTube suffixes.
-    """
-    for suffix in (' - YouTube Music', ' - YouTube'):
-        if title.endswith(suffix):
-            return title[:-len(suffix)]
-    return title
-
-
-# Keywords that indicate YTM mapped a remix/alternate version instead of the original.
-# If these appear in videoDetails but NOT in microformat, it's a catalog mismatch.
-CATALOG_MISMATCH_KEYWORDS = frozenset({
-    'slowed', 'reverb', 'remix', 'nightcore', 'sped', 'speedup',
-    'speed', 'bass', 'boosted', 'bassboosted', '8d', 'audio',
-    'lofi', 'lo-fi', 'acoustic', 'instrumental', 'karaoke',
-    'cover', 'live', 'concert', 'extended', 'edit', 'mashup',
-})
-
-
-def has_ytm_catalog_mismatch(vd_title: str, mf_title: str) -> bool:
-    """Detect if YTM videoDetails points to a wrong version (catalog mismatch).
-
-    YTM's catalog sometimes maps the wrong song variant to a video ID. For example,
-    the original song's ID might return metadata for a "Slowed + Reverb" version.
-
-    We detect this by checking if videoDetails contains specific remix/version
-    keywords that don't appear in the microformat (raw YouTube) title. Only these
-    keywords trigger a mismatch—author differences are ignored (channel name vs
-    artist name is expected and doesn't pollute search results significantly).
-
-    Args:
-        vd_title: Title from videoDetails.
-        mf_title: Cleaned title from microformat (raw YouTube title).
-
-    Returns:
-        True if mismatch detected (use microformat instead), False otherwise.
-    """
-    # Compare only titles, not author—author differences are expected
-    # (channel name vs artist name is normal, not a mismatch)
-    vd_words = extract_words(vd_title)
-    mf_words = extract_words(mf_title)
-
-    # Words in videoDetails but NOT in microformat
-    extra_in_vd = vd_words - mf_words
-
-    # Check if any are catalog mismatch keywords
-    mismatch_words = extra_in_vd & CATALOG_MISMATCH_KEYWORDS
-
-    if mismatch_words:
-        logger.warning(
-            f"[YTM Metadata] Catalog mismatch detected: "
-            f"videoDetails='{vd_title}' has version keywords {mismatch_words} "
-            f"not in microformat='{mf_title}'"
-        )
-        return True
-
-    return False
-
-
-def text_similarity(a: str, b: str) -> float:
-    """Calculate similarity ratio between two strings.
-
-    Args:
-        a: First string.
-        b: Second string.
-
-    Returns:
-        Similarity ratio between 0.0 and 1.0.
-    """
-    if not a or not b:
-        return 0.0
-    a_norm = normalize_text(a)
-    b_norm = normalize_text(b)
-    return SequenceMatcher(None, a_norm, b_norm).ratio()
-
-
-def text_contains(haystack: str, needle: str) -> bool:
-    """Check if one text contains the other (normalized).
-
-    Args:
-        haystack: Text to search in.
-        needle: Text to search for.
-
-    Returns:
-        True if needle is contained in haystack.
-    """
-    return normalize_text(needle) in normalize_text(haystack)
-
-
-def format_view_count(count: Optional[int]) -> str:
-    """Format view count for display (e.g., 1.2M views).
-
-    Args:
-        count: Raw view count.
-
-    Returns:
-        Formatted string, or empty string if None.
-    """
-    if count is None:
-        return ""
-    if count >= 1_000_000_000:
-        return f"{count / 1_000_000_000:.1f}B views"
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M views"
-    if count >= 1_000:
-        return f"{count / 1_000:.1f}K views"
-    return f"{count} views"
-
-
-# ==========================================================================
-# LANGUAGE-AWARE GARBAGE FILTER
-# ==========================================================================
-
-
-def is_relevant(query: str, result: SearchResult) -> bool:
-    """Determine if a search result is relevant to the query.
-
-    Uses language-aware filtering with transliteration support:
-    - Expands CJK text to romanized forms for cross-script verification
-    - Cross-script matches: attempt verification, fall back to trusting YTM
-    - Same-script matches: use similarity/containment checks
-
-    DESIGN PHILOSOPHY (Data Gathering Phase):
-    We currently TRUST YTM for cross-script results while LOGGING what we see.
-    YTM is more selective about returning cross-language results, so their
-    cross-script results are generally higher quality. However, we want to
-    gather data on:
-    1. How often transliteration verification succeeds vs fails
-    2. What similarity scores cross-script results typically get
-    3. Whether blind trust ever lets through garbage
-
-    This logging will help us decide if/when to tighten cross-script filtering.
-
-    Args:
-        query: Original search query.
-        result: Search result to evaluate.
-
-    Returns:
-        True if result should be kept, False if garbage.
-    """
-    query_has_cjk = has_cjk(query)
-    title_has_cjk = has_cjk(result.title)
-    is_cross_script = query_has_cjk != title_has_cjk
-
-    combined = f"{result.title} {result.artist}"
-
-    # Extract words from ALL representations (original + transliterated)
-    # This is the key to cross-script verification: "紫咲シオン" expands to
-    # include "murasaki", "shion" which can match query "Murasaki Shion"
-    query_words = extract_words_expanded(query)
-    result_words = extract_words_expanded(combined)
-
-    # Word overlap in ANY representation = definitely relevant
-    word_overlap = query_words & result_words
-    if word_overlap:
-        if is_cross_script:
-            logger.info(
-                f"[Cross-Script Verified] query='{query}' | "
-                f"result='{result.title}' by '{result.artist}' | "
-                f"overlapping_words={word_overlap}"
-            )
-        return True
-
-    # Containment check across all representations
-    # Check if any representation of query is contained in any representation of result
-    for q_repr in expand_text(query):
-        q_norm = normalize_text(q_repr)
-        for r_repr in expand_text(combined):
-            r_norm = normalize_text(r_repr)
-            if q_norm in r_norm or r_norm in q_norm:
-                if is_cross_script:
-                    logger.info(
-                        f"[Cross-Script Containment] query='{query}' ({q_repr}) | "
-                        f"result='{result.title}' ({r_repr})"
-                    )
-                return True
-
-    # Similarity fallback (on original text - transliteration handled above)
-    title_sim = text_similarity(query, result.title)
-    combined_sim = text_similarity(query, combined)
-    best_sim = max(title_sim, combined_sim)
-
-    # Use script-appropriate threshold
-    # Cross-script gets lower threshold because YTM is more selective
-    threshold = CROSS_SCRIPT_GARBAGE_THRESHOLD if is_cross_script else GARBAGE_SIMILARITY_THRESHOLD
-
-    # Log borderline cases for threshold tuning
-    if threshold - 0.1 <= best_sim < threshold + 0.1:
-        logger.info(
-            f"[Garbage Filter Borderline] query='{query}' | "
-            f"result='{result.title}' by '{result.artist}' | "
-            f"title_sim={title_sim:.2f}, combined_sim={combined_sim:.2f} | "
-            f"threshold={threshold} ({'cross-script' if is_cross_script else 'same-script'}) | "
-            f"{'KEPT' if best_sim >= threshold else 'FILTERED'}"
-        )
-
-    if best_sim >= threshold:
-        return True
-
-    logger.info(f"Filtered as garbage: {result.title} (sim={best_sim:.2f})")
-    return False
-
-
-# ==========================================================================
-# CONFIDENCE-BASED STAR SCORING
-# ==========================================================================
-
-
-@dataclass
-class OriginalMetadata:
-    """Metadata from the original video for comparison during star scoring."""
-    title: str
-    artist: str
-    artist_id: Optional[str] = None
-
-
-def calculate_artist_confidence(original: OriginalMetadata, candidate: SearchResult) -> float:
-    """Calculate confidence that candidate is by the same artist as original.
-
-    Artist ID match is a BONUS, not a gate. Text similarity is the base.
-
-    Args:
-        original: Metadata from original video.
-        candidate: Search result candidate.
-
-    Returns:
-        Confidence score between 0.0 and 1.0.
-    """
-    # Base: text similarity
-    base_sim = text_similarity(original.artist, candidate.artist)
-
-    # ID match bonus: if both have IDs and they match, boost to at least 0.85
-    if original.artist_id and candidate.artist_id:
-        if original.artist_id == candidate.artist_id:
-            return max(base_sim, 0.85)
-
-    return base_sim
-
-
-def calculate_title_match(orig_title: str, cand_title: str) -> float:
-    """Calculate how well candidate title matches original.
-
-    Uses transliteration expansion for cross-script matching.
-    Containment-first (if one contains the other, high match).
-    Word overlap ratio as secondary signal.
-    Similarity-fallback.
-
-    Args:
-        orig_title: Original video title.
-        cand_title: Candidate title.
-
-    Returns:
-        Match score between 0.0 and 1.0.
-    """
-    # Expand both titles to all representations (original + transliterated)
-    orig_representations = expand_text(orig_title)
-    cand_representations = expand_text(cand_title)
-
-    best_match = 0.0
-
-    # Check all combinations of representations
-    for orig_repr in orig_representations:
-        orig_norm = normalize_text(orig_repr)
-
-        for cand_repr in cand_representations:
-            cand_norm = normalize_text(cand_repr)
-
-            # Containment: strong signal
-            if orig_norm in cand_norm or cand_norm in orig_norm:
-                best_match = max(best_match, 0.9)
-                continue
-
-            # Word overlap ratio
-            orig_words = set(orig_norm.split())
-            cand_words = set(cand_norm.split())
-
-            if orig_words and cand_words:
-                overlap = len(orig_words & cand_words)
-                total = max(len(orig_words), len(cand_words))
-                ratio = overlap / total
-                best_match = max(best_match, ratio)
-
-            # Similarity as final fallback
-            sim = text_similarity(orig_repr, cand_repr)
-            best_match = max(best_match, sim)
-
-    return best_match
-
-
-def score_candidate(original: OriginalMetadata, candidate: SearchResult) -> float:
-    """Score a candidate for star assignment.
-
-    Sliding scale: higher artist confidence → lower title threshold required.
-    Perfect title match always passes regardless of artist.
-
-    Thresholds (approximate):
-        - Artist 100% → Title 25%
-        - Artist 75%  → Title 45%
-        - Artist 50%  → Title 65%
-
-    Args:
-        original: Metadata from original video.
-        candidate: Search result candidate.
-
-    Returns:
-        Combined score if candidate passes, 0.0 if fails.
-    """
-    artist_conf = calculate_artist_confidence(original, candidate)
-    title_match = calculate_title_match(original.title, candidate.title)
-
-    logger.debug(
-        f"[Star Scoring] Candidate: '{candidate.title}' by '{candidate.artist}' | "
-        f"artist_conf={artist_conf:.2f}, title_match={title_match:.2f}"
-    )
-
-    # Perfect title match always passes (regardless of artist)
-    if title_match >= 0.95:
-        score = (artist_conf * 0.4) + (title_match * 0.6)
-        logger.debug(f"[Star Scoring]   → AUTO-PASS (perfect title): score={score:.2f}")
-        return score
-
-    # Sliding threshold: title_threshold = 1.05 - (0.8 * artist_conf)
-    # Artist 1.0 → title needs 0.25
-    # Artist 0.75 → title needs 0.45
-    # Artist 0.5 → title needs 0.65
-    title_threshold = 1.05 - (artist_conf * 0.8)
-
-    if title_match < title_threshold:
-        logger.debug(
-            f"[Star Scoring]   → FAILED: title_match {title_match:.2f} < threshold {title_threshold:.2f} "
-            f"(required for artist_conf={artist_conf:.2f})"
-        )
-        return 0.0
-
-    # Combined score: weighted average
-    score = (artist_conf * 0.4) + (title_match * 0.6)
-    logger.debug(f"[Star Scoring]   → PASSED: score={score:.2f} (threshold was {title_threshold:.2f})")
-
-    # Log edge cases for threshold validation
-    if score < STAR_THRESHOLD and score >= 0.5:
-        logger.debug(
-            f"[Star Scoring] Near-miss: '{candidate.title}' score={score:.2f} < threshold={STAR_THRESHOLD}"
-        )
-    elif score >= STAR_THRESHOLD and score < 0.7:
-        logger.debug(
-            f"[Star Scoring] Near-hit: '{candidate.title}' score={score:.2f} (barely passed)"
-        )
-
-    return score
-
-
-def _title_length_ratio(orig_title: str, cand_title: str) -> float:
-    """Calculate length ratio for containment tiebreaking.
-
-    When multiple candidates pass containment check, prefer the one
-    closest in length to the original. This prevents "(Instrumental)"
-    or "(Slowed)" versions from winning over the exact match.
-
-    Args:
-        orig_title: Original video title.
-        cand_title: Candidate title.
-
-    Returns:
-        Ratio between 0.0 and 1.0 (1.0 = same length).
-    """
-    orig_norm = normalize_text(orig_title)
-    cand_norm = normalize_text(cand_title)
-
-    shorter = min(len(orig_norm), len(cand_norm))
-    longer = max(len(orig_norm), len(cand_norm))
-
-    return shorter / longer if longer > 0 else 1.0
-
-
-def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Optional[SearchResult]:
-    """Find the best ATV candidate to star.
-
-    Scores each ATV candidate. If multiple candidates tie (same score),
-    uses title length ratio as tiebreaker to prefer exact matches over
-    variants like "(Instrumental)" or "(Remix)".
-
-    Args:
-        original: Metadata from original video.
-        candidates: List of search result candidates.
-
-    Returns:
-        Best candidate above threshold, or None.
-    """
-    # Collect all passing candidates with their scores
-    passing: List[tuple[SearchResult, float]] = []
-
-    for candidate in candidates:
-        # Only consider ATVs for starring
-        if candidate.video_type != MUSIC_VIDEO_TYPE_ATV:
-            continue
-
-        score = score_candidate(original, candidate)
-        if score >= STAR_THRESHOLD:
-            passing.append((candidate, score))
-
-    if not passing:
-        return None
-
-    # Find the best score
-    best_score = max(score for _, score in passing)
-
-    # Get all candidates with the best score (ties)
-    tied = [(cand, score) for cand, score in passing if score == best_score]
-
-    if len(tied) == 1:
-        # No tie, just return the winner
-        best_candidate = tied[0][0]
-    else:
-        # Multiple candidates tied—use length ratio as tiebreaker
-        # Prefer the candidate whose title is closest in length to original
-        best_candidate = max(
-            tied,
-            key=lambda x: _title_length_ratio(original.title, x[0].title)
-        )[0]
-        logger.debug(
-            f"[Star Scoring] Tiebreaker: {len(tied)} candidates tied at {best_score:.2f}, "
-            f"selected '{best_candidate.title}' by length ratio"
-        )
-
-    logger.info(f"Star assigned to: {best_candidate.title} (score={best_score:.2f})")
-    return best_candidate
-
-    return best_candidate
-
-
-# ==========================================================================
+# =============================================================================
 # CJK TAG CONFIDENCE SCORING
-# ==========================================================================
+# =============================================================================
 #
 # This system scores tags by likelihood of being a useful artist name.
 # It replaces the binary _SKIP_TAGS approach with nuanced confidence scoring.
@@ -974,9 +1557,7 @@ def find_star(original: OriginalMetadata, candidates: List[SearchResult]) -> Opt
 # Once logs show transliteration matching reliably identifies artists,
 # we can wire it up to boost confidence scores.
 
-# ==========================================================================
 # HARD SKIP LISTS - Tags that are NEVER artist names (confidence = 0.0)
-# ==========================================================================
 
 _HARD_SKIP_EXACT = {
     # Agencies - organization names, never individual artists
@@ -1000,9 +1581,7 @@ _HARD_SKIP_CONTAINS = {
     'hololive', 'nijisanji', 'にじさんじ', 'ホロライブ',
 }
 
-# ==========================================================================
 # SOFT SKIP LIST - Reduces confidence but doesn't zero out
-# ==========================================================================
 # These COULD be part of a legitimate compound tag (e.g., "Official髭男dism")
 # so we penalize rather than reject outright.
 
@@ -1028,107 +1607,6 @@ _SOFT_SKIP = {
     '東方', 'touhou',
     'jpop', 'j-pop', 'kpop', 'k-pop',
 }
-
-# ==========================================================================
-# LEGACY SKIP TAGS (RELIC)
-# ==========================================================================
-# Preserved for reference. This was the original binary approach before
-# confidence scoring was implemented. The categories informed the new
-# _HARD_SKIP_EXACT and _SOFT_SKIP lists above.
-#
-# _LEGACY_SKIP_AGENCIES = {
-#     'ホロライブ', 'hololive', 'hololive production',
-#     'にじさんじ', 'nijisanji',
-# }
-# _LEGACY_SKIP_CONTENT_TYPE = {
-#     '歌ってみた', 'cover', 'original', 'オリジナル', '実況',
-# }
-# _LEGACY_SKIP_FORMAT = {
-#     'music', 'mv', 'pv', 'lyric', 'lyrics',
-#     'バーチャル', 'vtuber', 'virtual',
-# }
-# _LEGACY_SKIP_TAGS = _LEGACY_SKIP_AGENCIES | _LEGACY_SKIP_CONTENT_TYPE | _LEGACY_SKIP_FORMAT
-
-
-# ==========================================================================
-# CONFIDENCE SCORING HELPERS
-# ==========================================================================
-
-def _calculate_script_ratio(tag: str) -> float:
-    """Calculate the ratio of CJK characters to total alphabetic characters.
-
-    Used to determine if a tag is primarily CJK (likely Japanese/Chinese name)
-    vs primarily Latin (less useful for CJK name extraction).
-
-    Args:
-        tag: The tag to analyze.
-
-    Returns:
-        Float from 0.0 (no CJK) to 1.0 (pure CJK).
-        Returns 0.0 if no alphabetic characters present.
-    """
-    cjk_count = sum(1 for c in tag if has_cjk(c))
-    latin_count = sum(1 for c in tag if c.isalpha() and ord(c) < 0x300)
-    total = cjk_count + latin_count
-
-    if total == 0:
-        return 0.0
-
-    return cjk_count / total
-
-
-def _is_vocaloid_p_pattern(tag: str) -> bool:
-    """Detect Vocaloid producer naming pattern: CJK characters + P suffix.
-
-    Examples: みきとP, ハチP, ピノキオピー, syudouP
-
-    These are almost always real artist names and should get a confidence boost.
-
-    Args:
-        tag: The tag to check.
-
-    Returns:
-        True if tag matches the VocaloidP pattern.
-    """
-    # Ends with P or fullwidth P (U+FF30)
-    if not tag.endswith('P') and not tag.endswith('Ｐ'):  # noqa: RUF001
-        return False
-
-    # Has CJK content before the P
-    prefix = tag[:-1]
-    return len(prefix) >= 2 and has_cjk(prefix)
-
-
-def _title_similarity(tag: str, title: str) -> float:
-    """Calculate similarity between tag and video title.
-
-    Used to detect when a tag IS the song title (which we want to filter out).
-    Intentionally simple word overlap - we just want to catch obvious cases.
-
-    Args:
-        tag: The tag to check.
-        title: The video title.
-
-    Returns:
-        Float from 0.0 (no overlap) to 1.0 (tag words all appear in title).
-    """
-    def normalize(s: str) -> set:
-        s = s.lower()
-        # Remove common title noise/brackets (fullwidth chars intentional)
-        for noise in ['【', '】', '「', '」', '[', ']', '/', '-', '|', '(', ')', '（', '）']:  # noqa: RUF001
-            s = s.replace(noise, ' ')
-        return {w for w in s.split() if len(w) >= 2}
-
-    tag_words = normalize(tag)
-    title_words = normalize(title)
-
-    if not tag_words or not title_words:
-        return 0.0
-
-    overlap = len(tag_words & title_words)
-
-    # Ratio of tag words that appear in title
-    return overlap / len(tag_words)
 
 
 def calculate_tag_confidence(
@@ -1389,113 +1867,193 @@ def extract_jp_names(
     return [tag for tag, _conf in ranked]
 
 
-# ==========================================================================
-# YTM RESULT PARSING
-# ==========================================================================
+def _calculate_script_ratio(tag: str) -> float:
+    """Calculate the ratio of CJK characters to total alphabetic characters.
 
-
-def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
-    """Parse a YTM search result item into a SearchResult.
+    Used to determine if a tag is primarily CJK (likely Japanese/Chinese name)
+    vs primarily Latin (less useful for CJK name extraction).
 
     Args:
-        item: Raw result from ytm.search().
+        tag: The tag to analyze.
 
     Returns:
-        SearchResult or None if not playable.
+        Float from 0.0 (no CJK) to 1.0 (pure CJK).
+        Returns 0.0 if no alphabetic characters present.
     """
-    result_type = item.get('resultType')
+    cjk_count = sum(1 for c in tag if has_cjk(c))
+    latin_count = sum(1 for c in tag if c.isalpha() and ord(c) < 0x300)
+    total = cjk_count + latin_count
 
-    # Skip non-playable types
-    if result_type in ('artist', 'album', 'playlist', 'podcast'):
-        return None
+    if total == 0:
+        return 0.0
 
-    video_type = item.get('videoType', '')
-    if video_type == 'MUSIC_VIDEO_TYPE_PODCAST_EPISODE':
-        return None
-
-    video_id = item.get('videoId')
-    if not video_id:
-        return None
-
-    # Determine source and version label
-    is_atv = video_type == MUSIC_VIDEO_TYPE_ATV
-    source = 'ytm_song' if is_atv else 'ytm_video'
-    version_label = determine_version_label(video_type, source)
-
-    # Extract artist info
-    artists = item.get('artists', [])
-    artist_name = artists[0].get('name', 'Unknown') if artists else item.get('author', 'Unknown')
-    artist_id = artists[0].get('id') if artists else None
-
-    # Extract album
-    album_info = item.get('album', {})
-    album_name = album_info.get('name') if isinstance(album_info, dict) else None
-
-    # Extract thumbnail
-    thumbnails = item.get('thumbnails', [])
-    thumb_url = None
-    thumb_is_square = False
-    if thumbnails:
-        largest = thumbnails[-1]
-        thumb_is_square = largest.get('width') == largest.get('height')
-        raw_url = largest.get('url')
-        if raw_url and thumb_is_square:
-            thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
-        else:
-            thumb_url = raw_url
-
-    return SearchResult(
-        video_id=video_id,
-        title=item.get('title', 'Unknown'),
-        artist=artist_name,
-        artist_id=artist_id,
-        album=album_name,
-        duration_seconds=item.get('duration_seconds'),
-        thumbnail_url=thumb_url,
-        thumbnail_is_square=thumb_is_square,
-        source=source,
-        video_type=video_type,
-        version_label=version_label,
-    )
+    return cjk_count / total
 
 
-# ==========================================================================
-# YTM SEARCH & METADATA
-# ==========================================================================
+def _is_vocaloid_p_pattern(tag: str) -> bool:
+    """Detect Vocaloid producer naming pattern: CJK characters + P suffix.
 
+    Examples: みきとP, ハチP, ピノキオピー, syudouP
 
-async def get_ytm_metadata(video_id: str) -> Optional[Dict[str, Any]]:
-    """Get metadata for a video from YouTube Music.
+    These are almost always real artist names and should get a confidence boost.
 
     Args:
-        video_id: YouTube video ID.
+        tag: The tag to check.
 
     Returns:
-        Raw metadata dict from get_song(), or None if unavailable.
+        True if tag matches the VocaloidP pattern.
     """
-    ytm = _get_ytm()
-    if not ytm:
-        return None
+    # Ends with P or fullwidth P (U+FF30)
+    if not tag.endswith('P') and not tag.endswith('Ｐ'):  # noqa: RUF001
+        return False
 
-    try:
-        def do_get() -> Dict[str, Any]:
-            return ytm.get_song(video_id)  # type: ignore[union-attr]
+    # Has CJK content before the P
+    prefix = tag[:-1]
+    return len(prefix) >= 2 and has_cjk(prefix)
 
-        result = await asyncio.wait_for(
-            asyncio.to_thread(do_get),
-            timeout=15.0
+
+def _title_similarity(tag: str, title: str) -> float:
+    """Calculate similarity between tag and video title.
+
+    Used to detect when a tag IS the song title (which we want to filter out).
+    Intentionally simple word overlap - we just want to catch obvious cases.
+
+    Args:
+        tag: The tag to check.
+        title: The video title.
+
+    Returns:
+        Float from 0.0 (no overlap) to 1.0 (tag words all appear in title).
+    """
+    def normalize(s: str) -> set:
+        s = s.lower()
+        # Remove common title noise/brackets (fullwidth chars intentional)
+        for noise in ['【', '】', '「', '」', '[', ']', '/', '-', '|', '(', ')', '（', '）']:  # noqa: RUF001
+            s = s.replace(noise, ' ')
+        return {w for w in s.split() if len(w) >= 2}
+
+    tag_words = normalize(tag)
+    title_words = normalize(title)
+
+    if not tag_words or not title_words:
+        return 0.0
+
+    overlap = len(tag_words & title_words)
+
+    # Ratio of tag words that appear in title
+    return overlap / len(tag_words)
+
+
+# =============================================================================
+# SECTION 7: PURE UTILITIES
+# =============================================================================
+# Stateless helpers. No module state, no complex dependencies.
+
+
+def extract_video_id(url: str) -> Optional[str]:
+    """Extracts the YouTube video ID from a URL.
+
+    Handles various YouTube URL formats:
+    - https://www.youtube.com/watch?v=VIDEO_ID
+    - https://youtu.be/VIDEO_ID
+    - https://www.youtube.com/embed/VIDEO_ID
+    - https://music.youtube.com/watch?v=VIDEO_ID
+
+    Args:
+        url: YouTube video URL.
+
+    Returns:
+        11-character video ID, or None if not found.
+    """
+    patterns = [
+        r'(?:v=|/v/|youtu\.be/|/embed/)([a-zA-Z0-9_-]{11})',
+        r'^([a-zA-Z0-9_-]{11})$'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def determine_version_label(video_type: Optional[str], source: str) -> str:
+    """Map video type to human-readable label.
+
+    Args:
+        video_type: YTM video type constant (e.g., MUSIC_VIDEO_TYPE_ATV)
+        source: Source identifier ('ytm_song', 'ytm_video', 'youtube')
+
+    Returns:
+        Human-readable label for display.
+    """
+    if video_type and video_type in VERSION_LABELS:
+        return VERSION_LABELS[video_type]
+    return "Video"
+
+
+def clean_microformat_title(title: str) -> str:
+    """Strip YouTube suffixes from microformat title.
+
+    Args:
+        title: Raw microformat title.
+
+    Returns:
+        Cleaned title without YouTube suffixes.
+    """
+    for suffix in (' - YouTube Music', ' - YouTube'):
+        if title.endswith(suffix):
+            return title[:-len(suffix)]
+    return title
+
+
+# Keywords that indicate YTM mapped a remix/alternate version instead of the original.
+# If these appear in videoDetails but NOT in microformat, it's a catalog mismatch.
+CATALOG_MISMATCH_KEYWORDS = frozenset({
+    'slowed', 'reverb', 'remix', 'nightcore', 'sped', 'speedup',
+    'speed', 'bass', 'boosted', 'bassboosted', '8d', 'audio',
+    'lofi', 'lo-fi', 'acoustic', 'instrumental', 'karaoke',
+    'cover', 'live', 'concert', 'extended', 'edit', 'mashup',
+})
+
+
+def has_ytm_catalog_mismatch(vd_title: str, mf_title: str) -> bool:
+    """Detect if YTM videoDetails points to a wrong version (catalog mismatch).
+
+    YTM's catalog sometimes maps the wrong song variant to a video ID. For example,
+    the original song's ID might return metadata for a "Slowed + Reverb" version.
+
+    We detect this by checking if videoDetails contains specific remix/version
+    keywords that don't appear in the microformat (raw YouTube) title. Only these
+    keywords trigger a mismatch—author differences are ignored (channel name vs
+    artist name is expected and doesn't pollute search results significantly).
+
+    Args:
+        vd_title: Title from videoDetails.
+        mf_title: Cleaned title from microformat (raw YouTube title).
+
+    Returns:
+        True if mismatch detected (use microformat instead), False otherwise.
+    """
+    # Compare only titles, not author—author differences are expected
+    # (channel name vs artist name is normal, not a mismatch)
+    vd_words = extract_words(vd_title)
+    mf_words = extract_words(mf_title)
+
+    # Words in videoDetails but NOT in microformat
+    extra_in_vd = vd_words - mf_words
+
+    # Check if any are catalog mismatch keywords
+    mismatch_words = extra_in_vd & CATALOG_MISMATCH_KEYWORDS
+
+    if mismatch_words:
+        logger.warning(
+            f"[YTM Metadata] Catalog mismatch detected: "
+            f"videoDetails='{vd_title}' has version keywords {mismatch_words} "
+            f"not in microformat='{mf_title}'"
         )
+        return True
 
-        video_details = result.get('videoDetails', {})
-        if not video_details.get('title'):
-            logger.debug(f"[YTM Metadata] No valid data for {video_id}")
-            return None
-
-        return result
-
-    except Exception as e:
-        logger.warning(f"[YTM Metadata] Error getting metadata for {video_id}: {e}")
-        return None
+    return False
 
 
 def is_atv(metadata: Dict[str, Any]) -> bool:
@@ -1531,492 +2089,31 @@ def extract_view_count(metadata: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-async def search_ytm(query: str, limit: int = 10) -> List[SearchResult]:
-    """Search YouTube Music for tracks.
-
-    Performs unfiltered search (songs + videos) and filtered songs search
-    in parallel to get both mixed results AND album info for ATVs.
+def format_view_count(count: Optional[int]) -> str:
+    """Format view count for display (e.g., 1.2M views).
 
     Args:
-        query: Search query string.
-        limit: Maximum results to return.
+        count: Raw view count.
 
     Returns:
-        List of SearchResult objects (songs and videos mixed).
+        Formatted string, or empty string if None.
     """
-    ytm = _get_ytm()
-    if not ytm:
-        logger.debug("[YTM Search] YTMusic not available")
-        return []
-
-    try:
-        def do_unfiltered_search() -> List[Dict[str, Any]]:
-            return ytm.search(query, limit=limit)  # type: ignore[union-attr]
-
-        def do_songs_search() -> List[Dict[str, Any]]:
-            return ytm.search(query, filter="songs", limit=limit)  # type: ignore[union-attr]
-
-        # Run both searches in parallel
-        unfiltered_task = asyncio.to_thread(do_unfiltered_search)
-        songs_task = asyncio.to_thread(do_songs_search)
-
-        unfiltered_results, songs_results = await asyncio.wait_for(
-            asyncio.gather(unfiltered_task, songs_task),
-            timeout=15.0
-        )
-
-        # Build maps from filtered songs search (has album + explicit info)
-        album_map: Dict[str, Optional[str]] = {}
-        explicit_map: Dict[str, Optional[bool]] = {}
-        for item in songs_results:
-            video_id = item.get('videoId')
-            if video_id:
-                album_info = item.get('album')
-                if album_info:
-                    album_map[video_id] = album_info.get('name')
-                explicit_map[video_id] = item.get('isExplicit')
-
-        # Parse unfiltered results
-        parsed: List[SearchResult] = []
-        for item in unfiltered_results:
-            result = _parse_ytm_result(item)
-            if result:
-                # Attach album and explicit info from filtered search
-                if result.video_id in album_map:
-                    result.album = album_map[result.video_id]
-                if result.video_id in explicit_map:
-                    result.is_explicit = explicit_map[result.video_id]
-                parsed.append(result)
-
-        # Fetch metadata for results missing duration or view_count
-        # Collect all results that need metadata fetching
-        results_needing_metadata = [
-            r for r in parsed
-            if r.video_id and (r.duration_seconds is None or r.view_count is None)
-        ]
-
-        if results_needing_metadata:
-            # Fetch metadata in parallel for efficiency
-            async def fetch_and_update(result: SearchResult) -> None:
-                metadata = await get_ytm_metadata(result.video_id)
-                if metadata:
-                    video_details = metadata.get('videoDetails', {})
-                    if result.duration_seconds is None:
-                        length = video_details.get('lengthSeconds')
-                        if length:
-                            result.duration_seconds = int(length)
-                    if result.view_count is None:
-                        result.view_count = extract_view_count(metadata)
-
-            await asyncio.gather(*[fetch_and_update(r) for r in results_needing_metadata])
-
-        # Log results
-        songs = sum(1 for r in parsed if r.source == 'ytm_song')
-        videos = sum(1 for r in parsed if r.source == 'ytm_video')
-        logger.info(f"[YTM Search] '{query}' -> {songs} songs, {videos} videos")
-
-        return parsed
-
-    except Exception as e:
-        logger.warning(f"[YTM Search] Error searching: {e}")
-        return []
-
-
-# ==========================================================================
-# YOUTUBE (YT-DLP) SEARCH
-# ==========================================================================
-
-YTDLP_SEARCH_OPTIONS = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': 'in_playlist',
-    'noplaylist': True,
-}
-
-
-async def search_youtube(query: str, limit: int = 6) -> List[SearchResult]:
-    """Search YouTube using yt-dlp.
-
-    Args:
-        query: Search query string.
-        limit: Maximum results to return.
-
-    Returns:
-        List of SearchResult objects.
-    """
-    if not yt_dlp:
-        logger.debug("[YT Search] yt-dlp not available")
-        return []
-
-    try:
-        search_query = f"ytsearch{limit}:{query}"
-
-        def do_search() -> Dict[str, Any]:
-            with yt_dlp.YoutubeDL(cast(Any, YTDLP_SEARCH_OPTIONS)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(search_query, download=False)  # type: ignore[return-value]
-
-        info = await asyncio.wait_for(
-            asyncio.to_thread(do_search),
-            timeout=15.0
-        )
-
-        if not info:
-            return []
-
-        results: List[SearchResult] = []
-        entries = info.get('entries', [])
-
-        for entry in entries:
-            if not entry:
-                continue
-
-            view_count = entry.get('view_count')
-            results.append(SearchResult(
-                video_id=entry.get('id', ''),
-                title=entry.get('title', 'Unknown Title'),
-                artist=entry.get('uploader', entry.get('channel', 'Unknown')),
-                duration_seconds=int(entry.get('duration', 0) or 0),
-                thumbnail_url=entry.get('thumbnail'),
-                thumbnail_is_square=False,
-                source='youtube',
-                version_label='Video',
-                view_count=int(view_count) if view_count else None,
-            ))
-
-        logger.info(f"[YT Search] '{query}' -> {len(results)} results")
-        return results
-
-    except Exception as e:
-        logger.warning(f"[YT Search] Error searching: {e}")
-        return []
-
-
-# ==========================================================================
-# DEDUPLICATION
-# ==========================================================================
-
-
-def dedupe_results(
-    ytm_results: List[SearchResult],
-    yt_results: List[SearchResult],
-    exclude_id: Optional[str] = None
-) -> Tuple[List[SearchResult], List[SearchResult]]:
-    """Deduplicate results, preferring YTM versions.
-
-    Same video ID = same video. Prefer YTM metadata (better quality).
-
-    Args:
-        ytm_results: Results from YTM search.
-        yt_results: Results from yt-dlp search.
-        exclude_id: Optional video ID to exclude from yt_results.
-
-    Returns:
-        Tuple of (ytm_results, filtered_yt_results).
-    """
-    ytm_ids = {r.video_id for r in ytm_results}
-
-    filtered_yt = []
-    for r in yt_results:
-        if r.video_id in ytm_ids:
-            continue  # Duplicate of YTM result
-        if r.video_id == exclude_id:
-            continue
-        filtered_yt.append(r)
-
-    logger.debug(
-        f"[Dedupe] YTM={len(ytm_results)}, YT={len(filtered_yt)} (excluded={exclude_id})"
-    )
-
-    return ytm_results, filtered_yt
-
-
-# ==========================================================================
-# UNIFIED SEARCH API
-# ==========================================================================
-
-
-async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[SearchResult], Optional[str]]:
-    """Search for a user query (Query Mode).
-
-    Searches both YTM and YouTube in parallel, deduplicates, applies
-    language-aware garbage filtering, and returns results split into
-    songs (ATVs) and videos.
-
-    Args:
-        query: User's search query.
-
-    Returns:
-        Tuple of (songs, videos, recommended_id):
-        - songs: Up to 3 ATVs
-        - videos: Up to 3 videos
-        - recommended_id: First non-garbage ATV's video_id, or None
-    """
-    # Parallel search
-    ytm_task = search_ytm(query, limit=10)
-    yt_task = search_youtube(query, limit=6)
-
-    ytm_results, yt_results = await asyncio.gather(
-        ytm_task, yt_task, return_exceptions=True
-    )
-
-    # Handle exceptions
-    if isinstance(ytm_results, Exception):
-        logger.warning(f"[Query Mode] YTM search failed: {ytm_results}")
-        ytm_results = []
-    if isinstance(yt_results, Exception):
-        logger.warning(f"[Query Mode] YT search failed: {yt_results}")
-        yt_results = []
-
-    # Dedupe (prefer YTM)
-    ytm_results, yt_results = dedupe_results(
-        cast(List[SearchResult], ytm_results),
-        cast(List[SearchResult], yt_results)
-    )
-
-    # Language-aware garbage filter
-    ytm_results = [r for r in ytm_results if is_relevant(query, r)]
-    yt_results = [r for r in yt_results if is_relevant(query, r)]
-
-    # Split into songs (ATVs) and videos
-    songs = [r for r in ytm_results if r.source == 'ytm_song']
-    ytm_videos = [r for r in ytm_results if r.source == 'ytm_video']
-    videos = ytm_videos + yt_results
-
-    # First ATV gets recommended (query mode has no original to compare against)
-    recommended_id = songs[0].video_id if songs else None
-
-    logger.info(
-        f"[Query Mode] '{query}' -> {len(songs[:3])} songs + {len(videos[:3])} videos"
-    )
-
-    return songs[:3], videos[:3], recommended_id
-
-
-async def search_url_mode(
-    url_or_id: str
-) -> Tuple[SearchResult, List[SearchResult], List[SearchResult], Optional[str]]:
-    """Search for alternatives to a user-provided URL (URL Mode).
-
-    If the URL is already an ATV, returns it directly with proper metadata and
-    empty alternatives (no selection UI needed). Otherwise, searches for matching
-    ATVs and related videos using multi-query with Japanese name extraction.
-
-    Args:
-        url_or_id: YouTube video URL or video ID.
-
-    Returns:
-        Tuple of (original, songs, videos, recommended_id):
-        - original: SearchResult for user's URL (always present)
-        - songs: Up to 3 ATVs (empty if original is already an ATV)
-        - videos: Up to 3 related videos (empty if original is already an ATV)
-        - recommended_id: Video ID of recommended song (original's ID if ATV)
-
-    Raises:
-        ValueError: If video ID cannot be extracted from url_or_id.
-    """
-    # Normalize input: extract video ID if a URL was passed
-    video_id = extract_video_id(url_or_id)
-    if not video_id:
-        raise ValueError(f"Could not extract video ID from: {url_or_id}")
-
-    # Get metadata for the original video
-    metadata = await get_ytm_metadata(video_id)
-
-    if not metadata:
-        logger.debug(f"[URL Mode] No metadata for {video_id}, returning original only")
-        original_fallback = SearchResult(
-            video_id=video_id,
-            title="Unknown",
-            artist="Unknown",
-            source='youtube',
-            version_label='Video',
-        )
-        return original_fallback, [], [], None
-
-    video_details = metadata.get('videoDetails', {})
-
-    # Check if already an ATV - search YTM by ID to get full metadata (album, explicit, etc.)
-    if is_atv(metadata):
-        logger.info(f"[URL Mode] {video_id} is already an ATV, fetching full metadata from YTM")
-
-        # Search YTM by video ID - this gives us the complete SearchResult with album info
-        ytm_results = await search_ytm(video_id, limit=1)
-        for result in ytm_results:
-            if result.video_id == video_id:
-                logger.debug(f"[URL Mode] Found ATV in YTM search: album='{result.album}'")
-                return result, [], [], video_id
-
-        # Fallback: build from get_song() metadata if YTM search didn't find it
-        # (This can happen if the ATV is region-locked or very new)
-        logger.debug("[URL Mode] ATV not found in YTM search, using get_song() metadata")
-        # For ATVs, videoDetails.author IS the clean artist name (not channel)
-        atv_title = video_details.get('title', 'Unknown')
-        atv_artist = video_details.get('author', 'Unknown')
-        atv_duration = int(video_details.get('lengthSeconds', 0) or 0)
-        atv_view_count = extract_view_count(metadata)
-
-        # ATVs have square thumbnails
-        thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
-        atv_thumb_url = None
-        if thumbnails:
-            # Get largest thumbnail and resize
-            raw_url = thumbnails[-1].get('url')
-            if raw_url:
-                atv_thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
-
-        atv_result = SearchResult(
-            video_id=video_id,
-            title=atv_title,
-            artist=atv_artist,
-            duration_seconds=atv_duration,
-            thumbnail_url=atv_thumb_url,
-            thumbnail_is_square=True,  # ATVs always have square art
-            source='ytm_song',
-            video_type=MUSIC_VIDEO_TYPE_ATV,
-            version_label='Official Audio',
-            view_count=atv_view_count,
-        )
-        # Return ATV as original, empty alternatives, itself as recommended
-        return atv_result, [], [], video_id
-
-    # Extract metadata for searching
-    # Start with videoDetails (structured metadata)
-    vd_title = video_details.get('title', 'Unknown')
-    vd_author = video_details.get('author', 'Unknown')
-    duration = int(video_details.get('lengthSeconds', 0) or 0)
-    view_count = extract_view_count(metadata)
-
-    # Extract microformat (raw YouTube title) for comparison
-    microformat = metadata.get('microformat', {}).get('microformatDataRenderer', {})
-    mf_title_raw = microformat.get('title', '')
-    mf_title = clean_microformat_title(mf_title_raw) if mf_title_raw else ''
-
-    # Check for YTM catalog mismatch (videoDetails points to wrong song).
-    # This happens when YTM's catalog maps the wrong song to a video ID.
-    # If detected, use microformat title for SEARCHING (it's the raw YouTube title),
-    # but keep videoDetails author for display. We don't parse the microformat—
-    # just use it as-is since it contains the accurate video title.
-    mismatch_detected = mf_title and has_ytm_catalog_mismatch(vd_title, mf_title)
-    if mismatch_detected:
-        logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
-        title = mf_title  # Use full microformat title for search
-        author = vd_author  # Keep videoDetails author for display
-    else:
-        # No mismatch—trust videoDetails
-        title = vd_title
-        author = vd_author
-
-    # Extract tags for Japanese name extraction
-    tags = microformat.get('tags', [])
-    jp_names = extract_jp_names(tags, video_title=title, author=author)
-
-    # Build original SearchResult
-    thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
-    thumb_url = thumbnails[-1].get('url') if thumbnails else None
-
-    # Try to get artist_id from YTM if available
-    original_artist_id: Optional[str] = None
-
-    original = SearchResult(
-        video_id=video_id,
-        title=title,
-        artist=author,
-        artist_id=original_artist_id,
-        duration_seconds=duration,
-        thumbnail_url=thumb_url,
-        thumbnail_is_square=False,
-        source='youtube',
-        version_label='Video',
-        view_count=view_count,
-    )
-
-    # Multi-query search for CJK content.
-    # Query order depends on data quality:
-    # - No mismatch (clean metadata): "{author} {title}" (conventional artist-first)
-    # - Mismatch (raw YT title): "{title} {author}" (title is more reliable)
-    # Additional queries are added ONLY when Japanese name variants are detected
-    # in the video tags (e.g., artist name in kanji/romaji). This helps find
-    # YTM songs that might be indexed under different name spellings.
-    if mismatch_detected:
-        # Title is raw YouTube title (more reliable), author may be just channel name
-        queries = [f"{title} {author}"]
-    else:
-        # Clean metadata—use conventional "Artist Song" order
-        queries = [f"{author} {title}"]
-
-    for jp_name in jp_names[:2]:
-        queries.append(f"{title} {jp_name}")
-
-    # Search YTM with all queries, collecting unique results
-    all_ytm_results: List[SearchResult] = []
-    seen_ids: set[str] = set()
-    original_found_as_atv = False
-
-    for query in queries:
-        results = await search_ytm(query, limit=5)
-        for r in results:
-            # Capture artist_id from original if it appears in YTM
-            if r.video_id == video_id and r.artist_id and not original_artist_id:
-                original_artist_id = r.artist_id
-                original.artist_id = original_artist_id
-                logger.debug(f"[URL Mode] Found original in YTM with artist_id={r.artist_id}")
-
-            if r.video_id not in seen_ids:
-                seen_ids.add(r.video_id)
-                all_ytm_results.append(r)
-                if r.video_id == video_id and r.source == 'ytm_song':
-                    original_found_as_atv = True
-                    logger.info(f"[URL Mode] Original {video_id} found as ATV in YTM")
-
-    # Search YouTube (title only), excluding IDs already seen
-    yt_results = await search_youtube(title, limit=6)
-    yt_results = [r for r in yt_results if r.video_id not in seen_ids and r.video_id != video_id]
-
-    # Split into songs and videos
-    songs = [r for r in all_ytm_results if r.source == 'ytm_song']
-    videos = [r for r in all_ytm_results if r.source == 'ytm_video'] + yt_results
-
-    # Garbage filter videos only - YTM ATVs are curated, trust them
-    videos = [r for r in videos if is_relevant(title, r)]
-
-    # Determine recommended_id using confidence-based scoring
-    recommended_id: Optional[str] = None
-    star: Optional[SearchResult] = None
-
-    if original_found_as_atv:
-        # The user's URL IS the ATV - perfect match
-        recommended_id = video_id
-        logger.info(f"[URL Mode] Original {video_id} IS the ATV - 100% match")
-    elif songs:
-        # Use confidence-based star scoring
-        original_meta = OriginalMetadata(
-            title=title,
-            artist=author,
-            artist_id=original_artist_id,
-        )
-        star = find_star(original_meta, songs)
-        if star:
-            recommended_id = star.video_id
-
-    # Select top 3 songs, but ensure starred track is included if found
-    top_songs = songs[:3]
-    if star and star not in top_songs:
-        # Replace last slot with starred track so it's visible
-        logger.info(f"[URL Mode] Moving starred track '{star.title}' into visible results")
-        top_songs = songs[:2] + [star]
-
-    # Select top 3 videos
-    top_videos = videos[:3]
-
-    logger.info(f"[URL Mode] {video_id} -> {len(top_songs)} songs, {len(top_videos)} videos")
-
-    return original, top_songs, top_videos, recommended_id
-
-
-# ==========================================================================
-# THUMBNAIL FUNCTIONS
-# ==========================================================================
+    if count is None:
+        return ""
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f}B views"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M views"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}K views"
+    return f"{count} views"
+
+
+# =============================================================================
+# SECTION 8: THUMBNAILS
+# =============================================================================
+# Completely separate concern. Could be its own file.
+# Grouped at bottom because it's orthogonal to search flow.
 
 
 def resize_ytm_thumbnail(url: str, size: int = THUMBNAIL_WIDTH) -> str:
@@ -2034,6 +2131,27 @@ def resize_ytm_thumbnail(url: str, size: int = THUMBNAIL_WIDTH) -> str:
     url = re.sub(r'=w\d+-h\d+', f'=w{size}-h{size}', url)
     url = re.sub(r'=s\d+', f'=s{size}', url)
     return url
+
+
+def get_thumbnail_url(result: SearchResult, size: int = THUMBNAIL_WIDTH) -> Optional[str]:
+    """Get the best thumbnail URL for a search result.
+
+    Args:
+        result: SearchResult object.
+        size: Target size for square thumbnails.
+
+    Returns:
+        Thumbnail URL or None.
+    """
+    if not result.thumbnail_url:
+        if result.video_id:
+            return f"https://img.youtube.com/vi/{result.video_id}/sddefault.jpg"
+        return None
+
+    if result.thumbnail_is_square:
+        return resize_ytm_thumbnail(result.thumbnail_url, size)
+
+    return result.thumbnail_url
 
 
 async def fetch_thumbnail_bytes(url: str) -> Optional[bytes]:
@@ -2180,27 +2298,6 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
     return None
 
 
-def get_thumbnail_url(result: SearchResult, size: int = THUMBNAIL_WIDTH) -> Optional[str]:
-    """Get the best thumbnail URL for a search result.
-
-    Args:
-        result: SearchResult object.
-        size: Target size for square thumbnails.
-
-    Returns:
-        Thumbnail URL or None.
-    """
-    if not result.thumbnail_url:
-        if result.video_id:
-            return f"https://img.youtube.com/vi/{result.video_id}/sddefault.jpg"
-        return None
-
-    if result.thumbnail_is_square:
-        return resize_ytm_thumbnail(result.thumbnail_url, size)
-
-    return result.thumbnail_url
-
-
 async def _probe_thumbnail_dimensions(url: str) -> Optional[Tuple[int, int]]:
     """Uses ffprobe to get actual dimensions of a thumbnail URL.
 
@@ -2304,17 +2401,3 @@ async def extract_best_thumbnail_from_info(info: Dict[str, Any]) -> Tuple[Option
     best = max(usable, key=lambda t: t.get('width', 0) * t.get('height', 0))
     logger.info(f"[Thumbnail] Using largest: {best.get('width')}x{best.get('height')}")
     return best.get('url'), False
-
-
-async def search_youtube_legacy(
-    query: str,
-    max_results: int,
-    logger_instance: Any,
-    ydl_opts: Optional[Dict[str, Any]] = None
-) -> List['Track']:
-    """Legacy wrapper for old search_youtube signature.
-
-    Maintains compatibility with existing code during migration.
-    """
-    results = await search_youtube(query, limit=max_results)
-    return [r.to_track() for r in results]

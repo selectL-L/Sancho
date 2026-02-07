@@ -93,7 +93,6 @@ from utils.musicutils.search import (
     is_atv,
     # YouTube search
     search_youtube as search_youtube_results,
-    search_youtube_legacy,
     # Unified search
     search_query_mode,
     search_url_mode,
@@ -218,7 +217,6 @@ __all__ += [
     'search_youtube_results',
     'search_query_mode',
     'search_url_mode',
-    'search_youtube_legacy',
     'is_relevant',
     'dedupe_results',
 ]
