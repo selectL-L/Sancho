@@ -28,7 +28,7 @@ Architecture: Top-to-bottom data flow
 5. TEXT ANALYSIS      - String comparison, relevance
 6. CJK SUPPORT       - Transliteration, script detection
 7. PURE UTILITIES    - Stateless helpers
-8. THUMBNAILS        - Separate concern (could be own file)
+8. THUMBNAILS        - Separate concern
 """
 
 from __future__ import annotations
@@ -202,6 +202,33 @@ class OriginalMetadata:
     artist_id: Optional[str] = None
 
 
+@dataclass
+class MetadataExtraction:
+    """Output from _build_original_metadata — everything needed for search.
+
+    Transport container: downstream functions unpack only the fields they need.
+    Named fields prevent positional swap-bugs (multiple str fields).
+
+    Attributes:
+        original: SearchResult built from the video's metadata.
+        base_query: Pre-computed search query (mf_title or vd_title depending
+            on video type and mismatch status). Author is NOT included.
+        vd_title: Raw videoDetails title, always the clean song name.
+            Used for CJK query pairing (CJK metadata is reliably mapped).
+        author: Channel/artist name for display and star scoring only.
+        jp_names: CJK artist name variants extracted from video tags.
+        mismatch_detected: True if videoDetails title diverged from raw YouTube title.
+        video_type: musicVideoType from videoDetails (ATV/OMV/UGC/etc.).
+    """
+    original: SearchResult
+    base_query: str
+    vd_title: str
+    author: str
+    jp_names: List[str]
+    mismatch_detected: bool
+    video_type: str
+
+
 # =============================================================================
 # SECTION 1: ENTRY POINTS
 # =============================================================================
@@ -256,16 +283,16 @@ async def search_url_mode(
         return atv_result, [], [], video_id
 
     # Phase 3: Build original SearchResult and extract search parameters
-    original, title, author, jp_names, mismatch_detected = _build_original_metadata(video_id, metadata)
+    ext = _build_original_metadata(video_id, metadata)
 
     # Phase 4: Search for alternatives
     songs, videos, original_found_as_atv = await _search_alternatives(
-        title, author, jp_names, video_id, original, mismatch_detected
+        ext.base_query, ext.vd_title, ext.jp_names, video_id, ext.original
     )
 
     # Phase 5: Pick recommendation
     recommended_id, star = _select_recommendation(
-        original, songs, original_found_as_atv, title, author
+        ext.original, songs, original_found_as_atv, ext.vd_title, ext.author
     )
 
     # Select top 3 songs, but ensure starred track is included if found
@@ -283,7 +310,7 @@ async def search_url_mode(
 
     logger.info(f"[URL Mode] {video_id} -> {len(top_songs)} songs, {len(top_videos)} videos")
 
-    return original, top_songs, top_videos, recommended_id
+    return ext.original, top_songs, top_videos, recommended_id
 
 
 async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[SearchResult], Optional[str]]:
@@ -464,29 +491,36 @@ async def _build_atv_result(video_id: str, metadata: Dict[str, Any]) -> SearchRe
 def _build_original_metadata(
     video_id: str,
     metadata: Dict[str, Any],
-) -> Tuple[SearchResult, str, str, List[str], bool]:
+) -> MetadataExtraction:
     """Extract search parameters and build original SearchResult from metadata.
 
-    Handles catalog mismatch detection (microformat vs videoDetails title)
+    Handles catalog mismatch detection, video-type-aware query strategy,
     and Japanese name extraction from tags.
+
+    Query strategy (base_query selection):
+        - Mismatch detected → microformat title (catalog pointed to wrong song)
+        - UGC → vd_title (author is cover channel, not the artist)
+        - OMV → microformat title if it differs from vd_title (contains artist
+          name in YouTube's raw format, e.g. "Artist - Song"), else vd_title
+        - Other (ATV, etc.) → vd_title (trust videoDetails)
+
+    Author is excluded from queries entirely — it's unreliable for UGCs
+    (cover channels) and OMVs (VEVO/Topic channels). Kept for display
+    and star scoring only.
 
     Args:
         video_id: YouTube video ID.
         metadata: Raw metadata from get_ytm_metadata().
 
     Returns:
-        Tuple of:
-        - original_result: SearchResult built from the video's metadata.
-        - title: Best title for searching (microformat if mismatch, else videoDetails).
-        - author: Author/channel name for searching.
-        - jp_names: CJK artist name variants extracted from video tags.
-        - mismatch_detected: True if videoDetails title diverged from raw YouTube title.
+        MetadataExtraction with all fields populated.
     """
     video_details = metadata.get('videoDetails', {})
 
     # Start with videoDetails (structured metadata)
     vd_title = video_details.get('title', 'Unknown')
     vd_author = video_details.get('author', 'Unknown')
+    video_type = video_details.get('musicVideoType', '')
     duration = int(video_details.get('lengthSeconds', 0) or 0)
     view_count = extract_view_count(metadata)
 
@@ -497,22 +531,34 @@ def _build_original_metadata(
 
     # Check for YTM catalog mismatch (videoDetails points to wrong song).
     # This happens when YTM's catalog maps the wrong song to a video ID.
-    # If detected, use microformat title for SEARCHING (it's the raw YouTube title),
-    # but keep videoDetails author for display. We don't parse the microformat—
-    # just use it as-is since it contains the accurate video title.
     mismatch_detected = bool(mf_title) and has_ytm_catalog_mismatch(vd_title, mf_title)
     if mismatch_detected:
         logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
-        title = mf_title  # Use full microformat title for search
-        author = vd_author  # Keep videoDetails author for display
+
+    # Determine base query by video type and mismatch status.
+    # Author is intentionally excluded — unreliable for UGCs (cover channels)
+    # and OMVs (VEVO/Topic channels). Microformat title for OMVs already
+    # contains the artist name (e.g. "Pop Smoke - Dior (Official Audio)").
+    if mismatch_detected:
+        base_query = mf_title
+    elif video_type == MUSIC_VIDEO_TYPE_UGC:
+        base_query = vd_title
+    elif video_type == MUSIC_VIDEO_TYPE_OMV:
+        if mf_title and mf_title != vd_title:
+            base_query = mf_title
+        else:
+            base_query = vd_title
     else:
-        # No mismatch—trust videoDetails
-        title = vd_title
-        author = vd_author
+        base_query = vd_title
+
+    logger.debug(
+        f"[URL Mode] Query strategy: video_type={video_type}, "
+        f"mismatch={mismatch_detected}, base_query='{base_query}'"
+    )
 
     # Extract tags for Japanese name extraction
     tags = microformat.get('tags', [])
-    jp_names = extract_jp_names(tags, video_title=title, author=author)
+    jp_names = extract_jp_names(tags, video_title=vd_title, author=vd_author)
 
     # Build original SearchResult
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
@@ -520,8 +566,8 @@ def _build_original_metadata(
 
     original = SearchResult(
         video_id=video_id,
-        title=title,
-        artist=author,
+        title=vd_title,
+        artist=vd_author,
         artist_id=None,
         duration_seconds=duration,
         thumbnail_url=thumb_url,
@@ -531,46 +577,47 @@ def _build_original_metadata(
         view_count=view_count,
     )
 
-    return original, title, author, jp_names, mismatch_detected
+    return MetadataExtraction(
+        original=original,
+        base_query=base_query,
+        vd_title=vd_title,
+        author=vd_author,
+        jp_names=jp_names,
+        mismatch_detected=mismatch_detected,
+        video_type=video_type,
+    )
 
 
 async def _search_alternatives(
-    title: str,
-    author: str,
+    base_query: str,
+    vd_title: str,
     jp_names: List[str],
     video_id: str,
     original: SearchResult,
-    mismatch_detected: bool,
 ) -> Tuple[List[SearchResult], List[SearchResult], bool]:
     """Run multi-query search across YTM and YouTube.
 
+    Query strategy is fully resolved upstream in _build_original_metadata().
+    This function just executes the queries — no branching on video type
+    or mismatch status.
+
     Args:
-        title: Video title (may be microformat title if mismatch detected).
-        author: Video author.
+        base_query: Pre-computed search query (title only, no author).
+        vd_title: Raw videoDetails title for CJK query pairing and filtering.
         jp_names: Japanese name variants extracted from tags.
         video_id: Original video ID to exclude from results.
         original: The original SearchResult (mutated to attach artist_id if found).
-        mismatch_detected: Whether a catalog mismatch was detected.
 
     Returns:
         Tuple of (songs, videos, original_found_as_atv).
     """
-    # Multi-query search for CJK content.
-    # Query order depends on data quality:
-    # - No mismatch (clean metadata): "{author} {title}" (conventional artist-first)
-    # - Mismatch (raw YT title): "{title} {author}" (title is more reliable)
-    # Additional queries are added ONLY when Japanese name variants are detected
-    # in the video tags (e.g., artist name in kanji/romaji). This helps find
-    # YTM songs that might be indexed under different name spellings.
-    if mismatch_detected:
-        # Title is raw YouTube title (more reliable), author may be just channel name
-        queries = [f"{title} {author}"]
-    else:
-        # Clean metadata—use conventional "Artist Song" order
-        queries = [f"{author} {title}"]
-
+    # Build query list. base_query handles the primary search.
+    # CJK queries always pair vd_title (the clean song name) with Japanese
+    # name variants — CJK metadata on YTM is reliably mapped, so vd_title
+    # is always safe for this pairing.
+    queries = [base_query]
     for jp_name in jp_names[:2]:
-        queries.append(f"{title} {jp_name}")
+        queries.append(f"{vd_title} {jp_name}")
 
     # Search YTM with all queries, collecting unique results
     all_ytm_results: List[SearchResult] = []
@@ -594,8 +641,8 @@ async def _search_alternatives(
                     original_found_as_atv = True
                     logger.info(f"[URL Mode] Original {video_id} found as ATV in YTM")
 
-    # Search YouTube (title only), excluding IDs already seen
-    yt_results = await search_youtube(title, limit=6)
+    # Search YouTube (vd_title only), excluding IDs already seen
+    yt_results = await search_youtube(vd_title, limit=6)
     yt_results = [r for r in yt_results if r.video_id not in seen_ids and r.video_id != video_id]
 
     # Split into songs and videos
@@ -603,7 +650,7 @@ async def _search_alternatives(
     videos = [r for r in all_ytm_results if r.source == 'ytm_video'] + yt_results
 
     # Garbage filter videos only - YTM ATVs are curated, trust them
-    videos = [r for r in videos if is_relevant(title, r)]
+    videos = [r for r in videos if is_relevant(vd_title, r)]
 
     return songs, videos, original_found_as_atv
 
