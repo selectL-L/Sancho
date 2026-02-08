@@ -278,6 +278,9 @@ async def search_url_mode(
     # Select top 3 videos
     top_videos = videos[:3]
 
+    # Lightweight backfill: only enrich the final results shown to the user
+    await _backfill_missing_metadata(top_songs + top_videos)
+
     logger.info(f"[URL Mode] {video_id} -> {len(top_songs)} songs, {len(top_videos)} videos")
 
     return original, top_songs, top_videos, recommended_id
@@ -333,11 +336,17 @@ async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[Search
     # First ATV gets recommended (query mode has no original to compare against)
     recommended_id = songs[0].video_id if songs else None
 
+    top_songs = songs[:3]
+    top_videos = videos[:3]
+
+    # Lightweight backfill: only enrich the final results shown to the user
+    await _backfill_missing_metadata(top_songs + top_videos)
+
     logger.info(
-        f"[Query Mode] '{query}' -> {len(songs[:3])} songs + {len(videos[:3])} videos"
+        f"[Query Mode] '{query}' -> {len(top_songs)} songs + {len(top_videos)} videos"
     )
 
-    return songs[:3], videos[:3], recommended_id
+    return top_songs, top_videos, recommended_id
 
 
 # =============================================================================
@@ -345,6 +354,40 @@ async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[Search
 # =============================================================================
 # Break down the complex flows in entry points into named steps.
 # These are "private" to the module — called only by entry points.
+
+
+async def _backfill_missing_metadata(results: List[SearchResult]) -> None:
+    """Backfill duration and view_count on final results shown to the user.
+
+    Called after truncation to [:3] so we only fetch metadata for results
+    that will actually appear in the embed. Songs filter already provides
+    these fields for most ATVs, so this typically fires 0-3 calls for
+    video-type results only.
+
+    Args:
+        results: The final list of SearchResults to enrich (mutated in place).
+    """
+    needs_backfill = [
+        r for r in results
+        if r.video_id and (r.duration_seconds is None or r.view_count is None)
+    ]
+
+    if not needs_backfill:
+        return
+
+    async def fetch_and_update(result: SearchResult) -> None:
+        metadata = await get_ytm_metadata(result.video_id)
+        if metadata:
+            video_details = metadata.get('videoDetails', {})
+            if result.duration_seconds is None:
+                length = video_details.get('lengthSeconds')
+                if length:
+                    result.duration_seconds = int(length)
+            if result.view_count is None:
+                result.view_count = extract_view_count(metadata)
+
+    await asyncio.gather(*[fetch_and_update(r) for r in needs_backfill])
+    logger.debug(f"[Backfill] Enriched {len(needs_backfill)} results with get_song()")
 
 
 async def _fetch_and_validate_original(video_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
@@ -726,28 +769,6 @@ async def search_ytm(query: str, limit: int = 10) -> List[SearchResult]:
                 if result.video_id in explicit_map:
                     result.is_explicit = explicit_map[result.video_id]
                 parsed.append(result)
-
-        # Fetch metadata for results missing duration or view_count
-        # Collect all results that need metadata fetching
-        results_needing_metadata = [
-            r for r in parsed
-            if r.video_id and (r.duration_seconds is None or r.view_count is None)
-        ]
-
-        if results_needing_metadata:
-            # Fetch metadata in parallel for efficiency
-            async def fetch_and_update(result: SearchResult) -> None:
-                metadata = await get_ytm_metadata(result.video_id)
-                if metadata:
-                    video_details = metadata.get('videoDetails', {})
-                    if result.duration_seconds is None:
-                        length = video_details.get('lengthSeconds')
-                        if length:
-                            result.duration_seconds = int(length)
-                    if result.view_count is None:
-                        result.view_count = extract_view_count(metadata)
-
-            await asyncio.gather(*[fetch_and_update(r) for r in results_needing_metadata])
 
         # Log results
         songs = sum(1 for r in parsed if r.source == 'ytm_song')
