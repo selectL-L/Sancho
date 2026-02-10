@@ -383,27 +383,28 @@ class ImageCog(BaseCog):
             self.logger.error(f"Failed to fetch banner: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to fetch that banner.")
 
-    async def _find_image_attachment(self, message: discord.Message) -> Optional[discord.Attachment]:
-        """Finds a valid image attachment in the message or its reply context.
+    async def _find_image_attachments(self, message: discord.Message) -> list[discord.Attachment]:
+        """Finds all valid image attachments in the message or its reply context.
+
+        Checks the current message first. If no images are found there, falls
+        back to checking the replied-to message.
 
         Args:
-            message (discord.Message): The message to check.
+            message: The message to check.
 
         Returns:
-            Optional[discord.Attachment]: The found attachment, or None.
+            A list of image attachments found, which may be empty.
         """
         # Check current message attachments.
-        for attachment in message.attachments:
-            if attachment.content_type and attachment.content_type.startswith('image/'):
-                return attachment
+        attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith('image/')]
+        if attachments:
+            return attachments
 
-        # Check reply attachments.
+        # Fall back to reply attachments.
         if message.reference and isinstance(message.reference.resolved, discord.Message):
-            for attachment in message.reference.resolved.attachments:
-                if attachment.content_type and attachment.content_type.startswith('image/'):
-                    return attachment
+            return [a for a in message.reference.resolved.attachments if a.content_type and a.content_type.startswith('image/')]
 
-        return None
+        return []
 
     async def resize(self, ctx: commands.Context, *, query: str) -> None:
         """NLP handler for resizing an image.
@@ -427,8 +428,8 @@ class ImageCog(BaseCog):
             await ctx.send("Invalid dimensions. Both width and height must be between 1 and 4000 pixels.")
             return
 
-        attachment = await self._find_image_attachment(ctx.message)
-        if not attachment:
+        attachments = await self._find_image_attachments(ctx.message)
+        if not attachments:
             await ctx.send("Please attach an image or reply to a message with an image to resize.")
             return
 
@@ -457,13 +458,25 @@ class ImageCog(BaseCog):
 
         try:
             async with ctx.typing():  # Show a "typing..." indicator.
-                image_bytes = await attachment.read()
+                # Fetch all image bytes concurrently.
+                all_bytes = await asyncio.gather(*[a.read() for a in attachments])
 
-                # Run the blocking image processing in a separate thread.
-                buffer = await asyncio.to_thread(_processing_thread, image_bytes, new_size)
+                # Process all images concurrently in threads.
+                buffers = await asyncio.gather(*[
+                    asyncio.to_thread(_processing_thread, img_bytes, new_size)
+                    for img_bytes in all_bytes
+                ])
 
-                filename = f"resized_{attachment.filename}"
-                await ctx.send(f"Here is the image resized to {new_size[0]}x{new_size[1]}:", file=discord.File(buffer, filename=filename))
+                files = [
+                    discord.File(buf, filename=f"resized_{att.filename}")
+                    for att, buf in zip(attachments, buffers, strict=True)
+                ]
+
+                label = f"{new_size[0]}x{new_size[1]}"
+                if len(files) == 1:
+                    await ctx.send(f"Here is the image resized to {label}:", file=files[0])
+                else:
+                    await ctx.send(f"Here are {len(files)} images resized to {label}:", files=files)
         except Exception as e:
             self.logger.error(f"Failed to resize image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to resize that image.")
@@ -496,8 +509,8 @@ class ImageCog(BaseCog):
         # Get the single target format and make it uppercase.
         target_format = found_formats.pop().upper()
 
-        attachment = await self._find_image_attachment(ctx.message)
-        if not attachment:
+        attachments = await self._find_image_attachments(ctx.message)
+        if not attachments:
             await ctx.send("Please attach an image or reply to a message with an image to convert.")
             return
 
@@ -526,16 +539,25 @@ class ImageCog(BaseCog):
 
         try:
             async with ctx.typing():
-                image_bytes = await attachment.read()
+                # Fetch all image bytes concurrently.
+                all_bytes = await asyncio.gather(*[a.read() for a in attachments])
 
-                # Run the blocking image processing in a separate thread.
-                buffer = await asyncio.to_thread(_processing_thread, image_bytes, target_format)
+                # Process all images concurrently in threads.
+                buffers = await asyncio.gather(*[
+                    asyncio.to_thread(_processing_thread, img_bytes, target_format)
+                    for img_bytes in all_bytes
+                ])
 
-                # Create a new filename with the correct extension.
-                base_filename = attachment.filename.rsplit('.', 1)[0]
-                new_filename = f"{base_filename}.{target_format.lower()}"
+                ext = target_format.lower()
+                files = [
+                    discord.File(buf, filename=f"{att.filename.rsplit('.', 1)[0]}.{ext}")
+                    for att, buf in zip(attachments, buffers, strict=True)
+                ]
 
-                await ctx.send(f"Here is the image converted to {target_format}:", file=discord.File(buffer, filename=new_filename))
+                if len(files) == 1:
+                    await ctx.send(f"Here is the image converted to {target_format}:", file=files[0])
+                else:
+                    await ctx.send(f"Here are {len(files)} images converted to {target_format}:", files=files)
         except Exception as e:
             self.logger.error(f"Failed to convert image: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to convert that image.")
