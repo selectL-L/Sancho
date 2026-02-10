@@ -96,6 +96,15 @@ GARBAGE_SIMILARITY_THRESHOLD = 0.3  # Below this = garbage (same-script only)
 # may not perfectly capture all representations.
 CROSS_SCRIPT_GARBAGE_THRESHOLD = 0.25
 
+# Garbage filter — word overlap coverage thresholds
+# These control how much of the query needs to match at word-level
+# before we trust it without character-level similarity backup.
+OVERLAP_STRONG = 0.5     # >= half of query words matched -> pass directly
+OVERLAP_MINIMUM = 1 / 3  # >= third of query words -> pass with sim check
+# When NO word overlap AND no containment, character-level sim alone must
+# be very high (e.g. "acacia syndrome" vs CamelCase "AcaciaSyndrome").
+NO_SIGNAL_SIM_THRESHOLD = 0.55
+
 # Thumbnail constants
 THUMBNAIL_WIDTH = 720  # Target width for resized thumbnails
 
@@ -191,6 +200,7 @@ class SearchResult:
             is_explicit=self.is_explicit,
             version_label=self.version_label,
             view_count=self.view_count,
+            video_type=self.video_type,
         )
 
 
@@ -279,7 +289,7 @@ async def search_url_mode(
 
     # Phase 2: If already an ATV, return it directly
     if already_atv:
-        atv_result = await _build_atv_result(video_id, metadata)
+        atv_result = await _build_quick_result(video_id, metadata)
         return atv_result, [], [], video_id
 
     # Phase 3: Build original SearchResult and extract search parameters
@@ -432,59 +442,132 @@ async def _fetch_and_validate_original(video_id: str) -> Tuple[Optional[Dict[str
     return metadata, is_atv(metadata)
 
 
-async def _build_atv_result(video_id: str, metadata: Dict[str, Any]) -> SearchResult:
-    """Construct SearchResult for a confirmed ATV.
+async def _build_quick_result(
+    video_id: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> SearchResult:
+    """Construct SearchResult for any video via get_song() + targeted enrichment.
 
-    Tries YTM search first (for full metadata with album info), falls back
-    to building from get_song() metadata.
+    Uses get_song() as the primary metadata source (provides title, artist,
+    duration, video type, thumbnails, view count). Only performs an additional
+    filtered YTM songs search for ATVs, where album and isExplicit are
+    available. For UGC/OMV, get_song() has everything we need.
+
+    When called from the interactive search flow, pre-fetched get_song()
+    metadata is passed in via ``metadata`` to avoid a redundant API call.
+    When called from the ambient resolution pipeline, metadata is None and
+    this function fetches it internally.
 
     Args:
         video_id: YouTube video ID.
-        metadata: Raw metadata from get_ytm_metadata().
+        metadata: Pre-fetched get_song() metadata, or None to self-fetch.
 
     Returns:
-        SearchResult with ATV metadata.
+        SearchResult with the best available metadata.
     """
-    logger.info(f"[URL Mode] {video_id} is already an ATV, fetching full metadata from YTM")
+    logger.info(f"[Quick Result] Resolving metadata for {video_id}")
 
-    # Search YTM by video ID - this gives us the complete SearchResult with album info
-    ytm_results = await search_ytm(video_id, limit=1)
-    for result in ytm_results:
-        if result.video_id == video_id:
-            logger.debug(f"[URL Mode] Found ATV in YTM search: album='{result.album}'")
-            return result
+    # Step 1: get_song() as primary source
+    if metadata is None:
+        metadata = await get_ytm_metadata(video_id)
 
-    # Fallback: build from get_song() metadata if YTM search didn't find it
-    # (This can happen if the ATV is region-locked or very new)
-    logger.debug("[URL Mode] ATV not found in YTM search, using get_song() metadata")
+    if not metadata:
+        logger.info(f"[Quick Result] No YTM metadata available for {video_id}")
+        return SearchResult(
+            video_id=video_id,
+            title="Unknown",
+            artist="Unknown",
+            source='youtube',
+            version_label='Video',
+        )
+
     video_details = metadata.get('videoDetails', {})
 
-    # For ATVs, videoDetails.author IS the clean artist name (not channel)
-    atv_title = video_details.get('title', 'Unknown')
-    atv_artist = video_details.get('author', 'Unknown')
-    atv_duration = int(video_details.get('lengthSeconds', 0) or 0)
-    atv_view_count = extract_view_count(metadata)
+    # Detect video type from get_song() response
+    raw_video_type = video_details.get('musicVideoType', '')
+    detected_is_atv = raw_video_type == MUSIC_VIDEO_TYPE_ATV
+    detected_video_type = raw_video_type if raw_video_type in VERSION_LABELS else None
 
-    # ATVs have square thumbnails
+    # Base fields from get_song()
+    title = video_details.get('title', 'Unknown')
+    # For ATVs, videoDetails.author is the clean artist name.
+    # For non-ATVs, it's the channel name (best we have).
+    artist = video_details.get('author', 'Unknown')
+    duration = int(video_details.get('lengthSeconds', 0) or 0)
+    view_count_val = extract_view_count(metadata)
+
+    # Thumbnail: check actual dimensions rather than assuming square
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
-    atv_thumb_url = None
+    thumb_url = None
+    thumb_is_square = False
     if thumbnails:
-        # Get largest thumbnail and resize
         raw_url = thumbnails[-1].get('url')
+        raw_w = thumbnails[-1].get('width', 0)
+        raw_h = thumbnails[-1].get('height', 0)
         if raw_url:
-            atv_thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
+            thumb_is_square = (raw_w == raw_h) if (raw_w and raw_h) else detected_is_atv
+            if thumb_is_square:
+                thumb_url = resize_ytm_thumbnail(raw_url, THUMBNAIL_WIDTH)
+            else:
+                # get_song() videoDetails thumbnails have ?sqp= params that apply
+                # server-side de-letterboxing (removes black bars, crops content).
+                # Use clean maxresdefault.jpg to match get_thumbnail_bytes Priority 3.
+                thumb_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+
+    # Derive source and version_label from video type
+    source = 'ytm_song' if detected_is_atv else 'ytm_video'
+    version_label = determine_version_label(detected_video_type, source)
+
+    # Step 2: For ATVs only, do a filtered songs search to get album + isExplicit
+    # (get_song() doesn't return these; only the songs-filtered search endpoint does)
+    album: Optional[str] = None
+    is_explicit: Optional[bool] = None
+
+    if detected_is_atv:
+        try:
+            ytm = _get_ytm()
+            if ytm:
+                def do_songs_search() -> List[Dict[str, Any]]:
+                    return ytm.search(video_id, filter="songs", limit=1)  # type: ignore[union-attr]
+
+                songs_results = await asyncio.wait_for(
+                    asyncio.to_thread(do_songs_search),
+                    timeout=10.0,
+                )
+                for item in songs_results:
+                    if item.get('videoId') == video_id:
+                        album_info = item.get('album')
+                        if album_info:
+                            album = album_info.get('name')
+                        is_explicit = item.get('isExplicit')
+                        logger.info(
+                            f"[Quick Result] ATV enriched: album='{album}', "
+                            f"explicit={is_explicit}"
+                        )
+                        break
+                else:
+                    logger.info(f"[Quick Result] ATV {video_id} not found in songs search")
+        except Exception as e:
+            logger.info(f"[Quick Result] ATV songs search failed for {video_id}: {e}")
+
+    logger.info(
+        f"[Quick Result] Resolved {video_id}: '{title}' by '{artist}' "
+        f"type={detected_video_type}"
+    )
 
     return SearchResult(
         video_id=video_id,
-        title=atv_title,
-        artist=atv_artist,
-        duration_seconds=atv_duration,
-        thumbnail_url=atv_thumb_url,
-        thumbnail_is_square=True,  # ATVs always have square art
-        source='ytm_song',
-        video_type=MUSIC_VIDEO_TYPE_ATV,
-        version_label='Official Audio',
-        view_count=atv_view_count,
+        title=title,
+        artist=artist,
+        duration_seconds=duration,
+        thumbnail_url=thumb_url,
+        thumbnail_is_square=thumb_is_square,
+        source=source,
+        video_type=detected_video_type,
+        version_label=version_label,
+        view_count=view_count_val,
+        album=album,
+        is_explicit=is_explicit,
     )
 
 
@@ -1005,19 +1088,21 @@ def is_relevant(query: str, result: SearchResult) -> bool:
 
     Uses language-aware filtering with transliteration support:
     - Expands CJK text to romanized forms for cross-script verification
-    - Cross-script matches: attempt verification, fall back to trusting YTM
-    - Same-script matches: use similarity/containment checks
+    - Tiered confidence: word overlap + containment add confidence but are
+      NOT automatic passes (unlike previous version)
+    - Character similarity required as confirmation for partial matches
 
-    DESIGN PHILOSOPHY (Data Gathering Phase):
-    We currently TRUST YTM for cross-script results while LOGGING what we see.
-    YTM is more selective about returning cross-language results, so their
-    cross-script results are generally higher quality. However, we want to
-    gather data on:
-    1. How often transliteration verification succeeds vs fails
-    2. What similarity scores cross-script results typically get
-    3. Whether blind trust ever lets through garbage
+    Tiered confidence model:
+    1. Strong word overlap (>= half of query words) -> pass immediately
+    2. Partial word overlap (>= 1/3) + character sim >= threshold -> pass
+    3. Containment match + character sim >= threshold -> pass
+    4. No word signal at all -> require very high character sim (>= 0.55)
+       to handle cases like "acacia syndrome" vs CamelCase "AcaciaSyndrome"
+    5. Otherwise -> filtered as garbage
 
-    This logging will help us decide if/when to tighten cross-script filtering.
+    Word overlap and containment add confidence but are NOT automatic passes.
+    A single shared word (e.g. "shion" in a 3-word query) only covers 1/3
+    of the query — it needs character similarity backup to confirm relevance.
 
     Args:
         query: Original search query.
@@ -1032,60 +1117,80 @@ def is_relevant(query: str, result: SearchResult) -> bool:
 
     combined = f"{result.title} {result.artist}"
 
+    # --- Word-level signals ---
     # Extract words from ALL representations (original + transliterated)
-    # This is the key to cross-script verification: "紫咲シオン" expands to
-    # include "murasaki", "shion" which can match query "Murasaki Shion"
+    # "紫咲シオン" expands to include "murasaki", "shion" for cross-script matching
     query_words = extract_words_expanded(query)
     result_words = extract_words_expanded(combined)
-
-    # Word overlap in ANY representation = definitely relevant
     word_overlap = query_words & result_words
-    if word_overlap:
-        if is_cross_script:
-            logger.info(
-                f"[Cross-Script Verified] query='{query}' | "
-                f"result='{result.title}' by '{result.artist}' | "
-                f"overlapping_words={word_overlap}"
-            )
-        return True
+    overlap_ratio = len(word_overlap) / len(query_words) if query_words else 0.0
 
     # Containment check across all representations
-    # Check if any representation of query is contained in any representation of result
+    has_containment = False
     for q_repr in expand_text(query):
         q_norm = normalize_text(q_repr)
         for r_repr in expand_text(combined):
             r_norm = normalize_text(r_repr)
             if q_norm in r_norm or r_norm in q_norm:
-                if is_cross_script:
-                    logger.info(
-                        f"[Cross-Script Containment] query='{query}' ({q_repr}) | "
-                        f"result='{result.title}' ({r_repr})"
-                    )
-                return True
+                has_containment = True
+                break
+        if has_containment:
+            break
 
-    # Similarity fallback (on original text - transliteration handled above)
+    # --- Character-level similarity ---
     title_sim = text_similarity(query, result.title)
     combined_sim = text_similarity(query, combined)
     best_sim = max(title_sim, combined_sim)
 
-    # Use script-appropriate threshold
-    # Cross-script gets lower threshold because YTM is more selective
     threshold = CROSS_SCRIPT_GARBAGE_THRESHOLD if is_cross_script else GARBAGE_SIMILARITY_THRESHOLD
+    has_word_signal = bool(word_overlap) or has_containment
+
+    # --- Tiered decision ---
+
+    # Tier 1: Strong word overlap (>= half of query words) -> pass directly
+    if overlap_ratio >= OVERLAP_STRONG:
+        if is_cross_script:
+            logger.info(
+                f"[Cross-Script Verified] query='{query}' | "
+                f"result='{result.title}' by '{result.artist}' | "
+                f"overlapping_words={word_overlap} ({overlap_ratio:.0%})"
+            )
+        return True
+
+    # Tier 2: Partial word signal + character similarity confirmation
+    if has_word_signal and best_sim >= threshold:
+        if is_cross_script:
+            logger.info(
+                f"[Cross-Script Partial] query='{query}' | "
+                f"result='{result.title}' by '{result.artist}' | "
+                f"overlap={word_overlap} ({overlap_ratio:.0%}), "
+                f"containment={has_containment}, sim={best_sim:.2f}"
+            )
+        return True
+
+    # Tier 3: No word signal at all -> require much higher character similarity
+    # Handles CamelCase/concatenation ("acacia syndrome" vs "AcaciaSyndrome")
+    if not has_word_signal and best_sim >= NO_SIGNAL_SIM_THRESHOLD:
+        logger.info(
+            f"[Garbage Filter High-Sim Pass] query='{query}' | "
+            f"result='{result.title}' by '{result.artist}' | "
+            f"sim={best_sim:.2f} (no word overlap, no containment)"
+        )
+        return True
 
     # Log borderline cases for threshold tuning
-    if threshold - 0.1 <= best_sim < threshold + 0.1:
+    if has_word_signal and threshold - 0.1 <= best_sim < threshold:
         logger.info(
             f"[Garbage Filter Borderline] query='{query}' | "
             f"result='{result.title}' by '{result.artist}' | "
-            f"title_sim={title_sim:.2f}, combined_sim={combined_sim:.2f} | "
-            f"threshold={threshold} ({'cross-script' if is_cross_script else 'same-script'}) | "
-            f"{'KEPT' if best_sim >= threshold else 'FILTERED'}"
+            f"overlap={word_overlap} ({overlap_ratio:.0%}), "
+            f"sim={best_sim:.2f}, threshold={threshold} | FILTERED"
         )
 
-    if best_sim >= threshold:
-        return True
-
-    logger.info(f"Filtered as garbage: {result.title} (sim={best_sim:.2f})")
+    logger.info(
+        f"Filtered as garbage: {result.title} by {result.artist} "
+        f"(overlap={overlap_ratio:.0%}, containment={has_containment}, sim={best_sim:.2f})"
+    )
     return False
 
 
@@ -2201,27 +2306,6 @@ def resize_ytm_thumbnail(url: str, size: int = THUMBNAIL_WIDTH) -> str:
     return url
 
 
-def get_thumbnail_url(result: SearchResult, size: int = THUMBNAIL_WIDTH) -> Optional[str]:
-    """Get the best thumbnail URL for a search result.
-
-    Args:
-        result: SearchResult object.
-        size: Target size for square thumbnails.
-
-    Returns:
-        Thumbnail URL or None.
-    """
-    if not result.thumbnail_url:
-        if result.video_id:
-            return f"https://img.youtube.com/vi/{result.video_id}/sddefault.jpg"
-        return None
-
-    if result.thumbnail_is_square:
-        return resize_ytm_thumbnail(result.thumbnail_url, size)
-
-    return result.thumbnail_url
-
-
 async def fetch_thumbnail_bytes(url: str) -> Optional[bytes]:
     """Fetch thumbnail bytes from a URL.
 
@@ -2259,7 +2343,7 @@ async def resize_thumbnail_bytes(data: bytes, width: int = THUMBNAIL_WIDTH) -> O
         width: Target width in pixels.
 
     Returns:
-        Resized image bytes (JPEG), or original data if resize fails.
+        Resized image bytes (PNG), or original data if resize fails.
     """
     from .music_helpers import get_ffmpeg_path
 
@@ -2272,8 +2356,7 @@ async def resize_thumbnail_bytes(data: bytes, width: int = THUMBNAIL_WIDTH) -> O
         '-i', 'pipe:0',
         '-vf', f'scale={width}:-1',
         '-f', 'image2',
-        '-c:v', 'mjpeg',
-        '-q:v', '2',
+        '-c:v', 'png',
         'pipe:1'
     ]
 
@@ -2325,7 +2408,7 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
     """Get thumbnail bytes for a Track.
 
     Priority:
-    1. Extract from cached MP3 (already embedded)
+    1. Extract from cached audio file (M4A or MP3, already embedded)
     2. Fetch from track.thumbnail URL (if square)
     3. Fallback to constructed URL from video_id
 
@@ -2337,18 +2420,25 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
         Image bytes, or None if unavailable.
     """
     import os
-    from .music_helpers import extract_mp3_thumbnail
+    from .music_helpers import extract_mp3_thumbnail, extract_m4a_thumbnail
 
-    # Priority 1: Extract from cached MP3
-    cached_mp3_path = None
+    # Priority 1: Extract from cached audio file
+    cached_path = None
     if cache_manager and track.video_id:
-        cached_mp3_path = cache_manager.get_any_local_path(track.video_id)
+        cached_path = cache_manager.get_any_local_path(
+            track.video_id,
+            residential_allowed=False,
+        )
 
-    if cached_mp3_path and os.path.exists(cached_mp3_path):
-        logger.debug(f"[Thumbnail] Checking cached MP3: {os.path.basename(cached_mp3_path)}")
-        thumbnail_data = extract_mp3_thumbnail(cached_mp3_path)
+    if cached_path and os.path.exists(cached_path):
+        logger.debug(f"[Thumbnail] Checking cached file: {os.path.basename(cached_path)}")
+        thumbnail_data = None
+        if cached_path.endswith('.m4a'):
+            thumbnail_data = extract_m4a_thumbnail(cached_path)
+        elif cached_path.endswith('.mp3'):
+            thumbnail_data = extract_mp3_thumbnail(cached_path)
         if thumbnail_data:
-            logger.info(f"[Thumbnail] Using embedded MP3 thumbnail for {track.video_id}")
+            logger.info(f"[Thumbnail] Using embedded thumbnail for {track.video_id}")
             return thumbnail_data
 
     # Priority 2: Use track's thumbnail URL (square only)

@@ -189,6 +189,7 @@ class Track:
     is_explicit: Optional[bool] = None  # True if explicit, False if clean
     version_label: str = "Video"  # "Official Audio", "Music Video", etc.
     view_count: Optional[int] = None  # Raw view count for display
+    video_type: Optional[str] = None  # MUSIC_VIDEO_TYPE_ATV, _OMV, _UGC, _OFFICIAL_SOURCE
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for caching.
@@ -209,6 +210,7 @@ class Track:
             'is_explicit': self.is_explicit,
             'version_label': self.version_label,
             'view_count': self.view_count,
+            'video_type': self.video_type,
         }
 
     @classmethod
@@ -227,6 +229,7 @@ class Track:
             is_explicit=data.get('is_explicit'),
             version_label=data.get('version_label', 'Video'),
             view_count=data.get('view_count'),
+            video_type=data.get('video_type'),
         )
 
 

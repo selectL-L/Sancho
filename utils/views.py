@@ -1495,6 +1495,13 @@ class StatusData:
     cache_residential_cost: float
     cache_last_refresh_ago: Optional[float]  # seconds
 
+    # Cache Provenance
+    cache_ytm_resolved: int
+    cache_ytdlp_fallback: int
+    cache_unresolved: int
+    cache_filenames_modified: int
+    cache_pending_downloads: int
+
     # Database
     db_size_mb: float
 
@@ -1851,6 +1858,18 @@ class StatusView(discord.ui.LayoutView):
             f"**Size:** {d.cache_size_mb:.1f} MB"
         )
         container.add_item(ui.TextDisplay(cache_text))
+
+        # Provenance breakdown (only show if there are tracks)
+        if d.cache_tracks_total > 0:
+            provenance_text = (
+                f"### Metadata Provenance\n"
+                f"**YTM:** {d.cache_ytm_resolved} tracks | "
+                f"**yt-dlp fallback:** {d.cache_ytdlp_fallback} | "
+                f"**Unresolved:** {d.cache_unresolved}\n"
+                f"**Filenames sanitized:** {d.cache_filenames_modified} | "
+                f"**Pending downloads:** {d.cache_pending_downloads}"
+            )
+            container.add_item(ui.TextDisplay(provenance_text))
 
         container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 

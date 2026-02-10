@@ -520,7 +520,10 @@ class AudioFetcher:
         # best quality local files we have. Orphaned files have limited lifetime
         # but are still usable while they exist.
         # ---------------------------------------------------------------------
-        any_cached = self.cache_manager.get_any_local_path(track.video_id)
+        any_cached = self.cache_manager.get_any_local_path(
+            track.video_id,
+            residential_allowed=False,
+        )
         if any_cached:
             self.logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
             self.clear_state(track.video_id)  # Clean up - no retry state needed
@@ -540,8 +543,11 @@ class AudioFetcher:
 
             if result.success:
                 # PREFETCH: Keep state - URL might go stale before playback
-                # LIVE/RETRY: Clear state - we're actually playing now
-                if context != FetchContext.PREFETCH:
+                # LIVE: Clear state - first play, fresh start
+                # RETRY: Keep state - counter must accumulate across FFmpeg
+                #   rejections (yt-dlp "succeeds" but URL may 403 at FFmpeg
+                #   level). Without this, the retry loop is infinite.
+                if context == FetchContext.LIVE:
                     self.clear_state(track.video_id)
                 return result
 
@@ -566,7 +572,10 @@ class AudioFetcher:
         # Note: No "having trouble" message here - cache hit is instant,
         # we don't want users expecting residential downloads to be fast.
         # ---------------------------------------------------------------------
-        cached = self.cache_manager.check_residential(track.video_id)
+        cached = self.cache_manager.get_any_local_path(
+            track.video_id,
+            residential_allowed=True,
+        )
         if cached:
             self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
             self.clear_state(track.video_id)  # Clean up - no retry state needed

@@ -59,6 +59,7 @@ from utils.musicutils.music_helpers import (
     extract_video_id,
     # Thumbnails
     extract_mp3_thumbnail,
+    extract_m4a_thumbnail,
     # yt-dlp wrappers
     get_audio_url,
     search_youtube,
@@ -68,6 +69,10 @@ from utils.musicutils.music_helpers import (
     # MP3 download
     sanitize_filename,
     download_track_as_mp3,
+    # M4A download
+    download_track_as_m4a,
+    # Ambient filename generation
+    generate_ambient_filename,
     get_track_info_for_download,
 )
 
@@ -140,6 +145,7 @@ __all__ = [
     'fetch_and_resize_thumbnail',
     'extract_best_thumbnail_from_info',
     'extract_mp3_thumbnail',
+    'extract_m4a_thumbnail',
     'get_thumbnail_bytes',
     # yt-dlp wrappers
     'get_audio_url',
@@ -150,6 +156,8 @@ __all__ = [
     # MP3 download
     'sanitize_filename',
     'download_track_as_mp3',
+    'download_track_as_m4a',
+    'generate_ambient_filename',
     'get_track_info_for_download',
 ]
 

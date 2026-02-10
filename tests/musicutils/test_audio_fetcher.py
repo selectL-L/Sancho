@@ -36,7 +36,6 @@ def mock_track():
 def mock_cache_manager():
     """Create a mock MusicCacheManager."""
     manager = MagicMock()
-    manager.check_residential = MagicMock(return_value=None)  # No cache by default
     manager.get_any_local_path = MagicMock(return_value=None)  # No ambient cache by default
     manager.download_residential = AsyncMock(return_value=(False, "Not configured", 0, None))
     return manager
@@ -115,7 +114,10 @@ class TestAudioFetcherResidentialCacheHit:
     @pytest.mark.asyncio
     async def test_returns_cached_path(self, fetcher, mock_cache_manager, mock_track):
         """Returns local_path when residential cache hits after direct fails."""
-        mock_cache_manager.check_residential.return_value = "/cache/video.mp3"
+        mock_cache_manager.get_any_local_path.side_effect = [
+            None,
+            "/cache/video.mp3",
+        ]
 
         # Direct must fail for us to reach residential cache check
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
@@ -128,6 +130,10 @@ class TestAudioFetcherResidentialCacheHit:
         assert result.success is True
         assert result.local_path == "/cache/video.mp3"
         # State is cleared on success, so no point checking direct_attempts
+        mock_cache_manager.get_any_local_path.assert_any_call(
+            mock_track.video_id,
+            residential_allowed=True,
+        )
 
 
 class TestAudioFetcherAmbientCacheHit:
@@ -148,7 +154,10 @@ class TestAudioFetcherAmbientCacheHit:
         assert result.local_path == "/playlists/abc123/dQw4w9WgXcQ.mp3"
         # Should not attempt direct fetch since cache hit
         assert fetcher._get_state(mock_track.video_id).direct_attempts == 0
-        mock_cache_manager.get_any_local_path.assert_called_once_with(mock_track.video_id)
+        mock_cache_manager.get_any_local_path.assert_called_once_with(
+            mock_track.video_id,
+            residential_allowed=False,
+        )
 
     @pytest.mark.asyncio
     async def test_direct_attempted_before_residential_cache(
@@ -159,8 +168,10 @@ class TestAudioFetcherAmbientCacheHit:
         Even if a residential cached file exists, we try direct first in case
         the 403 has cleared - direct gives higher quality than residential.
         """
-        mock_cache_manager.check_residential.return_value = "/residential/dQw4w9WgXcQ.mp3"
-        mock_cache_manager.get_any_local_path.return_value = None  # No ambient cache
+        mock_cache_manager.get_any_local_path.side_effect = [
+            None,
+            "/residential/dQw4w9WgXcQ.mp3",
+        ]
 
         with patch('utils.musicutils.music_auth.get_audio_url') as mock_get:
             # Direct fails, so we fall back to residential cache
@@ -172,6 +183,10 @@ class TestAudioFetcherAmbientCacheHit:
         assert result.local_path == "/residential/dQw4w9WgXcQ.mp3"
         # Direct was attempted first (before checking residential cache)
         mock_get.assert_called_once()
+        mock_cache_manager.get_any_local_path.assert_any_call(
+            mock_track.video_id,
+            residential_allowed=True,
+        )
 
 
 class TestAudioFetcherDirectFetch:

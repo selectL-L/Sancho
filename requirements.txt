@@ -41,6 +41,10 @@ psutil
 # For YouTube audio extraction in the Music cog.
 yt-dlp
 
+# External JavaScript runtime for yt-dlp's YouTube signature/token generation.
+# Requires Node.js (>=22.6), Deno, or Bun on the server.
+yt-dlp-ejs
+
 # PO token plugin for yt-dlp to bypass YouTube 403 errors on datacenter IPs.
 # Requires Node.js (>=18) to be installed on the server for token generation.
 bgutil-ytdlp-pot-provider

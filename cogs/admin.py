@@ -916,6 +916,11 @@ class AdminCog(BaseCog):
         cache_residential_mb = 0.0
         cache_residential_cost = 0.0
         cache_last_refresh_ago: Optional[float] = None
+        cache_ytm_resolved = 0
+        cache_ytdlp_fallback = 0
+        cache_unresolved = 0
+        cache_filenames_modified = 0
+        cache_pending_downloads = 0
 
         if cache_manager:
             stats = cache_manager.get_stats()
@@ -926,6 +931,11 @@ class AdminCog(BaseCog):
             cache_orphaned_count = stats.get('orphaned_tracks', 0)
             cache_orphaned_mb = stats.get('orphaned_size_mb', 0.0)
             cache_last_refresh_ago = stats.get('last_refresh_ago')
+            cache_ytm_resolved = stats.get('ytm_resolved_count', 0)
+            cache_ytdlp_fallback = stats.get('ytdlp_fallback_count', 0)
+            cache_unresolved = stats.get('unresolved_count', 0)
+            cache_filenames_modified = stats.get('filenames_modified_count', 0)
+            cache_pending_downloads = stats.get('pending_download_count', 0)
 
             residential_stats = cache_manager.get_residential_stats()
             cache_residential_count = residential_stats.get('file_count', 0)
@@ -1030,6 +1040,12 @@ class AdminCog(BaseCog):
             cache_residential_mb=cache_residential_mb,
             cache_residential_cost=cache_residential_cost,
             cache_last_refresh_ago=cache_last_refresh_ago,
+            # Cache Provenance
+            cache_ytm_resolved=cache_ytm_resolved,
+            cache_ytdlp_fallback=cache_ytdlp_fallback,
+            cache_unresolved=cache_unresolved,
+            cache_filenames_modified=cache_filenames_modified,
+            cache_pending_downloads=cache_pending_downloads,
             # Database
             db_size_mb=db_size_mb,
             # Next Reminder
@@ -1325,7 +1341,7 @@ class AdminCog(BaseCog):
             cache_manager.cancel_refresh_timer()
 
             # Refresh all playlists
-            playlists = await cache_manager.refresh_all_playlists()
+            playlists, old_membership = await cache_manager.refresh_all_playlists()
 
             if not playlists:
                 await status_msg.edit(content="⚠️ No playlists found in ambience.toml or all failed to fetch.")
@@ -1334,7 +1350,7 @@ class AdminCog(BaseCog):
 
             # Reconcile downloads
             await status_msg.edit(content="🔄 **Reconciling downloads...**")
-            await cache_manager.reconcile_downloads(playlists)
+            await cache_manager.reconcile_downloads(playlists, old_membership)
 
             # Cleanup expired orphans
             expired = await cache_manager.cleanup_expired_orphans()

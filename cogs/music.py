@@ -126,7 +126,8 @@ class Music(MusicCommandsMixin, BaseCog):
         # Music cache manager for proactive caching
         self.cache_manager = MusicCacheManager(
             self.cache_path,
-            self.logger
+            self.logger,
+            on_track_unavailable=self._on_track_unavailable,
         )
 
         # Audio fetcher for retry orchestration (replaces self._retry)
@@ -158,6 +159,32 @@ class Music(MusicCommandsMixin, BaseCog):
                 f"🔄 Hmm, having some trouble with **{track_title}**... "
                 f"Let me try another way!"
             )
+
+    async def _on_track_unavailable(self, title: str, artist: str, url: str) -> None:
+        """Callback fired when a track is marked unavailable after download failure.
+
+        Sends a DM to each bot owner reporting the unavailable track so they
+        can investigate or remove it from the playlist.
+
+        Args:
+            title: Track title.
+            artist: Track artist.
+            url: YouTube URL of the track.
+        """
+        for owner_id in config.OWNER_IDS:
+            try:
+                owner = self.bot.get_user(owner_id) or await self.bot.fetch_user(owner_id)
+                await owner.send(
+                    f"⚠️ **Ambient track unavailable**\n"
+                    f"**{title}** by {artist}\n"
+                    f"{url}\n\n"
+                    f"Both direct and residential proxy downloads failed. "
+                    f"The track has been excluded from playback until the next "
+                    f"24h refresh. It may be age-restricted, region-locked, or "
+                    f"otherwise inaccessible."
+                )
+            except Exception as e:
+                self.logger.debug(f"Failed to DM owner {owner_id} about unavailable track: {e}")
 
     def _on_playlist_change(self, playlist_url: Optional[str], description: Optional[str]) -> None:
         """Callback from ambience system when playlist should change.
@@ -416,11 +443,11 @@ class Music(MusicCommandsMixin, BaseCog):
             self.logger.info("[Cache] Starting background playlist refresh...")
 
             # Refresh all playlists from YouTube
-            playlists = await self.cache_manager.refresh_all_playlists()
+            playlists, old_membership = await self.cache_manager.refresh_all_playlists()
 
             if playlists:
                 # Reconcile downloads (handle orphans)
-                await self.cache_manager.reconcile_downloads(playlists)
+                await self.cache_manager.reconcile_downloads(playlists, old_membership)
 
                 # Cleanup expired orphans
                 await self.cache_manager.cleanup_expired_orphans()
@@ -1848,8 +1875,11 @@ class Music(MusicCommandsMixin, BaseCog):
             await self._handle_track_failure(track)
             return
 
-        # Normal track end - reset notification flag for next track
+        # Normal track end - clean up per-track state
         self._residential_notified_this_track = False
+        track = self._get_current_track()
+        if track and track.video_id:
+            self._audio_fetcher.clear_state(track.video_id)
 
         # Check session duration limit (8 hours)
         session_duration = time.time() - self.active_session.started_at
