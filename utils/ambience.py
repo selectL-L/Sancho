@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
+import sys
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -51,12 +52,14 @@ def _load_toml() -> dict[str, Any]:
     global _toml_cache, _toml_mtime
 
     if not _TOML_PATH.exists():
-        return {}
+        logger.critical("ambience.toml not found at %s", _TOML_PATH)
+        sys.exit(f"Exiting: Required config file missing: {_TOML_PATH}")
 
     try:
         current_mtime = _TOML_PATH.stat().st_mtime
-    except OSError:
-        return _toml_cache or {}
+    except OSError as e:
+        logger.critical("Unable to stat ambience.toml at %s: %s", _TOML_PATH, e, exc_info=True)
+        sys.exit(f"Exiting: Could not access ambience.toml at {_TOML_PATH}.")
 
     if _toml_cache is not None and current_mtime == _toml_mtime:
         return _toml_cache
@@ -65,8 +68,9 @@ def _load_toml() -> dict[str, Any]:
         with open(_TOML_PATH, "rb") as f:
             _toml_cache = tomllib.load(f)
             _toml_mtime = current_mtime
-    except Exception:
-        _toml_cache = _toml_cache or {}
+    except Exception as e:
+        logger.critical("Failed to parse ambience.toml at %s: %s", _TOML_PATH, e, exc_info=True)
+        sys.exit(f"Exiting: ambience.toml is invalid or corrupted at {_TOML_PATH}.")
 
     return _toml_cache
 

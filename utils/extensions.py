@@ -20,7 +20,7 @@ def discover_cogs(cogs_path: str) -> List[str]:
         cogs_path (str): The path to the cogs directory.
 
     Returns:
-        List[str]: A list of cog module names (e.g., 'cogs.math').
+        List[str]: A list of cog module names (e.g., 'cogs.calc').
     """
     # If frozen (bundled), read from the manifest file instead of scanning the directory.
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):

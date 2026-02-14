@@ -275,7 +275,10 @@
 
       const toast = document.createElement('div');
       toast.className = `toast ${type}`;
-      toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+      toast.innerHTML = icons[type] || icons.info;
+      const span = document.createElement('span');
+      span.textContent = message;
+      toast.appendChild(span);
       $toastContainer.appendChild(toast);
 
       setTimeout(() => {
@@ -779,9 +782,9 @@
 
       if (participants.length === 0) {
         if (allViewableUsers.length > 0) {
-          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${guildName}</strong> yet.<br>But ${allViewableUsers.length} ${allViewableUsers.length === 1 ? 'person has' : 'people have'} shared in other servers you're in!<br><a href="/settings.html">Share yours here</a>`;
+          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${escapeHtml(guildName)}</strong> yet.<br>But ${allViewableUsers.length} ${allViewableUsers.length === 1 ? 'person has' : 'people have'} shared in other servers you're in!<br><a href="/settings.html">Share yours here</a>`;
         } else {
-          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${guildName}</strong> yet.<br>Be the first! <a href="/settings.html">Set yours</a>`;
+          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${escapeHtml(guildName)}</strong> yet.<br>Be the first! <a href="/settings.html">Set yours</a>`;
         }
         $emptyOverlay.classList.add('visible');
       } else {

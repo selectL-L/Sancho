@@ -14,7 +14,7 @@ import re
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
@@ -161,6 +161,14 @@ class Fun(BaseCog):
     The __getattr__ method routes NLP dispatcher calls to _dispatch_fun_command.
     Complex commands (BOD, leaderboard) are implemented as regular methods.
     """
+
+    BOD_CHAIN_DIALOGUE = [
+        "First…", "Second…", "Third…", "Fourth…", "Fifth…",
+        "Sixth…", "Seventh…", "Eighth…", "Ninth…", "Tenth…",
+        "Eleventh…", "Twelfth…", "Thirteenth…", "Fourteenth…", "Fifteenth…",
+        "Sixteenth…", "Seventeenth…", "Eighteenth…", "Nineteenth…",
+        "Twentieth, and final… Be not afraid."
+    ]
 
     def __init__(self, bot: CoreBot):
         """Initializes the Fun cog.
@@ -432,7 +440,7 @@ class Fun(BaseCog):
         Returns:
             Message content if found within 10 minutes, None otherwise.
         """
-        ten_minutes_ago = datetime.now(timezone.utc) - __import__('datetime').timedelta(minutes=10)
+        ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
 
         try:
             async for message in channel.history(limit=50, before=before):
@@ -751,14 +759,6 @@ class Fun(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
         """
-        BOD_CHAIN_DIALOGUE = [
-            "First…", "Second…", "Third…", "Fourth…", "Fifth…",
-            "Sixth…", "Seventh…", "Eighth…", "Ninth…", "Tenth…",
-            "Eleventh…", "Twelfth…", "Thirteenth…", "Fourteenth…", "Fifteenth…",
-            "Sixteenth…", "Seventeenth…", "Eighteenth…", "Nineteenth…",
-            "Twentieth, and final… Be not afraid."
-        ]
-
         user_id = ctx.author.id
         db_manager = self.bot.db_manager
         if not db_manager:
@@ -809,7 +809,7 @@ class Fun(BaseCog):
                 # Update timestamp, chain, and the last channel used.
                 await db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
 
-                dialogue = (BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(BOD_CHAIN_DIALOGUE)
+                dialogue = (self.BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(self.BOD_CHAIN_DIALOGUE)
                             else f"You've reached an unheard of chain of {new_chain}! The angels sing your name.")
 
                 # Add fate flavor if consumed fate tier was used

@@ -32,7 +32,7 @@ from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 from utils.views import get_selection
-from .math import Math, DiceLexer, DiceParser, DiceToken
+from cogs.calc import Math, DiceLexer, DiceParser, DiceToken
 
 
 class MaxDiceParser(DiceParser):

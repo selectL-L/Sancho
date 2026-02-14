@@ -265,6 +265,7 @@ def check_and_create_env_file() -> None:
             logging.critical(f"Failed to create {ENV_PATH}: {e}")
             sys.exit(f"Exiting: Failed to create {ENV_PATH}.")
 
+        # TODO: Route through logger once startup ordering allows logging before config load
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
@@ -499,6 +500,11 @@ YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OA
 # =============================================================================
 # We scan for an existing .db file to use, regardless of its name.
 # This strictly enforces a "Single Database" rule.
+if not os.path.isdir(ASSETS_PATH):
+    print(f"CRITICAL ERROR: Required assets directory not found: {ASSETS_PATH}")
+    print("Please restore the assets folder before starting the bot.")
+    sys.exit("Exiting: Missing assets directory.")
+
 found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
 
 if len(found_dbs) == 0:

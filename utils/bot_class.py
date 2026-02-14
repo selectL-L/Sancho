@@ -415,13 +415,15 @@ class CoreBot(commands.Bot):
         if config.DEV_MODE and message.author.id not in config.OWNER_IDS:
             return
 
-        # First, allow `discord.py` to process the message to see if it's a
+        # Get context once and reuse it for both command processing and NLP check.
+        ctx = await self.get_context(message)
+
+        # Allow `discord.py` to process the message to see if it's a
         # standard, decorator-based command (like `.ping`).
-        await self.process_commands(message)
+        await self.invoke(ctx)
 
         # If the message was a standard command, we don't need to process it for NLP.
         # `ctx.valid` will be True if a valid command was found and invoked.
-        ctx = await self.get_context(message)
         if ctx.valid:
             return
 
@@ -479,8 +481,8 @@ class CoreBot(commands.Bot):
         matching_prefixes = [p for p in config.BOT_PREFIX if content_lower.startswith(p.lower())]
 
         if matching_prefixes:
-            # Sort by length descending to handle overlapping prefixes (e.g., '!' and '!!')
-            matching_prefixes.sort(key=len, reverse=True)
+            # BOT_PREFIX is already sorted by length descending in config.py,
+            # so the first match from the filtered list is the longest.
             longest_match = matching_prefixes[0]
             # Return the slice of the original message that corresponds to the prefix length.
             return [message.content[:len(longest_match)]]
@@ -508,7 +510,7 @@ class CoreBot(commands.Bot):
         """
         logger.info("Starting cog reload process...")
 
-        # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.math'})
+        # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.calc'})
         loaded_cogs = set(self.extensions.keys())
         logger.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
 

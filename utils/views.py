@@ -605,7 +605,7 @@ async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -
 class SelectionView(discord.ui.View):
     """View with multiple selection buttons."""
 
-    def __init__(self, ctx, options: Dict[str, str], timeout: float = 30.0):
+    def __init__(self, ctx: commands.Context, options: Dict[str, str], timeout: float = 30.0):
         super().__init__(timeout=timeout)
         self.ctx = ctx
         self.value: Optional[str] = None
@@ -637,7 +637,7 @@ class SelectionButton(discord.ui.Button):
         view.stop()
 
 
-async def get_selection(ctx, embed: discord.Embed, options: Dict[str, str], timeout: float = 30.0, buttons_only: bool = False) -> Optional[str]:
+async def get_selection(ctx: commands.Context, embed: discord.Embed, options: Dict[str, str], timeout: float = 30.0, buttons_only: bool = False) -> Optional[str]:
     """
     Sends an embed with buttons corresponding to the options.
     Waits for either a button click or a message from the user.
@@ -1037,7 +1037,7 @@ class TrackSelectionView(ui.LayoutView):
 
 
 async def get_track_selection(
-    ctx,
+    ctx: commands.Context,
     ytm_tracks: List['Track'],
     yt_tracks: List['Track'],
     user_track: Optional['Track'] = None,
@@ -1196,7 +1196,7 @@ class ModalLauncherView(discord.ui.View):
                 logging.getLogger(__name__).debug(f"ModalLauncherView timeout cleanup failed: {e}")
 
 
-async def launch_modal(ctx, modal: discord.ui.Modal):
+async def launch_modal(ctx: commands.Context, modal: discord.ui.Modal):
     """
     Sends a message with a button to launch the modal.
     This ensures consistent behavior between slash and text commands.
@@ -1272,7 +1272,6 @@ class DashboardView(discord.ui.View):
     - View paginated skill entries
     - View paginated reminder entries
     - Export data to file
-    - Dump database
 
     Each sub-view has a "Back to Dashboard" button to return to the main view.
     """
@@ -1283,7 +1282,6 @@ class DashboardView(discord.ui.View):
         skill_pages: List[discord.Embed],
         reminder_pages: List[discord.Embed],
         report_file_callback: DashboardCallback,
-        dump_db_callback: DashboardCallback,
         dashboard_embed: Optional[discord.Embed] = None,
         timeout: float = 120.0
     ):
@@ -1294,7 +1292,6 @@ class DashboardView(discord.ui.View):
             skill_pages: List of embeds for skill pagination.
             reminder_pages: List of embeds for reminder pagination.
             report_file_callback: Async callback to export report file.
-            dump_db_callback: Async callback to dump database.
             dashboard_embed: The main dashboard embed to return to.
             timeout: View timeout in seconds (default 120s).
         """
@@ -1303,7 +1300,6 @@ class DashboardView(discord.ui.View):
         self.skill_pages = skill_pages
         self.reminder_pages = reminder_pages
         self.report_file_callback = report_file_callback
-        self.dump_db_callback = dump_db_callback
         self.dashboard_embed = dashboard_embed
         self.message: Optional[discord.Message] = None
 
@@ -1366,12 +1362,6 @@ class DashboardView(discord.ui.View):
         await interaction.response.defer()
         await self.report_file_callback(self.ctx)
 
-    @discord.ui.button(label="🗄️ Dump Database", style=discord.ButtonStyle.danger)
-    async def dump_database(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Trigger the database dump callback."""
-        await interaction.response.defer()
-        await self.dump_db_callback(self.ctx)
-
     async def on_timeout(self):
         """Disable all buttons on timeout."""
         if self.message:
@@ -1391,7 +1381,6 @@ async def show_dashboard(
     skill_pages: List[discord.Embed],
     reminder_pages: List[discord.Embed],
     report_file_callback: DashboardCallback,
-    dump_db_callback: DashboardCallback,
     dashboard_embed: discord.Embed,
     timeout: float = 120.0
 ) -> discord.Message:
@@ -1405,7 +1394,6 @@ async def show_dashboard(
         skill_pages: List of embeds for skill pagination.
         reminder_pages: List of embeds for reminder pagination.
         report_file_callback: Async function to call for file export.
-        dump_db_callback: Async function to call for database dump.
         dashboard_embed: The main dashboard embed.
         timeout: View timeout in seconds (default 120s).
 
@@ -1417,7 +1405,6 @@ async def show_dashboard(
         skill_pages=skill_pages,
         reminder_pages=reminder_pages,
         report_file_callback=report_file_callback,
-        dump_db_callback=dump_db_callback,
         dashboard_embed=dashboard_embed,
         timeout=timeout
     )

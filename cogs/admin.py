@@ -119,10 +119,6 @@ class AdminCog(BaseCog):
             all_reminders = await self.db_manager.get_all_reminders()
 
             # --- Helper Functions ---
-            def chunk_list(lst, n):
-                for i in range(0, len(lst), n):
-                    yield lst[i:i + n]
-
             def get_user_display(user_id: int) -> str:
                 """Get display name for a user, falling back to ID if not cached."""
                 user = self.bot.get_user(user_id)
@@ -329,136 +325,27 @@ class AdminCog(BaseCog):
                     f.write("\n".join(report_lines))
                     temp_path = f.name
 
-                await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
-                os.remove(temp_path)
-
-            # 4. Define Database Dump Callback (full SQLite export for migrations)
-            async def dump_db_callback(interaction_ctx):
-                assert config.BOT_NAME is not None
-                import json
-                import shutil
-
-                # Create a temp directory for the dump
-                dump_dir = tempfile.mkdtemp(prefix="db_dump_")
                 try:
-                    # Copy the actual SQLite database file
-                    db_path = self.db_manager.db_path
-                    db_copy_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_database.db")
-                    shutil.copy2(db_path, db_copy_path)
-
-                    # Also create a JSON export of all data for easy inspection
-                    json_data = {
-                        "exported_at": str(discord.utils.utcnow()),
-                        "bot_name": config.BOT_NAME,
-                        "tables": {}
-                    }
-
-                    # Export all tables as JSON
-                    tables_to_export = [
-                        ("skills", all_skills),
-                        ("reminders", all_reminders),
-                    ]
-
-                    # Get additional tables
-                    try:
-                        skill_aliases = await self.db_manager.db_fetchall("SELECT * FROM skill_aliases")
-                        tables_to_export.append(
-                            ("skill_aliases", [dict(row) for row in skill_aliases]))
-                    except Exception as e:
-                        self.logger.warning(f"Table skill_aliases not available for export: {e}")
-
-                    try:
-                        user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
-                        tables_to_export.append(
-                            ("user_settings", [dict(row) for row in user_settings]))
-                    except Exception as e:
-                        self.logger.warning(f"Table user_settings not available for export: {e}")
-
-                    try:
-                        bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
-                        tables_to_export.append(
-                            ("bot_settings", [dict(row) for row in bot_settings]))
-                    except Exception as e:
-                        self.logger.warning(f"Table bot_settings not available for export: {e}")
-
-                    try:
-                        guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
-                        tables_to_export.append(
-                            ("guild_settings", [dict(row) for row in guild_settings]))
-                    except Exception as e:
-                        self.logger.warning(f"Table guild_settings not available for export: {e}")
-
-                    try:
-                        starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
-                        tables_to_export.append(
-                            ("starboard_entries", [dict(row) for row in starboard_entries]))
-                    except Exception as e:
-                        self.logger.warning(f"Table starboard_entries not available for export: {e}")
-
-                    try:
-                        bod_players = await self.db_manager.db_fetchall("SELECT * FROM bod_players")
-                        tables_to_export.append(
-                            ("bod_players", [dict(row) for row in bod_players]))
-                    except Exception as e:
-                        self.logger.warning(f"Table bod_players not available for export: {e}")
-
-                    try:
-                        bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
-                        tables_to_export.append(
-                            ("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
-                    except Exception as e:
-                        self.logger.warning(f"Table bod_leaderboard not available for export: {e}")
-
-                    for table_name, data in tables_to_export:
-                        json_data["tables"][table_name] = {
-                            "count": len(data),
-                            "rows": data
-                        }
-
-                    json_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_database.json")
-                    with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(json_data, f, indent=2, default=str)
-
-                    # Create a zip archive containing both files
-                    import zipfile
-                    zip_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_db_dump.zip")
-                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.write(
-                            db_copy_path, os.path.basename(db_copy_path))
-                        zipf.write(json_path, os.path.basename(json_path))
-
-                    await interaction_ctx.send(
-                        "**Full database dump attached.**\nContains:\n"
-                        "• `.db` - SQLite database file (for migrations)\n"
-                        "• `.json` - Human-readable JSON export",
-                        file=discord.File(
-                            zip_path, filename=f"{config.BOT_NAME}_db_dump.zip")
-                    )
+                    await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
                 finally:
-                    # Cleanup temp directory
-                    shutil.rmtree(dump_dir, ignore_errors=True)
+                    os.remove(temp_path)
 
-            # 5. Create Dashboard Embed
+            # 4. Create Dashboard Embed
             dashboard_embed = discord.Embed(
                 title="Admin Dashboard",
                 description="Select a category to view database entries.\n\n"
-                            "**💾 Export to File** - Human-readable text report\n"
-                            "**🗄️ Dump Database** - Full SQLite + JSON export for migrations",
+                            "**💾 Export to File** - Human-readable text report",
                 color=discord.Color.dark_grey()
             )
             dashboard_embed.add_field(
                 name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
-            # 6. Launch Dashboard
+            # 5. Launch Dashboard
             await show_dashboard(
                 ctx=ctx,
                 skill_pages=skill_pages,
                 reminder_pages=reminder_pages,
                 report_file_callback=export_callback,
-                dump_db_callback=dump_db_callback,
                 dashboard_embed=dashboard_embed
             )
 

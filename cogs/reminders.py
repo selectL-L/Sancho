@@ -42,6 +42,42 @@ from utils.views import get_selection
 class Reminders(BaseCog):
     """A cog for setting and checking natural language reminders."""
 
+    TIMEZONE_ABBREVIATIONS: Dict[str, str] = {
+        # North America
+        "est": "America/New_York",    # Eastern Standard Time
+        "edt": "America/New_York",    # Eastern Daylight Time
+        "cst": "America/Chicago",     # Central Standard Time
+        "cdt": "America/Chicago",     # Central Daylight Time
+        "mst": "America/Denver",      # Mountain Standard Time
+        "mdt": "America/Denver",      # Mountain Daylight Time
+        "pst": "America/Los_Angeles",  # Pacific Standard Time
+        "pdt": "America/Los_Angeles",  # Pacific Daylight Time
+        "akst": "America/Anchorage",  # Alaska Standard Time
+        "akdt": "America/Anchorage",  # Alaska Daylight Time
+        "hst": "Pacific/Honolulu",    # Hawaii Standard Time
+        # Europe
+        "gmt": "Europe/London",       # Greenwich Mean Time
+        "bst": "Europe/London",       # British Summer Time
+        "wet": "WET",                 # Western European Time
+        "west": "WET",                # Western European Summer Time
+        "cet": "CET",                 # Central European Time
+        "cest": "CET",                # Central European Summer Time
+        "eet": "EET",                 # Eastern European Time
+        "eest": "EET",                # Eastern European Summer Time
+        "msk": "Europe/Moscow",       # Moscow Standard Time
+        # Asia
+        "ist": "Asia/Kolkata",        # Indian Standard Time
+        "jst": "Asia/Tokyo",          # Japan Standard Time
+        "kst": "Asia/Seoul",          # Korea Standard Time
+        "sgt": "Asia/Singapore",      # Singapore Time
+        # Australia
+        "aest": "Australia/Sydney",   # Australian Eastern Standard Time
+        "aedt": "Australia/Sydney",   # Australian Eastern Daylight Time
+        "acst": "Australia/Darwin",   # Australian Central Standard Time
+        "acdt": "Australia/Adelaide",  # Australian Central Daylight Time
+        "awst": "Australia/Perth",    # Australian Western Standard Time
+    }
+
     def __init__(self, bot: CoreBot):
         """Initializes the Reminders cog.
 
@@ -112,6 +148,50 @@ class Reminders(BaseCog):
         except Exception as e:
             self.logger.error(f"Error during missed reminder processing: {e}", exc_info=True)
 
+    async def _resolve_destination(
+        self, reminder: Dict[str, Any], user: discord.User
+    ) -> Optional[Union[discord.User, discord.abc.GuildChannel, discord.Thread, discord.abc.PrivateChannel]]:
+        """Resolve the destination channel/DM for a reminder.
+
+        Checks user preference (DM, specific channel ID, or origin channel)
+        and falls back to DM if the preferred destination is unavailable.
+
+        Args:
+            reminder: The reminder data dict (must contain 'user_id' and optionally 'channel_id').
+            user: The resolved Discord user for this reminder.
+
+        Returns:
+            A messageable destination, or None if no destination could be resolved.
+        """
+        user_id = reminder['user_id']
+        destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
+
+        if destination_pref == 'dm':
+            return user
+
+        if destination_pref and destination_pref.isdigit():
+            try:
+                chan_id = int(destination_pref)
+                channel = self.bot.get_channel(chan_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(chan_id)
+                return channel
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return user  # Fallback to DM.
+
+        # Try origin channel.
+        channel_id = reminder.get('channel_id')
+        if channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                return channel
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return user  # Fallback to DM.
+
+        return user  # No channel stored, fallback to DM.
+
     async def _handle_missed_reminder(self, reminder: Dict[str, Any], current_time: int) -> None:
         """Handles a single missed reminder, sending a summary and rescheduling if needed.
 
@@ -134,32 +214,8 @@ class Reminders(BaseCog):
                     await self.db_manager.delete_reminders([reminder_id])
                     return
 
-            # Determine destination (same logic as before).
-            destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
-            targetable: Optional[Union[discord.User, discord.abc.GuildChannel, discord.Thread, discord.abc.PrivateChannel]] = None
-
-            if destination_pref == 'dm':
-                targetable = user
-            elif destination_pref and destination_pref.isdigit():
-                try:
-                    chan_id = int(destination_pref)
-                    targetable = self.bot.get_channel(chan_id)
-                    if not targetable:
-                        targetable = await self.bot.fetch_channel(chan_id)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    targetable = user  # Fallback to DM.
-            else:
-                # Try origin channel.
-                channel_id = reminder.get('channel_id')
-                if channel_id:
-                    try:
-                        targetable = self.bot.get_channel(channel_id)
-                        if not targetable:
-                            targetable = await self.bot.fetch_channel(channel_id)
-                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        targetable = user  # Fallback to DM.
-                else:
-                    targetable = user  # No channel stored, fallback to DM.
+            # Determine destination.
+            targetable = await self._resolve_destination(reminder, user)
 
             if not targetable:
                 self.logger.warning(f"Could not find destination for missed reminder {reminder_id}. Deleting.")
@@ -300,26 +356,8 @@ class Reminders(BaseCog):
             user_id = reminder['user_id']
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
 
-            # Destination Logic (Refactored to be cleaner).
-            destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
-            targetable = None
-
-            # Try DM.
-            if destination_pref == 'dm':
-                targetable = user
-            # Try Specific Channel.
-            elif destination_pref and destination_pref.isdigit():
-                try:
-                    chan_id = int(destination_pref)
-                    targetable = self.bot.get_channel(chan_id) or await self.bot.fetch_channel(chan_id)
-                except (discord.NotFound, discord.Forbidden):
-                    targetable = user  # Fallback.
-            # Try Origin Channel.
-            else:
-                try:
-                    targetable = self.bot.get_channel(reminder['channel_id']) or await self.bot.fetch_channel(reminder['channel_id'])
-                except (discord.NotFound, discord.Forbidden):
-                    targetable = user  # Fallback.
+            # Resolve destination.
+            targetable = await self._resolve_destination(reminder, user)
 
             if targetable:
                 # Reply Logic.
@@ -336,7 +374,7 @@ class Reminders(BaseCog):
                         await original_msg.reply(msg_content)
                         sent = True
                     except Exception:  # Catch all: discord may return unexpected responses
-                        pass  # Fallback to normal send.
+                        self.logger.warning("Could not fetch original message %s for reply context", reply_msg_id)
 
                 if not sent:
                     if reply_msg_id:
@@ -539,7 +577,10 @@ class Reminders(BaseCog):
         front_lower = front.lower().strip()
         back_lower = back.lower().strip()
 
-        # Two reference times to catch time-of-day edge cases
+        # Fixed reference dates prevent dateparser's PREFER_DATES_FROM: future
+        # from misinterpreting relative expressions like "next monday" or
+        # "tomorrow". Two reference times (morning/evening) catch edge cases
+        # where time-of-day affects how dateparser resolves ambiguous inputs.
         ref_morning = datetime(2025, 1, 8, 6, 0, 0)
         ref_evening = datetime(2025, 1, 8, 22, 0, 0)
 
@@ -1463,50 +1504,11 @@ class Reminders(BaseCog):
             await ctx.send("Please provide a timezone to set. For example: `set timezone EST` or `tz US/Eastern`.")
             return
 
-        TIMEZONE_ABBREVIATIONS = {
-            # North America
-            "est": "America/New_York",    # Eastern Standard Time
-            "edt": "America/New_York",    # Eastern Daylight Time
-            "cst": "America/Chicago",     # Central Standard Time
-            "cdt": "America/Chicago",     # Central Daylight Time
-            "mst": "America/Denver",      # Mountain Standard Time
-            "mdt": "America/Denver",      # Mountain Daylight Time
-            "pst": "America/Los_Angeles",  # Pacific Standard Time
-            "pdt": "America/Los_Angeles",  # Pacific Daylight Time
-            "akst": "America/Anchorage",  # Alaska Standard Time
-            "akdt": "America/Anchorage",  # Alaska Daylight Time
-            "hst": "Pacific/Honolulu",    # Hawaii Standard Time
-
-            # Europe
-            "gmt": "Europe/London",       # Greenwich Mean Time
-            "bst": "Europe/London",       # British Summer Time
-            "wet": "WET",                 # Western European Time
-            "west": "WET",                # Western European Summer Time
-            "cet": "CET",                 # Central European Time
-            "cest": "CET",                # Central European Summer Time
-            "eet": "EET",                 # Eastern European Time
-            "eest": "EET",                # Eastern European Summer Time
-            "msk": "Europe/Moscow",       # Moscow Standard Time
-
-            # Asia
-            "ist": "Asia/Kolkata",        # Indian Standard Time
-            "jst": "Asia/Tokyo",          # Japan Standard Time
-            "kst": "Asia/Seoul",          # Korea Standard Time
-            "sgt": "Asia/Singapore",      # Singapore Time
-
-            # Australia
-            "aest": "Australia/Sydney",   # Australian Eastern Standard Time
-            "aedt": "Australia/Sydney",   # Australian Eastern Daylight Time
-            "acst": "Australia/Darwin",   # Australian Central Standard Time
-            "acdt": "Australia/Adelaide",  # Australian Central Daylight Time
-            "awst": "Australia/Perth",    # Australian Western Standard Time
-        }
-
         tz_to_check = timezone_str.lower()
         final_tz_str = None
 
-        if tz_to_check in TIMEZONE_ABBREVIATIONS:
-            final_tz_str = TIMEZONE_ABBREVIATIONS[tz_to_check]
+        if tz_to_check in self.TIMEZONE_ABBREVIATIONS:
+            final_tz_str = self.TIMEZONE_ABBREVIATIONS[tz_to_check]
         elif re.match(r'^(gmt|utc)?([+-])(\d{1,2})$', tz_to_check):
             # Convert user-friendly offset to pytz format for storage
             final_tz_str = self._to_pytz_format(tz_to_check)
@@ -1541,7 +1543,7 @@ class Reminders(BaseCog):
                 iana_recommendation = (
                     "\n\n**Note:** You've set a fixed GMT/UTC offset. For automatic Daylight Saving Time adjustments, "
                     "we recommend using an IANA timezone name instead. Examples include:\n"
-                    "- `America/New_York` (for US Eastern Time (P.S yes the underscore is neccessary))\n"
+                    "- `America/New_York` (for US Eastern Time (P.S yes the underscore is necessary))\n"
                     "- `Europe/London` (for UK time)\n"
                     "- `Asia/Tokyo` (for Japan Standard Time)"
                 )
@@ -1896,11 +1898,10 @@ class Reminders(BaseCog):
             await ctx.send("❌ An error occurred while saving your reminder.")
 
 
-async def setup(bot: CoreBot, **kwargs: Any) -> None:
-    """Standard setup, receiving the database path via kwargs from main.py.
+async def setup(bot: CoreBot) -> None:
+    """Standard setup function to add the cog to the bot.
 
     Args:
         bot (CoreBot): The bot instance.
-        **kwargs: Additional keyword arguments.
     """
     await bot.add_cog(Reminders(bot))

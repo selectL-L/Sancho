@@ -21,7 +21,6 @@ NLP Query Features:
 """
 
 import asyncio
-import logging
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
@@ -36,8 +35,6 @@ from utils.base_cog import BaseCog
 
 if TYPE_CHECKING:
     from utils.bot_class import CoreBot
-
-logger = logging.getLogger(__name__)
 
 # Day name mappings
 DAY_NAMES = {

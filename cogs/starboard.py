@@ -83,8 +83,8 @@ class Starboard(BaseCog):
         # Fast-mode override (disabled by default). When True, bypass rate-limits and thresholds.
         self._fast_mode = False
 
-    async def cog_load(self) -> None:
-        """Called when the cog is loaded."""
+    async def cog_ready(self) -> None:
+        """Called when the cog is ready."""
         self.http_session = aiohttp.ClientSession()
 
     async def cog_unload(self) -> None:

@@ -300,14 +300,15 @@
     function showToast(message, type = 'info') {
       const toast = document.createElement('div');
       toast.className = `toast ${type}`;
-      toast.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          ${type === 'success' ? '<path d="M20 6L9 17l-5-5"/>' :
-            type === 'error' ? '<circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>' :
-            '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>'}
-        </svg>
-        <span>${message}</span>
-      `;
+      const icons = {
+        success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
+        error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>',
+        info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>'
+      };
+      toast.innerHTML = icons[type] || icons.info;
+      const span = document.createElement('span');
+      span.textContent = message;
+      toast.appendChild(span);
       $toastContainer.appendChild(toast);
       requestAnimationFrame(() => toast.classList.add('visible'));
       setTimeout(() => {
@@ -730,10 +731,10 @@
         // No one in this guild - check if anyone exists globally
         if (allViewableUsers.length > 0) {
           // People exist in other guilds, just not this one
-          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${guildName}</strong> yet.<br>But ${allViewableUsers.length} ${allViewableUsers.length === 1 ? 'person has' : 'people have'} shared in other servers you're in!<br><a href="settings.html">Share yours here</a>`;
+          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${escapeHtml(guildName)}</strong> yet.<br>But ${allViewableUsers.length} ${allViewableUsers.length === 1 ? 'person has' : 'people have'} shared in other servers you're in!<br><a href="settings.html">Share yours here</a>`;
         } else {
           // No one anywhere
-          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${guildName}</strong> yet.<br>Be the first! <a href="settings.html">Set yours</a>`;
+          $emptyOverlayText.innerHTML = `No one has shared their availability in <strong>${escapeHtml(guildName)}</strong> yet.<br>Be the first! <a href="settings.html">Set yours</a>`;
         }
         $emptyOverlay.classList.add('visible');
       } else {

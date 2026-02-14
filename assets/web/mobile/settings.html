@@ -606,7 +606,7 @@
 
   <!-- Core JS modules -->
   <script type="module">
-    import { getConfig } from '/web-core/api.js';
+    import * as api from '/web-core/api.js';
     import { initTheme, toggleTheme, setThemeColor } from '/web-core/theme.js';
     import { escapeHtml } from '/web-core/utils.js';
 
@@ -641,7 +641,10 @@
         error: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
         info: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
       };
-      toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+      toast.innerHTML = icons[type] || icons.info;
+      const span = document.createElement('span');
+      span.textContent = message;
+      toast.appendChild(span);
       $toastContainer.appendChild(toast);
       setTimeout(() => {
         toast.classList.add('hiding');
@@ -654,7 +657,7 @@
 
     async function initConfig() {
       try {
-        const cfg = await getConfig();
+        const cfg = await api.getConfig();
         if (cfg) {
           botName = cfg.botName || 'Bot';
           $botCredit.textContent = `served to you by ${botName}`;
@@ -669,24 +672,21 @@
 
     async function loadCurrentUser() {
       try {
-        const res = await fetch('/auth/me', { credentials: 'include' });
-        if (res.status === 401) {
+        const user = await api.getMe();
+        if (!user) {
           $loginRedirectOverlay.classList.add('visible');
           return null;
         }
-        if (res.ok) {
-          const user = await res.json();
-          if (!user.hasTimezone) {
-            window.location.href = 'index.html';
-            return null;
-          }
-          return user;
+        if (!user.hasTimezone) {
+          window.location.href = 'index.html';
+          return null;
         }
+        return user;
       } catch (e) {
         console.error('Failed to load current user:', e);
         $loginRedirectOverlay.classList.add('visible');
+        return null;
       }
-      return null;
     }
 
     // ========== STATE ==========
@@ -988,24 +988,14 @@
     // ========== SAVE / DISCARD ==========
     window.handleSave = async function() {
       try {
-        const res = await fetch('/api/availability', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ slots: Array.from(myAvailability) })
-        });
+        await api.saveAvailability(Array.from(myAvailability));
+        const count = myAvailability.size;
+        const hours = (count * 15 / 60).toFixed(1);
+        showToast(`Saved! ${hours} hours per week`, 'success');
 
-        if (res.ok) {
-          const count = myAvailability.size;
-          const hours = (count * 15 / 60).toFixed(1);
-          showToast(`Saved! ${hours} hours per week`, 'success');
-          
-          originalAvailability = new Set(myAvailability);
-          hasUnsavedChanges = false;
-          updateSaveButtons();
-        } else {
-          showToast('Failed to save availability', 'error');
-        }
+        originalAvailability = new Set(myAvailability);
+        hasUnsavedChanges = false;
+        updateSaveButtons();
       } catch (e) {
         console.error('Failed to save availability:', e);
         showToast('Failed to save availability', 'error');
@@ -1117,6 +1107,12 @@
       }
     };
 
+    // ========== TZ BADGE ==========
+    function updateTzBadge() {
+      const tz = (currentUser && currentUser.timezone) || 'Local';
+      if ($tzLabel) $tzLabel.textContent = tz;
+    }
+
     // ========== USER PILL ==========
     function updateUserPill(user) {
       if (!$mobileUserPill || !user) return;
@@ -1144,19 +1140,14 @@
       $mobileUserPill.innerHTML = '';
       $mobileUserPill.appendChild(avatarDiv);
       $mobileUserPill.appendChild(nameSpan);
-      const tz = (currentUser && currentUser.timezone) || 'Local';
-      if ($tzLabel) $tzLabel.textContent = tz;
     }
 
     // ========== GUILDS ==========
     async function loadGuilds() {
       try {
-        const res = await fetch('/api/guilds', { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          guilds = data.guilds || [];
-          buildGuildList();
-        }
+        const data = await api.getGuilds();
+        guilds = data.guilds || [];
+        buildGuildList();
       } catch (e) {
         console.error('Failed to load guilds:', e);
         showToast('Failed to load servers', 'error');
@@ -1207,20 +1198,9 @@
       toggle.classList.toggle('active', newState);
 
       try {
-        const res = await fetch(`/api/guilds/${id}/visibility`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ visible: newState })
-        });
-
-        if (res.ok) {
-          guild.enabled = newState;
-          showToast(`${escapeHtml(guild.name)} ${newState ? 'enabled' : 'disabled'}`, 'success');
-        } else {
-          toggle.classList.toggle('active', guild.enabled);
-          showToast('Failed to update visibility', 'error');
-        }
+        await api.setGuildVisibility(id, newState);
+        guild.enabled = newState;
+        showToast(`${escapeHtml(guild.name)} ${newState ? 'enabled' : 'disabled'}`, 'success');
       } catch (e) {
         console.error('Failed to toggle guild:', e);
         toggle.classList.toggle('active', guild.enabled);
@@ -1231,12 +1211,9 @@
     // ========== BLACKLIST ==========
     async function loadBlacklist() {
       try {
-        const res = await fetch('/api/blacklist', { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          blacklist = data.blacklist || [];
-          buildBlacklist();
-        }
+        const data = await api.getBlacklist();
+        blacklist = data.blacklist || [];
+        buildBlacklist();
       } catch (e) {
         console.error('Failed to load blacklist:', e);
         showToast('Failed to load blocked users', 'error');
@@ -1282,18 +1259,10 @@
       if (!user) return;
 
       try {
-        const res = await fetch(`/api/blacklist/${id}`, {
-          method: 'DELETE',
-          credentials: 'include'
-        });
-
-        if (res.ok) {
-          blacklist = blacklist.filter(u => u.id !== id);
-          buildBlacklist();
-          showToast(`${escapeHtml(user.username)} unblocked`, 'success');
-        } else {
-          showToast('Failed to unblock user', 'error');
-        }
+        await api.unblockUser(id);
+        blacklist = blacklist.filter(u => u.id !== id);
+        buildBlacklist();
+        showToast(`${escapeHtml(user.username)} unblocked`, 'success');
       } catch (e) {
         console.error('Failed to remove from blacklist:', e);
         showToast('Failed to unblock user', 'error');
@@ -1304,16 +1273,10 @@
     async function loadAvailability() {
       if (!currentUser) return;
       try {
-        const res = await fetch(`/api/users/${currentUser.id}/availability`, { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          myAvailability = new Set(data.slots || []);
-          originalAvailability = new Set(myAvailability);
-          renderAvailabilityGrid();
-        } else {
-          console.error('Failed to load availability:', res.status);
-          showToast('Failed to load availability', 'error');
-        }
+        const data = await api.getUserAvailability(currentUser.id);
+        myAvailability = new Set(data.slots || []);
+        originalAvailability = new Set(myAvailability);
+        renderAvailabilityGrid();
       } catch (e) {
         console.error('Failed to load availability:', e);
         showToast('Failed to load availability', 'error');
@@ -1349,29 +1312,23 @@
       $deleteConfirmBtn.disabled = e.target.value !== 'DELETE';
     });
 
-    window.confirmDeleteAllData = function() {
+    window.confirmDeleteAllData = async function() {
       if ($deleteConfirmInput.value !== 'DELETE') return;
       hideDeleteDataModal();
 
-      fetch('/api/account', {
-        method: 'DELETE',
-        credentials: 'include'
-      }).then(res => {
-        if (res.ok) {
-          showToast('All data deleted. Redirecting...', 'success');
-          setTimeout(() => {
-            document.cookie.split(';').forEach(c => {
-              document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
-            });
-            window.location.href = '/auth/logout?clear=true';
-          }, 1500);
-        } else {
-          showToast('Failed to delete data', 'error');
-        }
-      }).catch(e => {
+      try {
+        await api.deleteAccount();
+        showToast('All data deleted. Redirecting...', 'success');
+        setTimeout(() => {
+          document.cookie.split(';').forEach(c => {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+          });
+          window.location.href = '/auth/logout?clear=true';
+        }, 1500);
+      } catch (e) {
         console.error('Failed to delete account data:', e);
         showToast('Failed to delete data', 'error');
-      });
+      }
     };
 
     window.showAddBlockModal = function() {
@@ -1393,14 +1350,14 @@
     };
 
     window.doLogout = function() {
-      window.location.href = '/auth/logout';
+      api.logout();
     };
 
     window.doClearSession = function() {
       document.cookie.split(';').forEach(c => {
         document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
       });
-      window.location.href = '/auth/logout?clear=true';
+      api.logout(true);
     };
 
     window.addToBlacklist = async function() {
@@ -1408,27 +1365,17 @@
       if (!username) return;
 
       try {
-        const res = await fetch('/api/blacklist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ username })
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          blacklist.push(data.user);
-          buildBlacklist();
-          hideAddBlockModal();
-          showToast(`${username} blocked`, 'success');
-        } else if (res.status === 404) {
+        const user = await api.blockUser(username);
+        blacklist.push(user);
+        buildBlacklist();
+        hideAddBlockModal();
+        showToast(`${username} blocked`, 'success');
+      } catch (e) {
+        if (e.message?.includes('404')) {
           showToast('User not found', 'error');
         } else {
           showToast('Failed to block user', 'error');
         }
-      } catch (e) {
-        console.error('Failed to add to blacklist:', e);
-        showToast('Failed to block user', 'error');
       }
     };
 

@@ -447,11 +447,11 @@ class ImageCog(BaseCog):
                 io.BytesIO: The resized image data.
             """
             with PILImage.open(io.BytesIO(image_bytes)) as img:
+                # Capture format before resize (PIL clears it on transform)
+                original_format = img.format or 'PNG'
                 img = img.resize(size)
 
                 buffer = io.BytesIO()
-                # Preserve the original format if possible, otherwise default to PNG.
-                original_format = img.format or 'PNG'
                 img.save(buffer, format=original_format)
                 buffer.seek(0)
                 return buffer

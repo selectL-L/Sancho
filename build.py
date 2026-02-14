@@ -59,7 +59,7 @@ def build():
     ffmpeg_args = []
     ffmpeg_path = None
 
-    if os.name == 'nt':
+    if sys.platform == "win32":
         candidate = os.path.join(HERE, 'ffmpeg.exe')
         if os.path.exists(candidate):
             ffmpeg_path = candidate
@@ -95,12 +95,14 @@ def build():
     print("🔨 Running PyInstaller...")
     try:
         PyInstaller.__main__.run(args)
+        exe_name = f"{config.BOT_NAME}.exe" if sys.platform == "win32" else config.BOT_NAME
         print("\n✅ Build Complete!")
-        print(f"   Executable is located in: {os.path.join(HERE, 'dist', f'{config.BOT_NAME}.exe')}")
+        print(f"   Executable is located in: {os.path.join(HERE, 'dist', exe_name)}")
         print("   IMPORTANT: You must copy your 'info.env' file AND the 'assets' folder")
         print("               to the same directory as the executable for it to run!")
     except Exception as e:
         print(f"\n❌ Build Failed: {e}")
+        sys.exit(1)
     finally:
         # Cleanup the temporary manifest file
         if os.path.exists(manifest_path):

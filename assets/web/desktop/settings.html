@@ -559,7 +559,10 @@
 
       const toast = document.createElement('div');
       toast.className = `toast ${type}`;
-      toast.innerHTML = `${icons[type] || icons.info}<span>${message}</span>`;
+      toast.innerHTML = icons[type] || icons.info;
+      const span = document.createElement('span');
+      span.textContent = message;
+      toast.appendChild(span);
       $toastContainer.appendChild(toast);
 
       setTimeout(() => {

@@ -379,7 +379,10 @@ class Math(BaseCog):
                 return
 
             # Format result, removing trailing zeros.
-            if result == int(result):
+            if math.isinf(result) or math.isnan(result):
+                await ctx.send("That calculation overflowed into an invalid result (infinity/NaN). Please use smaller numbers.")
+                return
+            elif result == int(result):
                 result_display = str(int(result))
             else:
                 result_display = f"{result:.15f}".rstrip('0').rstrip('.')
@@ -449,7 +452,9 @@ class Math(BaseCog):
         context_suffix = f" ({', '.join(context_parts)})" if context_parts else ""
 
         # --- 4. Format Result ---
-        if result == int(result):
+        if math.isinf(result) or math.isnan(result):
+            raise ValueError("That roll overflowed into an invalid result (infinity/NaN). Please use smaller numbers.")
+        elif result == int(result):
             result_display = str(int(result))
         else:
             result_display = f"{result:.2f}"
@@ -494,19 +499,19 @@ class Math(BaseCog):
 
 
 class DiceToken:
-    DICE = 'DICE'
-    COIN = 'COIN'
-    CLAMP = 'CLAMP'
-    NUMBER = 'NUMBER'
-    PLUS = 'PLUS'
-    MINUS = 'MINUS'
-    MULTIPLY = 'MULTIPLY'
-    DIVIDE = 'DIVIDE'
-    POWER = 'POWER'
-    MODULO = 'MODULO'
-    LPAREN = 'LPAREN'
-    RPAREN = 'RPAREN'
-    EOF = 'EOF'
+    DICE: str = 'DICE'
+    COIN: str = 'COIN'
+    CLAMP: str = 'CLAMP'
+    NUMBER: str = 'NUMBER'
+    PLUS: str = 'PLUS'
+    MINUS: str = 'MINUS'
+    MULTIPLY: str = 'MULTIPLY'
+    DIVIDE: str = 'DIVIDE'
+    POWER: str = 'POWER'
+    MODULO: str = 'MODULO'
+    LPAREN: str = 'LPAREN'
+    RPAREN: str = 'RPAREN'
+    EOF: str = 'EOF'
 
     def __init__(self, type_: str, value: Any, raw: str = "", normalized: str = ""):
         self.type = type_
@@ -614,10 +619,10 @@ class DiceParser:
         self.advantage = advantage
         self.disadvantage = disadvantage
         self.sp = sp
-        self.breakdown = []
+        self.breakdown: List[str] = []
         self.current_token = self.lexer.next()
 
-    def eat(self, token_type: str):
+    def eat(self, token_type: str) -> None:
         if self.current_token.type == token_type:
             self.current_token = self.lexer.next()
         else:

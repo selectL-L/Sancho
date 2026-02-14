@@ -16,7 +16,7 @@ import queue
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from typing import Any, Dict, List, Literal, Optional
 
@@ -61,9 +61,17 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: bold_red + format_str + reset
     }
 
+    def __init__(self):
+        super().__init__()
+        self._formatters = {
+            level: logging.Formatter(fmt)
+            for level, fmt in self.FORMATS.items()
+        }
+
     def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
+        formatter = self._formatters.get(record.levelno)
+        if formatter is None:
+            formatter = self._formatters[logging.DEBUG]
         return formatter.format(record)
 
 
@@ -315,7 +323,7 @@ class ResourceTracker:
             cpu_spike = cpu_peak is not None and cpu_usage > 0 and (cpu_peak - cpu_usage) / cpu_usage > threshold
             ram_spike = ram_peak is not None and ram_rss > 0 and (ram_peak - ram_rss) / ram_rss > threshold
 
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc)
             self.usage_history.append({
                 'timestamp': timestamp,
                 'cpu': cpu_usage,
@@ -328,6 +336,20 @@ class ResourceTracker:
                 'ram_spike': ram_spike,
                 'label': label
             })
+
+            # Trim history to prevent unbounded growth.
+            # Keep: first entry (Startup), peak RAM entry, and last 288 entries (~72h at 15m intervals).
+            max_history = 288
+            if len(self.usage_history) > max_history + 2:
+                first = self.usage_history[0]
+                peak_entry = max(self.usage_history, key=lambda e: e.get('ram_peak') or e['ram'])
+                tail = self.usage_history[-(max_history):]
+                # Deduplicate: first and peak may already be in the tail
+                kept = [first]
+                if peak_entry is not first and peak_entry not in tail:
+                    kept.append(peak_entry)
+                kept.extend(tail)
+                self.usage_history = kept
 
             # Build log message with spike indicators
             spike_info = []
@@ -678,7 +700,7 @@ def setup_logging(
             cleanup_old_logs(logs_dir, retention_count)
 
             # Create timestamped log filename
-            timestamp_str = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
             log_filename = f"{bot_name}_{timestamp_str}.log"
             log_file_path = os.path.join(logs_dir, log_filename)
 
@@ -697,7 +719,7 @@ def setup_logging(
         # - QueueHandler puts records into a queue (fast, non-blocking)
         # - QueueListener runs in a background thread, consuming records in order
         # This preserves log ordering while not blocking the asyncio event loop.
-        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)  # Unbounded queue
+        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(10_000)
         queue_handler = QueueHandler(log_queue)
         root_logger.addHandler(queue_handler)
 

@@ -55,6 +55,22 @@ class DatabaseManager:
         self.db_path = db_path
         self.skill_limit = 8  # Default skill limit, loaded from DB on startup.
 
+    async def _connect(self) -> aiosqlite.Connection:
+        """Opens a connection with PRAGMA foreign_keys = ON and row_factory set.
+
+        Callers must manage closing the connection themselves, e.g.:
+            db = await self._connect()
+            try: ...
+            finally: await db.close()
+
+        Returns:
+            aiosqlite.Connection: A configured database connection.
+        """
+        db = await aiosqlite.connect(self.db_path)
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA foreign_keys = ON")
+        return db
+
     # ==========================================================================
     # CORE / SHARED METHODS
     # These methods are used by multiple cogs or are fundamental to the system.
@@ -585,23 +601,15 @@ class DatabaseManager:
             raise ValueError(f"Invalid fate tier: {tier}")
 
         async with aiosqlite.connect(self.db_path) as db:
-            # Check current count
             cursor = await db.execute(
-                f"SELECT {column} FROM bod_players WHERE user_id = ?",
-                (user_id,)
-            )
-            row = await cursor.fetchone()
-            if not row or row[0] <= 0:
-                return False
-
-            # Decrement
-            await db.execute(
-                f"UPDATE bod_players SET {column} = {column} - 1 WHERE user_id = ?",
+                f"UPDATE bod_players SET {column} = {column} - 1 WHERE user_id = ? AND {column} > 0",
                 (user_id,)
             )
             await db.commit()
-            logger.debug(f"Consumed 1 {tier} fate from user {user_id}.")
-            return True
+            if cursor.rowcount > 0:
+                logger.debug(f"Consumed 1 {tier} fate from user {user_id}.")
+                return True
+            return False
 
     async def clear_bod_fate(self, user_id: int, tier: Optional[str] = None) -> None:
         """Clear fate from a user's bank.
@@ -799,6 +807,11 @@ class DatabaseManager:
         """
         if not updates:
             return 0
+
+        REMINDER_UPDATE_COLUMNS = {'message', 'reminder_time', 'channel_id', 'is_recurring', 'recurrence_rule', 'reply_message_id'}
+        invalid_keys = set(updates.keys()) - REMINDER_UPDATE_COLUMNS
+        if invalid_keys:
+            raise ValueError(f"Invalid column names: {invalid_keys}")
 
         async with aiosqlite.connect(self.db_path) as db:
             set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
@@ -1293,9 +1306,9 @@ class DatabaseManager:
             refresh_token: Discord OAuth2 refresh token.
             token_expires_at: Unix timestamp when access_token expires.
         """
-        import time
         now = int(time.time())
-        async with aiosqlite.connect(self.db_path) as db:
+        db = await self._connect()
+        try:
             await db.execute(
                 """
                 INSERT INTO web_sessions (session_id, user_id, access_token, refresh_token, token_expires_at, created_at, last_seen_at)
@@ -1304,6 +1317,8 @@ class DatabaseManager:
                 (session_id, user_id, access_token, refresh_token, token_expires_at, now, now)
             )
             await db.commit()
+        finally:
+            await db.close()
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """Get a web session by its ID.
@@ -1364,7 +1379,6 @@ class DatabaseManager:
         Args:
             session_id: The session UUID to update.
         """
-        import time
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE web_sessions SET last_seen_at = ? WHERE session_id = ?",
@@ -1407,7 +1421,6 @@ class DatabaseManager:
         Returns:
             Number of sessions deleted.
         """
-        import time
         cutoff = int(time.time()) - (max_age_days * 24 * 60 * 60)
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
@@ -1472,28 +1485,29 @@ class DatabaseManager:
             skill_type (str): The skill type.
             description (Optional[str]): The skill description.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON;")
-            async with db.execute("BEGIN") as cursor:
-                try:
-                    # Insert the main skill
-                    await cursor.execute(
-                        "INSERT INTO skills (user_id, name, dice_roll, skill_type, description) VALUES (?, ?, ?, ?, ?)",
-                        (user_id, name, dice_roll, skill_type.lower(), description)
-                    )
-                    skill_id = cursor.lastrowid
+        db = await self._connect()
+        try:
+            await db.execute("BEGIN")
+            # Insert the main skill
+            cursor = await db.execute(
+                "INSERT INTO skills (user_id, name, dice_roll, skill_type, description) VALUES (?, ?, ?, ?, ?)",
+                (user_id, name, dice_roll, skill_type.lower(), description)
+            )
+            skill_id = cursor.lastrowid
 
-                    # Insert all aliases
-                    if aliases and skill_id:
-                        await cursor.executemany(
-                            "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
-                            [(skill_id, alias) for alias in aliases]
-                        )
-                except aiosqlite.Error as e:
-                    await db.rollback()
-                    logger.error(f"Failed to save skill '{name}': {e}")
-                    raise
+            # Insert all aliases
+            if aliases and skill_id:
+                await db.executemany(
+                    "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
+                    [(skill_id, alias) for alias in aliases]
+                )
             await db.commit()
+        except aiosqlite.Error as e:
+            await db.rollback()
+            logger.error(f"Failed to save skill '{name}': {e}")
+            raise
+        finally:
+            await db.close()
 
     async def get_skill_by_id(self, skill_id: int) -> Optional[Dict[str, Any]]:
         """Retrieves a skill by its unique ID.
@@ -1583,11 +1597,13 @@ class DatabaseManager:
         Returns:
             int: The number of rows deleted.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON;")
+        db = await self._connect()
+        try:
             cursor = await db.execute("DELETE FROM skills WHERE id = ? AND user_id = ?", (skill_id, user_id))
             await db.commit()
             return cursor.rowcount
+        finally:
+            await db.close()
 
     async def update_skill(self, skill_id: int, user_id: int, updates: Dict[str, Any]) -> int:
         """Updates specific fields of a skill for a user.
@@ -1607,39 +1623,43 @@ class DatabaseManager:
         if not updates:
             return 0
 
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON;")
+        SKILL_UPDATE_COLUMNS = {'name', 'dice_roll', 'skill_type', 'description', 'aliases'}
+        invalid_keys = set(updates.keys()) - SKILL_UPDATE_COLUMNS
+        if invalid_keys:
+            raise ValueError(f"Invalid column names: {invalid_keys}")
+
+        db = await self._connect()
+        try:
+            await db.execute("BEGIN")
             rows_affected = 0
-            async with db.execute("BEGIN") as cursor:
-                try:
-                    # Handle alias updates separately
-                    if 'aliases' in updates:
-                        new_aliases = updates.pop('aliases')
-                        # Delete old aliases
-                        await cursor.execute("DELETE FROM skill_aliases WHERE skill_id = ?", (skill_id,))
-                        # Insert new ones
-                        if new_aliases:
-                            await cursor.executemany(
-                                "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
-                                [(skill_id, alias) for alias in new_aliases]
-                            )
 
-                    # Handle other field updates
-                    if updates:
-                        set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
-                        params = list(updates.values())
-                        params.extend([skill_id, user_id])
-                        query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
-                        await cursor.execute(query, params)
+            # Handle alias updates separately
+            if 'aliases' in updates:
+                new_aliases = updates.pop('aliases')
+                await db.execute("DELETE FROM skill_aliases WHERE skill_id = ?", (skill_id,))
+                if new_aliases:
+                    await db.executemany(
+                        "INSERT INTO skill_aliases (skill_id, alias) VALUES (?, ?)",
+                        [(skill_id, alias) for alias in new_aliases]
+                    )
 
-                    rows_affected = cursor.rowcount
+            # Handle other field updates
+            if updates:
+                set_clause = ", ".join(f"{key} = ?" for key in updates.keys())
+                params = list(updates.values())
+                params.extend([skill_id, user_id])
+                query = f"UPDATE skills SET {set_clause} WHERE id = ? AND user_id = ?"
+                cursor = await db.execute(query, params)
+                rows_affected = cursor.rowcount
 
-                except aiosqlite.Error as e:
-                    await db.rollback()
-                    logger.error(f"Failed to update skill {skill_id}: {e}")
-                    raise
             await db.commit()
             return rows_affected
+        except aiosqlite.Error as e:
+            await db.rollback()
+            logger.error(f"Failed to update skill {skill_id}: {e}")
+            raise
+        finally:
+            await db.close()
 
     # ==========================================================================
     # STARBOARD COG METHODS
@@ -1813,7 +1833,6 @@ class DatabaseManager:
             username: The user's display name.
             avatar: URL to the user's avatar, or None.
         """
-        import time
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """

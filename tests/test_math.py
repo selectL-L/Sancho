@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from discord.ext import commands
 
-from cogs.math import Math, DiceToken, DiceLexer, DiceParser, safe_eval_math
+from cogs.calc import Math, DiceToken, DiceLexer, DiceParser, safe_eval_math
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 
