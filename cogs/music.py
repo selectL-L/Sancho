@@ -263,9 +263,11 @@ class Music(MusicCommandsMixin, BaseCog):
             self.logger.info("POT_PROVIDER_PORT not configured, skipping POT server")
             return False
 
-        if not pot_script or not os.path.isfile(pot_script):
-            self.logger.info(f"POT provider script not found at {pot_script}")
+        if not pot_script:
+            self.logger.info("POT provider script not found (searched APP_PATH and venv)")
             return False
+
+        self.logger.info(f"Discovered POT provider at: {pot_script}")
 
         # Check if node is available
         import shutil
