@@ -1,10 +1,12 @@
-# Shiori (V0.9.32 - The Web Update)
+# Shiori (V0.13.01 - The "HOLY IT'S FINALLY HERE!" Update)
+
+**Format**: Major.Minor.Bugfix
 
 **A Discord bot designed to be more reasonable.**
 
 Shiori is built on the simple premise interacting with her should feel natural. Rather than forcing you to memorize rigid command structures like most other bots, or using slash commands, Shiori attempts to interpret your *intent*.
 
-If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too, hopefully.
+If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too... hopefully.
 
 ## Features
 
