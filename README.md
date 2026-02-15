@@ -1,4 +1,4 @@
-# Shiori (V0.13.01 - The "HOLY IT'S FINALLY HERE!" Update)
+# Shiori (V0.13.02 - The "HOLY IT'S FINALLY HERE!" Update)
 
 **Format**: Major.Minor.Bugfix
 
