@@ -11,8 +11,6 @@ AudioFetcher Architecture:
 - FetchContext enum communicates intent: PREFETCH (conservative) vs LIVE/RETRY (aggressive)
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

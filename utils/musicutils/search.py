@@ -31,8 +31,6 @@ Architecture: Top-to-bottom data flow
 8. THUMBNAILS        - Separate concern
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re

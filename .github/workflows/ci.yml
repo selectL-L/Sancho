@@ -33,13 +33,7 @@ jobs:
         echo "BOT_NAME=Sancho" >> info.env
 
     - name: Lint with Ruff
-      run: |
-        ruff check \
-          --line-length=180 \
-          --target-version=py312 \
-          --select=F,B,S,C4,PIE,PLE,RUF,ASYNC,T10,SLOT,PERF \
-          --ignore=S110,S311,S104,S101,S105,S106,B008,B010,RUF012,RUF005,RUF022,ASYNC109,PERF203,PERF401,PERF102,ASYNC230,S608,S607,S112,PLR2004,PLC0415 \
-          cogs utils tests config.py main.py migrate_db.py build.py
+      run: ruff check cogs utils tests config.py main.py migrate_db.py build.py
 
   test:
     runs-on: ubuntu-latest

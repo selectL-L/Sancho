@@ -4,8 +4,6 @@ Contains scrapers for Genius, LRCLIB, and LyricalNonsense,
 plus text chunking utilities for display.
 """
 
-from __future__ import annotations
-
 import asyncio
 import html
 import logging

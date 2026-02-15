@@ -1,0 +1,107 @@
+[tool.ruff]
+line-length = 180
+target-version = "py312"
+
+exclude = [
+    "**/WindowsApps",
+]
+
+[tool.ruff.lint]
+select = [
+    # PEP8 style (same as flake8)
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+
+    # Bugs and errors
+    "F",      # Pyflakes: undefined names, unused imports, shadowing
+    "B",      # Bugbear: likely bugs and design problems
+    "C4",     # Comprehensions: unnecessary list()/dict() calls
+    "PIE",    # Misc lints: unnecessary pass, duplicate class field keys
+    "PLE",    # Pylint Error: actual errors
+    "RUF",    # Ruff-specific: ambiguous characters, invalid pyproject, etc.
+    "PERF",   # Perflint: performance antipatterns
+
+    # Security
+    "S",      # Bandit: security issues
+
+    # Async
+    "ASYNC",  # Async: blocking calls in async functions
+
+    # Misc
+    "T10",    # Debugger: leftover breakpoint() calls
+    "SLOT",   # Slots: __slots__ issues
+]
+
+ignore = [
+    # Line length: handled per-file for data files with long regex patterns
+    # "E501",  # Uncomment if you want to globally ignore line length
+
+    # Intentional patterns in this codebase
+    "S110",   # try-except-pass: intentional for UI cleanup
+    "S311",   # pseudo-random: not used for crypto
+    "S104",   # bind to 0.0.0.0: required for yt-dlp source_address
+    "S101",   # assert: used appropriately in views
+    "S105",   # "hardcoded password": false positive on operator strings
+    "S608",   # SQL injection: false positive, table names are constants
+    "S607",   # subprocess with partial path: systemctl intentionally uses PATH
+    "S112",   # try-except-continue: intentional in starboard recovery
+
+    # discord.py patterns
+    "B008",   # Function call in default arg: discord.py pattern
+    "B010",   # setattr with constant: used for dynamic UI children
+    "RUF012", # Mutable class attrs: discord.py cog pattern
+
+    # Stylistic preferences
+    "RUF005", # list concatenation: sometimes clearer than unpacking
+    "RUF022", # __all__ not sorted: organized by category
+
+    # Async: trio/anyio rules that don't apply to our asyncio codebase.
+    # These want async wrappers around os.path/os/open calls, but for
+    # metadata syscalls (~0.1ms) the thread pool overhead is worse.
+    "ASYNC109", # timeout param in async
+    "ASYNC210", # blocking os.path calls (stat, exists, join)
+    "ASYNC220", # blocking os calls (replace, remove, rename)
+    "ASYNC230", # blocking open() calls: trivial config reads
+    "ASYNC240", # blocking os.path methods (isfile, getsize, getmtime)
+
+    # Micro-optimizations not worth the readability cost
+    "PERF203", # try-except in loop: sometimes necessary
+    "PERF401", # list comprehension: stylistic preference
+    "PERF102", # .keys() vs .items(): minor optimization
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "PLR2004", "E402"]
+"utils/lifecycle.py" = ["PLE"]
+"utils/music_helpers.py" = ["PLC0415"]
+# Add files with long regex patterns or data structures here:
+# "cogs/nlp_patterns.py" = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["cogs", "utils"]
+omit = [
+    "*/__pycache__/*",
+    "*/tests/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "pass",
+]
+show_missing = true
+skip_covered = false

@@ -22,7 +22,6 @@ Music is special:
     - background_music=True: Status shows activity, presence shows track
     - Otherwise: No music presence
 """
-from __future__ import annotations
 
 import logging
 import random

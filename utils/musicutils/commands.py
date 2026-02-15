@@ -54,8 +54,6 @@ These are the cost of file splitting, not overhead - they'd exist as wrapper
 signatures anyway if we used plain functions.
 """
 
-from __future__ import annotations
-
 import asyncio
 import functools
 import io

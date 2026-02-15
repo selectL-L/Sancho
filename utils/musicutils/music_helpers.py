@@ -4,7 +4,6 @@ This module contains all the core music functionality that doesn't involve
 state management or authentication. For auth-aware operations, see music_auth.
 """
 
-from __future__ import annotations
 from .music_data import AudioUrlResult, DownloadResult, Track
 
 import asyncio

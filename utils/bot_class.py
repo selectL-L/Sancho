@@ -9,8 +9,6 @@ This class is the central hub of the bot's functionality. It is responsible for:
 - Encapsulating bot-specific configuration and helper methods.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re

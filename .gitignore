@@ -63,6 +63,7 @@ pip-log.txt
 # Users copy *.toml.example → *.toml and customize locally
 *.toml
 !*.toml.example
+!pyproject.toml
 
 # Dev mock data module (create your own for local web UI testing)
 utils/web/mock_data.py
