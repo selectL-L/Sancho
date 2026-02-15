@@ -360,8 +360,18 @@ async def search_query_mode(query: str) -> Tuple[List[SearchResult], List[Search
     )
 
     # Language-aware garbage filter
-    ytm_results = [r for r in ytm_results if is_relevant(query, r)]
-    yt_results = [r for r in yt_results if is_relevant(query, r)]
+    # If filtering would remove ALL results, skip it — a low-confidence result
+    # is better than falling through to the legacy UI with no results.
+    ytm_filtered = [r for r in ytm_results if is_relevant(query, r)]
+    yt_filtered = [r for r in yt_results if is_relevant(query, r)]
+    if ytm_filtered or yt_filtered:
+        ytm_results = ytm_filtered
+        yt_results = yt_filtered
+    elif ytm_results or yt_results:
+        logger.warning(
+            f"[Query Mode] Garbage filter would remove ALL {len(ytm_results) + len(yt_results)} results "
+            f"for '{query}' — skipping filter"
+        )
 
     # Split into songs (ATVs) and videos
     songs = [r for r in ytm_results if r.source == 'ytm_song']
@@ -731,7 +741,15 @@ async def _search_alternatives(
     videos = [r for r in all_ytm_results if r.source == 'ytm_video'] + yt_results
 
     # Garbage filter videos only - YTM ATVs are curated, trust them
-    videos = [r for r in videos if is_relevant(vd_title, r)]
+    # If filtering would remove ALL videos, skip it rather than returning nothing.
+    filtered_videos = [r for r in videos if is_relevant(vd_title, r)]
+    if filtered_videos or not videos:
+        videos = filtered_videos
+    else:
+        logger.warning(
+            f"[URL Mode] Garbage filter would remove ALL {len(videos)} videos "
+            f"for '{vd_title}' — skipping filter"
+        )
 
     return songs, videos, original_found_as_atv
 

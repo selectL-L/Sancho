@@ -27,6 +27,16 @@ from utils.lifecycle import startup_handler
 # Module-level logger for bot infrastructure
 logger = logging.getLogger(__name__)
 
+
+class SlashUnsupportedError(Exception):
+    """Raised when an NLP handler accesses context that slash commands cannot provide.
+
+    The adapter's stub objects raise this when handlers try to access attributes
+    like message.reference or message.attachments, which structurally don't exist
+    on slash interactions. ``dispatch_nlp`` catches this and sends a user-facing
+    message explaining the limitation.
+    """
+
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
 if TYPE_CHECKING:
@@ -154,7 +164,11 @@ class CoreBot(commands.Bot):
         author: Any
         guild: Any
         channel: Any
+        prefix: str
+        message: Any
         async def send(self, *args, **kwargs) -> Any: ...
+        async def reply(self, *args, **kwargs) -> Any: ...
+        def typing(self) -> Any: ...
 
     async def dispatch_nlp(self, ctx: "CoreBot.ContextLike", query: str) -> None:
         """Dispatch a natural-language `query` using the NLP dispatcher logic.
@@ -180,9 +194,19 @@ class CoreBot(commands.Bot):
                 assert method is not None
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, lambda: method(ctx, query=query))
+        except SlashUnsupportedError as e:
+            logger.info(f"Slash NLP hit unsupported feature: {e}")
+            try:
+                await ctx.send(
+                    f"\u26a0\ufe0f This feature requires context that slash commands can't provide "
+                    f"({e}). Please use a prefix command instead!"
+                )
+            except Exception:
+                pass
         except Exception:
             try:
                 logger.exception("Error dispatching NLP query")
+                await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
             except Exception:
                 pass
 
@@ -264,7 +288,11 @@ class CoreBot(commands.Bot):
             logger.info(f"slash NLP query from '{interaction.user}': '{query}'")
             try:
                 # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
-                await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
+                await interaction.response.send_message(
+                    "Forwarding query to NLP... "
+                    "(Note: `/nlp` is not fully supported — some features may require a prefix command.)",
+                    ephemeral=True
+                )
             except Exception:
                 # If sending the ephemeral message fails, try to defer as a fallback.
                 try:
@@ -273,20 +301,75 @@ class CoreBot(commands.Bot):
                     pass
 
             ctx_adapter = CoreBot.InteractionContextAdapter(self, interaction)
-            # Run the NLP dispatcher; no need to await in a special way —
-            # the user already received the ephemeral message.
             await self.dispatch_nlp(ctx_adapter, query)
 
         cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
         self.tree.add_command(cmd)
         logger.info("Registered /nlp application command")
 
-    class InteractionContextAdapter:
-        """A thin adapter that exposes the subset of `commands.Context` used by NLP handlers.
+    class _StubMessage:
+        """A proxy object standing in for `ctx.message` in slash interactions.
 
-        Backed by a `discord.Interaction`. Many NLP handlers expect `ctx.author`,
-        `ctx.guild`, `ctx.channel`, and `await ctx.send(...)`. This adapter
-        provides those attributes and maps `send` to the interaction response/followup.
+        Slash commands don't produce a `discord.Message`, so attributes like
+        ``reference``, ``attachments``, and ``mentions`` are structurally
+        unavailable. Accessing them raises `SlashUnsupportedError`, which
+        ``dispatch_nlp`` catches and converts into a user-facing message.
+        """
+
+        def _raise(self, attr: str):
+            """Raises `SlashUnsupportedError` for the given attribute.
+
+            Args:
+                attr: The attribute name that was accessed.
+
+            Raises:
+                SlashUnsupportedError: Always.
+            """
+            raise SlashUnsupportedError(f"message.{attr}")
+
+        @property
+        def reference(self):
+            """Raises — slash commands have no reply reference."""
+            self._raise("reference")
+
+        @property
+        def attachments(self) -> list:
+            """Raises — slash commands have no attachments."""
+            self._raise("attachments")
+
+        @property
+        def mentions(self) -> list:
+            """Raises — slash commands have no parsed mentions list."""
+            self._raise("mentions")
+
+        def __getattr__(self, name: str):
+            """Catch-all for any other attribute access on the stub.
+
+            Args:
+                name: The attribute being accessed.
+
+            Raises:
+                SlashUnsupportedError: Always.
+            """
+            self._raise(name)
+
+    class _NoOpTyping:
+        """A no-op async context manager standing in for `ctx.typing()`."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    class InteractionContextAdapter:
+        """Adapter that exposes a `commands.Context`-like interface backed by a `discord.Interaction`.
+
+        Provides the attributes NLP handlers commonly access: ``author``, ``guild``,
+        ``channel``, ``prefix``, ``send()``, ``reply()``, ``typing()``, and a stub
+        ``message``. Attributes that slash commands structurally cannot provide
+        (e.g. ``message.reference``) raise `SlashUnsupportedError` on access so the
+        dispatcher can inform the user.
         """
 
         def __init__(self, bot: "CoreBot", interaction: discord.Interaction):
@@ -302,6 +385,19 @@ class CoreBot(commands.Bot):
             self.guild = interaction.guild
             # `interaction.channel` can be None in some contexts; keep reference
             self.channel = interaction.channel
+            self.prefix: str = config.BOT_PREFIX[0] if config.BOT_PREFIX else ". "
+            self.message = CoreBot._StubMessage()
+
+        def typing(self):
+            """Returns a no-op async context manager.
+
+            Slash interactions don't benefit from typing indicators since the
+            user already received the ephemeral acknowledgement.
+
+            Returns:
+                _NoOpTyping: A no-op context manager.
+            """
+            return CoreBot._NoOpTyping()
 
         async def _send_to_channel(self, *args, **kwargs):
             """Helper to attempt sending via the channel if possible.
@@ -348,6 +444,15 @@ class CoreBot(commands.Bot):
                     return await self.author.send(*args, **kwargs)
                 except Exception:
                     return None
+
+        async def reply(self, *args, **kwargs):
+            """Maps ``ctx.reply()`` to ``send()``.
+
+            Slash interactions don't have a message to reply to, so this
+            simply delegates to ``send()``. The reply-threading visual is
+            lost but the content still reaches the channel.
+            """
+            return await self.send(*args, **kwargs)
 
     async def on_ready(self):
         """Called when the bot is ready; triggers the startup handler."""

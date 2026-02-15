@@ -80,7 +80,6 @@ from .music_helpers import (
     detect_mix_in_url,
 )
 from .search import (
-    YTMUSIC_AVAILABLE,
     SearchResult,
     get_thumbnail_bytes,
 )
@@ -239,7 +238,6 @@ class MusicCommandsMixin:
     async def _end_session(self, reason: str = "Session ended.") -> None: ...
     async def _play_current_track(self) -> None: ...
     async def _idle_timeout_loop(self) -> None: ...
-    async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]: ...
     async def _fetch_url_info(self, url: str, force_playlist: bool = False) -> tuple[List[Track], Optional[str], Optional[str]]: ...
 
     # YTM integration methods
@@ -589,7 +587,6 @@ class MusicCommandsMixin:
         """Handle search-based play with YTM integration.
 
         Searches both YTM and YouTube, deduplicates, and shows selection UI.
-        Falls back to legacy search if YTM is unavailable.
 
         Args:
             ctx: The command context.
@@ -598,89 +595,45 @@ class MusicCommandsMixin:
         Returns:
             List of tracks to add (empty if user cancelled or error).
         """
-        from utils.views import get_selection
-
         await ctx.send(f"🔍 Searching for: **{query}**")
 
-        # Try YTM-enhanced search first
-        if YTMUSIC_AVAILABLE:
-            try:
-                _, songs, videos, _ = await self._search_with_ytm(query, is_url=False)
+        try:
+            _, songs, videos, _ = await self._search_with_ytm(query, is_url=False)
+        except Exception as e:
+            self.logger.error(f"Search failed for query '{query}': {e}", exc_info=True)
+            await ctx.send("❌ Search failed. Please try again!")
+            return []
 
-                if songs or videos:
-                    # Convert results to tracks
-                    ytm_tracks = [r.to_track() for r in songs]
-                    yt_tracks = [r.to_track() for r in videos]
-
-                    total = len(ytm_tracks) + len(yt_tracks)
-                    if total == 1:
-                        return ytm_tracks if ytm_tracks else yt_tracks
-
-                    # Show selection UI
-                    selected = await get_track_selection(
-                        ctx,
-                        ytm_tracks=ytm_tracks,
-                        yt_tracks=yt_tracks,
-                        timeout=30.0,
-                    )
-
-                    if not selected:
-                        return []  # View already showed cancel/timeout message
-
-                    # Log the selection
-                    self.logger.info(
-                        f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
-                        f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
-                    )
-
-                    return [selected]
-
-            except Exception as e:
-                self.logger.warning(f"YTM search failed, falling back to legacy: {e}")
-                await ctx.send("-# Had a little trouble with YouTube Music, showing regular results instead!")
-
-        # Fallback to legacy YouTube search
-        results = await self._search_youtube(query, max_results=5)
-        if not results:
+        if not songs and not videos:
             await ctx.send("No results found. Try a different search term!")
             return []
 
-        if len(results) == 1:
-            return results
+        # Convert results to tracks
+        ytm_tracks = [r.to_track() for r in songs]
+        yt_tracks = [r.to_track() for r in videos]
 
-        # Legacy selection UI
-        embed = discord.Embed(
-            title="🎵 Select a Track",
-            description="Choose the track you want to play:",
-            color=discord.Color.blue()
+        total = len(ytm_tracks) + len(yt_tracks)
+        if total == 1:
+            return ytm_tracks if ytm_tracks else yt_tracks
+
+        # Show selection UI
+        selected = await get_track_selection(
+            ctx,
+            ytm_tracks=ytm_tracks,
+            yt_tracks=yt_tracks,
+            timeout=30.0,
         )
 
-        options = {}
-        for i, track in enumerate(results, 1):
-            duration_str = f"{int(track.duration) // 60}:{int(track.duration) % 60:02d}"
-            embed.add_field(
-                name=f"{i}. {track.title}",
-                value=f"by {track.artist} • {duration_str}",
-                inline=False
-            )
-            options[str(i)] = str(i)
+        if not selected:
+            return []  # View already showed cancel/timeout message
 
-        selection = await get_selection(ctx, embed, options, timeout=30.0)
+        # Log the selection
+        self.logger.info(
+            f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
+            f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
+        )
 
-        if not selection:
-            await ctx.send("Selection timed out. Call me again when you're ready!")
-            return []
-
-        try:
-            selected_idx = int(selection) - 1
-            if 0 <= selected_idx < len(results):
-                return [results[selected_idx]]
-            else:
-                await ctx.send("Invalid selection.")
-                return []
-        except ValueError:
-            await ctx.send("Invalid selection.")
-            return []
+        return [selected]
 
     async def _do_queue(self, ctx: commands.Context) -> None:
         """Internal implementation for queue display.

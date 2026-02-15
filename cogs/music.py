@@ -62,7 +62,6 @@ from utils.musicutils import (
     fetch_playlist_metadata,
     fetch_url_info,
     get_thumbnail_bytes,
-    search_youtube,
     search_query_mode,
     search_url_mode,
 )
@@ -1171,18 +1170,6 @@ class Music(MusicCommandsMixin, BaseCog):
     # ==========================================================================
     # VOICE PLAYBACK
     # ==========================================================================
-
-    async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]:
-        """Searches YouTube for tracks matching the query.
-
-        Args:
-            query: The search query string.
-            max_results: Maximum number of results to return.
-
-        Returns:
-            A list of Track objects representing search results.
-        """
-        return await search_youtube(query, max_results, self.logger)
 
     async def _search_with_ytm(
         self,

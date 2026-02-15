@@ -62,7 +62,6 @@ from utils.musicutils.music_helpers import (
     extract_m4a_thumbnail,
     # yt-dlp wrappers
     get_audio_url,
-    search_youtube,
     detect_mix_in_url,
     fetch_url_info,
     fetch_playlist_metadata,
@@ -149,7 +148,6 @@ __all__ = [
     'get_thumbnail_bytes',
     # yt-dlp wrappers
     'get_audio_url',
-    'search_youtube',
     'detect_mix_in_url',
     'fetch_url_info',
     'fetch_playlist_metadata',

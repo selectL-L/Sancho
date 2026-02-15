@@ -375,7 +375,7 @@ class Skills(BaseCog):
                     break
 
         if not cleaned_query:
-            await ctx.send("You didn't specify a skill. Try `.s cast <skill_name>`.")
+            await ctx.send(f"You didn't specify a skill. Try `{ctx.prefix}cast <skill_name>`.")
             return
 
         # Match query to skill.
@@ -415,7 +415,7 @@ class Skills(BaseCog):
                 break
 
         if not found_skill:
-            await ctx.send(f"I couldn't find the skill: `{cleaned_query}`. Use `.s list skills` to see your available skills.")
+            await ctx.send(f"I couldn't find the skill: `{cleaned_query}`. Use `{ctx.prefix}list skills` to see your available skills.")
             return
 
         math_cog: Optional[Math] = cast(Optional[Math], self.bot.get_cog('Math'))
