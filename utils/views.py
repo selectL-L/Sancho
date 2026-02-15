@@ -609,7 +609,7 @@ class SelectionView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.ctx = ctx
         self.value: Optional[str] = None
-        self.message = None
+        self.message: Optional[discord.Message] = None
 
         for label, val in options.items():
             self.add_item(SelectionButton(label, val))
@@ -1079,8 +1079,7 @@ async def get_track_selection(
         timeout=timeout,
     )
 
-    # LayoutView requires explicit content/embed clearing
-    message = await ctx.send(view=view, content=None, embed=None)
+    message = await ctx.send(view=view)
     view.message = message
 
     await view.wait()
