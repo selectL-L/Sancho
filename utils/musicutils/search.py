@@ -79,13 +79,35 @@ MUSIC_VIDEO_TYPE_OMV = "MUSIC_VIDEO_TYPE_OMV"
 MUSIC_VIDEO_TYPE_UGC = "MUSIC_VIDEO_TYPE_UGC"
 MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE = "MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC"
 
-# Version label mapping
-VERSION_LABELS = {
-    MUSIC_VIDEO_TYPE_ATV: "Official Audio",
-    MUSIC_VIDEO_TYPE_OMV: "Music Video",
-    MUSIC_VIDEO_TYPE_UGC: "Cover",
-    MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE: "Official Source",
-}
+# Known YTM video types (for validating raw API values)
+KNOWN_VIDEO_TYPES = frozenset({
+    MUSIC_VIDEO_TYPE_ATV,
+    MUSIC_VIDEO_TYPE_OMV,
+    MUSIC_VIDEO_TYPE_UGC,
+    MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE,
+})
+
+# Cover detection keywords — if any of these appear in the title or album name,
+# the track is classified as a cover regardless of YTM video type.
+# English keywords are matched as whole words; Japanese/Korean keywords are
+# matched as substrings (they don't use word boundaries).
+COVER_KEYWORDS_WORD = frozenset({
+    'cover', 'covers', 'covered',
+})
+# CJK cover indicators matched as substrings (no word boundaries in CJK text)
+COVER_KEYWORDS_SUBSTRING = (
+    '歌ってみた',   # utatte mita — "tried singing" (JP cover tag)
+    'カバー',       # kabā — "cover" in katakana
+    '커버',         # keobeo — "cover" in Korean
+)
+
+# Regex for cover keyword detection (compiled once)
+# Matches English words at word boundaries OR CJK substrings anywhere
+_COVER_PATTERN = re.compile(
+    r'(?:' + '|'.join(rf'\b{kw}\b' for kw in COVER_KEYWORDS_WORD) + r')'
+    r'|(?:' + '|'.join(re.escape(kw) for kw in COVER_KEYWORDS_SUBSTRING) + r')',
+    re.IGNORECASE,
+)
 
 # Scoring thresholds
 STAR_THRESHOLD = 0.6  # Minimum combined score to award star
@@ -494,7 +516,7 @@ async def _build_quick_result(
     # Detect video type from get_song() response
     raw_video_type = video_details.get('musicVideoType', '')
     detected_is_atv = raw_video_type == MUSIC_VIDEO_TYPE_ATV
-    detected_video_type = raw_video_type if raw_video_type in VERSION_LABELS else None
+    detected_video_type = raw_video_type if raw_video_type in KNOWN_VIDEO_TYPES else None
 
     # Base fields from get_song()
     title = video_details.get('title', 'Unknown')
@@ -522,9 +544,8 @@ async def _build_quick_result(
                 # Use clean maxresdefault.jpg to match get_thumbnail_bytes Priority 3.
                 thumb_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
 
-    # Derive source and version_label from video type
+    # Derive source from video type (version_label deferred until album is known)
     source = 'ytm_song' if detected_is_atv else 'ytm_video'
-    version_label = determine_version_label(detected_video_type, source)
 
     # Step 2: For ATVs only, do a filtered songs search to get album + isExplicit
     # (get_song() doesn't return these; only the songs-filtered search endpoint does)
@@ -562,6 +583,9 @@ async def _build_quick_result(
         f"[Quick Result] Resolved {video_id}: '{title}' by '{artist}' "
         f"type={detected_video_type}"
     )
+
+    # Classify version label using title + album evidence (not just video type)
+    version_label = classify_version_label(detected_video_type, title, album)
 
     return SearchResult(
         video_id=video_id,
@@ -1023,10 +1047,9 @@ def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
     if not video_id:
         return None
 
-    # Determine source and version label
+    # Determine source
     is_atv_result = video_type == MUSIC_VIDEO_TYPE_ATV
     source = 'ytm_song' if is_atv_result else 'ytm_video'
-    version_label = determine_version_label(video_type, source)
 
     # Extract artist info
     artists = item.get('artists', [])
@@ -1036,6 +1059,10 @@ def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
     # Extract album
     album_info = item.get('album', {})
     album_name = album_info.get('name') if isinstance(album_info, dict) else None
+
+    # Classify version label using title + album evidence
+    title_raw = item.get('title', 'Unknown')
+    version_label = classify_version_label(video_type, title_raw, album_name)
 
     # Extract thumbnail
     thumbnails = item.get('thumbnails', [])
@@ -1063,6 +1090,7 @@ def _parse_ytm_result(item: Dict[str, Any]) -> Optional[SearchResult]:
         video_type=video_type,
         version_label=version_label,
     )
+
 
 
 def dedupe_results(
@@ -2165,19 +2193,70 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
-def determine_version_label(video_type: Optional[str], source: str) -> str:
-    """Map video type to human-readable label.
+def classify_version_label(
+    video_type: Optional[str],
+    title: str,
+    album: Optional[str] = None,
+) -> str:
+    """Classify a track's version label using video type AND content signals.
+
+    Unlike the old determine_version_label() which blindly mapped YTM type
+    to a label, this function examines the title and album name for evidence
+    of what the content actually is.
+
+    Rules by video type:
+        ATV:  Default "Official Audio". Downgraded to "Cover" if title or
+              album contains cover keywords (e.g., 歌ってみた, "cover").
+        OMV:  Default "Music Video". Downgraded to "Cover" if cover keywords
+              are detected in title or album.
+        UGC:  Default "Video" (no assumption). Upgraded to "Cover" ONLY if
+              explicit cover keywords are found in the title or album.
+        OFFICIAL_SOURCE: Same as UGC — no trust, evidence-only.
+        Unknown/None: "Video".
 
     Args:
-        video_type: YTM video type constant (e.g., MUSIC_VIDEO_TYPE_ATV)
-        source: Source identifier ('ytm_song', 'ytm_video', 'youtube')
+        video_type: YTM video type constant (e.g., MUSIC_VIDEO_TYPE_ATV),
+            or None for yt-dlp/unknown sources.
+        title: Track title to scan for content keywords.
+        album: Album name to scan for cover keywords (optional).
 
     Returns:
-        Human-readable label for display.
+        Human-readable label: "Official Audio", "Music Video", "Cover",
+        or "Video".
     """
-    if video_type and video_type in VERSION_LABELS:
-        return VERSION_LABELS[video_type]
+    has_cover_signal = _has_cover_keywords(title, album)
+
+    if video_type == MUSIC_VIDEO_TYPE_ATV:
+        return "Cover" if has_cover_signal else "Official Audio"
+
+    if video_type == MUSIC_VIDEO_TYPE_OMV:
+        return "Cover" if has_cover_signal else "Music Video"
+
+    if video_type in (MUSIC_VIDEO_TYPE_UGC, MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE):
+        # No default label — only classify if we see explicit evidence
+        return "Cover" if has_cover_signal else "Video"
+
     return "Video"
+
+
+def _has_cover_keywords(title: str, album: Optional[str] = None) -> bool:
+    """Check if title or album contains cover indicators.
+
+    Scans for both English keywords (word-boundary matched) and CJK
+    keywords (substring matched) using a pre-compiled regex.
+
+    Args:
+        title: Track title.
+        album: Album name (optional).
+
+    Returns:
+        True if any cover keyword is found.
+    """
+    if _COVER_PATTERN.search(title):
+        return True
+    if album and _COVER_PATTERN.search(album):
+        return True
+    return False
 
 
 def clean_microformat_title(title: str) -> str:
@@ -2421,12 +2500,22 @@ async def fetch_and_resize_thumbnail(url: str, width: int = THUMBNAIL_WIDTH) -> 
 
 
 async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = None) -> Optional[bytes]:
-    """Get thumbnail bytes for a Track.
+    """Resolve the best available thumbnail for a Track at display time.
+
+    Called when the UI needs to render a thumbnail (e.g., now-playing embed,
+    skip/loop refresh) — NOT during search or audio fetching. The Track
+    dataclass carries a search-provided thumbnail URL, but a higher-quality
+    embedded image may exist in the local cache. This function checks at
+    render time so results always reflect current cache state.
+
+    Lives in search.py because thumbnail resolution is part of the broader
+    metadata-completeness concern, even though it's decoupled from the
+    search pipeline itself.
 
     Priority:
-    1. Extract from cached audio file (M4A or MP3, already embedded)
-    2. Fetch from track.thumbnail URL (if square)
-    3. Fallback to constructed URL from video_id
+    1. Extract from cached audio file (M4A embedded cover art)
+    2. Fetch from track.thumbnail URL (square thumbnails only)
+    3. Fallback to constructed maxresdefault.jpg from video_id
 
     Args:
         track: The Track object.
@@ -2436,7 +2525,7 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
         Image bytes, or None if unavailable.
     """
     import os
-    from .music_helpers import extract_mp3_thumbnail, extract_m4a_thumbnail
+    from .music_helpers import extract_m4a_thumbnail
 
     # Priority 1: Extract from cached audio file
     cached_path = None
@@ -2451,8 +2540,6 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
         thumbnail_data = None
         if cached_path.endswith('.m4a'):
             thumbnail_data = extract_m4a_thumbnail(cached_path)
-        elif cached_path.endswith('.mp3'):
-            thumbnail_data = extract_mp3_thumbnail(cached_path)
         if thumbnail_data:
             logger.info(f"[Thumbnail] Using embedded thumbnail for {track.video_id}")
             return thumbnail_data

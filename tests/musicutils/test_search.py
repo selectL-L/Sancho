@@ -16,9 +16,13 @@ from utils.musicutils.search import (
     is_relevant,
     dedupe_results,
     score_candidate,
+    classify_version_label,
     OriginalMetadata,
     SearchResult,
     MUSIC_VIDEO_TYPE_ATV,
+    MUSIC_VIDEO_TYPE_OMV,
+    MUSIC_VIDEO_TYPE_UGC,
+    MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE,
 )
 
 
@@ -677,3 +681,104 @@ class TestTagConfidenceScoring:
 
         # Numbers/symbols only
         assert _calculate_script_ratio('12345') == 0.0
+
+
+# ==========================================================================
+# VERSION LABEL CLASSIFICATION - Correct labels based on content evidence
+# ==========================================================================
+
+
+class TestVersionLabelClassification:
+    """classify_version_label must produce accurate labels based on evidence.
+
+    Dangerous: mislabelling a cover as "Official Audio" or vice versa
+    misleads the user about what they're selecting.
+    """
+
+    # --- ATV: trust by default, downgrade on cover evidence ---
+
+    def test_atv_defaults_to_official_audio(self):
+        """Plain ATV with no cover signals = Official Audio."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Crazy") == "Official Audio"
+
+    def test_atv_with_cover_in_title(self):
+        """ATV whose title says 'cover' = Cover, not Official Audio."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Crazy (Cover)") == "Cover"
+
+    def test_atv_with_japanese_cover_keyword(self):
+        """ATV with 歌ってみた in title = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "ロキ 歌ってみた") == "Cover"
+
+    def test_atv_with_katakana_cover(self):
+        """ATV with カバー in title = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "ロキ カバー") == "Cover"
+
+    def test_atv_with_cover_album(self):
+        """ATV on a cover album = Cover even if title is clean."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Crazy", album="Cover Album") == "Cover"
+
+    def test_atv_with_korean_cover(self):
+        """ATV with Korean 커버 = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "노래 커버") == "Cover"
+
+    # --- OMV: trust by default, downgrade on cover evidence ---
+
+    def test_omv_defaults_to_music_video(self):
+        """Plain OMV = Music Video."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_OMV, "Crazy (Official Video)") == "Music Video"
+
+    def test_omv_with_cover_in_title(self):
+        """OMV whose title says 'cover' = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_OMV, "Crazy Cover by Someone") == "Cover"
+
+    def test_omv_with_utatte_mita(self):
+        """OMV with 歌ってみた = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_OMV, "ロキ 歌ってみた MV") == "Cover"
+
+    # --- UGC: no assumption, evidence only ---
+
+    def test_ugc_defaults_to_video(self):
+        """UGC with no cover keywords = Video (no assumption)."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_UGC, "Crazy - Gnarls Barkley") == "Video"
+
+    def test_ugc_with_cover_keyword(self):
+        """UGC with 'cover' in title = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_UGC, "Crazy Cover") == "Cover"
+
+    def test_ugc_with_cover_album(self):
+        """UGC on a cover album = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_UGC, "Song Name", album="My Covers") == "Cover"
+
+    # --- Official Source: same as UGC (no trust) ---
+
+    def test_official_source_defaults_to_video(self):
+        """Official Source with no signals = Video."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE, "Some Track") == "Video"
+
+    def test_official_source_with_cover(self):
+        """Official Source with cover keyword = Cover."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE, "Song (Cover)") == "Cover"
+
+    # --- Unknown / None type ---
+
+    def test_unknown_type_is_video(self):
+        """Unknown video type = Video."""
+        assert classify_version_label(None, "Some Title") == "Video"
+
+    def test_empty_type_is_video(self):
+        """Empty string type = Video."""
+        assert classify_version_label("", "Some Title") == "Video"
+
+    # --- Edge cases: partial matches should NOT trigger ---
+
+    def test_discover_does_not_match_cover(self):
+        """'discover' contains 'cover' substring but should NOT match (word boundary)."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Discover") == "Official Audio"
+
+    def test_recovery_does_not_match_cover(self):
+        """'recovery' contains 'cover' but should NOT match (word boundary)."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Recovery") == "Official Audio"
+
+    def test_covered_matches(self):
+        """'covered' is an explicit keyword and should match."""
+        assert classify_version_label(MUSIC_VIDEO_TYPE_ATV, "Covered by AZKi") == "Cover"

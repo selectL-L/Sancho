@@ -887,7 +887,8 @@ class TrackSelectionView(ui.LayoutView):
                 view_str = _format_view_count(t.view_count)
 
                 # Version label emoji mapping
-                version_emoji = "🎵" if t.version_label == "Official Audio" else "🎬" if t.version_label == "Music Video" else "📀"
+                _VERSION_EMOJIS = {"Official Audio": "🎵", "Music Video": "🎬", "Cover": "🎤"}
+                version_emoji = _VERSION_EMOJIS.get(t.version_label, "📀")
                 explicit_badge = " 🅴" if t.is_explicit else ""
                 rec_badge = " ⭐" if is_rec else ""
 

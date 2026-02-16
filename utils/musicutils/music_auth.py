@@ -701,7 +701,7 @@ class AudioFetcher:
                 self.logger.debug(f"[AudioFetcher] Residential callback error: {e}")
 
         # Download via cache_manager
-        success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_residential(
+        success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_live_residential(
             track
         )
 

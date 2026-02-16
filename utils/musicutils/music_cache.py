@@ -446,22 +446,18 @@ class MusicCacheManager:
     def _find_residential_file(self, video_id: str) -> Optional[str]:
         """Find a cached residential download for a video ID.
 
+        Checks for any file named <video_id>.* in the residential directory.
+        Format doesn't matter — if the video ID matches, it's a hit.
+
         Args:
             video_id: YouTube video ID.
 
         Returns:
             Path to cached residential file if exists, None otherwise.
         """
-        mp3_path = os.path.join(self.residential_path, f"{video_id}.mp3")
-        if os.path.exists(mp3_path):
-            return mp3_path
-
-        for ext in ['.webm', '.opus', '.m4a', '.ogg']:
-            path = os.path.join(self.residential_path, f"{video_id}{ext}")
-            if os.path.exists(path):
-                return path
-
-        return None
+        pattern = os.path.join(self.residential_path, f"{video_id}.*")
+        matches = glob.glob(pattern)
+        return matches[0] if matches else None
 
     def _schedule_missing_invalidation(self, video_id: str) -> None:
         """Best-effort invalidation for a missing cached file.
@@ -576,7 +572,7 @@ class MusicCacheManager:
             return matches[0]
 
         if residential_allowed:
-            # Check residential cache (MP3 + legacy formats)
+            # Check residential cache (any format)
             residential_path = self._find_residential_file(video_id)
             if residential_path:
                 return residential_path
@@ -753,7 +749,7 @@ class MusicCacheManager:
     # =========================================================================
     # 1.9 — TRACK DOWNLOAD
     #
-    # Helpers first: _mark_track_unavailable, _download_track_via_residential
+    # Helpers first: _mark_track_unavailable, _download_ambient_residential
     # Then public: download_track
     # =========================================================================
 
@@ -800,18 +796,22 @@ class MusicCacheManager:
             except Exception as e:
                 self.logger.debug(f"[CacheManager] Unavailable callback error: {e}")
 
-    async def _download_track_via_residential(
+    async def _download_ambient_residential(
         self,
         video_id: str,
         entry_snap: Dict[str, Any],
         target_path: str,
         thumbnail_bytes: Optional[bytes] = None,
     ) -> Optional[str]:
-        """Downloads a track via residential proxy with ambient-quality settings.
+        """Ambient pipeline's residential fallback — downloads to tracks/.
 
-        Produces an M4A file identical to direct download, just routed through
-        the proxy. Unlike download_residential() which serves live playback at
-        192kbps MP3, this uses full 320kbps M4A with metadata.
+        Called when the ambient background download gets a 403/IP-block.
+        Produces a full-quality M4A identical to a direct ambient download,
+        just routed through the residential proxy.
+
+        Unlike download_live_residential() which serves live playback
+        at 192kbps to residential/, this writes 320kbps with full metadata
+        to tracks/ — it's ambient's retry path, not a separate cache.
 
         Args:
             video_id: YouTube video ID.
@@ -978,7 +978,7 @@ class MusicCacheManager:
 
             if is_ip_block:
                 self.logger.info(f"[CacheManager] Direct download blocked, trying residential: {entry_snap.get('title')}")
-                residential_result = await self._download_track_via_residential(
+                residential_result = await self._download_ambient_residential(
                     video_id=video_id,
                     entry_snap=entry_snap,
                     target_path=target_path,
@@ -1616,20 +1616,24 @@ class MusicCacheManager:
         }
 
     # =========================================================================
-    # 1.15 — RESIDENTIAL PROXY DOWNLOAD
+    # 1.15 — LIVE RESIDENTIAL DOWNLOAD
     # =========================================================================
 
-    async def download_residential(
+    async def download_live_residential(
         self,
         track: 'Track',
         timeout: float = 180.0,
         max_duration: int = 900  # 15 minutes max by default
     ) -> Tuple[bool, Optional[str], int, Optional[str]]:
-        """Download a track via residential proxy and cache it as MP3.
+        """Download a track via residential proxy for live playback.
 
         Downloads the full audio file through a residential proxy to bypass
-        YouTube's IP-based blocks. The file is converted to MP3 and saved
-        to the residential cache permanently.
+        YouTube's IP-based blocks. The file is saved to the residential
+        cache as M4A for immediate streaming.
+
+        This is the AudioFetcher's last resort for live playback — not
+        part of the ambient pipeline. Output goes to residential/ with
+        a simple <video_id>.m4a filename (no metadata, no ambient index).
 
         Args:
             track: Track to download.
@@ -1645,7 +1649,6 @@ class MusicCacheManager:
         - Timeout prevents hanging downloads
         - Returns byte count for cost tracking
         - Does NOT retry internally (caller handles retries)
-        - Converts to MP3 for consistency with ambient cache
         """
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
@@ -1669,16 +1672,17 @@ class MusicCacheManager:
 
         from typing import cast
 
-        # Output path (without extension - yt-dlp will add it, then postprocessor changes to .mp3)
+        # Output path (without extension - yt-dlp adds it, postprocessor converts to .m4a)
         output_base = os.path.join(self.residential_path, track.video_id)
 
-        # Build yt-dlp options with MP3 conversion (like ambient downloads)
+        # Build yt-dlp options with M4A conversion (same container as ambient)
         ydl_opts = get_ytdlp_options({
             'proxy': proxy_url,
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_base + '.%(ext)s',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
+                'preferredcodec': 'm4a',
                 'preferredquality': '192',  # 192kbps is fine for streaming, saves bandwidth
             }],
             'quiet': True,
@@ -1699,7 +1703,7 @@ class MusicCacheManager:
                 timeout=timeout
             )
 
-            # Find the downloaded file (should be .mp3 after postprocessing)
+            # Find the downloaded file
             cached_path = self._find_residential_file(track.video_id)
             if cached_path:
                 file_size = os.path.getsize(cached_path)

@@ -1,4 +1,4 @@
-"""yt-dlp wrappers, thumbnail processing, FFmpeg utilities, and MP3 downloads.
+"""yt-dlp wrappers, thumbnail processing, FFmpeg utilities, and M4A downloads.
 
 This module contains all the core music functionality that doesn't involve
 state management or authentication. For auth-aware operations, see music_auth.
@@ -25,16 +25,10 @@ except ImportError:
     YTDLP_AVAILABLE = False
 
 try:
-    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, TRCK, TYER, TCON, COMM  # type: ignore[attr-defined]
-    from mutagen.mp3 import MP3
     from mutagen.mp4 import MP4, MP4Cover  # type: ignore[attr-defined]
-    from mutagen._util import MutagenError  # type: ignore[attr-defined]
     MUTAGEN_AVAILABLE = True
 except ImportError:
-    APIC = ID3 = TALB = TIT2 = TPE1 = TRCK = TYER = TCON = COMM = None  # type: ignore[assignment,misc]
-    MP3 = None  # type: ignore[assignment,misc]
     MP4 = MP4Cover = None  # type: ignore[assignment,misc]
-    MutagenError = Exception  # type: ignore[assignment,misc]
     MUTAGEN_AVAILABLE = False
 
 try:
@@ -288,43 +282,6 @@ def extract_video_id(url: str) -> Optional[str]:
 # ==========================================================================
 
 
-def extract_mp3_thumbnail(mp3_path: str) -> Optional[bytes]:
-    """Extracts embedded cover art from an MP3 file.
-
-    Reads the APIC (Attached Picture) frame from the MP3's ID3 tags.
-    This is used to retrieve thumbnails from cached MP3 files without
-    hitting YouTube.
-
-    Args:
-        mp3_path: Path to the MP3 file.
-
-    Returns:
-        Image bytes if found, None otherwise.
-    """
-    if not MUTAGEN_AVAILABLE or not os.path.exists(mp3_path):
-        return None
-
-    try:
-        audio = MP3(mp3_path, ID3=ID3)  # type: ignore[misc]
-        if audio.tags is None:
-            logger.debug(f"[Thumbnail] No ID3 tags in {os.path.basename(mp3_path)}")
-            return None
-
-        # Look for APIC frames (cover art)
-        for key in audio.tags.keys():
-            if key.startswith('APIC'):
-                apic = audio.tags[key]
-                if apic.data:
-                    logger.debug(f"[Thumbnail] Extracted {len(apic.data)} bytes from MP3 ({apic.mime})")
-                    return apic.data
-
-        logger.debug(f"[Thumbnail] No APIC frame in {os.path.basename(mp3_path)}")
-    except Exception as e:
-        logger.debug(f"[Thumbnail] Failed to extract from MP3: {e}")
-
-    return None
-
-
 def extract_m4a_thumbnail(m4a_path: str) -> Optional[bytes]:
     """Extracts embedded cover art from an M4A file.
 
@@ -359,7 +316,6 @@ def extract_m4a_thumbnail(m4a_path: str) -> Optional[bytes]:
 # Thumbnail processing lives in search.py
 from .search import (  # noqa: E402
     extract_best_thumbnail_from_info,
-    fetch_thumbnail_bytes,
     MUSIC_VIDEO_TYPE_ATV,
 )
 
@@ -869,7 +825,7 @@ def generate_ambient_filename(
 
 
 # ==========================================================================
-# MP3 DOWNLOAD WITH METADATA
+# M4A DOWNLOAD WITH METADATA
 # ==========================================================================
 
 
@@ -964,276 +920,6 @@ def ytdlp_cleanup_temp_files(output_dir: str, video_id: str, keep_ext: str) -> N
                 os.remove(os.path.join(output_dir, filename))
             except OSError as e:
                 logger.debug(f"Failed to cleanup temp file {filename}: {e}")
-
-
-async def download_track_as_mp3(
-    url: str,
-    output_dir: str,
-    logger: Any,
-    custom_title: Optional[str] = None,
-    custom_artist: Optional[str] = None,
-    custom_album: Optional[str] = None,
-    custom_genre: Optional[str] = None,
-    custom_year: Optional[str] = None,
-    custom_track_num: Optional[str] = None,
-    custom_comment: Optional[str] = None,
-    embed_thumbnail: bool = True,
-    proxy: Optional[str] = None,
-    ydl_opts: Optional[Dict[str, Any]] = None
-) -> DownloadResult:
-    """Downloads a track from YouTube as MP3 with full metadata.
-
-    Downloads audio from a YouTube URL, converts to MP3, and embeds
-    ID3 metadata including cover art. Metadata can be customized or
-    auto-populated from YouTube.
-
-    Args:
-        url: YouTube URL to download.
-        output_dir: Directory to save the MP3 file.
-        logger: Logger instance for messages.
-        custom_title: Override the track title (None = use YouTube title).
-        custom_artist: Override the artist (None = use uploader/channel).
-        custom_album: Album name to embed (None = use YouTube album if available).
-        custom_genre: Genre tag to embed.
-        custom_year: Year tag to embed (None = auto-detect from upload date).
-        custom_track_num: Track number tag (e.g., "1" or "1/12").
-        custom_comment: Comment tag to embed.
-        embed_thumbnail: Whether to embed the thumbnail as cover art.
-        proxy: Optional proxy URL for the download (e.g., residential proxy).
-        ydl_opts: Optional base yt-dlp options dict.
-
-    Returns:
-        DownloadResult with success status, file path, and metadata.
-    """
-    if not YTDLP_AVAILABLE:
-        return DownloadResult(
-            success=False,
-            error_message="yt-dlp is not installed. Install with: pip install yt-dlp"
-        )
-
-    if not MUTAGEN_AVAILABLE:
-        return DownloadResult(
-            success=False,
-            error_message="mutagen is not installed. Install with: pip install mutagen"
-        )
-
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Temporary file template - we'll rename after getting metadata
-    temp_template = os.path.join(output_dir, 'temp_%(id)s.%(ext)s')
-
-    download_opts: Dict[str, Any] = {
-        'format': 'bestaudio/best',
-        'outtmpl': temp_template,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '320',
-        }],
-        'writethumbnail': embed_thumbnail,  # Download thumbnail for manual embedding
-        'nocheckcertificate': True,
-        'logtostderr': False,
-        'quiet': True,
-        'no_warnings': True,
-    }
-
-    # Merge base options if provided
-    if ydl_opts:
-        # Copy auth-related options
-        for key in ['cookiefile', 'cookiesfrombrowser', 'extractor_args']:
-            if key in ydl_opts:
-                download_opts[key] = ydl_opts[key]
-
-    if proxy:
-        download_opts['proxy'] = proxy
-
-    # Track video_id for cleanup - we may not get it if download fails early
-    video_id: Optional[str] = None
-
-    try:
-        logger.info(f"[Download] Starting download: {url}")
-
-        def do_download() -> Dict[str, Any]:
-            with yt_dlp.YoutubeDL(cast(Any, download_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=True)  # type: ignore[return-value]
-
-        info = await asyncio.to_thread(do_download)
-
-        if not info:
-            return DownloadResult(
-                success=False,
-                error_message="Failed to extract video information."
-            )
-
-        # Extract metadata from yt-dlp info
-        video_id_str: str = info.get('id') or 'unknown'
-        video_id = video_id_str
-        yt_title = info.get('title', 'Unknown Title')
-        yt_artist = info.get('artist') or info.get('uploader') or info.get('channel', 'Unknown Artist')
-        yt_album = info.get('album')
-        yt_duration = info.get('duration', 0)
-        yt_year = None
-        if info.get('upload_date'):
-            yt_year = info['upload_date'][:4]  # YYYYMMDD -> YYYY
-
-        # Apply custom metadata or use YouTube defaults
-        final_title = custom_title or yt_title
-        final_artist = custom_artist or yt_artist
-        final_album = custom_album or yt_album
-        final_year = custom_year or yt_year
-
-        # Find the downloaded MP3 file
-        temp_mp3_path = ytdlp_temp_finder(output_dir, video_id_str, '.mp3')
-        if not temp_mp3_path:
-            return DownloadResult(
-                success=False,
-                error_message=f"Downloaded file not found. Expected: temp_{video_id_str}.mp3"
-            )
-
-        # Generate final filename
-        safe_artist = sanitize_filename(final_artist, 60)
-        safe_title = sanitize_filename(final_title, 120)
-        final_filename = f"{safe_artist} - {safe_title}.mp3"
-        final_path = os.path.join(output_dir, final_filename)
-
-        # Handle filename collision
-        counter = 1
-        while os.path.exists(final_path):
-            final_filename = f"{safe_artist} - {safe_title} ({counter}).mp3"
-            final_path = os.path.join(output_dir, final_filename)
-            counter += 1
-
-        # Rename temp file to final name
-        if not ytdlp_move_temp_file(
-            temp_mp3_path,
-            final_path,
-            overwrite=False,
-            logger=logger,
-        ):
-            return DownloadResult(
-                success=False,
-                error_message=f"Failed to move temp file for {video_id_str}"
-            )
-        logger.info(f"[Download] MP3 saved as: {final_filename}")
-
-        # Embed metadata using mutagen
-        thumbnail_embedded = False
-        try:
-            audio = MP3(final_path, ID3=ID3)  # type: ignore[misc]
-
-            # Create ID3 tag if it doesn't exist
-            try:
-                audio.add_tags()
-            except MutagenError:
-                pass  # Tags already exist - expected
-
-            # Set metadata tags
-            audio.tags.add(TIT2(encoding=3, text=final_title))  # type: ignore[union-attr,misc]
-            audio.tags.add(TPE1(encoding=3, text=final_artist))  # type: ignore[union-attr,misc]
-
-            if final_album:
-                audio.tags.add(TALB(encoding=3, text=final_album))  # type: ignore[union-attr,misc]
-
-            if final_year:
-                audio.tags.add(TYER(encoding=3, text=final_year))  # type: ignore[union-attr,misc]
-
-            if custom_genre:
-                audio.tags.add(TCON(encoding=3, text=custom_genre))  # type: ignore[union-attr,misc]
-
-            if custom_track_num:
-                audio.tags.add(TRCK(encoding=3, text=custom_track_num))  # type: ignore[union-attr,misc]
-
-            if custom_comment:
-                audio.tags.add(COMM(encoding=3, lang='eng', desc='', text=custom_comment))  # type: ignore[union-attr,misc]
-
-            # Embed thumbnail as cover art
-            if embed_thumbnail:
-                thumbnail_embedded = await _embed_thumbnail_in_mp3(
-                    audio, info, output_dir, video_id_str, logger
-                )
-
-            audio.save()
-            logger.info("[Download] Metadata embedded successfully")
-
-        except Exception as e:
-            logger.warning(f"[Download] Failed to embed some metadata: {e}")
-
-        # Cleanup thumbnail files
-        ytdlp_cleanup_temp_files(output_dir, video_id_str, '.mp3')
-
-        return DownloadResult(
-            success=True,
-            file_path=final_path,
-            title=final_title,
-            artist=final_artist,
-            album=final_album,
-            duration=yt_duration,
-            thumbnail_embedded=thumbnail_embedded
-        )
-
-    except Exception as e:
-        logger.error(f"[Download] Error: {e}", exc_info=True)
-
-        # Cleanup temp files for THIS download only
-        try:
-            if os.path.isdir(output_dir) and video_id:
-                ytdlp_cleanup_temp_files(output_dir, video_id, '.mp3')
-        except OSError as cleanup_err:
-            logger.debug(f"Error cleanup failed (masking original error): {cleanup_err}")
-
-        return DownloadResult(success=False, error_message=format_youtube_error(e))
-
-
-async def _embed_thumbnail_in_mp3(
-    audio: Any,
-    info: Dict[str, Any],
-    output_dir: str,
-    video_id: str,
-    logger: Any
-) -> bool:
-    """Embeds thumbnail as cover art in an MP3 file.
-
-    Uses _extract_best_thumbnail() for proper thumbnail selection (prefers square),
-    then fetch_thumbnail_bytes() for download.
-
-    Args:
-        audio: Mutagen MP3 object with ID3 tags.
-        info: yt-dlp extraction info dict.
-        output_dir: Directory where temp files are stored.
-        video_id: YouTube video ID.
-        logger: Logger for debug messages.
-
-    Returns:
-        True if thumbnail was embedded, False otherwise.
-    """
-    thumbnail_data = None
-
-    # Use extract_best_thumbnail_from_info for proper thumbnail selection
-    # This prefers square album art over 16:9 video thumbnails
-    try:
-        thumbnail_url, is_square = await extract_best_thumbnail_from_info(info)
-        if thumbnail_url:
-            thumbnail_data = await fetch_thumbnail_bytes(thumbnail_url)
-            if thumbnail_data:
-                logger.debug(f"[Download] Thumbnail: {thumbnail_url[:50]}... (square={is_square})")
-    except Exception as e:
-        logger.debug(f"[Download] Failed to process thumbnail: {e}")
-
-    if thumbnail_data:
-        try:
-            audio.tags.add(APIC(  # type: ignore[union-attr,misc]
-                encoding=3,
-                mime='image/jpeg',  # fetch_thumbnail_bytes returns original format
-                type=3,  # Front cover
-                desc='Cover',
-                data=thumbnail_data
-            ))
-            return True
-        except Exception as e:
-            logger.warning(f"[Download] Failed to embed thumbnail: {e}")
-
-    return False
 
 
 async def download_track_as_m4a(
@@ -1456,57 +1142,3 @@ async def download_track_as_m4a(
             logger.debug(f"Error cleanup failed (masking original error): {cleanup_err}")
 
         return DownloadResult(success=False, error_message=format_youtube_error(e))
-
-
-async def get_track_info_for_download(
-    url: str,
-    logger: Any,
-    ydl_opts: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
-    """Gets track metadata without downloading, for preview purposes.
-
-    Useful for showing the user what will be downloaded before committing.
-
-    Args:
-        url: YouTube URL to inspect.
-        logger: Logger instance.
-        ydl_opts: Optional yt-dlp options dict.
-
-    Returns:
-        Dict with title, artist, album, duration, thumbnail, or None on failure.
-    """
-    if not YTDLP_AVAILABLE:
-        return None
-
-    try:
-        if ydl_opts is None:
-            ydl_opts = {**YTDLP_OPTIONS}
-
-        ydl_opts = {
-            **ydl_opts,
-            'extract_flat': False,
-            'skip_download': True,
-        }
-
-        def extract() -> Dict[str, Any]:
-            with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=False)  # type: ignore[return-value]
-
-        info = await asyncio.to_thread(extract)
-
-        if not info:
-            return None
-
-        return {
-            'title': info.get('title', 'Unknown Title'),
-            'artist': info.get('artist') or info.get('uploader') or info.get('channel', 'Unknown Artist'),
-            'album': info.get('album'),
-            'duration': info.get('duration', 0),
-            'thumbnail': info.get('thumbnail'),
-            'upload_date': info.get('upload_date'),
-            'url': url,
-        }
-
-    except Exception as e:
-        logger.error(f"[Download] Error getting track info: {e}")
-        return None

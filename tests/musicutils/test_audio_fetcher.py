@@ -37,7 +37,7 @@ def mock_cache_manager():
     """Create a mock MusicCacheManager."""
     manager = MagicMock()
     manager.get_any_local_path = MagicMock(return_value=None)  # No ambient cache by default
-    manager.download_residential = AsyncMock(return_value=(False, "Not configured", 0, None))
+    manager.download_live_residential = AsyncMock(return_value=(False, "Not configured", 0, None))
     return manager
 
 
@@ -251,7 +251,7 @@ class TestAudioFetcherPrefetchContext:
 
             assert result.success is False
             # Should not have tried residential
-            mock_cache_manager.download_residential.assert_not_called()
+            mock_cache_manager.download_live_residential.assert_not_called()
 
 
 class TestAudioFetcherLiveContext:
@@ -265,7 +265,7 @@ class TestAudioFetcherLiveContext:
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
-                mock_cache_manager.download_residential.return_value = (
+                mock_cache_manager.download_live_residential.return_value = (
                     True, None, 5000, "/residential/video.mp3"
                 )
 
@@ -274,7 +274,7 @@ class TestAudioFetcherLiveContext:
                 assert result.success is True
                 assert result.local_path == "/residential/video.mp3"
                 assert result.residential_used is True
-                mock_cache_manager.download_residential.assert_called_once()
+                mock_cache_manager.download_live_residential.assert_called_once()
 
 
 class TestAudioFetcherRetryContext:
@@ -288,7 +288,7 @@ class TestAudioFetcherRetryContext:
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
-                mock_cache_manager.download_residential.return_value = (
+                mock_cache_manager.download_live_residential.return_value = (
                     True, None, 5000, "/residential/video.mp3"
                 )
 
@@ -323,7 +323,7 @@ class TestAudioFetcherResidentialEscalation:
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
-                mock_cache_manager.download_residential.return_value = (False, "Failed", 0, None)
+                mock_cache_manager.download_live_residential.return_value = (False, "Failed", 0, None)
 
                 # Exhaust residential attempts
                 for _ in range(AudioFetcher.RESIDENTIAL_MAX + 2):
@@ -340,7 +340,7 @@ class TestAudioFetcherResidentialEscalation:
 
             with patch('utils.musicutils.music_auth.get_residential_proxy_url') as mock_proxy:
                 mock_proxy.return_value = "http://proxy:8080"
-                mock_cache_manager.download_residential.return_value = (
+                mock_cache_manager.download_live_residential.return_value = (
                     True, None, 1_000_000, "/path.mp3"
                 )
 

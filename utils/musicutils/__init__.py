@@ -58,21 +58,17 @@ from utils.musicutils.music_helpers import (
     # Video ID
     extract_video_id,
     # Thumbnails
-    extract_mp3_thumbnail,
     extract_m4a_thumbnail,
     # yt-dlp wrappers
     get_audio_url,
     detect_mix_in_url,
     fetch_url_info,
     fetch_playlist_metadata,
-    # MP3 download
+    # Download utilities
     sanitize_filename,
-    download_track_as_mp3,
-    # M4A download
     download_track_as_m4a,
     # Ambient filename generation
     generate_ambient_filename,
-    get_track_info_for_download,
 )
 
 # Thumbnail functions are now in search.py
@@ -143,7 +139,6 @@ __all__ = [
     'resize_thumbnail_bytes',
     'fetch_and_resize_thumbnail',
     'extract_best_thumbnail_from_info',
-    'extract_mp3_thumbnail',
     'extract_m4a_thumbnail',
     'get_thumbnail_bytes',
     # yt-dlp wrappers
@@ -151,12 +146,10 @@ __all__ = [
     'detect_mix_in_url',
     'fetch_url_info',
     'fetch_playlist_metadata',
-    # MP3 download
+    # Download utilities
     'sanitize_filename',
-    'download_track_as_mp3',
     'download_track_as_m4a',
     'generate_ambient_filename',
-    'get_track_info_for_download',
 ]
 
 # YouTube auth and retry orchestration (Phase 5 + Phase 12)
