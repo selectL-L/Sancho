@@ -1,16 +1,16 @@
-"""cogs/image.py
+"""cogs/files.py
 
-This cog contains commands for basic image manipulation, such as resizing
+This cog contains commands for file manipulation, such as image resizing
 and converting formats. It uses the Pillow (PIL) library for processing.
 
 A key feature of this cog is the use of `asyncio.to_thread` to run the
-synchronous, blocking image processing functions in a separate thread. This
+synchronous, blocking processing functions in a separate thread. This
 prevents the bot's main event loop from being blocked, ensuring the bot
-remains responsive while handling potentially time-consuming image operations.
+remains responsive while handling potentially time-consuming file operations.
 
 This cog also provides utilities to fetch user assets (avatars, banners) at
 both global and guild levels, with helper functions designed to be reusable
-for other image operations like applying masks or overlays.
+for other operations like applying masks or overlays.
 """
 
 import asyncio
@@ -72,11 +72,11 @@ class UserAsset:
         return PILImage.open(io.BytesIO(self.image_bytes))
 
 
-class ImageCog(BaseCog):
-    """A cog for handling image manipulation commands."""
+class FilesCog(BaseCog):
+    """A cog for handling file manipulation commands."""
 
     def __init__(self, bot: CoreBot):
-        """Initializes the ImageCog.
+        """Initializes the FilesCog.
 
         Args:
             bot (CoreBot): The bot instance.
@@ -569,4 +569,4 @@ async def setup(bot: CoreBot) -> None:
     Args:
         bot (CoreBot): The bot instance.
     """
-    await bot.add_cog(ImageCog(bot))
+    await bot.add_cog(FilesCog(bot))

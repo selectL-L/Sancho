@@ -587,16 +587,16 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Setting reminders
         ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
     ],
-    # Image Group
+    # Files Group
     [
         # Profile picture / avatar
-        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r'\b(show|get)\s.*(pfp|avatar)\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'ImageCog', 'pfp'),
+        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r'\b(show|get)\s.*(pfp|avatar)\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'FilesCog', 'pfp'),
         # Banner
-        ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'ImageCog', 'banner'),
+        ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'FilesCog', 'banner'),
         # Resize image
-        ((r'\bresize\b', r'\bscale\b'), 'ImageCog', 'resize'),
+        ((r'\bresize\b', r'\bscale\b'), 'FilesCog', 'resize'),
         # Convert image format
-        ((r'\bconvert\b', r'\bchange to\b'), 'ImageCog', 'convert'),
+        ((r'\bconvert\b', r'\bchange to\b'), 'FilesCog', 'convert'),
     ],
     # Fun Group - Complex commands only (BOD fate system)
     # Simple Fun commands (including yujin_quotes) are registered dynamically by the Fun cog
