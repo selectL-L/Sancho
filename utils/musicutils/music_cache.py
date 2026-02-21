@@ -856,8 +856,8 @@ class MusicCacheManager:
                 self.logger.warning(f"[CacheManager] Residential download failed: {result.error_message}")
             return None
 
-        # Log cost estimate
-        file_size = os.path.getsize(result.file_path)
+        # Log cost estimate (os.path.getsize is blocking I/O)
+        file_size = await asyncio.to_thread(os.path.getsize, result.file_path)
         cost = self._compute_download_cost(file_size)
         self.logger.info(
             f"[CacheManager] Downloaded via residential: {entry_snap.get('title')} - "
@@ -904,11 +904,13 @@ class MusicCacheManager:
         target_path = os.path.join(self.tracks_path, filename)
 
         # Already exists?
-        if os.path.exists(target_path):
+        if await asyncio.to_thread(os.path.exists, target_path):
             return target_path
 
         # Check for existing copy elsewhere (orphaned, etc.)
-        existing_path = self.get_any_local_path(video_id, residential_allowed=False)
+        existing_path = await asyncio.to_thread(
+            self.get_any_local_path, video_id, False
+        )
         if existing_path and existing_path != target_path:
             residential_root = os.path.abspath(self.residential_path)
             existing_abs = os.path.abspath(existing_path)
@@ -918,7 +920,7 @@ class MusicCacheManager:
                 )
             else:
                 try:
-                    shutil.copy2(existing_path, target_path)
+                    await asyncio.to_thread(shutil.copy2, existing_path, target_path)
 
                     # Mark as downloaded AND clear orphan flag (bug fix #10)
                     def mark_copied(ambient: Dict[str, Any]) -> None:
@@ -1045,7 +1047,7 @@ class MusicCacheManager:
 
             filename = entry.get('filename')
             file_path = os.path.join(self.tracks_path, filename)
-            if not os.path.exists(file_path):
+            if not await asyncio.to_thread(os.path.exists, file_path):
                 if await self._enqueue_download(video_id):
                     queued += 1
 
@@ -1311,6 +1313,7 @@ class MusicCacheManager:
 
         # Phase 2: File moves (no lock needed, filesystem operations)
         # Track results so we only update index when moves succeed
+        # Offload to thread — _move_file_safe does shutil.copy2 + os.remove
         orphan_move_ok: Dict[str, bool] = {}
         for video_id in to_orphan:
             entry = snap['tracks'][video_id]
@@ -1318,7 +1321,9 @@ class MusicCacheManager:
             if filename:
                 src = os.path.join(self.tracks_path, filename)
                 dst = os.path.join(self.orphaned_path, filename)
-                orphan_move_ok[video_id] = self._move_file_safe(src, dst)
+                orphan_move_ok[video_id] = await asyncio.to_thread(
+                    self._move_file_safe, src, dst
+                )
             else:
                 orphan_move_ok[video_id] = True  # No file to move, just mark
 
@@ -1329,7 +1334,9 @@ class MusicCacheManager:
             if filename:
                 src = os.path.join(self.orphaned_path, filename)
                 dst = os.path.join(self.tracks_path, filename)
-                unorphan_move_ok[video_id] = self._move_file_safe(src, dst)
+                unorphan_move_ok[video_id] = await asyncio.to_thread(
+                    self._move_file_safe, src, dst
+                )
             else:
                 unorphan_move_ok[video_id] = False
 
@@ -1393,18 +1400,22 @@ class MusicCacheManager:
         if not expired_ids:
             return 0
 
-        # Phase 2: Delete files
-        for video_id in expired_ids:
-            entry = snap['tracks'][video_id]
-            filename = entry.get('filename')
-            if filename:
-                file_path = os.path.join(self.orphaned_path, filename)
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                except IOError as e:
-                    self.logger.warning(f"[CacheManager] Could not delete orphan {video_id}: {e}")
+        # Phase 2: Delete files (offloaded — os.path.exists + os.remove are blocking)
+        def _delete_expired_files() -> None:
+            for vid in expired_ids:
+                e = snap['tracks'][vid]
+                fn = e.get('filename')
+                if fn:
+                    fp = os.path.join(self.orphaned_path, fn)
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except IOError as err:
+                        self.logger.warning(f"[CacheManager] Could not delete orphan {vid}: {err}")
 
+        await asyncio.to_thread(_delete_expired_files)
+
+        for video_id in expired_ids:
             self.logger.debug(f"[CacheManager] Expired orphan deleted: {video_id}")
 
         # Phase 3: Single mutation to remove entries
@@ -1440,17 +1451,20 @@ class MusicCacheManager:
         if not orphaned_ids:
             return 0
 
-        # Phase 2: Delete files
-        for video_id in orphaned_ids:
-            entry = snap['tracks'][video_id]
-            filename = entry.get('filename')
-            if filename:
-                file_path = os.path.join(self.orphaned_path, filename)
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                except IOError as e:
-                    self.logger.warning(f"[CacheManager] Could not delete orphan {video_id}: {e}")
+        # Phase 2: Delete files (offloaded — os.path.exists + os.remove are blocking)
+        def _delete_orphan_files() -> None:
+            for vid in orphaned_ids:
+                e = snap['tracks'][vid]
+                fn = e.get('filename')
+                if fn:
+                    fp = os.path.join(self.orphaned_path, fn)
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except IOError as err:
+                        self.logger.warning(f"[CacheManager] Could not delete orphan {vid}: {err}")
+
+        await asyncio.to_thread(_delete_orphan_files)
 
         # Phase 3: Single mutation
         def remove_all_orphans(ambient: Dict[str, Any]) -> int:
@@ -1703,10 +1717,12 @@ class MusicCacheManager:
                 timeout=timeout
             )
 
-            # Find the downloaded file
-            cached_path = self._find_residential_file(track.video_id)
+            # Find the downloaded file (filesystem checks offloaded to thread)
+            cached_path = await asyncio.to_thread(
+                self._find_residential_file, track.video_id
+            )
             if cached_path:
-                file_size = os.path.getsize(cached_path)
+                file_size = await asyncio.to_thread(os.path.getsize, cached_path)
                 cost = self._compute_download_cost(file_size)
                 self.logger.info(
                     f"[Residential] Downloaded '{track.title}' - "

@@ -315,11 +315,14 @@ class Fun(BaseCog):
             return [cmd.content]
 
         elif cmd.file is not None:
-            # Read lines from file
+            # Read lines from file (offloaded — open() is blocking I/O)
             path = os.path.join(config.ASSETS_PATH, cmd.file)
-            with open(path, 'r', encoding='utf-8') as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return lines
+
+            def _read_lines() -> List[str]:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return [line.strip() for line in f if line.strip()]
+
+            return await asyncio.to_thread(_read_lines)
 
         elif cmd.attr is not None:
             # Read from runtime attribute

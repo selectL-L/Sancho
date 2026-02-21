@@ -981,7 +981,7 @@ async def download_track_as_m4a(
             error_message="mutagen is not installed. Install with: pip install mutagen"
         )
 
-    os.makedirs(output_dir, exist_ok=True)
+    await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
 
     temp_template = os.path.join(output_dir, 'temp_%(id)s.%(ext)s')
 
@@ -1039,105 +1039,118 @@ async def download_track_as_m4a(
         final_album = custom_album or yt_album
         final_year = custom_year or yt_year
 
-        # Find the downloaded M4A file
-        temp_m4a_path = ytdlp_temp_finder(output_dir, video_id_str, '.m4a')
-        if not temp_m4a_path:
+        # Post-download: find temp file, rename, embed metadata, cleanup.
+        # All of these are blocking I/O (filesystem + mutagen), so bundle
+        # them into a sync helper and run in a thread.
+        def _post_download_process() -> DownloadResult:
+            """Sync helper for post-download file operations.
+
+            Handles temp file discovery, rename, MP4 tag embedding, and
+            cleanup. Runs via asyncio.to_thread to avoid blocking the
+            event loop.
+            """
+            # Find the downloaded M4A file
+            temp_m4a_path = ytdlp_temp_finder(output_dir, video_id_str, '.m4a')
+            if not temp_m4a_path:
+                return DownloadResult(
+                    success=False,
+                    error_message=f"Downloaded file not found. Expected: temp_{video_id_str}.m4a"
+                )
+
+            # Determine final path
+            if target_filename:
+                final_path = os.path.join(output_dir, target_filename)
+            else:
+                safe_artist = sanitize_filename(final_artist, 60)
+                safe_title = sanitize_filename(final_title, 120)
+                final_filename = f"{safe_artist} - {safe_title}.m4a"
+                final_path = os.path.join(output_dir, final_filename)
+
+            # Rename temp file to final path
+            if not ytdlp_move_temp_file(
+                temp_m4a_path,
+                final_path,
+                overwrite=True,
+                logger=logger,
+            ):
+                return DownloadResult(
+                    success=False,
+                    error_message=f"Failed to move temp file for {video_id_str}"
+                )
+            logger.info(f"[Download] M4A saved as: {os.path.basename(final_path)}")
+
+            # Embed metadata via MP4 atoms
+            _thumbnail_embedded = False
+            try:
+                assert MP4 is not None and MP4Cover is not None  # Guarded by early return above
+                audio = MP4(final_path)
+                if audio.tags is None:
+                    audio.add_tags()
+
+                assert audio.tags is not None  # Guaranteed by add_tags() above
+                tags = audio.tags
+
+                # Text atoms
+                tags['\xa9nam'] = [final_title]
+                tags['\xa9ART'] = [final_artist]
+
+                if custom_album_artist:
+                    tags['aART'] = [custom_album_artist]
+
+                if final_album:
+                    tags['\xa9alb'] = [final_album]
+
+                if final_year:
+                    tags['\xa9day'] = [final_year]
+
+                if custom_genre:
+                    tags['\xa9gen'] = [custom_genre]
+
+                if custom_track_num is not None:
+                    tags['trkn'] = [custom_track_num]
+
+                if custom_comment:
+                    tags['\xa9cmt'] = [custom_comment]
+
+                # Explicit flag (rtng atom: 0=clean, 1=explicit)
+                if is_explicit is not None:
+                    tags['rtng'] = [1 if is_explicit else 0]
+
+                # Cover art (PNG)
+                if thumbnail_bytes:
+                    tags['covr'] = [
+                        MP4Cover(thumbnail_bytes, imageformat=MP4Cover.FORMAT_PNG)
+                    ]
+                    _thumbnail_embedded = True
+                    logger.debug(f"[Download] Embedded {len(thumbnail_bytes)} bytes PNG cover art")
+
+                audio.save()
+                logger.info("[Download] M4A metadata embedded successfully")
+
+            except Exception as e:
+                logger.warning(f"[Download] Failed to embed some M4A metadata: {e}")
+
+            # Cleanup temp files
+            ytdlp_cleanup_temp_files(output_dir, video_id_str, '.m4a')
+
             return DownloadResult(
-                success=False,
-                error_message=f"Downloaded file not found. Expected: temp_{video_id_str}.m4a"
+                success=True,
+                file_path=final_path,
+                title=final_title,
+                artist=final_artist,
+                album=final_album,
+                duration=yt_duration,
+                thumbnail_embedded=_thumbnail_embedded
             )
 
-        # Determine final path
-        if target_filename:
-            final_path = os.path.join(output_dir, target_filename)
-        else:
-            safe_artist = sanitize_filename(final_artist, 60)
-            safe_title = sanitize_filename(final_title, 120)
-            final_filename = f"{safe_artist} - {safe_title}.m4a"
-            final_path = os.path.join(output_dir, final_filename)
-
-        # Rename temp file to final path
-        if not ytdlp_move_temp_file(
-            temp_m4a_path,
-            final_path,
-            overwrite=True,
-            logger=logger,
-        ):
-            return DownloadResult(
-                success=False,
-                error_message=f"Failed to move temp file for {video_id_str}"
-            )
-        logger.info(f"[Download] M4A saved as: {os.path.basename(final_path)}")
-
-        # Embed metadata via MP4 atoms
-        thumbnail_embedded = False
-        try:
-            audio = MP4(final_path)
-            if audio.tags is None:
-                audio.add_tags()
-
-            assert audio.tags is not None  # Guaranteed by add_tags() above
-            tags = audio.tags
-
-            # Text atoms
-            tags['\xa9nam'] = [final_title]
-            tags['\xa9ART'] = [final_artist]
-
-            if custom_album_artist:
-                tags['aART'] = [custom_album_artist]
-
-            if final_album:
-                tags['\xa9alb'] = [final_album]
-
-            if final_year:
-                tags['\xa9day'] = [final_year]
-
-            if custom_genre:
-                tags['\xa9gen'] = [custom_genre]
-
-            if custom_track_num is not None:
-                tags['trkn'] = [custom_track_num]
-
-            if custom_comment:
-                tags['\xa9cmt'] = [custom_comment]
-
-            # Explicit flag (rtng atom: 0=clean, 1=explicit)
-            if is_explicit is not None:
-                tags['rtng'] = [1 if is_explicit else 0]
-
-            # Cover art (PNG)
-            if thumbnail_bytes:
-                tags['covr'] = [
-                    MP4Cover(thumbnail_bytes, imageformat=MP4Cover.FORMAT_PNG)
-                ]
-                thumbnail_embedded = True
-                logger.debug(f"[Download] Embedded {len(thumbnail_bytes)} bytes PNG cover art")
-
-            audio.save()
-            logger.info("[Download] M4A metadata embedded successfully")
-
-        except Exception as e:
-            logger.warning(f"[Download] Failed to embed some M4A metadata: {e}")
-
-        # Cleanup temp files
-        ytdlp_cleanup_temp_files(output_dir, video_id_str, '.m4a')
-
-        return DownloadResult(
-            success=True,
-            file_path=final_path,
-            title=final_title,
-            artist=final_artist,
-            album=final_album,
-            duration=yt_duration,
-            thumbnail_embedded=thumbnail_embedded
-        )
+        return await asyncio.to_thread(_post_download_process)
 
     except Exception as e:
         logger.error(f"[Download] M4A download error: {e}", exc_info=True)
 
         try:
             if os.path.isdir(output_dir) and video_id:
-                ytdlp_cleanup_temp_files(output_dir, video_id, '.m4a')
+                await asyncio.to_thread(ytdlp_cleanup_temp_files, output_dir, video_id, '.m4a')
         except OSError as cleanup_err:
             logger.debug(f"Error cleanup failed (masking original error): {cleanup_err}")
 

@@ -476,8 +476,11 @@ class AdminCog(BaseCog):
                     # we can just use dateparser directly or ask them to be precise.
                     # For simplicity in this admin tool, we'll assume they know what they are doing or use a simple parser.
                     import dateparser
-                    dt = dateparser.parse(msg.content.strip(), languages=[
-                                          'en'], settings={'PREFER_DATES_FROM': 'future'})
+                    from typing import cast, Any as TypingAny
+                    dt = await asyncio.to_thread(
+                        dateparser.parse, msg.content.strip(),
+                        languages=['en'], settings=cast(TypingAny, {'PREFER_DATES_FROM': 'future'})
+                    )
                     if dt:
                         updates['reminder_time'] = int(dt.timestamp())
                     else:
@@ -734,7 +737,8 @@ class AdminCog(BaseCog):
         # =====================================================================
 
         # Force refresh POT server status before reading
-        _detect_youtube_auth()
+        # _detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(_detect_youtube_auth)
         auth_status = get_youtube_auth_status()
         auth_method = auth_status.auth_method
         pot_server_running = auth_status.pot_server_running
@@ -743,7 +747,7 @@ class AdminCog(BaseCog):
         # Cookie age
         cookie_age_days: Optional[int] = None
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
-        if cookie_path and os.path.isfile(cookie_path):
+        if cookie_path and await asyncio.to_thread(os.path.isfile, cookie_path):
             file_age = now - os.path.getmtime(cookie_path)
             cookie_age_days = int(file_age / 86400)
 
@@ -1159,10 +1163,11 @@ class AdminCog(BaseCog):
         )
 
         # Check current status
-        _detect_youtube_auth()  # Refresh before reading
+        # _detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(_detect_youtube_auth)
         auth_status = get_youtube_auth_status()
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
-        if cookie_path and os.path.isfile(cookie_path):
+        if cookie_path and await asyncio.to_thread(os.path.isfile, cookie_path):
             file_age = time.time() - os.path.getmtime(cookie_path)
             age_days = int(file_age / 86400)
             embed.add_field(
@@ -1255,15 +1260,16 @@ class AdminCog(BaseCog):
             cookie_path = os.path.join(config.APP_PATH, 'youtube_cookies.txt')
 
         try:
-            # Backup existing file if present
-            if os.path.isfile(cookie_path):
-                backup_path = cookie_path + '.backup'
-                shutil.copy2(cookie_path, backup_path)
-                self.logger.debug(f"Backed up existing cookies to {backup_path}")
+            # Backup and write in thread — shutil.copy2 and open() are blocking I/O
+            def _save_cookie_file() -> None:
+                if os.path.isfile(cookie_path):
+                    backup_path = cookie_path + '.backup'
+                    shutil.copy2(cookie_path, backup_path)
 
-            # Write new cookies
-            with open(cookie_path, 'w', encoding='utf-8') as f:
-                f.write(text)
+                with open(cookie_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+
+            await asyncio.to_thread(_save_cookie_file)
 
             self.logger.warning(f"Admin {ctx.author} uploaded YouTube cookies to {cookie_path}.")
 
@@ -1272,9 +1278,9 @@ class AdminCog(BaseCog):
             auth_status.last_check = 0
             auth_status.auth_method = None
 
-            # Force re-detection
+            # Force re-detection (_detect_youtube_auth is sync with socket timeout)
             from utils.musicutils.music_auth import _detect_youtube_auth
-            _detect_youtube_auth()
+            await asyncio.to_thread(_detect_youtube_auth)
 
             # Success message
             embed = discord.Embed(

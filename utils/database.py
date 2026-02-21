@@ -297,6 +297,10 @@ class DatabaseManager:
     async def _warn_and_backup_db(self, issue: str) -> None:
         """Creates a backup of the database and logs a warning about schema issues.
 
+        Note: shutil.copyfile is blocking I/O but this is safe because this
+        method only runs during the INIT phase (pre-connection), before any
+        Discord gateway heartbeats exist.
+
         Used By: _setup_databases (internal)
 
         Args:
