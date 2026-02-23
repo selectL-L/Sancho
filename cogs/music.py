@@ -1516,6 +1516,8 @@ class Music(MusicCommandsMixin, BaseCog):
             audio_source: Optional[str] = None
             http_headers: Optional[Dict[str, str]] = None
             prebuffered_source: Optional[Any] = None  # SeekableAudioSource
+            prebuffer_replay_url: Optional[str] = None
+            prebuffer_replay_headers: Optional[Dict[str, str]] = None
             is_local_file = False
             used_loop_replay_cache = False
 
@@ -1540,6 +1542,9 @@ class Music(MusicCommandsMixin, BaseCog):
                         elif self._next_prepared.prebuffered_source:
                             # Phase 5: Use validated prebuffered source (instant playback)
                             prebuffered_source = self._next_prepared.prebuffered_source
+                            # Keep URL/headers for loop ONE replay cache after handoff
+                            prebuffer_replay_url = self._next_prepared.url
+                            prebuffer_replay_headers = self._next_prepared.http_headers
                             # Take ownership - don't let cleanup() kill it
                             self._next_prepared.prebuffered_source = None
                             buffered_secs = getattr(prebuffered_source, 'buffered_seconds', 0.0)
@@ -1564,7 +1569,7 @@ class Music(MusicCommandsMixin, BaseCog):
             # -----------------------------------------------------------
             # Priority 3: AudioFetcher with LIVE context (full retry)
             # -----------------------------------------------------------
-            if not audio_source:
+            if not audio_source and prebuffered_source is None:
                 result = await self._audio_fetcher.fetch(track, FetchContext.LIVE)
 
                 if result.success:
@@ -1637,10 +1642,18 @@ class Music(MusicCommandsMixin, BaseCog):
 
                 # Cache streaming URL for loop ONE replay
                 # (Don't cache prebuffered - those are one-shot validated sources)
-                if not is_local_file and audio_source and not prebuffered_source:
-                    self._playback.current_audio_url = audio_source
-                    self._playback.current_audio_track_url = track.url
-                    self._playback.current_audio_headers = http_headers
+                if not is_local_file:
+                    if prebuffered_source and prebuffer_replay_url:
+                        self._playback.current_audio_url = prebuffer_replay_url
+                        self._playback.current_audio_track_url = track.url
+                        self._playback.current_audio_headers = prebuffer_replay_headers
+                        self.logger.debug(
+                            f"[PlayTrack] Stored replay cache URL from prebuffered handoff: {track.title}"
+                        )
+                    elif audio_source and not prebuffered_source:
+                        self._playback.current_audio_url = audio_source
+                        self._playback.current_audio_track_url = track.url
+                        self._playback.current_audio_headers = http_headers
 
                 # Start prefetching next track (Phase 12)
                 # Skip if using loop-replay cache - track isn't changing, so

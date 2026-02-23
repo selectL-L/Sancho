@@ -786,6 +786,109 @@ class TestPrefetchBufferUsage:
         assert not fetch_called, "AudioFetcher.fetch should not be called when prefetch is valid"
 
     @pytest.mark.asyncio
+    async def test_prebuffered_prefetch_populates_loop_replay_cache(self, music_cog, mock_voice_client):
+        """Using prebuffered handoff should still populate loop replay URL cache."""
+        music_cog.playlist = create_ambient_playlist()[:3]
+        music_cog.current_index = 0
+        music_cog.active_session = ActiveSession(
+            guild_id=888888,
+            channel_id=777777,
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
+        )
+
+        mock_player = MagicMock()
+        mock_player.stop = MagicMock()
+        mock_player.play = MagicMock()
+        music_cog._player = mock_player
+
+        music_cog._advance_track()
+        track_1 = music_cog.playlist[1]
+
+        mock_prebuffered_source = MagicMock()
+        mock_prebuffered_source.buffered_seconds = 30.0
+
+        music_cog._next_prepared = AudioFetchResult(
+            success=True,
+            url="https://prefetched-prebuffer-source.com/audio",
+            http_headers={"User-Agent": "prefetch-test"},
+            prebuffered_source=mock_prebuffered_source,
+        )
+        music_cog._next_prepared_track = track_1
+
+        with patch.object(music_cog._audio_fetcher, 'fetch', new_callable=AsyncMock) as fetch_mock:
+            with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
+                with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
+                    await music_cog._play_current_track()
+
+        fetch_mock.assert_not_called()
+        mock_player.play.assert_called_once_with(track_1, source=mock_prebuffered_source)
+
+        assert music_cog._playback.current_audio_url == "https://prefetched-prebuffer-source.com/audio"
+        assert music_cog._playback.current_audio_track_url == track_1.url
+        assert music_cog._playback.current_audio_headers == {"User-Agent": "prefetch-test"}
+
+    @pytest.mark.asyncio
+    async def test_loop_one_repeat_uses_replay_cache_after_prebuffered_start(self, music_cog, mock_voice_client):
+        """Loop ONE repeat should reuse replay cache after a prebuffered first play."""
+        music_cog.playlist = create_ambient_playlist()[:3]
+        music_cog.current_index = 1
+        music_cog.loop_mode = LoopMode.ONE
+        music_cog.active_session = ActiveSession(
+            guild_id=888888,
+            channel_id=777777,
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
+        )
+
+        track_1 = music_cog.playlist[1]
+
+        mock_player = MagicMock()
+        mock_player.stop = MagicMock()
+        mock_player.play = MagicMock()
+        music_cog._player = mock_player
+
+        mock_prebuffered_source = MagicMock()
+        mock_prebuffered_source.buffered_seconds = 30.0
+        replay_url = "https://prefetched-prebuffer-source.com/audio"
+        replay_headers = {"User-Agent": "prefetch-test"}
+
+        music_cog._next_prepared = AudioFetchResult(
+            success=True,
+            url=replay_url,
+            http_headers=replay_headers,
+            prebuffered_source=mock_prebuffered_source,
+        )
+        music_cog._next_prepared_track = track_1
+
+        # First play: consume prebuffered source and seed loop replay cache
+        with patch.object(music_cog._audio_fetcher, 'fetch', new_callable=AsyncMock) as first_fetch_mock:
+            with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
+                with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
+                    await music_cog._play_current_track()
+
+        first_fetch_mock.assert_not_called()
+        assert music_cog._playback.current_audio_url == replay_url
+        assert music_cog._playback.current_audio_track_url == track_1.url
+        assert music_cog._playback.current_audio_headers == replay_headers
+
+        # Second play (Loop ONE cycle): should use replay cache, not LIVE fetch
+        music_cog._advance_track()  # Loop ONE keeps current track
+        mock_player.play.reset_mock()
+
+        with patch.object(music_cog._audio_fetcher, 'fetch', new_callable=AsyncMock) as second_fetch_mock:
+            with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
+                with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
+                    await music_cog._play_current_track()
+
+        second_fetch_mock.assert_not_called()
+        mock_player.play.assert_called_once()
+        second_call_args = mock_player.play.call_args
+        assert second_call_args[0][0] == track_1
+        assert second_call_args[0][1] == replay_url
+        assert second_call_args[1]["http_headers"] == replay_headers
+
+    @pytest.mark.asyncio
     async def test_stale_prefetch_is_discarded(self, music_cog, mock_voice_client):
         """When prefetch doesn't match current track, it should be discarded."""
         # Setup: 3 tracks
