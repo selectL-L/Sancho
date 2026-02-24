@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # AMBIENCE CONFIGURATION - TEMPLATE
 # ═══════════════════════════════════════════════════════════════════════════════
-# This file contains the bot's personality DATA - her interests, favorites, etc.
+# This file contains the personality DATA - interests, favorites, etc.
 # The STRUCTURE (moods, activities, cog behaviors) lives in utils/ambience.py
 #
 # SETUP:
