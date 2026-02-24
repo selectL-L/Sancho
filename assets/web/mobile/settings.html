@@ -1165,7 +1165,7 @@
       $mobileGuildList.innerHTML = guilds.map(g => `
         <div class="list-item" data-guild-id="${g.id}">
           <div class="list-item-left">
-            <div class="list-item-icon">${g.icon ? `<img src="${g.icon}" alt="" data-fallback="${escapeHtml(g.name.charAt(0))}">` : escapeHtml(g.name.charAt(0))}</div>
+            <div class="list-item-icon">${g.icon ? `<img src="${escapeHtml(g.icon)}" alt="" data-fallback="${escapeHtml(g.name.charAt(0))}">` : escapeHtml(g.name.charAt(0))}</div>
             <span class="list-item-name">${escapeHtml(g.name)}</span>
           </div>
           <div class="toggle-switch ${g.enabled ? 'active' : ''}" data-toggle-guild="${g.id}"></div>
@@ -1231,7 +1231,7 @@
       $mobileBlacklist.innerHTML = blacklist.map(u => `
         <div class="list-item" data-user-id="${u.id}">
           <div class="list-item-left">
-            <div class="list-item-icon">${u.avatar ? `<img src="${u.avatar}" alt="" data-fallback="${escapeHtml((u.username || '?').charAt(0).toUpperCase())}">` : escapeHtml((u.username || '?').charAt(0).toUpperCase())}</div>
+            <div class="list-item-icon">${u.avatar ? `<img src="${escapeHtml(u.avatar)}" alt="" data-fallback="${escapeHtml((u.username || '?').charAt(0).toUpperCase())}">` : escapeHtml((u.username || '?').charAt(0).toUpperCase())}</div>
             <span class="list-item-name">${escapeHtml(u.username || u.id)}</span>
           </div>
           <button class="action-btn danger" data-unblock="${u.id}">Unblock</button>

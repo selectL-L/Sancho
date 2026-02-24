@@ -358,7 +358,7 @@
       $guildDropdown.innerHTML = guildList.map(g => `
         <div class="guild-option ${g.id === currentGuildId ? 'selected' : ''}" data-guild-id="${g.id}">
           ${g.icon 
-            ? `<img src="${g.icon}" class="guild-icon" alt="">`
+            ? `<img src="${escapeHtml(g.icon)}" class="guild-icon" alt="">`
             : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${escapeHtml(g.name.charAt(0))}</div>`
           }
           <span style="font-size: 0.8125rem;">${escapeHtml(g.name)}</span>
@@ -572,7 +572,7 @@
         $drawerPeekAvatars.innerHTML = `
           <div class="drawer-avatar viewing">
             ${viewingPerson.avatar 
-              ? `<img src="${getAvatarUrl(viewingPerson)}" alt="">` 
+              ? `<img src="${escapeHtml(getAvatarUrl(viewingPerson))}" alt="">` 
               : escapeHtml(viewingPerson.username?.charAt(0).toUpperCase() || '?')}
           </div>
         `;
@@ -595,7 +595,7 @@
           let html = available.slice(0, maxShow).map(person => `
             <div class="drawer-avatar">
               ${person.avatar 
-                ? `<img src="${getAvatarUrl(person)}" alt="">` 
+                ? `<img src="${escapeHtml(getAvatarUrl(person))}" alt="">` 
                 : escapeHtml(person.username?.charAt(0).toUpperCase() || '?')}
             </div>
           `).join('');
@@ -619,7 +619,7 @@
             <div class="drawer-person-row">
               <div class="drawer-avatar">
                 ${person.avatar 
-                  ? `<img src="${getAvatarUrl(person)}" alt="">` 
+                  ? `<img src="${escapeHtml(getAvatarUrl(person))}" alt="">` 
                   : escapeHtml(person.username?.charAt(0).toUpperCase() || '?')}
               </div>
               <div class="drawer-person-info">
@@ -668,7 +668,7 @@
              data-user-id="${person.id}">
           <div class="drawer-avatar">
             ${person.avatar 
-              ? `<img src="${getAvatarUrl(person)}" alt="">` 
+              ? `<img src="${escapeHtml(getAvatarUrl(person))}" alt="">` 
               : escapeHtml((person.username || '?').charAt(0).toUpperCase())}
           </div>
           <div class="drawer-person-info">
@@ -804,7 +804,7 @@
           $loginOverlay.classList.remove('visible');
 
           if (me.avatar) {
-            $drawerUserAvatar.innerHTML = `<img src="${me.avatar}" alt="">`;
+            $drawerUserAvatar.innerHTML = `<img src="${escapeHtml(me.avatar)}" alt="">`;
           } else {
             $drawerUserAvatar.textContent = me.username?.charAt(0).toUpperCase() || '?';
           }

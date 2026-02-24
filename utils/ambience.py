@@ -46,19 +46,33 @@ _toml_cache: Optional[dict[str, Any]] = None
 _toml_mtime: float = 0.0
 
 
+_TOML_EXAMPLE_PATH = _TOML_PATH.with_suffix(".toml.example")
+
+
 def _load_toml() -> dict[str, Any]:
     """Load ambience.toml with caching and hot-reload."""
     global _toml_cache, _toml_mtime
 
     if not _TOML_PATH.exists():
         logger.critical("ambience.toml not found at %s", _TOML_PATH)
-        sys.exit(f"Exiting: Required config file missing: {_TOML_PATH}")
+        print(f"\n'ambience.toml' was not found at: {_TOML_PATH}")
+        if _TOML_EXAMPLE_PATH.exists():
+            print(f"An example file exists at: {_TOML_EXAMPLE_PATH}")
+            print("Copy it to 'ambience.toml' in the same folder and customize it:")
+            print(f"  cp {_TOML_EXAMPLE_PATH.name} {_TOML_PATH.name}")
+        else:
+            print("Please create 'ambience.toml' in the assets/ folder.")
+            print("You can get the example template from the project's GitHub repository (assets/ambience.toml.example).")
+        sys.exit("Exiting: Required config file 'ambience.toml' is missing.")
 
     try:
         current_mtime = _TOML_PATH.stat().st_mtime
     except OSError as e:
         logger.critical("Unable to stat ambience.toml at %s: %s", _TOML_PATH, e, exc_info=True)
-        sys.exit(f"Exiting: Could not access ambience.toml at {_TOML_PATH}.")
+        print(f"\nCould not read 'ambience.toml' at: {_TOML_PATH}")
+        print(f"OS error: {e}")
+        print("Check file permissions and ensure the file is not locked by another process.")
+        sys.exit("Exiting: Could not access 'ambience.toml'.")
 
     if _toml_cache is not None and current_mtime == _toml_mtime:
         return _toml_cache
@@ -67,9 +81,20 @@ def _load_toml() -> dict[str, Any]:
         with open(_TOML_PATH, "rb") as f:
             _toml_cache = tomllib.load(f)
             _toml_mtime = current_mtime
-    except Exception as e:
+    except tomllib.TOMLDecodeError as e:
         logger.critical("Failed to parse ambience.toml at %s: %s", _TOML_PATH, e, exc_info=True)
-        sys.exit(f"Exiting: ambience.toml is invalid or corrupted at {_TOML_PATH}.")
+        print("\n'ambience.toml' has a syntax error and could not be parsed:")
+        print(f"  {e}")
+        print(f"\nFile location: {_TOML_PATH}")
+        print("Common issues: missing quotes, unclosed brackets, or invalid TOML syntax.")
+        if _TOML_EXAMPLE_PATH.exists():
+            print(f"Compare with the example file: {_TOML_EXAMPLE_PATH}")
+        sys.exit("Exiting: 'ambience.toml' is malformed.")
+    except Exception as e:
+        logger.critical("Unexpected error loading ambience.toml at %s: %s", _TOML_PATH, e, exc_info=True)
+        print(f"\nUnexpected error reading 'ambience.toml': {e}")
+        print(f"File location: {_TOML_PATH}")
+        sys.exit("Exiting: Could not load 'ambience.toml'.")
 
     return _toml_cache
 
@@ -86,13 +111,20 @@ def get_interest(category: str, key: str) -> Optional[str]:
     """
     toml = _load_toml()
     items = toml.get("interests", {}).get(category, {}).get(key, [])
+    if not isinstance(items, list):
+        logger.warning("[Ambience] interests.%s.%s is not a list (got %s), skipping", category, key, type(items).__name__)
+        return None
     return random.choice(items) if items else None
 
 
 def get_all_interests(category: str, key: str) -> list[str]:
     """Get all values from an interest category."""
     toml = _load_toml()
-    return toml.get("interests", {}).get(category, {}).get(key, [])
+    items = toml.get("interests", {}).get(category, {}).get(key, [])
+    if not isinstance(items, list):
+        logger.warning("[Ambience] interests.%s.%s is not a list (got %s), returning empty", category, key, type(items).__name__)
+        return []
+    return items
 
 
 def get_config(key: str, default: Any = None) -> Any:
@@ -105,13 +137,20 @@ def get_playlist(music_mood: str) -> Optional[str]:
     """Get a random playlist URL for a music mood."""
     toml = _load_toml()
     playlists = toml.get("playlists", {}).get(music_mood, [])
+    if not isinstance(playlists, list):
+        logger.warning("[Ambience] playlists.%s is not a list (got %s), skipping", music_mood, type(playlists).__name__)
+        return None
     return random.choice(playlists) if playlists else None
 
 
 def get_all_playlists(music_mood: str) -> list[str]:
     """Get all playlist URLs for a music mood."""
     toml = _load_toml()
-    return toml.get("playlists", {}).get(music_mood, [])
+    playlists = toml.get("playlists", {}).get(music_mood, [])
+    if not isinstance(playlists, list):
+        logger.warning("[Ambience] playlists.%s is not a list (got %s), returning empty", music_mood, type(playlists).__name__)
+        return []
+    return playlists
 
 
 def get_playlist_description(music_mood: str) -> Optional[str]:
@@ -891,8 +930,12 @@ def maybe_cycle() -> bool:
     """
     global _current_mood, _current_activity, _music_state
 
-    cycle_minutes = get_config("cycle_minutes", 60)
-    cycle_seconds = float(cycle_minutes) * 60
+    raw_cycle = get_config("cycle_minutes", 60)
+    try:
+        cycle_seconds = float(raw_cycle) * 60
+    except (TypeError, ValueError):
+        logger.warning("[Ambience] config.cycle_minutes is not numeric (got %r), using default 60", raw_cycle)
+        cycle_seconds = 60.0 * 60
 
     time_since_change = time.time() - _music_state.last_mood_change
     if time_since_change < cycle_seconds:
@@ -905,7 +948,12 @@ def maybe_cycle() -> bool:
 
     # Decide what to change
     roll = random.random()
-    music_weight = get_config("music_weight", 0.4)
+    raw_weight = get_config("music_weight", 0.4)
+    try:
+        music_weight = float(raw_weight)
+    except (TypeError, ValueError):
+        logger.warning("[Ambience] config.music_weight is not numeric (got %r), using default 0.4", raw_weight)
+        music_weight = 0.4
 
     if roll < 0.2:
         # 20% chance: Change mood entirely

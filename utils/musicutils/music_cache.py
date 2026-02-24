@@ -418,12 +418,27 @@ class MusicCacheManager:
     def get_all_playlist_urls(self) -> List[str]:
         """Extracts all unique playlist URLs from ambience.toml.
 
+        Reads the TOML file directly to avoid coupling with the ambience module.
+
         Returns:
             List of unique playlist URLs.
         """
-        from utils.ambience import _load_toml
+        import tomllib
+        from pathlib import Path
+        import config
 
-        toml_data = _load_toml()
+        toml_path = Path(config.ASSETS_PATH) / "ambience.toml"
+        if not toml_path.exists():
+            self.logger.warning("[CacheManager] ambience.toml not found at %s", toml_path)
+            return []
+
+        try:
+            with open(toml_path, "rb") as f:
+                toml_data = tomllib.load(f)
+        except Exception as e:
+            self.logger.error("[CacheManager] Failed to parse ambience.toml: %s", e)
+            return []
+
         playlists_section = toml_data.get('playlists', {})
 
         urls: Set[str] = set()
@@ -432,6 +447,8 @@ class MusicCacheManager:
                 continue  # Skip the descriptions sub-table
             if isinstance(value, list):
                 urls.update(value)
+            elif isinstance(value, str):
+                self.logger.warning("[CacheManager] playlists.%s is a string, not a list — skipping", key)
 
         return list(urls)
 

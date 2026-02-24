@@ -512,7 +512,7 @@
           $availableList.innerHTML = available.map((person, i) => `
             <div class="person-row" style="transition-delay: ${i * 50}ms;">
               <div class="avatar">
-                <img src="${getAvatarUrl(person)}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
+                <img src="${escapeHtml(getAvatarUrl(person))}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
               </div>
               <div class="person-info">
                 <div class="person-name">${escapeHtml(person.username || 'Unknown')}</div>
@@ -643,7 +643,7 @@
       $everyoneList.innerHTML = allViewableUsers.map((person, i) => `
         <div class="person-row" data-user-id="${person.id}" style="transition-delay: ${i * 50}ms;">
           <div class="avatar">
-            <img src="${getAvatarUrl(person)}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
+            <img src="${escapeHtml(getAvatarUrl(person))}" alt="" data-initial="${escapeHtml((person.username || '?').charAt(0))}">
           </div>
           <div class="person-info">
             <div class="person-name">${escapeHtml(person.username || 'Unknown')}</div>
@@ -686,7 +686,7 @@
       $guildDropdown.innerHTML = guilds.map(g => `
         <div class="guild-option ${g.id === selectedGuildId ? 'selected' : ''}" data-guild-id="${g.id}">
           ${g.icon
-            ? `<img src="${g.icon}" alt="" class="guild-icon">`
+            ? `<img src="${escapeHtml(g.icon)}" alt="" class="guild-icon">`
             : `<div class="guild-icon" style="background: var(--bg-card-elevated); display: flex; align-items: center; justify-content: center; font-size: 0.625rem; color: var(--text-muted);">${escapeHtml(g.name.charAt(0))}</div>`
           }
           <span style="font-size: 0.8125rem;">${escapeHtml(g.name)}</span>

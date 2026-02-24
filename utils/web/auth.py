@@ -17,6 +17,7 @@ import logging
 import re
 import secrets
 import time
+from urllib.parse import urlencode
 
 import aiohttp
 from fastapi import APIRouter, Request
@@ -127,7 +128,7 @@ async def login(request: Request) -> RedirectResponse:
         "state": state,
     }
 
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urlencode(params)
     auth_url = f"{DISCORD_AUTHORIZE_URL}?{query}"
 
     response = RedirectResponse(url=auth_url)
