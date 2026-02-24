@@ -10,6 +10,7 @@ Tests mock VoiceClient and SeekableAudioSource to test state logic in isolation.
 
 import asyncio
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from utils.musicutils.managed_player import ManagedPlayer, PlayerState
@@ -93,7 +94,11 @@ def mock_source():
 @pytest.fixture
 def player(mock_voice_client, callback_tracker):
     """Create a ManagedPlayer with mocked dependencies."""
-    return ManagedPlayer(mock_voice_client, callback_tracker)
+    loop = asyncio.new_event_loop()
+    with patch('utils.musicutils.managed_player.asyncio.get_running_loop', return_value=loop):
+        p = ManagedPlayer(mock_voice_client, callback_tracker)
+    yield p
+    loop.close()
 
 
 class TestPlayerStateInit:
@@ -327,8 +332,7 @@ class TestGenerationFiltering:
         # Callback should have been invoked
         # Note: Since _handle_track_end is async and scheduled on event loop,
         # we need to run the loop
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(asyncio.sleep(0.1))
+        player._loop.run_until_complete(asyncio.sleep(0.1))
 
         assert callback_tracker.called is True
 

@@ -103,7 +103,7 @@ class ManagedPlayer:
         """
         self._vc = voice_client
         self._on_track_end_callback = on_track_end
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
 
         self._source: Optional[SeekableAudioSource] = None
         self._current_track: Optional[TrackInfo] = None
