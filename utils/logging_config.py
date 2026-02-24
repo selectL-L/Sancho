@@ -155,8 +155,14 @@ class ResourceTracker:
     # How often to sample CPU/RAM for averaging (in seconds)
     SAMPLE_INTERVAL = 10
 
-    # If peak exceeds average by this percentage, flag as a spike
-    SPIKE_THRESHOLD_PERCENT = 50
+    # Spike detection thresholds — ALL conditions must be met.
+    # A spike is only flagged when the peak is a significant relative increase
+    # AND the absolute values are high enough to actually matter.
+    SPIKE_THRESHOLD_PERCENT = 50           # Peak must exceed average by this % (relative)
+    SPIKE_MIN_CPU_PEAK = 20.0              # Peak CPU must be at least this % (absolute floor)
+    SPIKE_MIN_CPU_DEVIATION = 10.0         # Peak to average must differ by at least this many pp
+    SPIKE_MIN_RAM_PEAK_MB = 1500.0         # Peak RAM must be at least this many MB (music playback can reach ~800MB)
+    SPIKE_MIN_RAM_DEVIATION_MB = 500.0     # Peak to average RAM must differ by at least this many MB
 
     def __init__(self, interval_minutes: int = 15):
         """Initializes the ResourceTracker.
@@ -318,10 +324,25 @@ class ResourceTracker:
             ram_private = mem_stats['ram_private']
             ram_swap = mem_stats['ram_swap']
 
-            # Detect spikes (peak significantly exceeds average)
+            # Detect spikes (peak significantly exceeds average AND absolute values are meaningful)
             threshold = self.SPIKE_THRESHOLD_PERCENT / 100
-            cpu_spike = cpu_peak is not None and cpu_usage > 0 and (cpu_peak - cpu_usage) / cpu_usage > threshold
-            ram_spike = ram_peak is not None and ram_rss > 0 and (ram_peak - ram_rss) / ram_rss > threshold
+            cpu_deviation = (cpu_peak - cpu_usage) if cpu_peak is not None else 0.0
+            ram_deviation = (ram_peak - ram_rss) if ram_peak is not None else 0.0
+
+            cpu_spike = (
+                cpu_peak is not None
+                and cpu_usage > 0
+                and cpu_deviation / cpu_usage > threshold
+                and cpu_peak >= self.SPIKE_MIN_CPU_PEAK
+                and cpu_deviation >= self.SPIKE_MIN_CPU_DEVIATION
+            )
+            ram_spike = (
+                ram_peak is not None
+                and ram_rss > 0
+                and ram_deviation / ram_rss > threshold
+                and ram_peak >= self.SPIKE_MIN_RAM_PEAK_MB
+                and ram_deviation >= self.SPIKE_MIN_RAM_DEVIATION_MB
+            )
 
             timestamp = datetime.now(timezone.utc)
             self.usage_history.append({
