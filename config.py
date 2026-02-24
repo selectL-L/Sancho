@@ -494,6 +494,16 @@ LOGS_DIR = os.path.join(APP_PATH, 'logs')
 COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
 MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
 YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OAuth tokens, etc.)
+TRANSFORM_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'transform')  # Temp files for file conversion
+
+# =============================================================================
+# FILE CONVERSION LIMITS
+# =============================================================================
+CONVERT_MAX_FILE_SIZE_MB = 25        # Max input/output file size in MB
+CONVERT_MAX_VIDEO_DURATION = 300     # Max video duration in seconds (5 minutes)
+CONVERT_MAX_AUDIO_DURATION = 900     # Max audio duration in seconds (15 minutes)
+CONVERT_MAX_CONCURRENT = 10          # Max global concurrent conversions
+CONVERT_FFMPEG_TIMEOUT = 120         # Kill FFmpeg after this many seconds
 
 # =============================================================================
 # DATABASE PATH DISCOVERY

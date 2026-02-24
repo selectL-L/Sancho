@@ -10,7 +10,8 @@ Design Philosophy:
 
 Exports:
     - Wrapper functions (preferred API): get_selection(), show_track_failed(),
-      show_now_playing(), show_dashboard(), launch_modal(), get_track_selection()
+      show_now_playing(), show_dashboard(), launch_modal(), get_track_selection(),
+      show_conversion()
     - Types: TrackFailureAction, NowPlayingState, MusicPlayerProtocol
     - View classes (for advanced use): PaginatorView, TrackSelectionView, etc.
 """
@@ -20,7 +21,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Protocol, cast
 
 import asyncio
 import discord
@@ -28,6 +29,7 @@ from discord import ui
 from discord.ext import commands
 
 if TYPE_CHECKING:
+    from cogs.files import ConversionJob, SettingDef
     from utils.musicutils import Track
 
 
@@ -2055,6 +2057,431 @@ async def show_status(
         The sent message containing the status view.
     """
     view = StatusView(ctx=ctx, data=data, timeout=timeout, refresh_callback=refresh_callback)
+    message = await ctx.send(view=view)
+    view.message = message
+    return message
+
+
+# =============================================================================
+# File Conversion V2 View
+# =============================================================================
+
+# Type alias for the execute callback used by ConversionView
+ConversionExecutor = Callable[
+    ["ConversionJob", Callable[[str], Awaitable[None]]],
+    Awaitable[tuple[bool, list[tuple[str, bytes]], str]],
+]
+
+
+class ConversionSettingsModal(discord.ui.Modal, title="Custom Conversion Settings"):
+    """Modal for freeform conversion settings.
+
+    Shown when the user clicks "Custom values" on the ConversionView.
+    Contains TextInput fields only for freeform SettingDefs.
+    """
+
+    def __init__(self, setting_defs: list["SettingDef"], current_settings: dict[str, str]):
+        """Initialize the modal.
+
+        Args:
+            setting_defs: All setting definitions (only freeform ones become inputs).
+            current_settings: Current setting values for pre-filling.
+        """
+        super().__init__()
+        self.result: Optional[dict[str, str]] = None
+        self.freeform_defs = [d for d in setting_defs if d.freeform]
+        self._interaction: Optional[discord.Interaction] = None
+
+        for sdef in self.freeform_defs[:5]:  # Modal max is 5 TextInputs
+            hint_parts = []
+            if sdef.min_val is not None and sdef.max_val is not None:
+                hint_parts.append(f"{sdef.min_val}-{sdef.max_val}")
+            if sdef.unit:
+                hint_parts.append(sdef.unit)
+            placeholder = ", ".join(hint_parts) if hint_parts else f"Default: {sdef.default}"
+
+            self.add_item(discord.ui.TextInput(
+                label=f"{sdef.label} (default: {sdef.default})",
+                placeholder=placeholder,
+                default=current_settings.get(sdef.key, sdef.default),
+                required=False,
+                max_length=20,
+                custom_id=f"conv_setting_{sdef.key}",
+            ))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Process submitted values and validate ranges.
+
+        Args:
+            interaction: The interaction that submitted the modal.
+        """
+        self._interaction = interaction
+        updated: dict[str, str] = {}
+        errors: list[str] = []
+
+        for i, sdef in enumerate(self.freeform_defs[:5]):
+            raw = self.children[i].value.strip()  # type: ignore[union-attr]
+            if not raw:
+                raw = sdef.default
+
+            # Validate numeric ranges
+            if sdef.min_val is not None and sdef.max_val is not None:
+                try:
+                    val = int(raw)
+                    if val < sdef.min_val or val > sdef.max_val:
+                        errors.append(f"{sdef.label}: must be {sdef.min_val}-{sdef.max_val}")
+                        continue
+                except ValueError:
+                    if raw != "auto":  # Allow "auto" for video bitrate
+                        errors.append(f"{sdef.label}: must be a number")
+                        continue
+
+            updated[sdef.key] = raw
+
+        if errors:
+            await interaction.response.send_message(
+                "**Validation errors:**\n" + "\n".join(f"• {e}" for e in errors),
+                ephemeral=True,
+            )
+            self.result = None
+        else:
+            await interaction.response.defer()
+            self.result = updated
+
+
+class _ConvSettingSelect(ui.Select):
+    """Select dropdown for a conversion setting.
+
+    Wraps a key reference so the ConversionView can be rebuilt
+    when the user picks a new value.
+    """
+
+    def __init__(self, view_ref: "ConversionView", setting_key: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._view_ref = view_ref
+        self._setting_key = setting_key
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        """Handle setting selection.
+
+        Args:
+            interaction: The interaction triggered by the user.
+        """
+        if interaction.user.id != self._view_ref.ctx.author.id:
+            await interaction.response.send_message("This isn't your conversion.", ephemeral=True)
+            return
+        if self.values:
+            self._view_ref.job.settings[self._setting_key] = self.values[0]
+            self._view_ref._build_ui()
+            await interaction.response.edit_message(view=self._view_ref)
+
+
+class ConversionView(ui.LayoutView):
+    """Components V2 view for file conversion confirmation and execution.
+
+    Displays source info, target format, settings dropdowns, size estimate,
+    and action buttons (Convert / Custom values / Cancel).
+
+    Usage::
+
+        from utils.views import show_conversion
+        await show_conversion(ctx, job, cog._execute_conversion)
+    """
+
+    def __init__(
+        self,
+        ctx: commands.Context,
+        job: "ConversionJob",
+        execute_callback: ConversionExecutor,
+        timeout: float = 60.0,
+    ):
+        """Initialize the conversion view.
+
+        Args:
+            ctx: The command context.
+            job: The ConversionJob with probe, settings, etc.
+            execute_callback: Async callback to run the actual conversion.
+            timeout: View timeout in seconds.
+        """
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.job = job
+        self._execute = execute_callback
+        self._converting = False
+        self.message: Optional[discord.Message] = None
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        """Build or rebuild the V2 layout from current job state."""
+        self.clear_items()
+
+        job = self.job
+        probe = job.probe
+
+        container = ui.Container(accent_colour=discord.Colour.blue())
+
+        # Header
+        container.add_item(ui.TextDisplay("## \U0001f504 File Conversion"))
+
+        # Source info
+        source_line = f"**Source:** {job.source_filename}\n{probe.display_info}"
+        container.add_item(ui.TextDisplay(source_line))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Target + current settings summary
+        ext = job.target_format.upper()
+        settings_parts: list[str] = []
+        for sdef in job.setting_defs:
+            val = job.settings.get(sdef.key, sdef.default)
+            # Find the label for dropdown options
+            label = val
+            for opt in sdef.options:
+                if opt.value == val:
+                    label = opt.label
+                    break
+            unit = f" {sdef.unit}" if sdef.unit and sdef.unit not in label else ""
+            settings_parts.append(f"{label}{unit}")
+
+        settings_summary = " \u2022 ".join(settings_parts) if settings_parts else "Default settings"
+        container.add_item(ui.TextDisplay(f"**Converting to:** {ext}\n{settings_summary}"))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Size estimate
+        from cogs.files import estimate_output_size, format_estimate
+        est_mb, confidence = estimate_output_size(probe, job.target_format, job.settings)
+        container.add_item(ui.TextDisplay(format_estimate(est_mb, confidence)))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Dropdowns for non-freeform settings
+        dropdown_defs = [d for d in job.setting_defs if not d.freeform and d.options]
+        for sdef in dropdown_defs:
+            options = [
+                discord.SelectOption(
+                    label=opt.label,
+                    value=opt.value,
+                    default=(opt.value == job.settings.get(sdef.key, sdef.default)),
+                )
+                for opt in sdef.options
+            ]
+            select = _ConvSettingSelect(
+                view_ref=self,
+                setting_key=sdef.key,
+                placeholder=sdef.label,
+                options=options,
+                custom_id=f"conv_select_{sdef.key}",
+            )
+            row = ui.ActionRow(select)
+            container.add_item(row)
+
+        # Action buttons
+        convert_btn = ui.Button(
+            label="Convert",
+            style=discord.ButtonStyle.green,
+            custom_id="conv_btn_convert",
+            emoji="\u2705",
+        )
+        convert_btn.callback = self._on_convert
+
+        cancel_btn = ui.Button(
+            label="Cancel",
+            style=discord.ButtonStyle.grey,
+            custom_id="conv_btn_cancel",
+            emoji="\u274c",
+        )
+        cancel_btn.callback = self._on_cancel
+
+        has_freeform = any(d.freeform for d in job.setting_defs)
+        button_row = ui.ActionRow(convert_btn)
+        if has_freeform:
+            custom_btn = ui.Button(
+                label="Custom values",
+                style=discord.ButtonStyle.blurple,
+                custom_id="conv_btn_custom",
+                emoji="\u270f\ufe0f",
+            )
+            custom_btn.callback = self._on_custom
+            button_row.add_item(custom_btn)
+        button_row.add_item(cancel_btn)
+        container.add_item(button_row)
+
+        # Footer
+        container.add_item(ui.TextDisplay("-# Upload limit: 25 MB"))
+
+        self.add_item(container)
+
+    async def _on_convert(self, interaction: discord.Interaction) -> None:
+        """Handle the Convert button click.
+
+        Args:
+            interaction: The button interaction.
+        """
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't your conversion.", ephemeral=True)
+            return
+
+        if self._converting:
+            await interaction.response.defer()
+            return
+
+        self._converting = True
+
+        # Show converting state
+        self._build_converting_ui("Converting...")
+        await interaction.response.edit_message(view=self)
+
+        async def update_status(text: str) -> None:
+            """Update the status text in the converting view."""
+            try:
+                self._build_converting_ui(text)
+                if self.message:
+                    await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+        # Run the conversion
+        success, results, message = await self._execute(self.job, update_status)
+
+        if success:
+            # Show success state
+            self._build_done_ui(f"\u2705 {message}")
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
+
+            # Send output files
+            ref = self.job.original_message
+            for i, (filename, data) in enumerate(results):
+                file = discord.File(io.BytesIO(data), filename=filename)
+                try:
+                    if ref is not None:
+                        await self.ctx.send(file=file, reference=ref)
+                    else:
+                        await self.ctx.send(file=file)
+                except discord.HTTPException as e:
+                    logging.getLogger(__name__).error(f"Failed to send conversion result: {e}")
+                    await self.ctx.send(f"Failed to upload `{filename}`: {e}")
+
+                # 4s delay between multi-file outputs
+                if len(results) > 1 and i < len(results) - 1:
+                    await asyncio.sleep(4)
+        else:
+            self._build_done_ui(f"\u274c {message}")
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
+
+        self.stop()
+
+    async def _on_custom(self, interaction: discord.Interaction) -> None:
+        """Handle the Custom values button click — opens modal.
+
+        Args:
+            interaction: The button interaction.
+        """
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't your conversion.", ephemeral=True)
+            return
+
+        modal = ConversionSettingsModal(self.job.setting_defs, self.job.settings)
+        await interaction.response.send_modal(modal)
+
+        # Wait for modal completion
+        if await modal.wait():
+            return  # Timed out
+
+        if modal.result:
+            self.job.settings.update(modal.result)
+            self._build_ui()
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
+
+    async def _on_cancel(self, interaction: discord.Interaction) -> None:
+        """Handle the Cancel button click.
+
+        Args:
+            interaction: The button interaction.
+        """
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't your conversion.", ephemeral=True)
+            return
+
+        self._build_done_ui("Conversion cancelled.")
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    def _build_converting_ui(self, status_text: str) -> None:
+        """Rebuild UI to show conversion-in-progress state.
+
+        Args:
+            status_text: Current progress stage message.
+        """
+        self.clear_items()
+        container = ui.Container(accent_colour=discord.Colour.yellow())
+        container.add_item(ui.TextDisplay("## \U0001f504 File Conversion"))
+        container.add_item(ui.TextDisplay(
+            f"**{self.job.source_filename}** \u2192 **{self.job.target_format.upper()}**"
+        ))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+        container.add_item(ui.TextDisplay(f"\u23f3 {status_text}"))
+        self.add_item(container)
+
+    def _build_done_ui(self, message: str) -> None:
+        """Rebuild UI to show final completion/error state.
+
+        Args:
+            message: Final status message with emoji prefix.
+        """
+        self.clear_items()
+        container = ui.Container(accent_colour=discord.Colour.green() if "\u2705" in message else discord.Colour.red())
+        container.add_item(ui.TextDisplay("## \U0001f504 File Conversion"))
+        container.add_item(ui.TextDisplay(
+            f"**{self.job.source_filename}** \u2192 **{self.job.target_format.upper()}**"
+        ))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+        container.add_item(ui.TextDisplay(message))
+        self.add_item(container)
+
+    async def on_timeout(self) -> None:
+        """Disable the view on timeout."""
+        if not self._converting:
+            self._build_done_ui("Conversion timed out.")
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    logging.getLogger(__name__).debug(f"ConversionView timeout cleanup failed: {e}")
+
+
+async def show_conversion(
+    ctx: commands.Context,
+    job: "ConversionJob",
+    execute_callback: ConversionExecutor,
+    timeout: float = 60.0,
+) -> discord.Message:
+    """Display the conversion confirmation view.
+
+    This is the preferred API for showing the conversion V2 view.
+
+    Args:
+        ctx: The command context.
+        job: The ConversionJob with probe, settings, etc.
+        execute_callback: Async callback to run the conversion.
+        timeout: View timeout in seconds.
+
+    Returns:
+        The sent message containing the conversion view.
+    """
+    view = ConversionView(ctx=ctx, job=job, execute_callback=execute_callback, timeout=timeout)
     message = await ctx.send(view=view)
     view.message = message
     return message
