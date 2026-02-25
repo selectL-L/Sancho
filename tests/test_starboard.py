@@ -1,13 +1,13 @@
 """Unit tests for the Starboard cog.
 
 This module contains comprehensive tests for the starboard system, including:
-- Configuration retrieval tests
+- Configuration retrieval tests (StarboardConfig dataclass)
 - Reaction event handling tests
 - Starboard post creation tests
 - Embed generation tests
-- Fix and remake command tests
-- Migration detection tests
+- Verify and remake command tests
 """
+import asyncio
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +15,7 @@ import discord
 import pytest
 from discord.ext import commands
 
-from cogs.starboard import Starboard
+from cogs.starboard import Starboard, StarboardConfig
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 
@@ -125,6 +125,7 @@ def mock_ctx(mock_bot, mock_guild):
     ctx.author = MagicMock()
     ctx.author.id = 999
     ctx.channel = MagicMock()
+    ctx.channel.id = 8001
     ctx.send = AsyncMock()
     return ctx
 
@@ -137,65 +138,85 @@ def create_star_reaction(emoji: str = "⭐", count: int = 5) -> MagicMock:
     return reaction
 
 
+def make_config_row(guild_id: int = 1001, **overrides) -> dict:
+    """Helper to create a starboard_config DB row dict.
+
+    Mirrors the shape returned by ``DatabaseManager.get_starboard_config``.
+    """
+    row = {
+        "guild_id": guild_id,
+        "enabled": 1,
+        "channel_id": 3001,
+        "emoji": "⭐",
+        "threshold": 3,
+        "last_heal_at": 0,
+        "crawl_started_at": None,
+        "crawl_requested_by": None,
+        "crawl_notify_channel": None,
+        "crawl_include_threads": 0,
+        "crawl_last_channel_id": None,
+        "crawl_last_message_id": None,
+    }
+    row.update(overrides)
+    return row
+
+
 # =============================================================================
 # CONFIGURATION TESTS
 # =============================================================================
 
 
 class TestGetStarboardConfig:
-    """Tests for get_starboard_config method."""
+    """Tests for get_starboard_config method (returns StarboardConfig dataclass)."""
 
     @pytest.mark.asyncio
     async def test_returns_defaults_when_not_configured(self, starboard_cog, mock_bot):
-        """Returns default values when no config is set."""
-        mock_bot.db_manager.get_guild_config.return_value = None
+        """Returns default StarboardConfig when no DB row exists."""
+        mock_bot.db_manager.get_starboard_config.return_value = None
 
-        channel_id, emoji, threshold = await starboard_cog.get_starboard_config(1001)
+        cfg = await starboard_cog.get_starboard_config(1001)
 
-        assert channel_id is None
-        assert emoji == "⭐"
-        assert threshold == 3
+        assert isinstance(cfg, StarboardConfig)
+        assert cfg.channel_id is None
+        assert cfg.emoji == "⭐"
+        assert cfg.threshold == 3
+        assert cfg.enabled is False
 
     @pytest.mark.asyncio
     async def test_returns_configured_values(self, starboard_cog, mock_bot):
-        """Returns configured values when set."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": "2001",
-            "starboard_emoji": "🌟",
-            "starboard_threshold": "5"
-        }.get(key)
+        """Returns configured values from DB row."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=2001, emoji="🌟", threshold=5
+        )
 
-        channel_id, emoji, threshold = await starboard_cog.get_starboard_config(1001)
+        cfg = await starboard_cog.get_starboard_config(1001)
 
-        assert channel_id == 2001
-        assert emoji == "🌟"
-        assert threshold == 5
-
-    @pytest.mark.asyncio
-    async def test_handles_invalid_channel_id(self, starboard_cog, mock_bot):
-        """Returns None for invalid channel ID."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": "not_a_number",
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
-
-        channel_id, _emoji, _threshold = await starboard_cog.get_starboard_config(1001)
-
-        assert channel_id is None
+        assert cfg.channel_id == 2001
+        assert cfg.emoji == "🌟"
+        assert cfg.threshold == 5
+        assert cfg.enabled is True
 
     @pytest.mark.asyncio
-    async def test_handles_invalid_threshold(self, starboard_cog, mock_bot):
-        """Returns default threshold for invalid value."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": "2001",
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "invalid"
-        }.get(key)
+    async def test_returns_none_channel_when_db_has_none(self, starboard_cog, mock_bot):
+        """Returns None channel_id when DB row has it as None."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=None
+        )
 
-        _channel_id, _emoji, threshold = await starboard_cog.get_starboard_config(1001)
+        cfg = await starboard_cog.get_starboard_config(1001)
 
-        assert threshold == 3  # Default
+        assert cfg.channel_id is None
+
+    @pytest.mark.asyncio
+    async def test_returns_correct_threshold(self, starboard_cog, mock_bot):
+        """Returns exact threshold from DB."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            threshold=10
+        )
+
+        cfg = await starboard_cog.get_starboard_config(1001)
+
+        assert cfg.threshold == 10
 
 
 # =============================================================================
@@ -214,7 +235,7 @@ class TestOnRawReactionAdd:
 
         await starboard_cog.on_raw_reaction_add(payload)
         # Should return early without any DB calls
-        starboard_cog.db_manager.get_guild_config.assert_not_called()
+        starboard_cog.db_manager.get_starboard_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ignores_bot_reactions(self, starboard_cog, mock_bot):
@@ -224,7 +245,20 @@ class TestOnRawReactionAdd:
         payload.user_id = mock_bot.user.id
 
         await starboard_cog.on_raw_reaction_add(payload)
-        starboard_cog.db_manager.get_guild_config.assert_not_called()
+        starboard_cog.db_manager.get_starboard_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignores_when_disabled(self, starboard_cog, mock_bot):
+        """Ignores reactions when starboard is disabled."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.user_id = 123
+        payload.emoji = "⭐"
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(enabled=0)
+
+        await starboard_cog.on_raw_reaction_add(payload)
+        mock_bot.get_channel.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ignores_wrong_emoji(self, starboard_cog, mock_bot):
@@ -234,18 +268,16 @@ class TestOnRawReactionAdd:
         payload.user_id = 123
         payload.emoji = "👍"  # Not the star emoji
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": "2001",
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
 
         await starboard_cog.on_raw_reaction_add(payload)
         # Should return after config check without fetching message
         mock_bot.get_channel.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ignores_reactions_in_starboard_channel(self, starboard_cog, mock_bot, mock_starboard_channel):
+    async def test_ignores_reactions_in_starboard_channel(
+        self, starboard_cog, mock_bot, mock_starboard_channel
+    ):
         """Ignores reactions in the starboard channel itself."""
         payload = MagicMock(spec=discord.RawReactionActionEvent)
         payload.guild_id = 1001
@@ -254,11 +286,10 @@ class TestOnRawReactionAdd:
         payload.channel_id = mock_starboard_channel.id
         payload.message_id = 4001
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.db_manager.is_starboard_channel_banned.return_value = False
         mock_bot.get_channel.return_value = mock_starboard_channel
 
         await starboard_cog.on_raw_reaction_add(payload)
@@ -266,7 +297,25 @@ class TestOnRawReactionAdd:
         mock_starboard_channel.fetch_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_posts_when_threshold_met(self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message):
+    async def test_ignores_banned_channels(self, starboard_cog, mock_bot, mock_channel):
+        """Ignores reactions in banned channels."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.user_id = 123
+        payload.emoji = "⭐"
+        payload.channel_id = mock_channel.id
+        payload.message_id = 4001
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
+        mock_bot.db_manager.is_starboard_channel_banned.return_value = True
+
+        await starboard_cog.on_raw_reaction_add(payload)
+        mock_bot.get_channel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_posts_when_threshold_met(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
         """Posts to starboard when reaction threshold is met."""
         payload = MagicMock(spec=discord.RawReactionActionEvent)
         payload.guild_id = 1001
@@ -275,14 +324,13 @@ class TestOnRawReactionAdd:
         payload.channel_id = mock_channel.id
         payload.message_id = mock_message.id
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.db_manager.is_starboard_channel_banned.return_value = False
         mock_bot.get_channel.side_effect = lambda ch_id: {
             mock_channel.id: mock_channel,
-            mock_starboard_channel.id: mock_starboard_channel
+            mock_starboard_channel.id: mock_starboard_channel,
         }.get(ch_id)
 
         # Add reaction meeting threshold
@@ -291,6 +339,8 @@ class TestOnRawReactionAdd:
 
         # Mock post_to_starboard to track calls
         starboard_cog.post_to_starboard = AsyncMock()
+        # Mock _should_self_heal to avoid background task logic
+        starboard_cog._should_self_heal = AsyncMock(return_value=False)
 
         await starboard_cog.on_raw_reaction_add(payload)
 
@@ -299,7 +349,9 @@ class TestOnRawReactionAdd:
         )
 
     @pytest.mark.asyncio
-    async def test_ignores_below_threshold(self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message):
+    async def test_ignores_below_threshold(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
         """Does not post when below threshold."""
         payload = MagicMock(spec=discord.RawReactionActionEvent)
         payload.guild_id = 1001
@@ -308,14 +360,13 @@ class TestOnRawReactionAdd:
         payload.channel_id = mock_channel.id
         payload.message_id = mock_message.id
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.db_manager.is_starboard_channel_banned.return_value = False
         mock_bot.get_channel.side_effect = lambda ch_id: {
             mock_channel.id: mock_channel,
-            mock_starboard_channel.id: mock_starboard_channel
+            mock_starboard_channel.id: mock_starboard_channel,
         }.get(ch_id)
 
         # Add reaction below threshold
@@ -323,6 +374,7 @@ class TestOnRawReactionAdd:
         mock_channel.fetch_message.return_value = mock_message
 
         starboard_cog.post_to_starboard = AsyncMock()
+        starboard_cog._should_self_heal = AsyncMock(return_value=False)
 
         await starboard_cog.on_raw_reaction_add(payload)
 
@@ -338,12 +390,14 @@ class TestPostToStarboard:
     """Tests for post_to_starboard method."""
 
     @pytest.mark.asyncio
-    async def test_creates_new_post_when_no_entry(self, starboard_cog, mock_bot, mock_starboard_channel, mock_message):
+    async def test_creates_new_post_when_no_entry(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
         """Creates a new starboard post when no entry exists."""
         mock_bot.get_channel.return_value = mock_starboard_channel
         mock_bot.db_manager.get_starboard_entry.return_value = None
 
-        starboard_cog.create_new_starboard_post = AsyncMock()
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5001, None))
 
         await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
 
@@ -353,8 +407,13 @@ class TestPostToStarboard:
         assert call_args[0][1] == mock_starboard_channel
         assert "⭐ **5**" in call_args[0][2]
 
+        # Verify DB entry was created with keyword args
+        mock_bot.db_manager.add_starboard_entry.assert_called_once()
+
     @pytest.mark.asyncio
-    async def test_updates_existing_post(self, starboard_cog, mock_bot, mock_starboard_channel, mock_message):
+    async def test_updates_existing_post(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
         """Updates an existing starboard post when entry exists."""
         mock_bot.get_channel.return_value = mock_starboard_channel
 
@@ -365,7 +424,8 @@ class TestPostToStarboard:
             'original_message_id': mock_message.id,
             'starboard_message_id': 5001,
             'guild_id': 1001,
-            'original_channel_id': 2001
+            'original_channel_id': 2001,
+            'failed_checks': 0,
         }
         mock_starboard_channel.fetch_message.return_value = existing_sb_msg
 
@@ -375,7 +435,9 @@ class TestPostToStarboard:
         assert "⭐ **10**" in existing_sb_msg.edit.call_args[1]['content']
 
     @pytest.mark.asyncio
-    async def test_recreates_when_starboard_message_missing(self, starboard_cog, mock_bot, mock_starboard_channel, mock_message):
+    async def test_recreates_when_starboard_message_missing(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
         """Recreates post when starboard message is deleted."""
         mock_bot.get_channel.return_value = mock_starboard_channel
 
@@ -383,35 +445,39 @@ class TestPostToStarboard:
             'original_message_id': mock_message.id,
             'starboard_message_id': 5001,
             'guild_id': 1001,
-            'original_channel_id': 2001
+            'original_channel_id': 2001,
+            'failed_checks': 0,
         }
         mock_starboard_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
 
-        starboard_cog.create_new_starboard_post = AsyncMock()
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5002, None))
 
         await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
 
-        mock_bot.db_manager.remove_starboard_entry.assert_called_once_with(mock_message.id)
         starboard_cog.create_new_starboard_post.assert_called_once()
+        mock_bot.db_manager.set_starboard_message_id.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_recreates_when_entry_has_no_starboard_message_id(self, starboard_cog, mock_bot, mock_starboard_channel, mock_message):
-        """Recreates post when entry exists but has no starboard_message_id."""
+    async def test_creates_post_when_entry_has_no_starboard_message_id(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
+        """Creates post when entry exists but has no starboard_message_id (crawled)."""
         mock_bot.get_channel.return_value = mock_starboard_channel
 
         mock_bot.db_manager.get_starboard_entry.return_value = {
             'original_message_id': mock_message.id,
-            'starboard_message_id': None,  # Missing!
+            'starboard_message_id': None,
             'guild_id': 1001,
-            'original_channel_id': 2001
+            'original_channel_id': 2001,
+            'failed_checks': 0,
         }
 
-        starboard_cog.create_new_starboard_post = AsyncMock()
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5001, None))
 
         await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
 
-        mock_bot.db_manager.remove_starboard_entry.assert_called_once_with(mock_message.id)
         starboard_cog.create_new_starboard_post.assert_called_once()
+        mock_bot.db_manager.set_starboard_message_id.assert_called_once()
 
 
 # =============================================================================
@@ -467,7 +533,20 @@ class TestOnRawReactionRemove:
         payload.guild_id = None
 
         await starboard_cog.on_raw_reaction_remove(payload)
-        starboard_cog.db_manager.get_guild_config.assert_not_called()
+        starboard_cog.db_manager.get_starboard_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignores_when_disabled(self, starboard_cog, mock_bot):
+        """Ignores reaction remove when starboard is disabled."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.emoji = "⭐"
+        payload.message_id = 4001
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(enabled=0)
+
+        await starboard_cog.on_raw_reaction_remove(payload)
+        mock_bot.db_manager.get_starboard_entry.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_deletes_when_below_threshold(
@@ -480,14 +559,12 @@ class TestOnRawReactionRemove:
         payload.channel_id = mock_channel.id
         payload.message_id = mock_message.id
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
         mock_bot.get_channel.side_effect = lambda ch_id: {
             mock_channel.id: mock_channel,
-            mock_starboard_channel.id: mock_starboard_channel
+            mock_starboard_channel.id: mock_starboard_channel,
         }.get(ch_id)
 
         # Below threshold
@@ -503,7 +580,7 @@ class TestOnRawReactionRemove:
             'starboard_message_id': 5001,
             'guild_id': 1001,
             'original_channel_id': mock_channel.id,
-            'starboard_reply_id': None
+            'starboard_reply_id': None,
         }
 
         await starboard_cog.on_raw_reaction_remove(payload)
@@ -522,14 +599,12 @@ class TestOnRawReactionRemove:
         payload.channel_id = mock_channel.id
         payload.message_id = mock_message.id
 
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
         mock_bot.get_channel.side_effect = lambda ch_id: {
             mock_channel.id: mock_channel,
-            mock_starboard_channel.id: mock_starboard_channel
+            mock_starboard_channel.id: mock_starboard_channel,
         }.get(ch_id)
 
         # Still above threshold
@@ -546,7 +621,7 @@ class TestOnRawReactionRemove:
             'starboard_message_id': 5001,
             'guild_id': 1001,
             'original_channel_id': mock_channel.id,
-            'starboard_reply_id': None
+            'starboard_reply_id': None,
         }
 
         await starboard_cog.on_raw_reaction_remove(payload)
@@ -590,96 +665,64 @@ class TestCreateTombstone:
 
 
 # =============================================================================
-# FIX COMMAND TESTS
+# VERIFY COMMAND TESTS
 # =============================================================================
 
 
-class TestFixCommand:
-    """Tests for the fix command implementation."""
+class TestVerifyCommand:
+    """Tests for the verify command (replaced old fix command)."""
 
     @pytest.mark.asyncio
-    async def test_fix_returns_early_without_guild(self, starboard_cog, mock_ctx):
+    async def test_verify_returns_early_without_guild(self, starboard_cog, mock_ctx):
         """Returns early when not in a guild."""
         mock_ctx.guild = None
 
-        await starboard_cog._fix_impl(mock_ctx)
+        await starboard_cog.verify_starboard.callback(starboard_cog, mock_ctx, False)
 
-        mock_ctx.send.assert_not_called()
+        # Only the "must be used in a guild" message
+        mock_ctx.send.assert_called_once()
+        assert "guild" in mock_ctx.send.call_args[0][0].lower()
 
     @pytest.mark.asyncio
-    async def test_fix_returns_when_no_channel_configured(self, starboard_cog, mock_ctx, mock_bot):
+    async def test_verify_returns_when_no_channel_configured(
+        self, starboard_cog, mock_ctx, mock_bot
+    ):
         """Returns when starboard channel is not configured."""
-        mock_bot.db_manager.get_guild_config.return_value = None
+        mock_bot.db_manager.get_starboard_config.return_value = None
 
-        await starboard_cog._fix_impl(mock_ctx)
+        # Mock _confirm_fast_mode to return True (skip the confirmation prompt)
+        starboard_cog._confirm_fast_mode = AsyncMock(return_value=True)
 
-        mock_ctx.send.assert_called()
-        assert "not configured" in mock_ctx.send.call_args[0][0]
+        # Need a fresh unlocked lock
+        lock = asyncio.Lock()
+        starboard_cog._acquire_guild_lock = MagicMock(return_value=lock)
 
-    @pytest.mark.asyncio
-    async def test_fix_returns_when_no_entries(self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel):
-        """Returns when no starboard entries exist."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
-        mock_bot.get_channel.return_value = mock_starboard_channel
-        mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = []
+        await starboard_cog.verify_starboard.callback(starboard_cog, mock_ctx, False)
 
-        await starboard_cog._fix_impl(mock_ctx)
-
-        assert any("No starboard entries" in str(call) for call in mock_ctx.send.call_args_list)
+        assert any(
+            "not configured" in str(call).lower()
+            for call in mock_ctx.send.call_args_list
+        )
 
     @pytest.mark.asyncio
-    async def test_fix_recovers_missing_guild_id(self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel, mock_guild):
-        """Recovers missing guild_id from starboard message embed."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
-        mock_bot.get_channel.return_value = mock_starboard_channel
+    async def test_verify_aborts_when_lock_held(self, starboard_cog, mock_ctx, mock_bot):
+        """Returns if another operation holds the guild lock."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
 
-        # Entry with missing guild_id
-        entry = {
-            'original_message_id': 4001,
-            'starboard_message_id': 5001,
-            'guild_id': None,  # Missing!
-            'original_channel_id': 2001,
-            'starboard_reply_id': None
-        }
-        mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = [entry]
+        # Mock _confirm_fast_mode to return True
+        starboard_cog._confirm_fast_mode = AsyncMock(return_value=True)
 
-        # Mock starboard message with embed containing jump URL
-        sb_msg = MagicMock(spec=discord.Message)
-        embed = MagicMock(spec=discord.Embed)
-        field = MagicMock()
-        field.name = "Original Message"
-        field.value = f"[Jump to Message](https://discord.com/channels/{mock_guild.id}/2001/4001)"
-        embed.fields = [field]
-        sb_msg.embeds = [embed]
-        sb_msg.reference = None
-        mock_starboard_channel.fetch_message.return_value = sb_msg
+        lock = asyncio.Lock()
+        await lock.acquire()  # Pre-lock it
+        starboard_cog._acquire_guild_lock = MagicMock(return_value=lock)
 
-        # Mock original message fetch to succeed
-        orig_channel = MagicMock(spec=discord.TextChannel)
-        orig_channel.fetch_message = AsyncMock()
-        mock_bot.get_channel.side_effect = lambda ch_id: {
-            mock_starboard_channel.id: mock_starboard_channel,
-            2001: orig_channel
-        }.get(ch_id)
+        await starboard_cog.verify_starboard.callback(starboard_cog, mock_ctx, False)
 
-        starboard_cog._fast_mode = True  # Skip rate limiting
-
-        # Patch asyncio.sleep to avoid 30s status editor delay
-        with patch('asyncio.sleep', new_callable=AsyncMock):
-            await starboard_cog._fix_impl(mock_ctx)
-
-        # Entry should have been updated with recovered guild_id
-        mock_bot.db_manager.update_starboard_entry.assert_called()
-        updated_entry = mock_bot.db_manager.update_starboard_entry.call_args[0][0]
-        assert updated_entry['guild_id'] == mock_guild.id
+        assert any(
+            "already running" in str(call).lower()
+            for call in mock_ctx.send.call_args_list
+        )
+        lock.release()
 
 
 # =============================================================================
@@ -700,196 +743,75 @@ class TestRemakeCommand:
         mock_ctx.send.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_remake_returns_when_no_channel_configured(self, starboard_cog, mock_ctx, mock_bot):
+    async def test_remake_returns_when_no_channel_configured(
+        self, starboard_cog, mock_ctx, mock_bot
+    ):
         """Returns when starboard channel is not configured."""
-        mock_bot.db_manager.get_guild_config.return_value = None
+        mock_bot.db_manager.get_starboard_config.return_value = None
 
         await starboard_cog._remake_impl(mock_ctx)
 
         mock_ctx.send.assert_called()
-        assert "not configured" in mock_ctx.send.call_args[0][0]
+        assert "not configured" in mock_ctx.send.call_args[0][0].lower()
 
     @pytest.mark.asyncio
-    async def test_remake_returns_when_no_entries(self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel):
-        """Returns when no starboard entries exist."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
-        mock_bot.get_channel.return_value = mock_starboard_channel
-        mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = []
-
-        await starboard_cog._remake_impl(mock_ctx)
-
-        assert any("No starboard entries" in str(call) for call in mock_ctx.send.call_args_list)
-
-    @pytest.mark.asyncio
-    async def test_remake_deletes_and_recreates(
-        self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel, mock_channel, mock_message, mock_guild
+    async def test_remake_verify_delete_recreate(
+        self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel,
+        mock_channel, mock_message, mock_guild
     ):
-        """Deletes existing starboard messages and recreates them."""
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(mock_starboard_channel.id),
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
+        """Runs verify, deletes, and recreates starboard messages."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.get_channel.side_effect = lambda ch_id: {
+            mock_starboard_channel.id: mock_starboard_channel,
+            mock_channel.id: mock_channel,
+        }.get(ch_id)
 
-        def get_channel_side_effect(ch_id):
-            if ch_id == mock_starboard_channel.id:
-                return mock_starboard_channel
-            if ch_id == mock_channel.id:
-                return mock_channel
-            return None
-        mock_bot.get_channel.side_effect = get_channel_side_effect
-
-        # Valid entry
         entry = {
             'original_message_id': mock_message.id,
             'starboard_message_id': 5001,
             'guild_id': mock_guild.id,
             'original_channel_id': mock_channel.id,
-            'starboard_reply_id': None
+            'starboard_reply_id': None,
+            'star_count': 5,
+            'failed_checks': 0,
+            'message_created_at': 1700000000,
         }
-        mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = [entry]
 
-        # Mock existing starboard message
+        # Verify phase — mock _verify_all_entries to return clean report
+        from cogs.starboard import VerifyReport
+        clean_report = VerifyReport()
+        starboard_cog._verify_all_entries = AsyncMock(return_value=clean_report)
+        starboard_cog._apply_verify_results = AsyncMock()
+
+        # Delete phase
+        mock_bot.db_manager.get_starboard_entries_ordered.return_value = [entry]
         sb_msg = MagicMock(spec=discord.Message)
         sb_msg.delete = AsyncMock()
         mock_starboard_channel.fetch_message.return_value = sb_msg
 
-        # Mock original message with reactions
+        # Recreate phase
         mock_message.reactions = [create_star_reaction("⭐", 5)]
         mock_channel.fetch_message.return_value = mock_message
-
-        # Mock post_to_starboard
-        starboard_cog.post_to_starboard = AsyncMock()
-        starboard_cog._fast_mode = True
-
-        # Patch asyncio.sleep to avoid recreation delays
-        with patch('asyncio.sleep', new_callable=AsyncMock):
-            await starboard_cog._remake_impl(mock_ctx)
-
-        # Verify old message was deleted
-        sb_msg.delete.assert_called_once()
-        # Verify DB was cleared
-        mock_bot.db_manager.clear_starboard_for_guild.assert_called_once_with(mock_guild.id)
-        # Verify post was recreated
-        starboard_cog.post_to_starboard.assert_called_once()
-
-
-# =============================================================================
-# MIGRATION DETECTION TESTS
-# =============================================================================
-
-
-class TestMigrationDetection:
-    """Tests for channel migration detection in remake."""
-
-    @pytest.mark.asyncio
-    async def test_detects_channel_migration(
-        self, starboard_cog, mock_ctx, mock_bot, mock_guild
-    ):
-        """Detects when starboard messages exist in a different channel than configured."""
-        # Old channel (where messages currently exist)
-        old_channel = MagicMock(spec=discord.TextChannel)
-        old_channel.id = 2000
-        old_channel.guild = mock_guild
-        old_channel.mention = "<#2000>"
-        old_channel.fetch_message = AsyncMock()
-
-        # New channel (configured channel)
-        new_channel = MagicMock(spec=discord.TextChannel)
-        new_channel.id = 2001
-        new_channel.guild = mock_guild
-        new_channel.mention = "<#2001>"
-        new_channel.fetch_message = AsyncMock()
-        new_channel.send = AsyncMock()
-
-        # Original channel
-        orig_channel = MagicMock(spec=discord.TextChannel)
-        orig_channel.id = 3001
-        orig_channel.guild = mock_guild
-        orig_channel.fetch_message = AsyncMock()
-
-        mock_guild.text_channels = [old_channel, new_channel, orig_channel]
-
-        mock_bot.db_manager.get_guild_config.side_effect = lambda g_id, key: {
-            "starboard_channel_id": str(new_channel.id),  # Points to NEW channel
-            "starboard_emoji": "⭐",
-            "starboard_threshold": "3"
-        }.get(key)
-
-        def get_channel_side_effect(ch_id):
-            if ch_id == old_channel.id:
-                return old_channel
-            if ch_id == new_channel.id:
-                return new_channel
-            if ch_id == orig_channel.id:
-                return orig_channel
-            return None
-        mock_bot.get_channel.side_effect = get_channel_side_effect
-
-        # Entry pointing to message in OLD channel
-        entry = {
-            'original_message_id': 4001,
-            'starboard_message_id': 5001,
-            'guild_id': mock_guild.id,
-            'original_channel_id': orig_channel.id,
-            'starboard_reply_id': None
-        }
-        mock_bot.db_manager.get_all_starboard_entries_for_guild.return_value = [entry]
-
-        # Message not found in NEW channel
-        new_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
-
-        # Message found in OLD channel
-        old_sb_msg = MagicMock(spec=discord.Message)
-        old_sb_msg.id = 5001
-        old_channel.fetch_message.return_value = old_sb_msg
-
-        # Original message with reactions
-        orig_msg = MagicMock(spec=discord.Message)
-        orig_msg.id = 4001
-        orig_msg.channel = orig_channel
-        orig_msg.guild = mock_guild
-        orig_msg.content = "Test"
-        orig_msg.author = MagicMock()
-        orig_msg.author.id = 123
-        orig_msg.author.display_name = "TestUser"
-        orig_msg.author.name = "testuser"
-        orig_msg.author.display_avatar.url = "http://avatar.url"
-        orig_msg.created_at = discord.utils.utcnow()
-        orig_msg.jump_url = f"https://discord.com/channels/{mock_guild.id}/{orig_channel.id}/4001"
-        orig_msg.embeds = []
-        orig_msg.attachments = []
-        orig_msg.reactions = [create_star_reaction("⭐", 5)]
-        orig_msg.reference = None
-        orig_msg.message_snapshots = []
-        orig_channel.fetch_message.return_value = orig_msg
-
-        # Mock new message creation
         new_sb_msg = MagicMock(spec=discord.Message)
         new_sb_msg.id = 7001
-        new_channel.send.return_value = new_sb_msg
+        # create_new_starboard_post returns (sb_id, reply_id)
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(7001, None))
 
         starboard_cog._fast_mode = True
 
-        # Patch asyncio.sleep to avoid 30s status editor delay
         with patch('asyncio.sleep', new_callable=AsyncMock):
             await starboard_cog._remake_impl(mock_ctx)
 
-        # Should detect migration
-        migration_detected = any(
-            "migration detected" in str(call).lower()
-            for call in mock_ctx.send.call_args_list
-        )
-        assert migration_detected, "Migration should have been detected"
-
-        # Old message should NOT have been deleted
-        old_sb_msg.delete = MagicMock()  # Ensure it's trackable
-        # DB should NOT have been cleared (migration updates entries)
-        mock_bot.db_manager.clear_starboard_for_guild.assert_not_called()
+        # Verify was called
+        starboard_cog._verify_all_entries.assert_called_once()
+        # Verify results were applied
+        starboard_cog._apply_verify_results.assert_called_once()
+        # Old message was deleted
+        sb_msg.delete.assert_called_once()
+        # DB IDs were nulled
+        mock_bot.db_manager.null_starboard_message_ids.assert_called_once_with(mock_guild.id)
 
 
 # =============================================================================
@@ -958,18 +880,18 @@ class TestReplyContext:
 
         content = "⭐ **5** in <#2001>"
 
-        await starboard_cog.create_new_starboard_post(starred_msg, mock_starboard_channel, content)
+        sb_id, reply_id = await starboard_cog.create_new_starboard_post(
+            starred_msg, mock_starboard_channel, content
+        )
+
+        # Returns tuple of (starboard_msg_id, reply_context_id)
+        assert sb_id == 5002
+        assert reply_id == 5001
 
         # First: context message sent
         mock_starboard_channel.send.assert_called_once()
         # Second: reply to context
         context_msg.reply.assert_called_once()
-        # DB entry with reply context ID
-        mock_bot.db_manager.add_starboard_entry.assert_called_once()
-        call_args = mock_bot.db_manager.add_starboard_entry.call_args[0]
-        assert call_args[0] == starred_msg.id  # original_message_id
-        assert call_args[1] == starred_sb_msg.id  # starboard_message_id
-        assert call_args[4] == context_msg.id  # reply_context_id
 
 
 # =============================================================================
@@ -1003,8 +925,7 @@ class TestRateLimiting:
                 raise discord.HTTPException(MagicMock(), "Rate limited")
             return "success"
 
-        starboard_cog._fix_delay = 0.01
-        # Patch asyncio.sleep to avoid real 1s + 2s backoff delays
+        # Patch asyncio.sleep to avoid real backoff delays
         with patch('asyncio.sleep', new_callable=AsyncMock):
             result = await starboard_cog._run_rate_limited(failing_coro, delay=0.01, retries=4)
 
@@ -1032,7 +953,9 @@ class TestSinglePostFallback:
     """Tests for create_single_starboard_post method."""
 
     @pytest.mark.asyncio
-    async def test_creates_single_post(self, starboard_cog, mock_bot, mock_starboard_channel, mock_message):
+    async def test_creates_single_post(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
         """Creates a single starboard post for non-reply messages."""
         sb_msg = MagicMock(spec=discord.Message)
         sb_msg.id = 5001
@@ -1040,13 +963,12 @@ class TestSinglePostFallback:
 
         content = "⭐ **5** in <#2001>"
 
-        await starboard_cog.create_single_starboard_post(mock_message, mock_starboard_channel, content)
+        result = await starboard_cog.create_single_starboard_post(
+            mock_message, mock_starboard_channel, content
+        )
 
+        assert result == sb_msg
         mock_starboard_channel.send.assert_called_once()
-        mock_bot.db_manager.add_starboard_entry.assert_called_once()
-        call_args = mock_bot.db_manager.add_starboard_entry.call_args[0]
-        assert call_args[0] == mock_message.id
-        assert call_args[1] == sb_msg.id
 
     @pytest.mark.asyncio
     async def test_falls_back_when_reply_to_deleted(
@@ -1067,10 +989,13 @@ class TestSinglePostFallback:
 
         content = "⭐ **5** in <#2001>"
 
-        await starboard_cog.create_new_starboard_post(mock_message, mock_starboard_channel, content)
+        sb_id, reply_id = await starboard_cog.create_new_starboard_post(
+            mock_message, mock_starboard_channel, content
+        )
 
-        # Should fall back to single post (only one send call)
-        assert mock_starboard_channel.send.call_count == 1
+        # Should fall back to single post
+        assert sb_id == 5001
+        assert reply_id is None
 
 
 # =============================================================================
@@ -1083,18 +1008,43 @@ class TestConfigCommands:
 
     @pytest.mark.asyncio
     async def test_set_channel(self, starboard_cog, mock_ctx, mock_bot, mock_channel):
-        """Sets the starboard channel."""
+        """Sets the starboard channel via string arg."""
         mock_ctx.guild = MagicMock()
         mock_ctx.guild.id = 1001
 
-        # Call the underlying callback directly to bypass the hybrid command wrapper
-        await starboard_cog.set_channel.callback(starboard_cog, mock_ctx, mock_channel)
+        # get_starboard_config returns unconfigured state (no row)
+        mock_bot.db_manager.get_starboard_config.return_value = None
+        mock_bot.get_channel.return_value = mock_channel
 
-        mock_bot.db_manager.set_guild_config.assert_called_once_with(
-            1001, "starboard_channel_id", str(mock_channel.id)
+        # Mock the _resolve_channel_arg helper
+        starboard_cog._resolve_channel_arg = AsyncMock(
+            return_value=(mock_channel.id, mock_channel.mention)
         )
+
+        await starboard_cog.set_channel.callback(
+            starboard_cog, mock_ctx, str(mock_channel.id)
+        )
+
+        # Should upsert with full row (first-time setup)
+        mock_bot.db_manager.upsert_starboard_config.assert_called_once()
         mock_ctx.send.assert_called_once()
-        assert mock_channel.mention in mock_ctx.send.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_set_channel_naked_displays_current(
+        self, starboard_cog, mock_ctx, mock_bot
+    ):
+        """Naked call displays current channel."""
+        mock_ctx.guild = MagicMock()
+        mock_ctx.guild.id = 1001
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=3001
+        )
+
+        await starboard_cog.set_channel.callback(starboard_cog, mock_ctx, None)
+
+        mock_ctx.send.assert_called_once()
+        assert "3001" in mock_ctx.send.call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_set_emoji(self, starboard_cog, mock_ctx, mock_bot):
@@ -1102,12 +1052,11 @@ class TestConfigCommands:
         mock_ctx.guild = MagicMock()
         mock_ctx.guild.id = 1001
 
-        # Call the underlying callback directly
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
+
         await starboard_cog.set_emoji.callback(starboard_cog, mock_ctx, "🌟")
 
-        mock_bot.db_manager.set_guild_config.assert_called_once_with(
-            1001, "starboard_emoji", "🌟"
-        )
+        mock_bot.db_manager.upsert_starboard_config.assert_called_once_with(1001, emoji="🌟")
         mock_ctx.send.assert_called_once()
         assert "🌟" in mock_ctx.send.call_args[0][0]
 
@@ -1117,12 +1066,11 @@ class TestConfigCommands:
         mock_ctx.guild = MagicMock()
         mock_ctx.guild.id = 1001
 
-        # Call the underlying callback directly
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
+
         await starboard_cog.set_threshold.callback(starboard_cog, mock_ctx, 5)
 
-        mock_bot.db_manager.set_guild_config.assert_called_once_with(
-            1001, "starboard_threshold", "5"
-        )
+        mock_bot.db_manager.upsert_starboard_config.assert_called_once_with(1001, threshold=5)
         mock_ctx.send.assert_called_once()
         assert "5" in mock_ctx.send.call_args[0][0]
 
@@ -1132,10 +1080,11 @@ class TestConfigCommands:
         mock_ctx.guild = MagicMock()
         mock_ctx.guild.id = 1001
 
-        # Call the underlying callback directly
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row()
+
         await starboard_cog.set_threshold.callback(starboard_cog, mock_ctx, 0)
 
-        mock_bot.db_manager.set_guild_config.assert_not_called()
+        mock_bot.db_manager.upsert_starboard_config.assert_not_called()
 
 
 if __name__ == "__main__":

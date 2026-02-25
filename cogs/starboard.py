@@ -372,6 +372,45 @@ class Starboard(BaseCog):
             except discord.HTTPException as e:
                 self.logger.error(f"Failed to rename channel {channel.id}: {e}")
 
+    async def _resolve_channel_arg(
+        self, ctx: commands.Context, value: str
+    ) -> Tuple[int, str]:
+        """Resolve a user-provided channel argument to (channel_id, display_label).
+
+        Tries the TextChannel converter first (handles mentions, names, IDs that
+        the bot can see), then falls back to parsing as a raw integer ID.
+
+        Args:
+            ctx: The invocation context.
+            value: The raw argument string.
+
+        Returns:
+            A tuple of (channel_id, label) where label is a mention if resolved
+            or ``<#id>`` if only a raw ID.
+
+        Raises:
+            commands.BadArgument: If the value is neither a resolvable channel
+                nor a valid integer ID.
+        """
+        try:
+            channel = await commands.TextChannelConverter().convert(ctx, value)
+            return channel.id, channel.mention
+        except commands.BadArgument:
+            pass
+
+        # Strip <# > wrapper if someone pastes a mention of a channel the bot can't see
+        cleaned = value.strip()
+        if cleaned.startswith("<#") and cleaned.endswith(">"):
+            cleaned = cleaned[2:-1]
+
+        try:
+            channel_id = int(cleaned)
+            return channel_id, f"<#{channel_id}>"
+        except ValueError:
+            raise commands.BadArgument(
+                f"Could not resolve `{value}` to a channel or ID."
+            ) from None
+
     @commands.hybrid_group(
         name="starboard",
         hidden=True,
@@ -388,21 +427,23 @@ class Starboard(BaseCog):
                 await ctx.send_help(ctx.command)
 
     @starboard_group.command(
-        name="channel",
+        name="set",
         help="Sets or displays the starboard channel."
     )
     @commands.check_any(
         commands.has_guild_permissions(manage_channels=True),
         commands.has_guild_permissions(manage_guild=True),
     )
-    async def set_channel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:  # type: ignore[type-arg]
+    async def set_channel(self, ctx: commands.Context, channel: Optional[str] = None) -> None:  # type: ignore[type-arg]
         """Sets the starboard channel, or displays the current one if called naked.
 
         When changing channels, the previous channel is automatically added to
         the banned list to prevent re-tracking already-posted messages.
 
+        Accepts a channel mention/name or a raw ID.
+
         Args:
-            channel: The channel to use, or None to display current.
+            channel: The channel to use (mention, name, or ID), or None to display current.
         """
         if not ctx.guild:
             return
@@ -417,26 +458,33 @@ class Starboard(BaseCog):
                 await ctx.send("Starboard channel is not set.")
             return
 
+        channel_id, label = await self._resolve_channel_arg(ctx, channel)
         old_channel_id = config.channel_id
 
         # Auto-ban the old channel if switching
-        if old_channel_id and old_channel_id != channel.id:
+        if old_channel_id and old_channel_id != channel_id:
             await self.db_manager.add_starboard_banned_channel(ctx.guild.id, old_channel_id)
             self.logger.info(f"Auto-banned old starboard channel {old_channel_id} for guild {ctx.guild.id}.")
 
         # Build a full row from dataclass defaults + the new channel_id.
         # This is the only code path that creates a starboard_config row.
-        cfg = StarboardConfig(guild_id=ctx.guild.id, channel_id=channel.id)
+        cfg = StarboardConfig(guild_id=ctx.guild.id, channel_id=channel_id)
         if config.channel_id:
             # Row already exists — preserve existing settings, just update channel
-            await self.db_manager.upsert_starboard_config(ctx.guild.id, channel_id=channel.id)
+            await self.db_manager.upsert_starboard_config(ctx.guild.id, channel_id=channel_id)
         else:
             # First-time setup — write the full row with dataclass defaults
             await self.db_manager.upsert_starboard_config(ctx.guild.id, **cfg.to_db_dict())
 
-        msg = f"Starboard channel set to {channel.mention}."
-        if old_channel_id and old_channel_id != channel.id:
+        msg = f"Starboard channel set to {label}."
+        if old_channel_id and old_channel_id != channel_id:
             msg += f" Previous channel <#{old_channel_id}> has been added to the ban list."
+
+        # Warn if the bot can't actually see the channel
+        resolved = self.bot.get_channel(channel_id)
+        if not isinstance(resolved, discord.TextChannel):
+            msg += "\n⚠️ I can't see this channel. Make sure it exists and I have access to it."
+
         await ctx.send(msg)
 
     @starboard_group.command(
@@ -535,13 +583,17 @@ class Starboard(BaseCog):
                 await ctx.send("Starboard is already enabled.")
                 return
 
-            await self.db_manager.set_starboard_enabled(ctx.guild.id, True)
-
             channel = self.bot.get_channel(config.channel_id)
-            if isinstance(channel, discord.TextChannel):
-                await self._add_channel_prefix(channel)
+            if not isinstance(channel, discord.TextChannel):
+                await ctx.send(
+                    f"Cannot enable starboard — I can't see <#{config.channel_id}>. "
+                    "Make sure the channel exists and I have access to it."
+                )
+                return
 
-            await ctx.send(f"Starboard enabled in <#{config.channel_id}>.")
+            await self.db_manager.set_starboard_enabled(ctx.guild.id, True)
+            await self._add_channel_prefix(channel)
+            await ctx.send(f"Starboard enabled in {channel.mention}.")
         else:
             # Disable
             if not config.enabled:
@@ -597,11 +649,13 @@ class Starboard(BaseCog):
         commands.has_guild_permissions(manage_channels=True),
         commands.has_guild_permissions(manage_guild=True),
     )
-    async def ban_channel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:  # type: ignore[type-arg]
+    async def ban_channel(self, ctx: commands.Context, channel: Optional[str] = None) -> None:  # type: ignore[type-arg]
         """Bans a channel from starboard tracking, or lists banned channels.
 
+        Accepts a channel mention/name or a raw ID.
+
         Args:
-            channel: The channel to ban, or None to list banned channels.
+            channel: The channel to ban (mention, name, or ID), or None to list banned channels.
         """
         if not ctx.guild:
             return
@@ -616,8 +670,9 @@ class Starboard(BaseCog):
             await ctx.send("**Banned starboard channels:**\n" + "\n".join(lines))
             return
 
-        await self.db_manager.add_starboard_banned_channel(ctx.guild.id, channel.id)
-        await ctx.send(f"{channel.mention} has been banned from the starboard.")
+        channel_id, label = await self._resolve_channel_arg(ctx, channel)
+        await self.db_manager.add_starboard_banned_channel(ctx.guild.id, channel_id)
+        await ctx.send(f"{label} has been banned from the starboard.")
 
     @starboard_group.command(
         name="unban",
@@ -627,22 +682,26 @@ class Starboard(BaseCog):
         commands.has_guild_permissions(manage_channels=True),
         commands.has_guild_permissions(manage_guild=True),
     )
-    async def unban_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:  # type: ignore[type-arg]
+    async def unban_channel(self, ctx: commands.Context, channel: str) -> None:  # type: ignore[type-arg]
         """Removes a channel from the starboard ban list.
 
+        Accepts a channel mention/name or a raw ID (for deleted channels).
+
         Args:
-            channel: The channel to unban.
+            channel: The channel to unban (mention, name, or ID).
         """
         if not ctx.guild:
             return
 
+        channel_id, label = await self._resolve_channel_arg(ctx, channel)
+
         banned = await self.db_manager.get_starboard_banned_channels(ctx.guild.id)
-        if channel.id not in banned:
-            await ctx.send(f"{channel.mention} is not in the ban list.")
+        if channel_id not in banned:
+            await ctx.send(f"{label} is not in the ban list.")
             return
 
-        await self.db_manager.remove_starboard_banned_channel(ctx.guild.id, channel.id)
-        await ctx.send(f"{channel.mention} has been unbanned from the starboard.")
+        await self.db_manager.remove_starboard_banned_channel(ctx.guild.id, channel_id)
+        await ctx.send(f"{label} has been unbanned from the starboard.")
 
     # ── Section 3: Shared Infrastructure ──────────────────────────────────────
 
@@ -1565,6 +1624,7 @@ class Starboard(BaseCog):
                 tomb = await self._create_tombstone(starboard_channel, original_id or 0)
                 if tomb:
                     await self.db_manager.set_starboard_message_id(original_id, tomb.id)  # type: ignore[arg-type]
+                    await self.db_manager.increment_starboard_failed_checks(original_id)  # type: ignore[arg-type]
                     tombstoned += 1
                 else:
                     failed += 1
@@ -1580,6 +1640,7 @@ class Starboard(BaseCog):
                 tomb = await self._create_tombstone(starboard_channel, original_id or 0)
                 if tomb:
                     await self.db_manager.set_starboard_message_id(original_id, tomb.id)  # type: ignore[arg-type]
+                    await self.db_manager.increment_starboard_failed_checks(original_id)  # type: ignore[arg-type]
                     tombstoned += 1
                 else:
                     failed += 1

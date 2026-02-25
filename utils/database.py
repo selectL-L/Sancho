@@ -1754,19 +1754,32 @@ class DatabaseManager:
         if not filtered:
             return
 
-        # Build an UPSERT that only touches the specified columns
-        all_cols = ["guild_id"] + list(filtered.keys())
-        all_vals = [guild_id] + list(filtered.values())
-        placeholders = ", ".join("?" for _ in all_cols)
-        col_list = ", ".join(all_cols)
-        update_clause = ", ".join(f"{c} = excluded.{c}" for c in filtered)
-
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                f"INSERT INTO starboard_config ({col_list}) VALUES ({placeholders}) "
-                f"ON CONFLICT(guild_id) DO UPDATE SET {update_clause}",
-                all_vals,
+            # SQLite checks NOT NULL on INSERT values *before* evaluating
+            # ON CONFLICT, so a partial-column UPSERT fails when the row
+            # already exists.  Check first and use a plain UPDATE when it does.
+            cursor = await db.execute(
+                "SELECT 1 FROM starboard_config WHERE guild_id = ?", (guild_id,),
             )
+            exists = await cursor.fetchone() is not None
+
+            if exists:
+                set_clause = ", ".join(f"{c} = ?" for c in filtered)
+                vals = list(filtered.values()) + [guild_id]
+                await db.execute(
+                    f"UPDATE starboard_config SET {set_clause} WHERE guild_id = ?",
+                    vals,
+                )
+            else:
+                # First-time INSERT — caller must supply all NOT NULL columns
+                all_cols = ["guild_id"] + list(filtered.keys())
+                all_vals = [guild_id] + list(filtered.values())
+                placeholders = ", ".join("?" for _ in all_cols)
+                col_list = ", ".join(all_cols)
+                await db.execute(
+                    f"INSERT INTO starboard_config ({col_list}) VALUES ({placeholders})",
+                    all_vals,
+                )
             await db.commit()
         logger.info(f"Starboard config for guild {guild_id} updated: {filtered}")
 
