@@ -80,7 +80,7 @@ If you don't have Python installed or prefer a standalone executable, you can do
 
 ## Getting Started
 
-*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md) instead.*
+*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md) instead. For database schema documentation, see [database.md](database.md).*
 
 ### Prerequisites
 *   Python 3.11+
@@ -217,6 +217,8 @@ echo "status" | nc localhost 9999
 > Shiori maintains **two** definitions of the database schema. You must update **BOTH** when making changes:
 > 1.  `utils/database.py`: Used for runtime validation and fresh installs.
 > 2.  `migrate_db.py`: Used for migrating existing data to a new schema.
+>
+> For detailed table documentation, see [database.md](database.md).
 
 ### UI Patterns
 *   **Hybrid Selection**: Use `utils.views.get_selection`. It allows users to pick an option via Button *or* by typing the answer.

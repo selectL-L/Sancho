@@ -108,7 +108,7 @@ class DatabaseManager:
             await db.execute("PRAGMA foreign_keys = ON;")
 
             # Define Table Schemas (Creation SQL)
-            # Note: Table name descriptions are in migrate_db.py for easier reference.
+            # Note: Table documentation lives in database.md (project root).
             table_schemas = {
                 "skills": '''CREATE TABLE IF NOT EXISTS skills (
                         id INTEGER PRIMARY KEY,
@@ -174,12 +174,34 @@ class DatabaseManager:
                         value TEXT NOT NULL,
                         PRIMARY KEY(guild_id, key)
                     )''',
+                "starboard_config": '''CREATE TABLE IF NOT EXISTS starboard_config (
+                        guild_id INTEGER PRIMARY KEY,
+                        enabled INTEGER NOT NULL,
+                        channel_id INTEGER,
+                        emoji TEXT NOT NULL,
+                        threshold INTEGER NOT NULL,
+                        last_heal_at INTEGER NOT NULL,
+                        crawl_started_at INTEGER,
+                        crawl_requested_by INTEGER,
+                        crawl_notify_channel INTEGER,
+                        crawl_include_threads INTEGER NOT NULL,
+                        crawl_last_channel_id INTEGER,
+                        crawl_last_message_id INTEGER
+                    )''',
+                "starboard_banned_channels": '''CREATE TABLE IF NOT EXISTS starboard_banned_channels (
+                        guild_id INTEGER NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        PRIMARY KEY(guild_id, channel_id)
+                    )''',
                 "starboard_entries": '''CREATE TABLE IF NOT EXISTS starboard_entries (
                         original_message_id INTEGER PRIMARY KEY,
-                        starboard_message_id INTEGER NOT NULL,
+                        starboard_message_id INTEGER,
                         guild_id INTEGER NOT NULL,
                         starboard_reply_id INTEGER,
-                        original_channel_id INTEGER NOT NULL
+                        original_channel_id INTEGER NOT NULL,
+                        message_created_at INTEGER NOT NULL,
+                        star_count INTEGER NOT NULL DEFAULT 0,
+                        failed_checks INTEGER NOT NULL DEFAULT 0
                     )''',
                 "bod_players": '''CREATE TABLE IF NOT EXISTS bod_players (
                         user_id INTEGER PRIMARY KEY,
@@ -239,6 +261,7 @@ class DatabaseManager:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_guild_visibility_guild ON schedule_guild_visibility(guild_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_starboard_guild ON starboard_entries(guild_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_starboard_banned_guild ON starboard_banned_channels(guild_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_last_seen ON web_sessions(last_seen_at)")
 
@@ -256,7 +279,18 @@ class DatabaseManager:
                 "user_settings": {"user_id", "key", "value"},
                 "bot_settings": {"key", "value"},
                 "guild_settings": {"guild_id", "key", "value"},
-                "starboard_entries": {"original_message_id", "starboard_message_id", "guild_id", "starboard_reply_id", "original_channel_id"},
+                "starboard_config": {
+                    "guild_id", "enabled", "channel_id", "emoji", "threshold",
+                    "last_heal_at", "crawl_started_at", "crawl_requested_by",
+                    "crawl_notify_channel", "crawl_include_threads",
+                    "crawl_last_channel_id", "crawl_last_message_id",
+                },
+                "starboard_banned_channels": {"guild_id", "channel_id"},
+                "starboard_entries": {
+                    "original_message_id", "starboard_message_id", "guild_id",
+                    "starboard_reply_id", "original_channel_id",
+                    "message_created_at", "star_count", "failed_checks",
+                },
                 "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed", "fate_silent"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
                 "proxy_usage": {"id", "year_month", "track_count", "bytes_used", "last_updated"},
@@ -1670,10 +1704,163 @@ class DatabaseManager:
     # Methods for starboard tracking and guild configuration.
     # ==========================================================================
 
+    # -- Starboard Config (dedicated table) ------------------------------------
+
+    async def get_starboard_config(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        """Fetches the full starboard config row for a guild.
+
+        Returns None if no row exists. The calling code (cog) is responsible
+        for applying defaults via the StarboardConfig dataclass.
+
+        Used By: cogs/starboard.py
+
+        Args:
+            guild_id: The guild's ID.
+
+        Returns:
+            Dict with all starboard_config columns, or None if unconfigured.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM starboard_config WHERE guild_id = ?", (guild_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def upsert_starboard_config(self, guild_id: int, **kwargs: Any) -> None:
+        """Insert or update specific columns in starboard_config for a guild.
+
+        For the initial row creation (setting a channel for the first time),
+        the caller MUST pass all NOT NULL columns — there are no SQL DEFAULT
+        clauses. Use ``StarboardConfig.to_db_dict()`` to get a full set.
+        Subsequent calls only need the columns being changed (UPDATE path).
+
+        Used By: cogs/starboard.py (all config-mutating commands)
+
+        Args:
+            guild_id: The guild's ID.
+            **kwargs: Column-value pairs to set (e.g. ``enabled=1, channel_id=123``).
+        """
+        if not kwargs:
+            return
+
+        valid_columns = {
+            "enabled", "channel_id", "emoji", "threshold", "last_heal_at",
+            "crawl_started_at", "crawl_requested_by", "crawl_notify_channel",
+            "crawl_include_threads", "crawl_last_channel_id", "crawl_last_message_id",
+        }
+        filtered = {k: v for k, v in kwargs.items() if k in valid_columns}
+        if not filtered:
+            return
+
+        # Build an UPSERT that only touches the specified columns
+        all_cols = ["guild_id"] + list(filtered.keys())
+        all_vals = [guild_id] + list(filtered.values())
+        placeholders = ", ".join("?" for _ in all_cols)
+        col_list = ", ".join(all_cols)
+        update_clause = ", ".join(f"{c} = excluded.{c}" for c in filtered)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"INSERT INTO starboard_config ({col_list}) VALUES ({placeholders}) "
+                f"ON CONFLICT(guild_id) DO UPDATE SET {update_clause}",
+                all_vals,
+            )
+            await db.commit()
+        logger.info(f"Starboard config for guild {guild_id} updated: {filtered}")
+
+    async def set_starboard_enabled(self, guild_id: int, enabled: bool) -> None:
+        """Toggle the starboard enabled flag for a guild.
+
+        Used By: cogs/starboard.py (enable/disable commands)
+
+        Args:
+            guild_id: The guild's ID.
+            enabled: True to enable, False to disable.
+        """
+        await self.upsert_starboard_config(guild_id, enabled=int(enabled))
+
+    # -- Banned Channels -------------------------------------------------------
+
+    async def add_starboard_banned_channel(self, guild_id: int, channel_id: int) -> None:
+        """Add a channel to the starboard ban list for a guild.
+
+        Used By: cogs/starboard.py (ban command, channel change auto-ban)
+
+        Args:
+            guild_id: The guild's ID.
+            channel_id: The channel ID to ban.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO starboard_banned_channels (guild_id, channel_id) VALUES (?, ?)",
+                (guild_id, channel_id),
+            )
+            await db.commit()
+        logger.info(f"Starboard banned channel {channel_id} for guild {guild_id}.")
+
+    async def remove_starboard_banned_channel(self, guild_id: int, channel_id: int) -> None:
+        """Remove a channel from the starboard ban list for a guild.
+
+        Used By: cogs/starboard.py (unban command)
+
+        Args:
+            guild_id: The guild's ID.
+            channel_id: The channel ID to unban.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM starboard_banned_channels WHERE guild_id = ? AND channel_id = ?",
+                (guild_id, channel_id),
+            )
+            await db.commit()
+        logger.info(f"Starboard unbanned channel {channel_id} for guild {guild_id}.")
+
+    async def get_starboard_banned_channels(self, guild_id: int) -> List[int]:
+        """Get all banned channel IDs for a guild's starboard.
+
+        Used By: cogs/starboard.py (ban list display, reaction handler)
+
+        Args:
+            guild_id: The guild's ID.
+
+        Returns:
+            List of banned channel IDs.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT channel_id FROM starboard_banned_channels WHERE guild_id = ?",
+                (guild_id,),
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def is_starboard_channel_banned(self, guild_id: int, channel_id: int) -> bool:
+        """Check if a specific channel is banned from the starboard.
+
+        Used By: cogs/starboard.py (reaction handler hot path)
+
+        Args:
+            guild_id: The guild's ID.
+            channel_id: The channel ID to check.
+
+        Returns:
+            True if the channel is banned.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM starboard_banned_channels WHERE guild_id = ? AND channel_id = ?",
+                (guild_id, channel_id),
+            )
+            return await cursor.fetchone() is not None
+
+    # -- Guild Settings (generic KV, used by other cogs) -----------------------
+
     async def set_guild_config(self, guild_id: int, key: str, value: str) -> None:
         """Sets a configuration value for a specific guild.
 
-        Used By: cogs/starboard.py (set_channel, set_emoji, set_threshold commands)
+        Used By: cogs/music.py (music_channel_id)
 
         Args:
             guild_id (int): The guild's ID.
@@ -1691,7 +1878,7 @@ class DatabaseManager:
     async def get_guild_config(self, guild_id: int, key: str) -> Optional[str]:
         """Gets a configuration value for a specific guild.
 
-        Used By: cogs/starboard.py (get_starboard_config helper)
+        Used By: utils/musicutils/commands.py (music_channel_id)
 
         Args:
             guild_id (int): The guild's ID.
@@ -1708,42 +1895,52 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return row[0] if row else None
 
+    # -- Starboard Entries -----------------------------------------------------
+
     async def add_starboard_entry(
         self,
         original_message_id: int,
-        starboard_message_id: int,
         guild_id: int,
         channel_id: int,
+        message_created_at: int,
+        star_count: int = 0,
+        starboard_message_id: Optional[int] = None,
         starboard_reply_id: Optional[int] = None
     ) -> None:
         """Saves a new starboard entry to the database.
 
-        Used By: cogs/starboard.py (_handle_star_event, _remake_impl, _migrate_starboard_channel)
+        Used By: cogs/starboard.py (post_to_starboard, crawl engine)
 
         Args:
             original_message_id (int): The ID of the original message.
-            starboard_message_id (int): The ID of the message in the starboard channel.
             guild_id (int): The guild's ID.
             channel_id (int): The ID of the original channel.
-            starboard_reply_id (Optional[int]): The ID of the reply message in the starboard channel.
+            message_created_at (int): Unix timestamp (seconds) of the original message.
+            star_count (int): Current reaction count.
+            starboard_message_id (Optional[int]): The ID of the starboard channel message, or None if not yet posted.
+            starboard_reply_id (Optional[int]): The ID of the reply context message in the starboard channel.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO starboard_entries (original_message_id, starboard_message_id, guild_id, original_channel_id, starboard_reply_id) VALUES (?, ?, ?, ?, ?)",
-                (original_message_id, starboard_message_id, guild_id, channel_id, starboard_reply_id)
+                """INSERT INTO starboard_entries
+                   (original_message_id, starboard_message_id, guild_id, original_channel_id,
+                    starboard_reply_id, message_created_at, star_count, failed_checks)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                (original_message_id, starboard_message_id, guild_id, channel_id,
+                 starboard_reply_id, message_created_at, star_count)
             )
             await db.commit()
 
     async def get_starboard_entry(self, original_message_id: int) -> Optional[Dict[str, Any]]:
         """Retrieves a starboard entry by the original message's ID.
 
-        Used By: cogs/starboard.py (_handle_star_event, on_raw_reaction_remove)
+        Used By: cogs/starboard.py (post_to_starboard, on_raw_reaction_remove, verify engine)
 
         Args:
             original_message_id (int): The ID of the original message.
 
         Returns:
-            Optional[Dict[str, Any]]: A dictionary containing the starboard entry data.
+            Optional[Dict[str, Any]]: A dictionary containing the starboard entry data, or None.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -1751,40 +1948,50 @@ class DatabaseManager:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
-    async def get_all_starboard_entries_for_guild(self, guild_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all starboard entries for a specific guild.
+    async def get_starboard_entries_ordered(self, guild_id: int) -> List[Dict[str, Any]]:
+        """Retrieves all starboard entries for a guild, ordered chronologically.
 
-        Used By: cogs/starboard.py (remake_starboard, fix_starboard, _remake_impl)
+        Used By: cogs/starboard.py (remake engine, verify engine, self-heal)
 
         Args:
             guild_id (int): The guild's ID.
 
         Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing starboard entry data.
+            List[Dict[str, Any]]: Entries sorted by message_created_at ASC.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM starboard_entries WHERE guild_id = ?", (guild_id,))
+            cursor = await db.execute(
+                "SELECT * FROM starboard_entries WHERE guild_id = ? ORDER BY message_created_at ASC",
+                (guild_id,)
+            )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def clear_starboard_for_guild(self, guild_id: int) -> None:
-        """Deletes all starboard entries for a specific guild.
+    async def get_unposted_starboard_entries(self, guild_id: int) -> List[Dict[str, Any]]:
+        """Retrieves starboard entries that have been crawled but not yet posted.
 
-        Used By: cogs/starboard.py (_remake_impl)
+        Used By: cogs/starboard.py (bounded catch-up crawl, remake engine)
 
         Args:
             guild_id (int): The guild's ID.
+
+        Returns:
+            List[Dict[str, Any]]: Entries with NULL starboard_message_id, sorted chronologically.
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM starboard_entries WHERE guild_id = ?", (guild_id,))
-            await db.commit()
-            logger.info(f"Cleared all starboard entries for guild {guild_id}.")
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM starboard_entries WHERE guild_id = ? AND starboard_message_id IS NULL ORDER BY message_created_at ASC",
+                (guild_id,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def remove_starboard_entry(self, original_message_id: int) -> None:
         """Removes a starboard entry from the database.
 
-        Used By: cogs/starboard.py (_handle_star_event, _fix_impl, on_raw_reaction_remove)
+        Used By: cogs/starboard.py (on_raw_reaction_remove)
 
         Args:
             original_message_id (int): The ID of the original message.
@@ -1794,14 +2001,13 @@ class DatabaseManager:
             await db.commit()
 
     async def update_starboard_entry(self, entry: dict) -> None:
-        """Updates an existing starboard entry in the database.
+        """Updates an existing starboard entry in the database (full row update).
 
-        Expects all relevant keys in entry dict.
-
-        Used By: cogs/starboard.py (_remake_impl, _migrate_starboard_channel, _fix_impl)
+        Used By: cogs/starboard.py (verify engine, remake engine)
 
         Args:
             entry (dict): The dictionary containing starboard entry data.
+                Must contain 'original_message_id' as the key.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -1810,7 +2016,10 @@ class DatabaseManager:
                     starboard_message_id = ?,
                     guild_id = ?,
                     original_channel_id = ?,
-                    starboard_reply_id = ?
+                    starboard_reply_id = ?,
+                    message_created_at = ?,
+                    star_count = ?,
+                    failed_checks = ?
                 WHERE original_message_id = ?
                 """,
                 (
@@ -1818,10 +2027,168 @@ class DatabaseManager:
                     entry.get("guild_id"),
                     entry.get("original_channel_id"),
                     entry.get("starboard_reply_id"),
+                    entry.get("message_created_at"),
+                    entry.get("star_count", 0),
+                    entry.get("failed_checks", 0),
                     entry["original_message_id"]
                 )
             )
             await db.commit()
+
+    async def update_starboard_star_count(self, original_message_id: int, count: int) -> None:
+        """Updates the cached star count for a starboard entry.
+
+        Used By: cogs/starboard.py (hot-path healing, verify engine)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            count (int): The new star count.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET star_count = ? WHERE original_message_id = ?",
+                (count, original_message_id)
+            )
+            await db.commit()
+
+    async def update_starboard_channel(self, original_message_id: int, channel_id: int) -> None:
+        """Updates the original channel ID for a starboard entry.
+
+        Used By: cogs/starboard.py (hot-path healing when channel changes)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            channel_id (int): The new channel ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET original_channel_id = ? WHERE original_message_id = ?",
+                (channel_id, original_message_id)
+            )
+            await db.commit()
+
+    async def increment_starboard_failed_checks(self, original_message_id: int) -> int:
+        """Increments the consecutive failed verification counter for an entry.
+
+        Used By: cogs/starboard.py (verify engine - flagging/tombstoning)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+
+        Returns:
+            int: The new failed_checks value after incrementing.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET failed_checks = failed_checks + 1 WHERE original_message_id = ?",
+                (original_message_id,)
+            )
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT failed_checks FROM starboard_entries WHERE original_message_id = ?",
+                (original_message_id,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def reset_starboard_failed_checks(self, original_message_id: int) -> None:
+        """Resets the failed verification counter for an entry to zero.
+
+        Used By: cogs/starboard.py (hot-path healing, verify engine on success)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET failed_checks = 0 WHERE original_message_id = ?",
+                (original_message_id,)
+            )
+            await db.commit()
+
+    async def null_starboard_message_ids(self, guild_id: int) -> None:
+        """Sets all starboard_message_id and starboard_reply_id to NULL for a guild.
+
+        Used during remake: DB rows are preserved, but Discord message references
+        are cleared before recreation.
+
+        Used By: cogs/starboard.py (remake engine - _delete_starboard_messages)
+
+        Args:
+            guild_id (int): The guild's ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET starboard_message_id = NULL, starboard_reply_id = NULL WHERE guild_id = ?",
+                (guild_id,)
+            )
+            await db.commit()
+            logger.info(f"Nulled starboard message IDs for guild {guild_id}.")
+
+    async def set_starboard_message_id(
+        self,
+        original_message_id: int,
+        starboard_message_id: int,
+        starboard_reply_id: Optional[int] = None
+    ) -> None:
+        """Sets the starboard message ID (and optional reply ID) for an entry.
+
+        Used after posting/reposting a starboard message during remake or catch-up.
+
+        Used By: cogs/starboard.py (remake engine, bounded catch-up crawl)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            starboard_message_id (int): The new starboard channel message ID.
+            starboard_reply_id (Optional[int]): The new reply context message ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """UPDATE starboard_entries
+                   SET starboard_message_id = ?, starboard_reply_id = ?
+                   WHERE original_message_id = ?""",
+                (starboard_message_id, starboard_reply_id, original_message_id)
+            )
+            await db.commit()
+
+    async def bulk_insert_starboard_entries(self, entries: List[Dict[str, Any]]) -> int:
+        """Batch-inserts starboard entries, ignoring duplicates.
+
+        Used By: cogs/starboard.py (crawl engine - bounded catch-up and deep crawl)
+
+        Args:
+            entries (List[Dict[str, Any]]): List of entry dicts with keys:
+                original_message_id, guild_id, original_channel_id,
+                message_created_at, star_count.
+
+        Returns:
+            int: Number of rows actually inserted (excludes duplicates).
+        """
+        if not entries:
+            return 0
+        async with aiosqlite.connect(self.db_path) as db:
+            inserted = 0
+            for entry in entries:
+                try:
+                    await db.execute(
+                        """INSERT OR IGNORE INTO starboard_entries
+                           (original_message_id, starboard_message_id, guild_id, original_channel_id,
+                            starboard_reply_id, message_created_at, star_count, failed_checks)
+                           VALUES (?, NULL, ?, ?, NULL, ?, ?, 0)""",
+                        (
+                            entry["original_message_id"],
+                            entry["guild_id"],
+                            entry["original_channel_id"],
+                            entry["message_created_at"],
+                            entry.get("star_count", 0)
+                        )
+                    )
+                    if db.total_changes:
+                        inserted += 1
+                except Exception as e:
+                    logger.warning(f"Failed to insert starboard entry {entry.get('original_message_id')}: {e}")
+            await db.commit()
+            return inserted
 
     # =========================================================================
     # Users Table Methods (Web Auth / User Cache)
