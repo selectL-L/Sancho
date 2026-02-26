@@ -420,9 +420,11 @@ class Math(BaseCog):
             raise ValueError("Cannot roll with both advantage and disadvantage.")
 
         # Extract SP (default 50) - must happen BEFORE lexing to avoid NUMBER+MODULO confusion.
+        # After the digits, at most one non-whitespace character is allowed before a boundary.
+        # "with 80", "at 75%", "with 8% chance" all pass; "with 2d20" does not.
         sp = 50
         sp_explicit = False
-        sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', work_query)
+        sp_match = re.search(r'\b(at|with)\s+(\d+)\S?(?=\s|$)', work_query)
         if sp_match:
             sp = int(sp_match.group(2))
             sp_explicit = True
@@ -534,7 +536,7 @@ class DiceLexer:
         # Regex patterns - Order DOES matter here
         patterns = [
             (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?!?'),
-            (DiceToken.COIN, r'(\d*)c'),
+            (DiceToken.COIN, r'(\d+)c\b'),
             (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
             (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
             (DiceToken.POWER, r'\*\*|\^'),
@@ -564,7 +566,7 @@ class DiceLexer:
                     normalized = self._normalize_dice(value)
                     self.tokens.append(DiceToken(kind, value, value, normalized))
                 elif kind == DiceToken.COIN:
-                    # Normalize coin notation: c -> 1c
+                    # Normalize coin notation (count is always explicit)
                     normalized = self._normalize_coin(value)
                     self.tokens.append(DiceToken(kind, value, value, normalized))
                 else:
@@ -584,11 +586,11 @@ class DiceLexer:
         return f"{num_dice}d{num_sides}{keep_part}{exploding}"
 
     def _normalize_coin(self, coin_str: str) -> str:
-        """Normalize coin notation (c -> 1c)."""
-        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        """Normalize coin notation (e.g. 3c -> 3c)."""
+        match = re.match(r'(\d+)c', coin_str, re.IGNORECASE)
         if not match:
             return coin_str.lower()
-        num_coins = match.group(1) or '1'
+        num_coins = match.group(1)
         return f"{num_coins}c"
 
     def get_expression(self) -> str:
