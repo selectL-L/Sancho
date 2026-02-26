@@ -15,8 +15,10 @@ Architecture:
       and /starboard remake (as a prerequisite).
     - Remake engine: Destructive recreation — verify first, delete Discord
       messages, recreate in chronological order from DB.
-    - Crawl engine: Bounded startup catch-up + deep historical crawl that
-      populates the DB without posting.
+    - Crawl engine: Bounded startup catch-up + deep historical crawl (whole
+      server or single channel) that populates the DB without posting.
+      Retries transient errors with backoff and checkpoints progress for
+      resume across restarts.
 
 File layout follows the reading-order convention documented in
 Impls/STARBOARD_OVERHAUL.md — helpers are always defined before callers.
@@ -29,6 +31,7 @@ Impls/STARBOARD_OVERHAUL.md — helpers are always defined before callers.
 import asyncio
 import enum
 import io
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -286,15 +289,19 @@ class Starboard(BaseCog):
         # Iterate guilds the bot is in and run startup tasks
         for guild in self.bot.guilds:
             cfg = await self.get_starboard_config(guild.id)
+
+            # Resume deep crawl if one was interrupted — independent of enabled flag.
+            # A crawl in progress should always be resumed, even if starboard was
+            # disabled after the crawl started.
+            if cfg.crawl_started_at and cfg.channel_id:
+                task = asyncio.create_task(self._resume_crawl_if_pending(guild.id))
+                self._startup_tasks.append(task)
+
             if not cfg.enabled or not cfg.channel_id:
                 continue
 
             # Bounded catch-up crawl
             task = asyncio.create_task(self._bounded_catchup_crawl(guild.id))
-            self._startup_tasks.append(task)
-
-            # Resume deep crawl if one was interrupted
-            task = asyncio.create_task(self._resume_crawl_if_pending(guild.id))
             self._startup_tasks.append(task)
 
     async def cog_unload(self) -> None:
@@ -547,24 +554,41 @@ class Starboard(BaseCog):
     )
     @commands.has_guild_permissions(manage_guild=True)
     @app_commands.describe(
-        enabled="True to enable, False to disable. Omit to show current state."
+        enabled="on/off, true/false, yes/no. Omit to show current state."
     )
-    async def toggle_starboard(self, ctx: commands.Context, enabled: Optional[bool] = None) -> None:  # type: ignore[type-arg]
+    async def toggle_starboard(self, ctx: commands.Context, enabled: Optional[str] = None) -> None:  # type: ignore[type-arg]
         """Toggles the starboard on or off, or displays the current state.
 
         Naked call shows the current enabled/disabled status.
         Enabling requires a channel to be set first and adds the 🌟- prefix.
         Disabling removes the prefix but keeps settings and entries.
 
+        Accepts: on/off, true/false, enable/disable.
+
         Args:
-            enabled: True to enable, False to disable, None to display.
+            enabled: String toggle value, or None to display current state.
         """
         if not ctx.guild:
             return
 
         config = await self.get_starboard_config(ctx.guild.id)
 
-        if enabled is None:
+        # Parse the toggle value
+        _TRUTHY = {'on', 'true', 'enable', 'enabled'}
+        _FALSY = {'off', 'false', 'disable', 'disabled'}
+        toggle: Optional[bool] = None
+
+        if enabled is not None:
+            val = enabled.lower().strip()
+            if val in _TRUTHY:
+                toggle = True
+            elif val in _FALSY:
+                toggle = False
+            else:
+                await ctx.send(f"Unknown value `{enabled}`. Use on/off, true/false, or enable/disable.")
+                return
+
+        if toggle is None:
             # Naked call — display current state
             state = "enabled" if config.enabled else "disabled"
             msg = f"Starboard is **{state}**."
@@ -573,7 +597,7 @@ class Starboard(BaseCog):
             await ctx.send(msg)
             return
 
-        if enabled:
+        if toggle:
             # Enable
             if config.channel_id is None:
                 await ctx.send("Cannot enable starboard — no channel is set. Use `/starboard channel` first.")
@@ -1968,18 +1992,50 @@ class Starboard(BaseCog):
         except Exception as e:
             self.logger.error(f"Bounded catch-up crawl failed for guild {guild_id}: {e}")
 
-    async def _deep_crawl_task(self, guild_id: int) -> None:
+    async def _deep_crawl_task(self, guild_id: int, target_channel_id: Optional[int] = None) -> None:
         """Background task for deep historical crawl.
 
-        Scans the entire message history of all text channels (and optionally
-        threads) for qualifying star reactions. Populates the DB but does NOT
-        post to the starboard channel.
+        Scans the message history of all text channels in a guild (and
+        optionally threads), or a single target channel, for qualifying star
+        reactions. Populates the DB but does NOT post to the starboard channel.
 
-        Persists progress to starboard_config for resume on restart.
+        Progress is checkpointed every ``CHECKPOINT_INTERVAL`` messages scanned
+        and persisted to ``starboard_config`` for resume on restart. Each
+        channel is retried up to ``MAX_CHANNEL_RETRIES`` times with exponential
+        backoff before being skipped.
 
         Args:
             guild_id: The guild ID.
+            target_channel_id: If provided, only crawl this specific channel
+                instead of all text channels in the guild.
         """
+        CHECKPOINT_INTERVAL = 500     # Save progress every N messages scanned
+        MAX_CHANNEL_RETRIES = 3       # Retries per channel on transient errors
+        BASE_RETRY_DELAY = 10.0       # Base delay in seconds for retry backoff
+        PAGE_PACE_DELAY = 0.6         # Seconds to sleep per API page (~100 msgs) to stay under rate limits
+        LOG_SUMMARY_INTERVAL = 30     # Emit a progress summary every N checkpoints
+
+        # Crawl-wide counters (declared here so finally can always clean up)
+        total_found = 0
+        total_scanned = 0
+        checkpoints_since_log = 0
+        rate_limit_count = 0
+
+        # Temporary filter to count 429s from discord.http during this crawl
+        discord_http_logger = logging.getLogger('discord.http')
+
+        class _RateLimitCounter(logging.Filter):
+            """Counts rate-limit warnings without suppressing them."""
+
+            def filter(self, record: logging.LogRecord) -> bool:
+                if 'rate limited' in record.getMessage().lower():
+                    nonlocal rate_limit_count
+                    rate_limit_count += 1
+                return True  # Always pass through
+
+        rl_filter = _RateLimitCounter()
+        discord_http_logger.addFilter(rl_filter)
+
         try:
             cfg = await self.get_starboard_config(guild_id)
             if not cfg.channel_id:
@@ -1994,26 +2050,34 @@ class Starboard(BaseCog):
             resume_message_id = cfg.crawl_last_message_id
 
             # Build channel list
-            channels: List[discord.abc.Messageable] = list(guild.text_channels)
-            if cfg.crawl_include_threads:
-                try:
-                    channels.extend(list(guild.threads))
-                except Exception as e:
-                    self.logger.warning(f"Failed to enumerate threads for crawl: {e}")
+            if target_channel_id:
+                # Single-channel mode
+                target_ch = self.bot.get_channel(target_channel_id)
+                if not target_ch or not isinstance(target_ch, MessageableGuildChannel):
+                    self.logger.error(f"Deep crawl target channel {target_channel_id} not found or not messageable.")
+                    return
+                channels: List[discord.abc.Messageable] = [target_ch]
+            else:
+                channels = list(guild.text_channels)
+                if cfg.crawl_include_threads:
+                    try:
+                        channels.extend(list(guild.threads))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to enumerate threads for crawl: {e}")
 
-            # If resuming, skip channels we've already completed
-            if resume_channel_id:
-                skip = True
-                filtered: List[discord.abc.Messageable] = []
-                for ch in channels:
-                    if ch.id == resume_channel_id:  # type: ignore[union-attr]
-                        skip = False
-                    if not skip:
-                        filtered.append(ch)
-                channels = filtered or channels  # Fallback to full list if resume channel not found
+                # If resuming, skip channels we've already completed
+                if resume_channel_id:
+                    skip = True
+                    filtered: List[discord.abc.Messageable] = []
+                    for ch in channels:
+                        if ch.id == resume_channel_id:  # type: ignore[union-attr]
+                            skip = False
+                        if not skip:
+                            filtered.append(ch)
+                    channels = filtered or channels  # Fallback to full list if resume channel not found
 
-            self.logger.info(f"Deep crawl started for guild {guild_id}: {len(channels)} channels to scan.")
-            total_found = 0
+            self.logger.info(f"Deep crawl started for guild {guild_id}: {len(channels)} channel(s) to scan."
+                             + (f" (target: {target_channel_id})" if target_channel_id else ""))
 
             # Skip the starboard channel itself
             starboard_ch_id = cfg.channel_id
@@ -2023,7 +2087,10 @@ class Starboard(BaseCog):
                 if ch_id == starboard_ch_id:
                     continue
 
-                # Update crawl state
+                ch_name = getattr(ch, 'name', str(ch_id))
+                self.logger.info(f"Crawl [{guild_id}]: scanning channel #{ch_name} ({ch_id})")
+
+                # Update crawl state — channel pointer
                 await self.db_manager.upsert_starboard_config(guild_id, crawl_last_channel_id=ch_id)
 
                 after_snowflake = None
@@ -2031,47 +2098,130 @@ class Starboard(BaseCog):
                     after_snowflake = resume_message_id
                     resume_message_id = None  # Only use once
 
-                try:
-                    after_dt = discord.utils.snowflake_time(after_snowflake) if after_snowflake else None
-                    batch: List[Dict[str, Any]] = []
+                # Retry loop for transient errors on this channel
+                batch: List[Dict[str, Any]] = []
+                last_good_message_id: Optional[int] = after_snowflake
+                for attempt in range(1, MAX_CHANNEL_RETRIES + 1):
+                    try:
+                        after_dt = discord.utils.snowflake_time(after_snowflake) if after_snowflake else None
+                        batch = []
+                        scanned_since_checkpoint = 0
+                        last_good_message_id = after_snowflake
 
-                    async for message in ch.history(limit=None, after=after_dt, oldest_first=True):  # type: ignore[arg-type]
-                        star_reaction = discord.utils.get(message.reactions, emoji=cfg.emoji)
-                        if star_reaction and star_reaction.count >= cfg.threshold and message.guild:
-                            batch.append({
-                                'original_message_id': message.id,
-                                'guild_id': message.guild.id,
-                                'original_channel_id': message.channel.id,
-                                'message_created_at': snowflake_to_unix(message.id),
-                                'star_count': star_reaction.count,
-                            })
+                        async for message in ch.history(limit=None, after=after_dt, oldest_first=True):  # type: ignore[arg-type]
+                            star_reaction = discord.utils.get(message.reactions, emoji=cfg.emoji)
+                            if star_reaction and star_reaction.count >= cfg.threshold and message.guild:
+                                batch.append({
+                                    'original_message_id': message.id,
+                                    'guild_id': message.guild.id,
+                                    'original_channel_id': message.channel.id,
+                                    'message_created_at': snowflake_to_unix(message.id),
+                                    'star_count': star_reaction.count,
+                                })
 
-                        # Persist progress every 100 messages
-                        if len(batch) >= 100:
+                            scanned_since_checkpoint += 1
+                            total_scanned += 1
+
+                            # Pace: sleep at page boundaries to stay under rate limits.
+                            # discord.py fetches 100 messages per API call, so every
+                            # 100 messages scanned means a new HTTP request is imminent.
+                            if scanned_since_checkpoint % 100 == 0:
+                                await asyncio.sleep(PAGE_PACE_DELAY)
+
+                            if scanned_since_checkpoint >= CHECKPOINT_INTERVAL:
+                                # Flush any accumulated batch first
+                                if batch:
+                                    inserted = await self.db_manager.bulk_insert_starboard_entries(batch)
+                                    total_found += inserted
+                                    batch.clear()
+                                # Save the last good message ID (the one BEFORE this checkpoint window)
+                                # so that on crash-resume we don't skip anything
+                                await self.db_manager.upsert_starboard_config(
+                                    guild_id, crawl_last_message_id=last_good_message_id
+                                )
+                                last_good_message_id = message.id
+                                scanned_since_checkpoint = 0
+                                checkpoints_since_log += 1
+
+                                # Emit a batched progress summary periodically
+                                if checkpoints_since_log >= LOG_SUMMARY_INTERVAL:
+                                    self.logger.info(
+                                        f"Crawl progress [{guild_id}]: {total_scanned:,} msgs scanned, "
+                                        f"{total_found} stars found, {rate_limit_count} rate-limits, "
+                                        f"channel {ch_id}"
+                                    )
+                                    checkpoints_since_log = 0
+
+                        # Flush remaining batch
+                        if batch:
                             inserted = await self.db_manager.bulk_insert_starboard_entries(batch)
                             total_found += inserted
+
+                        # Channel done — save final position
+                        if last_good_message_id:
                             await self.db_manager.upsert_starboard_config(
-                                guild_id, crawl_last_message_id=message.id
+                                guild_id, crawl_last_message_id=last_good_message_id
                             )
+
+                        break  # Channel completed successfully, exit retry loop
+
+                    except discord.Forbidden as e:
+                        self.logger.warning(f"Cannot scan channel {ch_id} during deep crawl (no permission): {e}")
+                        break  # Permission errors won't be fixed by retrying
+                    except asyncio.CancelledError:
+                        # Flush progress before exiting on cancellation
+                        if batch:
+                            inserted = await self.db_manager.bulk_insert_starboard_entries(batch)
+                            total_found += inserted
+                        if last_good_message_id:
+                            await self.db_manager.upsert_starboard_config(
+                                guild_id, crawl_last_message_id=last_good_message_id
+                            )
+                        self.logger.info(f"Deep crawl cancelled for guild {guild_id}. Progress saved.")
+                        return
+                    except Exception as e:
+                        # Transient error — retry with backoff
+                        # Flush whatever batch we have so far
+                        if batch:
+                            try:
+                                inserted = await self.db_manager.bulk_insert_starboard_entries(batch)
+                                total_found += inserted
+                            except Exception:
+                                pass  # DB write failed too; will re-scan these on resume
                             batch.clear()
+                        # Save checkpoint so resume can pick up here
+                        if last_good_message_id:
+                            try:
+                                await self.db_manager.upsert_starboard_config(
+                                    guild_id, crawl_last_message_id=last_good_message_id
+                                )
+                                # Resume from this position on next attempt
+                                after_snowflake = last_good_message_id
+                            except Exception:
+                                pass
 
-                        # Pace: sleep briefly to avoid starving other operations
-                        await asyncio.sleep(0.05)
-
-                    # Flush remaining batch
-                    if batch:
-                        inserted = await self.db_manager.bulk_insert_starboard_entries(batch)
-                        total_found += inserted
-
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    self.logger.warning(f"Cannot scan channel {ch_id} during deep crawl: {e}")
-                    continue
-                except asyncio.CancelledError:
-                    self.logger.info(f"Deep crawl cancelled for guild {guild_id}.")
-                    return
+                        if attempt < MAX_CHANNEL_RETRIES:
+                            delay = BASE_RETRY_DELAY * (2 ** (attempt - 1))
+                            self.logger.warning(
+                                f"Transient error scanning channel {ch_id} during deep crawl "
+                                f"(attempt {attempt}/{MAX_CHANNEL_RETRIES}): {type(e).__name__}: {e}. "
+                                f"Retrying in {delay:.0f}s...",
+                                exc_info=True
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            self.logger.error(
+                                f"Channel {ch_id} failed after {MAX_CHANNEL_RETRIES} attempts during "
+                                f"deep crawl for guild {guild_id}. Skipping channel.",
+                                exc_info=True
+                            )
 
             # Crawl complete — save notify info before clearing state
-            self.logger.info(f"Deep crawl complete for guild {guild_id}: {total_found} new entries found.")
+            self.logger.info(
+                f"Deep crawl complete for guild {guild_id}: "
+                f"{total_scanned:,} msgs scanned, {total_found} stars found, "
+                f"{rate_limit_count} rate-limits encountered."
+            )
 
             requester_id = cfg.crawl_requested_by
             notify_ch_id = cfg.crawl_notify_channel
@@ -2098,7 +2248,27 @@ class Starboard(BaseCog):
         except asyncio.CancelledError:
             self.logger.info(f"Deep crawl task cancelled for guild {guild_id}.")
         except Exception as e:
-            self.logger.error(f"Deep crawl failed for guild {guild_id}: {e}")
+            self.logger.error(
+                f"Deep crawl failed for guild {guild_id}: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            # Flush crawl state so resume can pick up from last checkpoint
+            try:
+                cfg = await self.get_starboard_config(guild_id)
+                requester_id = cfg.crawl_requested_by
+                notify_ch_id = cfg.crawl_notify_channel
+                # Do NOT clear crawl_started_at — leave it set so resume picks this up
+                # crawl_last_channel_id and crawl_last_message_id are already persisted
+                if requester_id:
+                    await self._notify_user(
+                        requester_id, notify_ch_id or 0,
+                        f"⚠️ Starboard crawl for guild {guild_id} hit an error and stopped. "
+                        f"It will resume automatically on next restart. Error: {type(e).__name__}"
+                    )
+            except Exception:
+                self.logger.error("Failed to notify user about crawl failure.", exc_info=True)
+        finally:
+            discord_http_logger.removeFilter(rl_filter)
 
     async def _resume_crawl_if_pending(self, guild_id: int) -> None:
         """Check if a deep crawl was interrupted and resume it.
@@ -2113,7 +2283,27 @@ class Starboard(BaseCog):
         if not cfg.crawl_started_at:
             return
 
-        self.logger.info(f"Resuming interrupted deep crawl for guild {guild_id}.")
+        # Let the bot fully settle after startup before resuming.
+        # During READY, many cogs fire API calls (command sync, playlist
+        # refresh, etc.) which eat into our rate-limit budget.
+        RESUME_DELAY = 30
+        self.logger.info(
+            f"Resuming interrupted deep crawl for guild {guild_id} in {RESUME_DELAY}s."
+        )
+
+        # Notify the requester that the crawl is being resumed
+        try:
+            if cfg.crawl_requested_by:
+                await self._notify_user(
+                    cfg.crawl_requested_by, cfg.crawl_notify_channel or 0,
+                    f"🔄 Starboard crawl for guild {guild_id} is resuming after a restart "
+                    f"(starting in {RESUME_DELAY}s)."
+                )
+        except Exception:
+            self.logger.debug("Failed to notify user about crawl resume.", exc_info=True)
+
+        await asyncio.sleep(RESUME_DELAY)
+
         task = asyncio.create_task(self._deep_crawl_task(guild_id))
         self._crawl_tasks[guild_id] = task
 
@@ -2123,20 +2313,27 @@ class Starboard(BaseCog):
     )
     @commands.is_owner()
     @app_commands.describe(
-        include_threads="Also scan threads (significantly slower). Default: False."
+        include_threads="Also scan threads (significantly slower). Default: False.",
+        channel="Crawl only this specific channel (mention, name, or ID). Omit to crawl the entire server."
     )
-    async def crawl_starboard(self, ctx: commands.Context, include_threads: bool = False) -> None:  # type: ignore[type-arg]
-        """Starts a deep historical crawl of the entire server.
+    async def crawl_starboard(self, ctx: commands.Context, channel: Optional[str] = None, include_threads: bool = False) -> None:  # type: ignore[type-arg]
+        """Starts a deep historical crawl of the server or a specific channel.
 
-        Scans all text channels (and optionally threads) for qualifying star
-        reactions and adds them to the database. Does NOT post to the starboard
-        channel — run /starboard remake after the crawl completes.
+        When no channel is specified, scans all text channels (and optionally
+        threads) for qualifying star reactions and adds them to the database.
+        When a channel is provided, only that channel is crawled.
 
-        The crawl runs in the background and can take hours or days. Progress is
-        persisted and resumable across bot restarts.
+        Does NOT post to the starboard channel — run ``/starboard remake``
+        after the crawl completes.
+
+        The crawl runs in the background and can take hours or days. Progress
+        is checkpointed and resumable across bot restarts. Transient errors
+        are retried automatically.
 
         Args:
-            include_threads: Whether to also scan threads.
+            channel: Channel to crawl (mention, name, or ID). Omit to crawl
+                the entire server.
+            include_threads: Whether to also scan threads (server-wide crawl only).
         """
         if not ctx.guild:
             await ctx.send("This command must be used in a guild.")
@@ -2152,6 +2349,12 @@ class Starboard(BaseCog):
             await ctx.send("A crawl is already running for this guild.")
             return
 
+        # Resolve optional channel argument
+        target_channel_id: Optional[int] = None
+        target_label = "entire server"
+        if channel is not None:
+            target_channel_id, target_label = await self._resolve_channel_arg(ctx, channel)
+
         # Persist crawl state
         now = int(time.time())
         await self.db_manager.upsert_starboard_config(
@@ -2160,17 +2363,24 @@ class Starboard(BaseCog):
             crawl_started_at=now,
             crawl_include_threads=include_threads,
             crawl_notify_channel=ctx.channel.id,
-            crawl_last_channel_id=None,
+            crawl_last_channel_id=target_channel_id,
             crawl_last_message_id=None,
         )
 
-        await ctx.send(
-            "🔍 **Deep crawl started.** This may take hours or days depending on server size.\n"
-            "Progress is saved — the crawl resumes automatically if the bot restarts.\n"
-            "You'll be notified via DM when it's done. Then run `/starboard remake` to post the results."
-        )
+        if target_channel_id:
+            await ctx.send(
+                f"🔍 **Deep crawl started for {target_label}.** This may take a while.\n"
+                "Progress is saved — the crawl resumes automatically if the bot restarts.\n"
+                "You'll be notified via DM when it's done. Then run `/starboard remake` to post the results."
+            )
+        else:
+            await ctx.send(
+                "🔍 **Deep crawl started.** This may take hours or days depending on server size.\n"
+                "Progress is saved — the crawl resumes automatically if the bot restarts.\n"
+                "You'll be notified via DM when it's done. Then run `/starboard remake` to post the results."
+            )
 
-        task = asyncio.create_task(self._deep_crawl_task(ctx.guild.id))
+        task = asyncio.create_task(self._deep_crawl_task(ctx.guild.id, target_channel_id=target_channel_id))
         self._crawl_tasks[ctx.guild.id] = task
 
     # ── Section 8: Reaction Event Handlers ────────────────────────────────────

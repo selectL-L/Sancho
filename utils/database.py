@@ -1781,7 +1781,7 @@ class DatabaseManager:
                     all_vals,
                 )
             await db.commit()
-        logger.info(f"Starboard config for guild {guild_id} updated: {filtered}")
+        logger.debug(f"Starboard config for guild {guild_id} updated: {filtered}")
 
     async def set_starboard_enabled(self, guild_id: int, enabled: bool) -> None:
         """Toggle the starboard enabled flag for a guild.
