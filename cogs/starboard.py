@@ -11,8 +11,8 @@ Architecture:
       star count sync, failed_checks reset).
     - Cold-path self-healing: Background audit every 12 hours, triggered by
       any starboard activity.
-    - Verify engine: Reusable audit logic shared by self-heal, /starboard verify,
-      and /starboard remake (as a prerequisite).
+    - Verify engine: Reusable audit logic shared by self-heal, starboard verify,
+      and starboard remake (as a prerequisite).
     - Remake engine: Destructive recreation — verify first, delete Discord
       messages, recreate in chronological order from DB.
     - Crawl engine: Bounded startup catch-up + deep historical crawl (whole
@@ -1755,7 +1755,7 @@ class Starboard(BaseCog):
                 detail_text += f"\n… and {len(banned_details) - 10} more."
             abort_msg = (
                 f"⚠️ **Remake paused.** {report.banned} entries were in banned channels and have been deleted.\n"
-                f"Review the deletions, then run `/starboard remake` again to continue:\n{detail_text}"
+                f"Review the deletions, then run `starboard remake` again to continue:\n{detail_text}"
             )
             await self._notify_user(ctx.author.id, ctx.channel.id, abort_msg)
             return
@@ -2242,7 +2242,7 @@ class Starboard(BaseCog):
                 await self._notify_user(
                     requester_id, notify_ch_id or 0,
                     f"✅ Starboard crawl complete for guild {guild_id}. "
-                    f"Found {total_found} new entries. Run `/starboard remake` to post them."
+                    f"Found {total_found} new entries. Run `starboard remake` to post them."
                 )
 
         except asyncio.CancelledError:
@@ -2323,12 +2323,12 @@ class Starboard(BaseCog):
         threads) for qualifying star reactions and adds them to the database.
         When a channel is provided, only that channel is crawled.
 
-        Does NOT post to the starboard channel — run ``/starboard remake``
+        Does NOT post to the starboard channel — run ``starboard remake``
         after the crawl completes.
 
         The crawl runs in the background and can take hours or days. Progress
         is checkpointed and resumable across bot restarts. Transient errors
-        are retried automatically.
+        are retried automatically. You'll be notified via DM when the crawl completes.
 
         Args:
             channel: Channel to crawl (mention, name, or ID). Omit to crawl
@@ -2371,13 +2371,13 @@ class Starboard(BaseCog):
             await ctx.send(
                 f"🔍 **Deep crawl started for {target_label}.** This may take a while.\n"
                 "Progress is saved — the crawl resumes automatically if the bot restarts.\n"
-                "You'll be notified via DM when it's done. Then run `/starboard remake` to post the results."
+                "You'll be notified via DM when it's done. Then run `starboard remake` to post the results."
             )
         else:
             await ctx.send(
                 "🔍 **Deep crawl started.** This may take hours or days depending on server size.\n"
                 "Progress is saved — the crawl resumes automatically if the bot restarts.\n"
-                "You'll be notified via DM when it's done. Then run `/starboard remake` to post the results."
+                "You'll be notified via DM when it's done. Then run `starboard remake` to post the results."
             )
 
         task = asyncio.create_task(self._deep_crawl_task(ctx.guild.id, target_channel_id=target_channel_id))
