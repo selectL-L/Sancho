@@ -1,4 +1,4 @@
-# Shiori (V0.14.12) - The "What do you mean the readme changed?" Update
+# Shiori (V0.14.42) - The "The Update that Changed the World" Update (Trust me, Batman aint got anything on us)
 
 **Format**: Major.Minor.Bugfix
 
