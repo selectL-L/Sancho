@@ -525,7 +525,7 @@ async def startup_handler(bot: "CoreBot") -> None:
             channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
                 view, files = _build_lifecycle_message(
-                    title=f"Good morning, {config.BOT_NAME} is awake!",
+                    title=f"Ahoy!, {config.BOT_NAME} is now on air!",
                     gif_filename="startup.gif",
                 )
                 if files:
@@ -622,27 +622,27 @@ async def shutdown_handler(
     #   Going away: MANUAL_STOP, SYSTEM_POWEROFF → shutdown.gif
     goodbye_messages: dict[ShutdownReason, tuple[str, str, str]] = {
         ShutdownReason.RESTART: (
-            f"{config.BOT_NAME} is taking a small nap, {config.BOT_NAME} will be back shortly!",
+            f"{config.BOT_NAME} needs a breather, {config.BOT_NAME} will hopefully be back on air shortly!",
             "reboot.gif",
             "Shutdown initiated by service restart. Service should be back shortly...",
         ),
         ShutdownReason.SYSTEM_REBOOT: (
-            f"{config.BOT_NAME} is taking a small nap, {config.BOT_NAME} will be back shortly!",
+            f"{config.BOT_NAME} needs a breather, {config.BOT_NAME} will hopefully be back on air shortly!",
             "reboot.gif",
             "Shutdown initiated by system reboot. Service should be back shortly...",
         ),
         ShutdownReason.SYSTEM_UPGRADE: (
-            f"{config.BOT_NAME} needs some spare parts~, {config.BOT_NAME} will be back shortly!",
+            f"{config.BOT_NAME} needs to install a new game, {config.BOT_NAME} will return soon!",
             "upgrade.gif",
             "Shutdown initiated by system upgrade reboot. Service should be back shortly...",
         ),
         ShutdownReason.SYSTEM_POWEROFF: (
-            f"{config.BOT_NAME} is heading to bed. Goodnight!",
+            f"{config.BOT_NAME} is going off air. Goodnight and see you soon!",
             "shutdown.gif",
             "Shutdown initiated by system poweroff.",
         ),
         ShutdownReason.MANUAL_STOP: (
-            f"{config.BOT_NAME} is heading to bed. Goodnight!",
+            f"{config.BOT_NAME} is going off air. Goodnight and see you soon!",
             "shutdown.gif",
             "Shutdown initiated by manual stop or exit.",
         ),
