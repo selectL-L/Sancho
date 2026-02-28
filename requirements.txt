@@ -1,5 +1,5 @@
 # Core library for interacting with the Discord API.
-discord.py
+discord.py>=2.7.0
 
 # Used for loading environment variables (e.g., bot token) from an info.env file.
 python-dotenv
@@ -70,6 +70,9 @@ syncedlyrics
 
 # Required for Discord voice support (encryption).
 PyNaCl
+
+# DAVE (Discord Audio Video Encryption) protocol support for end-to-end encrypted voice.
+davey
 
 # Asyncio-native D-Bus client for deterministic shutdown detection on Linux.
 # Used to listen for logind's PrepareForShutdown signal (system reboot/poweroff).
