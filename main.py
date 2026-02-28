@@ -366,7 +366,8 @@ async def run_bot_lifecycle() -> None:
 
                 # Setup D-Bus shutdown detection (logind PrepareForShutdown listener).
                 # Must happen after event loop is running but before bot.start().
-                await mod_lifecycle.setup_shutdown_detection()
+                # Bot reference passed for pre-SIGTERM Discord messaging (upgrade notifications).
+                await mod_lifecycle.setup_shutdown_detection(bot)
 
                 # Connect to Discord (CONNECT/READY/POST-READY phases handled in lifecycle.startup_handler)
                 try:
