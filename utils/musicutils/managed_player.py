@@ -195,14 +195,19 @@ class ManagedPlayer:
         # before starting a new one. discord.py's vc.stop() just signals the thread
         # to stop but doesn't wait. If we start a new player immediately, the old
         # thread might still be sending silence packets, corrupting the encoder state.
-        old_player = self._vc._player if hasattr(self._vc, '_player') else None
+        #
+        # NOTE: _player is a private attribute on VoiceClient (an AudioPlayer thread).
+        # Verified present in discord.py 2.7.0 (voice_client.py). If a future version
+        # renames/removes it, the getattr guard returns None and we skip the join —
+        # worst case is occasional audio glitches between track transitions.
+        old_player = getattr(self._vc, '_player', None)
         if self._vc.is_playing():
             self._vc.stop()
 
         # Wait for old AudioPlayer thread to finish (up to 100ms)
         # This prevents race conditions between the old thread's send_silence()
         # and the new thread's audio output, which can cause static/glitches.
-        if old_player is not None and old_player.is_alive():
+        if old_player is not None and hasattr(old_player, 'is_alive') and old_player.is_alive():
             old_player.join(timeout=0.1)
 
         # Clean up old source (but NOT the new prebuffered one we're taking ownership of)
