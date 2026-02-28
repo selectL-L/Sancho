@@ -74,6 +74,10 @@ utils/web/mock_data.py
 # Deployment helpers (local Windows scripts, rsync filters)
 *.bat
 deploy-filter.txt
+deploy.conf
+deploy.py
+deploy.manifest
+.deploy_known_hosts
 
 # Temporary shelved files
 *.tmp
