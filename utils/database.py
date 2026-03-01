@@ -199,9 +199,10 @@ class DatabaseManager:
                         guild_id INTEGER NOT NULL,
                         starboard_reply_id INTEGER,
                         original_channel_id INTEGER NOT NULL,
-                        message_created_at INTEGER NOT NULL,
                         star_count INTEGER NOT NULL DEFAULT 0,
-                        failed_checks INTEGER NOT NULL DEFAULT 0
+                        failed_checks INTEGER NOT NULL DEFAULT 0,
+                        starred_at INTEGER,
+                        is_unworthy INTEGER NOT NULL DEFAULT 0
                     )''',
                 "bod_players": '''CREATE TABLE IF NOT EXISTS bod_players (
                         user_id INTEGER PRIMARY KEY,
@@ -289,7 +290,8 @@ class DatabaseManager:
                 "starboard_entries": {
                     "original_message_id", "starboard_message_id", "guild_id",
                     "starboard_reply_id", "original_channel_id",
-                    "message_created_at", "star_count", "failed_checks",
+                    "star_count", "failed_checks",
+                    "starred_at", "is_unworthy",
                 },
                 "bod_players": {"user_id", "last_used_timestamp", "current_chain", "last_channel_id", "fate_lucky", "fate_blessed", "fate_guaranteed", "fate_silent"},
                 "bod_leaderboard": {"user_id", "best_chain", "achieved_at"},
@@ -1915,10 +1917,11 @@ class DatabaseManager:
         original_message_id: int,
         guild_id: int,
         channel_id: int,
-        message_created_at: int,
         star_count: int = 0,
         starboard_message_id: Optional[int] = None,
-        starboard_reply_id: Optional[int] = None
+        starboard_reply_id: Optional[int] = None,
+        starred_at: Optional[int] = None,
+        is_unworthy: int = 0
     ) -> None:
         """Saves a new starboard entry to the database.
 
@@ -1928,19 +1931,21 @@ class DatabaseManager:
             original_message_id (int): The ID of the original message.
             guild_id (int): The guild's ID.
             channel_id (int): The ID of the original channel.
-            message_created_at (int): Unix timestamp (seconds) of the original message.
             star_count (int): Current reaction count.
             starboard_message_id (Optional[int]): The ID of the starboard channel message, or None if not yet posted.
             starboard_reply_id (Optional[int]): The ID of the reply context message in the starboard channel.
+            starred_at (Optional[int]): Unix timestamp of when the post first crossed threshold, or None.
+            is_unworthy (int): 1 if the post is below current threshold, 0 otherwise.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """INSERT INTO starboard_entries
                    (original_message_id, starboard_message_id, guild_id, original_channel_id,
-                    starboard_reply_id, message_created_at, star_count, failed_checks)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                    starboard_reply_id, star_count, failed_checks,
+                    starred_at, is_unworthy)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)""",
                 (original_message_id, starboard_message_id, guild_id, channel_id,
-                 starboard_reply_id, message_created_at, star_count)
+                 starboard_reply_id, star_count, starred_at, is_unworthy)
             )
             await db.commit()
 
@@ -1962,7 +1967,10 @@ class DatabaseManager:
             return dict(row) if row else None
 
     async def get_starboard_entries_ordered(self, guild_id: int) -> List[Dict[str, Any]]:
-        """Retrieves all starboard entries for a guild, ordered chronologically.
+        """Retrieves all starboard entries for a guild in starred order.
+
+        Ordered by ``starred_at`` when available, falling back to message
+        creation order (snowflake timestamp) for legacy/crawled entries.
 
         Used By: cogs/starboard.py (remake engine, verify engine, self-heal)
 
@@ -1970,12 +1978,12 @@ class DatabaseManager:
             guild_id (int): The guild's ID.
 
         Returns:
-            List[Dict[str, Any]]: Entries sorted by message_created_at ASC.
+            List[Dict[str, Any]]: Entries in starred order.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM starboard_entries WHERE guild_id = ? ORDER BY message_created_at ASC",
+                "SELECT * FROM starboard_entries WHERE guild_id = ? ORDER BY COALESCE(starred_at, original_message_id >> 22) ASC",
                 (guild_id,)
             )
             rows = await cursor.fetchall()
@@ -1990,12 +1998,12 @@ class DatabaseManager:
             guild_id (int): The guild's ID.
 
         Returns:
-            List[Dict[str, Any]]: Entries with NULL starboard_message_id, sorted chronologically.
+            List[Dict[str, Any]]: Entries with NULL starboard_message_id, in starred order.
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM starboard_entries WHERE guild_id = ? AND starboard_message_id IS NULL ORDER BY message_created_at ASC",
+                "SELECT * FROM starboard_entries WHERE guild_id = ? AND starboard_message_id IS NULL ORDER BY COALESCE(starred_at, original_message_id >> 22) ASC",
                 (guild_id,)
             )
             rows = await cursor.fetchall()
@@ -2030,9 +2038,10 @@ class DatabaseManager:
                     guild_id = ?,
                     original_channel_id = ?,
                     starboard_reply_id = ?,
-                    message_created_at = ?,
                     star_count = ?,
-                    failed_checks = ?
+                    failed_checks = ?,
+                    starred_at = ?,
+                    is_unworthy = ?
                 WHERE original_message_id = ?
                 """,
                 (
@@ -2040,9 +2049,10 @@ class DatabaseManager:
                     entry.get("guild_id"),
                     entry.get("original_channel_id"),
                     entry.get("starboard_reply_id"),
-                    entry.get("message_created_at"),
                     entry.get("star_count", 0),
                     entry.get("failed_checks", 0),
+                    entry.get("starred_at"),
+                    entry.get("is_unworthy", 0),
                     entry["original_message_id"]
                 )
             )
@@ -2171,8 +2181,7 @@ class DatabaseManager:
 
         Args:
             entries (List[Dict[str, Any]]): List of entry dicts with keys:
-                original_message_id, guild_id, original_channel_id,
-                message_created_at, star_count.
+                original_message_id, guild_id, original_channel_id, star_count.
 
         Returns:
             int: Number of rows actually inserted (excludes duplicates).
@@ -2186,14 +2195,15 @@ class DatabaseManager:
                     await db.execute(
                         """INSERT OR IGNORE INTO starboard_entries
                            (original_message_id, starboard_message_id, guild_id, original_channel_id,
-                            starboard_reply_id, message_created_at, star_count, failed_checks)
-                           VALUES (?, NULL, ?, ?, NULL, ?, ?, 0)""",
+                            starboard_reply_id, star_count, failed_checks,
+                            starred_at, is_unworthy)
+                           VALUES (?, NULL, ?, ?, NULL, ?, 0, ?, 0)""",
                         (
                             entry["original_message_id"],
                             entry["guild_id"],
                             entry["original_channel_id"],
-                            entry["message_created_at"],
-                            entry.get("star_count", 0)
+                            entry.get("star_count", 0),
+                            entry.get("starred_at")
                         )
                     )
                     if db.total_changes:
@@ -2202,6 +2212,74 @@ class DatabaseManager:
                     logger.warning(f"Failed to insert starboard entry {entry.get('original_message_id')}: {e}")
             await db.commit()
             return inserted
+
+    async def set_starboard_unworthy(self, original_message_id: int, is_unworthy: int) -> None:
+        """Sets or clears the unworthy flag on a starboard entry.
+
+        Used By: cogs/starboard.py (verify engine, cold-path self-heal, hot-path re-promotion)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            is_unworthy (int): 1 to mark as unworthy, 0 to clear.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET is_unworthy = ? WHERE original_message_id = ?",
+                (is_unworthy, original_message_id)
+            )
+            await db.commit()
+
+    async def set_starboard_starred_at(self, original_message_id: int, starred_at: Optional[int]) -> None:
+        """Sets the starred_at timestamp on a starboard entry.
+
+        Used By: cogs/starboard.py (hot-path new entry creation)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            starred_at (Optional[int]): Unix timestamp of when the post first crossed threshold, or None.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET starred_at = ? WHERE original_message_id = ?",
+                (starred_at, original_message_id)
+            )
+            await db.commit()
+
+    async def count_starboard_entries_in_channel(self, guild_id: int, channel_id: int) -> int:
+        """Counts starboard entries originating from a specific channel.
+
+        Used By: cogs/starboard.py (starboard ban command confirmation)
+
+        Args:
+            guild_id (int): The guild's ID.
+            channel_id (int): The channel to count entries for.
+
+        Returns:
+            int: Number of entries from that channel.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM starboard_entries WHERE guild_id = ? AND original_channel_id = ?",
+                (guild_id, channel_id)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def set_starboard_reply_id(self, original_message_id: int, starboard_reply_id: Optional[int]) -> None:
+        """Sets or nulls the reply context message ID for a starboard entry.
+
+        Used By: cogs/starboard.py (tombstone reply cleanup)
+
+        Args:
+            original_message_id (int): The ID of the original message.
+            starboard_reply_id (Optional[int]): The reply context message ID, or None to clear.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE starboard_entries SET starboard_reply_id = ? WHERE original_message_id = ?",
+                (starboard_reply_id, original_message_id)
+            )
+            await db.commit()
 
     # =========================================================================
     # Users Table Methods (Web Auth / User Cache)

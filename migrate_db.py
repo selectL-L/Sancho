@@ -162,9 +162,10 @@ TABLE_SCHEMAS = {
             guild_id INTEGER NOT NULL,
             starboard_reply_id INTEGER,
             original_channel_id INTEGER NOT NULL,
-            message_created_at INTEGER NOT NULL,
             star_count INTEGER NOT NULL DEFAULT 0,
-            failed_checks INTEGER NOT NULL DEFAULT 0
+            failed_checks INTEGER NOT NULL DEFAULT 0,
+            starred_at INTEGER,
+            is_unworthy INTEGER NOT NULL DEFAULT 0
         )
     """,
     "bod_players": """
@@ -274,45 +275,45 @@ def migrate_starboard_entries(
     rows: List[Dict[str, Any]],
     old_columns: List[str]
 ) -> None:
-    """Migrate starboard_entries from the old 5-column schema to the new 8-column schema.
+    """Migrate starboard_entries to V2 schema.
 
-    Transformations applied:
-        - starboard_message_id: Was NOT NULL, now nullable. No data change needed
-          (existing values are preserved; the constraint is just relaxed).
-        - message_created_at: NEW column. Derived from original_message_id via
-          snowflake-to-unix conversion.
-        - star_count: NEW column. Defaults to 0 (will be synced on first reaction
-          event or verify pass).
-        - failed_checks: NEW column. Defaults to 0 (healthy).
+    Handles migration from any previous schema variant:
+        - 5-column legacy (pre-V1): original_message_id, starboard_message_id,
+          guild_id, starboard_reply_id, original_channel_id
+        - 8-column V1: adds message_created_at, star_count, failed_checks
+
+    V2 changes:
+        - message_created_at: DROPPED — redundant with the snowflake PK.
+        - starred_at: NEW, nullable. Set to NULL for all migrated entries
+          (we don't know when they were originally starred).
+        - is_unworthy: NEW, defaults to 0.
 
     Args:
         cursor: Cursor on the new database.
         rows: Row dicts from the old table.
         old_columns: Column names from the old table.
     """
-    logging.info("  Migrating %d starboard entries (adding message_created_at, star_count, failed_checks)...", len(rows))
+    logging.info("  Migrating %d starboard entries to V2 (dropping message_created_at, adding starred_at, is_unworthy)...", len(rows))
 
     for row in rows:
-        original_id = row['original_message_id']
-        message_created_at = snowflake_to_unix(original_id)
-
         cursor.execute(
             """INSERT INTO starboard_entries
                (original_message_id, starboard_message_id, guild_id,
                 starboard_reply_id, original_channel_id,
-                message_created_at, star_count, failed_checks)
-               VALUES (?, ?, ?, ?, ?, ?, 0, 0)""",
+                star_count, failed_checks, starred_at, is_unworthy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0)""",
             (
-                original_id,
+                row['original_message_id'],
                 row['starboard_message_id'],
                 row['guild_id'],
                 row.get('starboard_reply_id'),
                 row.get('original_channel_id', 0),
-                message_created_at
+                row.get('star_count', 0),
+                row.get('failed_checks', 0),
             )
         )
 
-    logging.info("  Done. All entries now have message_created_at derived from snowflake.")
+    logging.info("  Done. message_created_at dropped; starred_at = NULL for all migrated entries.")
 
 
 def migrate_guild_settings(

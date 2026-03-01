@@ -235,14 +235,15 @@ Tracks messages that have been posted (or are pending posting) to a guild's star
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
-| `original_message_id` | INTEGER | PRIMARY KEY | The source message being starred. |
+| `original_message_id` | INTEGER | PRIMARY KEY | The source message being starred. The snowflake encodes the creation timestamp — no separate column needed. |
 | `starboard_message_id` | INTEGER | | The message ID in the starboard channel. **Nullable** — NULL means the entry is known to qualify but hasn't been posted yet (crawl result, or mid-remake). |
 | `guild_id` | INTEGER | NOT NULL | The guild this entry belongs to. |
 | `starboard_reply_id` | INTEGER | | If the original was a reply, the reply-context message ID in the starboard channel. |
 | `original_channel_id` | INTEGER | NOT NULL | The channel the original message lives in. |
-| `message_created_at` | INTEGER | NOT NULL | Unix timestamp (seconds) derived from the original message's snowflake. Used for chronological ordering. |
 | `star_count` | INTEGER | NOT NULL, DEFAULT 0 | Last known star reaction count. Updated on every reaction event and during verify. |
 | `failed_checks` | INTEGER | NOT NULL, DEFAULT 0 | Consecutive verification failures. 0 = healthy. 1 = flagged. 2+ = tombstoned. Reset to 0 on successful check. |
+| `starred_at` | INTEGER | | Unix timestamp of when the post first crossed threshold. NULL for legacy/crawled entries. Used for starred ordering via `COALESCE(starred_at, original_message_id >> 22)`, falling back to message creation order when NULL. |
+| `is_unworthy` | INTEGER | NOT NULL, DEFAULT 0 | 1 if the post has been demoted below threshold by cold path/verify/remake. 0 otherwise. |
 
 **Used by:** `cogs/starboard.py`
 **Indexes:** `idx_starboard_guild` on `guild_id`

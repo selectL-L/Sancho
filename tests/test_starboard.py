@@ -345,7 +345,7 @@ class TestOnRawReactionAdd:
         await starboard_cog.on_raw_reaction_add(payload)
 
         starboard_cog.post_to_starboard.assert_called_once_with(
-            mock_message, mock_starboard_channel.id, "⭐", 5
+            mock_message, mock_starboard_channel.id, "⭐", 5, 3
         )
 
     @pytest.mark.asyncio
@@ -646,13 +646,14 @@ class TestCreateTombstone:
         tomb.id = 9999
         mock_starboard_channel.send.return_value = tomb
 
-        result = await starboard_cog._create_tombstone(mock_starboard_channel, 4001)
+        result = await starboard_cog._create_tombstone(mock_starboard_channel, 4001, star_count=7)
 
         assert result == tomb
         mock_starboard_channel.send.assert_called_once()
         call_arg = mock_starboard_channel.send.call_args[0][0]
-        assert "4001" in call_arg
+        assert "**7**" in call_arg
         assert "🪦" in call_arg
+        assert "something was here" in call_arg
 
     @pytest.mark.asyncio
     async def test_returns_none_on_failure(self, starboard_cog, mock_starboard_channel):
@@ -776,7 +777,6 @@ class TestRemakeCommand:
             'starboard_reply_id': None,
             'star_count': 5,
             'failed_checks': 0,
-            'message_created_at': 1700000000,
         }
 
         # Verify phase — mock _verify_all_entries to return clean report

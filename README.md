@@ -38,7 +38,7 @@ Reply to a file with `convert` or `resize`. Handles images, audio, video, animat
 Messages with enough stars get reposted to a highlight channel. Unlike most starboards, this one maintains itself.
 *   **Self-Repair**: Star counts, channel drift, and failure flags are fixed inline on every reaction event. A background audit runs every 12 hours against live Discord state.
 *   **Tombstoning**: If the original message gets deleted, the starboard entry is edited in-place rather than removed — it keeps its position in the timeline.
-*   **Remake**: Recreate the entire starboard in chronological order from the database.
+*   **Remake**: Recreate the entire starboard in starred order from the database.
 *   **Deep Crawl**: Scan a server's history for missed starboard-worthy content. Progress persists to database, so crawls survive restarts.
 
 ### 📅 Availability Schedule
@@ -109,7 +109,7 @@ Most starboard implementations post a message when a threshold is hit and never 
 
 The **hot path** fires on every reaction event and inline-fixes star counts, channel drift, and failure flags with zero additional API calls beyond what the reaction handler already needs. The **cold path** runs a full verification audit every 12 hours, checking each database entry against live Discord state. Entries follow a lifecycle: healthy → flagged (first failure) → tombstoned (second failure, edited in-place to preserve position) → or recovered if the original reappears.
 
-The remake engine can destructively recreate the entire starboard in chronological order from the database. The crawl engine scans server history with resumable checkpoints persisted to the database — a crawl interrupted by a restart picks up exactly where it left off.
+The remake engine can destructively recreate the entire starboard in starred order from the database. The crawl engine scans server history with resumable checkpoints persisted to the database — a crawl interrupted by a restart picks up exactly where it left off.
 
 ### Proactive Ambient Music Caching
 

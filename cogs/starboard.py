@@ -3,7 +3,7 @@
 Starboard system — highlights popular messages in a dedicated channel.
 
 When a message receives enough star reactions, it gets posted to the starboard
-channel. The system is self-healing, chronologically ordered, and supports
+channel. The system is self-healing, maintains starred order, and supports
 back-crawling missed messages.
 
 Architecture:
@@ -14,7 +14,7 @@ Architecture:
     - Verify engine: Reusable audit logic shared by self-heal, starboard verify,
       and starboard remake (as a prerequisite).
     - Remake engine: Destructive recreation — verify first, delete Discord
-      messages, recreate in chronological order from DB.
+      messages, recreate in starred order from DB.
     - Crawl engine: Bounded startup catch-up + deep historical crawl (whole
       server or single channel) that populates the DB without posting.
       Retries transient errors with backoff and checkpoints progress for
@@ -157,7 +157,8 @@ class VerifyStatus(enum.Enum):
     TOMBSTONED = "tombstoned"       # Original not found, repeat failure — edited in-place or marked
     MISSING_POST = "missing_post"   # Starboard message missing, entry nulled for remake
     UNRESOLVABLE = "unresolvable"   # Cannot be automatically fixed (permissions, API errors)
-    BANNED = "banned"               # Entry is in a banned channel — deleted from DB
+    BANNED = "banned"               # Entry is in a banned channel — flagged for caller to handle
+    UNWORTHY = "unworthy"           # Original alive but star count below current threshold
 
 
 @dataclass
@@ -187,7 +188,8 @@ class VerifyReport:
         tombstoned: Count of TOMBSTONED entries.
         missing_post: Count of MISSING_POST entries.
         unresolvable: Count of UNRESOLVABLE entries.
-        banned: Count of BANNED entries (deleted from DB).
+        banned: Count of BANNED entries (flagged for caller to handle).
+        unworthy: Count of UNWORTHY entries.
     """
     results: List[VerifyResult] = field(default_factory=list)
     healthy: int = 0
@@ -196,6 +198,7 @@ class VerifyReport:
     missing_post: int = 0
     unresolvable: int = 0
     banned: int = 0
+    unworthy: int = 0
 
     @property
     def has_unresolvable(self) -> bool:
@@ -204,8 +207,13 @@ class VerifyReport:
 
     @property
     def has_banned(self) -> bool:
-        """Whether any entries were deleted for being in banned channels."""
+        """Whether any entries are in banned channels."""
         return self.banned > 0
+
+    @property
+    def has_unworthy(self) -> bool:
+        """Whether any entries are below the current threshold."""
+        return self.unworthy > 0
 
     @property
     def total(self) -> int:
@@ -695,6 +703,27 @@ class Starboard(BaseCog):
             return
 
         channel_id, label = await self._resolve_channel_arg(ctx, channel)
+
+        # Check for existing starboard entries in this channel
+        entry_count = await self.db_manager.count_starboard_entries_in_channel(ctx.guild.id, channel_id)
+
+        if entry_count > 0:
+            await ctx.send(
+                f"⚠️ This will affect **{entry_count}** starred post(s) from {label}. "
+                "They will be removed on next verify/heal. Continue?"
+            )
+            future: asyncio.Future = asyncio.get_event_loop().create_future()  # type: ignore[var-annotated]
+            modal = FastConfirmModal(future)
+            await launch_modal(ctx, modal)
+            try:
+                confirmed = await asyncio.wait_for(future, timeout=45.0)
+            except asyncio.TimeoutError:
+                await ctx.send("Ban cancelled (timed out).")
+                return
+            if not confirmed:
+                await ctx.send("Ban cancelled.")
+                return
+
         await self.db_manager.add_starboard_banned_channel(ctx.guild.id, channel_id)
         await ctx.send(f"{label} has been banned from the starboard.")
 
@@ -1003,44 +1032,254 @@ class Starboard(BaseCog):
 
         return new_embed, files
 
-    async def _create_tombstone(self, starboard_channel: discord.TextChannel, original_message_id: int) -> Optional[discord.Message]:
+    async def _create_tombstone(
+        self,
+        starboard_channel: discord.TextChannel,
+        original_message_id: int,
+        star_count: int = 0
+    ) -> Optional[discord.Message]:
         """Creates a tombstone message for a lost original message.
 
         Args:
             starboard_channel: The starboard channel to post in.
             original_message_id: The ID of the lost original message.
+            star_count: The last known star count from the DB.
 
         Returns:
             The tombstone message, or None on failure.
         """
         try:
-            return await starboard_channel.send(f"🪦 Original Message {original_message_id} Lost")
+            return await starboard_channel.send(f"🪦 **{star_count}** — something was here.")
         except Exception as e:
             self.logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
             return None
 
-    async def _edit_to_tombstone(self, starboard_message: discord.Message, original_message_id: int) -> bool:
+    async def _edit_to_tombstone(
+        self,
+        starboard_message: discord.Message,
+        original_message_id: int,
+        star_count: int = 0
+    ) -> bool:
         """Edits an existing starboard message into a tombstone.
 
         Used by verify/self-heal when the original message is confirmed dead
-        but the starboard message still exists (preserves chronological position).
+        but the starboard message still exists (preserves starred-order position).
 
         Args:
             starboard_message: The existing starboard channel message.
             original_message_id: The ID of the lost original message.
+            star_count: The last known star count from the DB.
 
         Returns:
             True if the edit succeeded.
         """
         try:
             await starboard_message.edit(
-                content=f"🪦 Original Message {original_message_id} Lost",
+                content=f"🪦 **{star_count}** — something was here.",
                 embed=None
             )
             return True
         except Exception as e:
             self.logger.error(f"Failed to edit starboard message {starboard_message.id} into tombstone: {e}")
             return False
+
+    async def _cleanup_tombstone_reply(
+        self,
+        starboard_channel: discord.TextChannel,
+        entry: Dict[str, Any]
+    ) -> None:
+        """Deletes reply context for a tombstoned entry and nulls the DB reference.
+
+        Tombstones don't have context — if one exists, it's irrelevant.
+
+        Args:
+            starboard_channel: The starboard channel.
+            entry: The starboard entry dict.
+        """
+        reply_id = entry.get('starboard_reply_id')
+        if not reply_id:
+            return
+        try:
+            reply_msg = await starboard_channel.fetch_message(reply_id)
+            await reply_msg.delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to delete reply context {reply_id}: {e}")
+        original_id = entry.get('original_message_id')
+        if original_id:
+            await self.db_manager.set_starboard_reply_id(original_id, None)
+
+    # ── Unworthy Helpers ──────────────────────────────────────────────────────
+
+    def _build_unworthy_embed(self, message: discord.Message) -> discord.Embed:
+        """Builds the minimal embed for an unworthy post (jump URL only).
+
+        Args:
+            message: The original (still alive) message.
+
+        Returns:
+            A minimal embed with just the jump URL field.
+        """
+        embed = discord.Embed(color=discord.Color.dark_grey())
+        embed.add_field(
+            name="Jump to Message",
+            value=f"[Jump to Message]({message.jump_url})",
+            inline=False
+        )
+        return embed
+
+    async def _create_unworthy_post(
+        self,
+        starboard_channel: discord.TextChannel,
+        message: discord.Message,
+        star_count: int,
+        emoji: str
+    ) -> Optional[discord.Message]:
+        """Creates a new unworthy-state starboard message.
+
+        Args:
+            starboard_channel: The starboard channel to post in.
+            message: The original (still alive) message.
+            star_count: The current star count.
+            emoji: The starboard emoji string.
+
+        Returns:
+            The sent unworthy message, or None on failure.
+        """
+        content = f"⚡ **{star_count}** — this post used to be cool."
+        embed = self._build_unworthy_embed(message)
+        try:
+            return await starboard_channel.send(content=content, embed=embed)
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to create unworthy post for {message.id}: {e}")
+            return None
+
+    async def _edit_to_unworthy(
+        self,
+        starboard_message: discord.Message,
+        original_message: discord.Message,
+        star_count: int,
+        emoji: str
+    ) -> bool:
+        """Edits an existing starboard message into the unworthy state.
+
+        Args:
+            starboard_message: The existing starboard channel message.
+            original_message: The original (still alive) message.
+            star_count: The current star count.
+            emoji: The starboard emoji string.
+
+        Returns:
+            True if the edit succeeded.
+        """
+        content = f"⚡ **{star_count}** — this post used to be cool."
+        embed = self._build_unworthy_embed(original_message)
+        try:
+            await starboard_message.edit(content=content, embed=embed)
+            return True
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to edit starboard message {starboard_message.id} to unworthy: {e}")
+            return False
+
+    async def _edit_reply_to_placeholder(
+        self,
+        starboard_channel: discord.TextChannel,
+        reply_id: int
+    ) -> bool:
+        """Edits a reply context message to the placeholder embed.
+
+        Used when demoting to unworthy — keeps the message in place so it can
+        be edited back on re-promotion.
+
+        Args:
+            starboard_channel: The starboard channel.
+            reply_id: The reply context message ID.
+
+        Returns:
+            True if the edit succeeded.
+        """
+        try:
+            reply_msg = await starboard_channel.fetch_message(reply_id)
+            placeholder_embed = discord.Embed(
+                description="I'd put context here. If I had any!",
+                color=discord.Color.dark_grey()
+            )
+            await reply_msg.edit(embed=placeholder_embed)
+            return True
+        except discord.NotFound:
+            self.logger.debug(f"Reply context {reply_id} not found for placeholder edit.")
+            return False
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to edit reply context {reply_id} to placeholder: {e}")
+            return False
+
+    async def _restore_from_unworthy(
+        self,
+        starboard_message: discord.Message,
+        original_message: discord.Message,
+        star_count: int,
+        emoji: str,
+        starboard_channel: discord.TextChannel,
+        reply_id: Optional[int] = None
+    ) -> bool:
+        """Re-promotes an unworthy post back to full starboard format.
+
+        Edits the starboard message back to normal content + embed, and if a
+        reply context placeholder exists, attempts to restore it to the real
+        reply context embed.
+
+        Args:
+            starboard_message: The existing unworthy starboard message.
+            original_message: The original message (must be alive).
+            star_count: The current star count.
+            emoji: The starboard emoji string.
+            starboard_channel: The starboard channel.
+            reply_id: The reply context message ID, if any.
+
+        Returns:
+            True if the main message was restored successfully.
+        """
+        content = f"{emoji} **{star_count}** in <#{original_message.channel.id}>"
+        embed, files = await self.create_starboard_embed_and_files(
+            original_message, style=self.STARRED_STYLE
+        )
+        try:
+            await starboard_message.edit(content=content, embed=embed)
+        except discord.HTTPException as e:
+            self.logger.error(f"Failed to restore starboard message {starboard_message.id} from unworthy: {e}")
+            return False
+        finally:
+            for f in files:
+                f.close()
+
+        # Restore reply context if we have one
+        if reply_id and original_message.reference and original_message.reference.message_id:
+            if isinstance(original_message.channel, MessageableGuildChannel):
+                try:
+                    replied_to = await original_message.channel.fetch_message(
+                        original_message.reference.message_id
+                    )
+                    reply_embed, reply_files = await self.create_starboard_embed_and_files(
+                        replied_to, style=self.CONTEXT_STYLE
+                    )
+                    try:
+                        reply_msg = await starboard_channel.fetch_message(reply_id)
+                        await reply_msg.edit(embed=reply_embed)
+                    except discord.NotFound:
+                        self.logger.debug(f"Reply context {reply_id} not found during re-promotion.")
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to restore reply context {reply_id}: {e}")
+                    finally:
+                        for f in reply_files:
+                            f.close()
+                except discord.NotFound:
+                    # Replied-to message is gone — leave the placeholder
+                    self.logger.debug(f"Replied-to message gone for {original_message.id}, leaving placeholder.")
+                except discord.HTTPException as e:
+                    self.logger.error(f"Failed to fetch replied-to message for re-promotion: {e}")
+
+        return True
 
     async def create_single_starboard_post(
         self,
@@ -1139,11 +1378,13 @@ class Starboard(BaseCog):
         message: discord.Message,
         starboard_channel_id: int,
         starboard_emoji: str,
-        star_count: int
+        star_count: int,
+        starboard_threshold: int = 1
     ) -> None:
         """Posts or updates a message on the starboard. Upsert semantics.
 
         If an entry exists, updates the star count on the existing post.
+        If the entry is unworthy and stars are now above threshold, re-promotes.
         If the starboard message is missing (404), removes the stale ID and
         recreates. If no entry exists, creates a new post and DB entry.
 
@@ -1152,6 +1393,7 @@ class Starboard(BaseCog):
             starboard_channel_id: The ID of the starboard channel.
             starboard_emoji: The emoji string.
             star_count: The current number of reactions.
+            starboard_threshold: The minimum star count for the starboard.
         """
         starboard_channel = self.bot.get_channel(starboard_channel_id)
         if not isinstance(starboard_channel, discord.TextChannel):
@@ -1175,6 +1417,31 @@ class Starboard(BaseCog):
                 await self.db_manager.reset_starboard_failed_checks(message.id)
 
             sb_msg_id = existing_entry.get('starboard_message_id')
+
+            # --- Re-promotion: unworthy → worthy ---
+            if existing_entry.get('is_unworthy') == 1 and star_count >= starboard_threshold:
+                if sb_msg_id:
+                    try:
+                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                        await self._restore_from_unworthy(
+                            sb_msg, message, star_count, starboard_emoji,
+                            starboard_channel, reply_id=existing_entry.get('starboard_reply_id')
+                        )
+                    except discord.NotFound:
+                        # Starboard message gone — recreate normally
+                        sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
+                        if sb_id:
+                            await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to re-promote {message.id}: {e}")
+                else:
+                    # No starboard message — create new post
+                    sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
+                    if sb_id:
+                        await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
+                await self.db_manager.set_starboard_unworthy(message.id, 0)
+                return
+
             if not sb_msg_id:
                 # Entry exists but has no starboard message (crawled, not yet posted).
                 # Create the post.
@@ -1200,10 +1467,10 @@ class Starboard(BaseCog):
                     original_message_id=message.id,
                     guild_id=message.guild.id,
                     channel_id=message.channel.id,
-                    message_created_at=snowflake_to_unix(message.id),
                     star_count=star_count,
                     starboard_message_id=sb_id,
-                    starboard_reply_id=reply_id
+                    starboard_reply_id=reply_id,
+                    starred_at=int(time.time())
                 )
 
     # ── Section 5: Verification Engine ────────────────────────────────────────
@@ -1212,17 +1479,20 @@ class Starboard(BaseCog):
         self,
         entry: Dict[str, Any],
         starboard_channel: discord.TextChannel,
-        starboard_emoji: str
+        starboard_emoji: str,
+        starboard_threshold: int = 1
     ) -> VerifyResult:
         """Verify one starboard DB entry against live Discord state.
 
         Checks that both the original and starboard messages exist.
         Updates star_count, flags missing originals, tombstones repeat failures.
+        Detects entries that have fallen below the threshold (unworthy).
 
         Args:
             entry: The starboard entry dict from the DB.
             starboard_channel: The starboard channel object.
             starboard_emoji: The emoji string for this guild.
+            starboard_threshold: The minimum star count for the starboard.
 
         Returns:
             A VerifyResult describing what happened.
@@ -1269,7 +1539,7 @@ class Starboard(BaseCog):
                 # Channel gone or not messageable — treat original as missing
                 original_exists = False
 
-        # -- Both exist: HEALTHY --
+        # -- Both exist: check health and threshold --
         if original_exists and sb_exists and original_msg:
             star_reaction = discord.utils.get(original_msg.reactions, emoji=starboard_emoji)
             live_count = star_reaction.count if star_reaction else 0
@@ -1281,6 +1551,14 @@ class Starboard(BaseCog):
             if failed_checks > 0:
                 entry['failed_checks'] = 0
                 needs_update = True
+
+            # Threshold check — below threshold means unworthy
+            if live_count < starboard_threshold:
+                return VerifyResult(
+                    entry=entry, status=VerifyStatus.UNWORTHY,
+                    needs_db_update=needs_update,
+                    message=f"Below threshold (stars={live_count}, threshold={starboard_threshold})"
+                )
 
             return VerifyResult(
                 entry=entry, status=VerifyStatus.HEALTHY,
@@ -1311,15 +1589,19 @@ class Starboard(BaseCog):
                 )
             else:
                 # Repeat failure — tombstone
+                db_star_count = entry.get('star_count', 0)
                 if sb_exists and sb_msg:
                     # Edit the existing starboard message into a tombstone
-                    await self._edit_to_tombstone(sb_msg, original_id or 0)
+                    await self._edit_to_tombstone(sb_msg, original_id or 0, star_count=db_star_count)
+                    # Clean up reply context — tombstones don't have it
+                    await self._cleanup_tombstone_reply(starboard_channel, entry)
                 else:
                     # Both gone — mark in DB for remake to handle
                     entry['starboard_message_id'] = None
                     entry['starboard_reply_id'] = None
 
                 entry['failed_checks'] = failed_checks + 1
+                entry['is_unworthy'] = 0  # Tombstoned supersedes unworthy
                 return VerifyResult(
                     entry=entry, status=VerifyStatus.TOMBSTONED,
                     needs_db_update=True,
@@ -1339,14 +1621,19 @@ class Starboard(BaseCog):
         guild_id: int,
         starboard_channel: discord.TextChannel,
         starboard_emoji: str,
+        starboard_threshold: int = 1,
         progress: Optional[Dict[str, Any]] = None
     ) -> VerifyReport:
         """Run verification on all starboard entries for a guild.
+
+        Pure detection engine — flags issues without destructive side effects
+        (except in-place tombstone edits by ``_verify_single_entry``).
 
         Args:
             guild_id: The guild ID.
             starboard_channel: The starboard channel object.
             starboard_emoji: The emoji string.
+            starboard_threshold: The minimum star count for the starboard.
             progress: Optional mutable dict for status updates ('done', 'total').
 
         Returns:
@@ -1365,14 +1652,13 @@ class Starboard(BaseCog):
         for entry in entries:
             original_channel_id = entry.get('original_channel_id')
 
-            # Check if the entry's channel is banned
+            # Check if the entry's channel is banned — flag only, no deletion
             if original_channel_id and original_channel_id in banned_channels:
                 original_id = entry.get('original_message_id', 0)
-                await self.db_manager.remove_starboard_entry(int(original_id))
                 result = VerifyResult(
                     entry=entry, status=VerifyStatus.BANNED,
-                    needs_db_update=False,  # Already deleted
-                    message=f"Entry {original_id} in banned channel <#{original_channel_id}> — deleted."
+                    needs_db_update=False,
+                    message=f"Entry {original_id} in banned channel <#{original_channel_id}> — flagged for caller."
                 )
                 report.results.append(result)
                 report.banned += 1
@@ -1380,7 +1666,9 @@ class Starboard(BaseCog):
                     progress['done'] = progress.get('done', 0) + 1
                 continue
 
-            result = await self._verify_single_entry(entry, starboard_channel, starboard_emoji)
+            result = await self._verify_single_entry(
+                entry, starboard_channel, starboard_emoji, starboard_threshold
+            )
             report.results.append(result)
 
             # Update aggregate counts
@@ -1394,6 +1682,8 @@ class Starboard(BaseCog):
                 report.missing_post += 1
             elif result.status == VerifyStatus.UNRESOLVABLE:
                 report.unresolvable += 1
+            elif result.status == VerifyStatus.UNWORTHY:
+                report.unworthy += 1
             elif result.status == VerifyStatus.BANNED:
                 report.banned += 1
 
@@ -1402,15 +1692,147 @@ class Starboard(BaseCog):
 
         return report
 
-    async def _apply_verify_results(self, report: VerifyReport) -> None:
-        """Write verification results back to the database.
+    async def _apply_verify_results(
+        self,
+        report: VerifyReport,
+        starboard_channel: discord.TextChannel,
+        starboard_emoji: str,
+        starboard_threshold: int
+    ) -> None:
+        """Write verification results back to the database and apply
+        visual changes (unworthy demotions, re-promotions, tombstone cleanup).
+
+        Banned entries are **skipped** — callers handle them separately after
+        confirmation via ``_purge_banned_entries``.
 
         Args:
             report: The verify report to apply.
+            starboard_channel: The starboard channel object.
+            starboard_emoji: The emoji string.
+            starboard_threshold: The current star threshold.
         """
         for result in report.results:
+            # Skip banned — caller handles those
+            if result.status == VerifyStatus.BANNED:
+                continue
+
+            entry = result.entry
+            original_id = entry.get('original_message_id')
+            sb_msg_id = entry.get('starboard_message_id')
+
+            if result.status == VerifyStatus.UNWORTHY:
+                # Demote to unworthy visual
+                if sb_msg_id:
+                    try:
+                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                        channel_id = entry.get('original_channel_id')
+                        ch = self.bot.get_channel(channel_id) if channel_id else None
+                        if isinstance(ch, MessageableGuildChannel) and original_id:
+                            try:
+                                original_msg = await ch.fetch_message(original_id)
+                                await self._edit_to_unworthy(
+                                    sb_msg, original_msg, entry.get('star_count', 0), starboard_emoji
+                                )
+                            except discord.NotFound:
+                                self.logger.debug(f"Original {original_id} gone during unworthy demotion.")
+                            except discord.HTTPException as e:
+                                self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}")
+                    except discord.NotFound:
+                        self.logger.debug(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}")
+
+                # Edit reply context to placeholder if present
+                reply_id = entry.get('starboard_reply_id')
+                if reply_id:
+                    await self._edit_reply_to_placeholder(starboard_channel, reply_id)
+
+                entry['is_unworthy'] = 1
+                result.needs_db_update = True
+
+            elif result.status == VerifyStatus.HEALTHY and entry.get('is_unworthy') == 1:
+                # Re-promote — threshold lowered or stars added since last check
+                if sb_msg_id:
+                    try:
+                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                        channel_id = entry.get('original_channel_id')
+                        ch = self.bot.get_channel(channel_id) if channel_id else None
+                        if isinstance(ch, MessageableGuildChannel) and original_id:
+                            try:
+                                original_msg = await ch.fetch_message(original_id)
+                                await self._restore_from_unworthy(
+                                    sb_msg, original_msg, entry.get('star_count', 0),
+                                    starboard_emoji, starboard_channel,
+                                    reply_id=entry.get('starboard_reply_id')
+                                )
+                            except discord.NotFound:
+                                self.logger.debug(f"Original {original_id} gone during re-promotion.")
+                            except discord.HTTPException as e:
+                                self.logger.error(f"Failed to fetch original {original_id} for re-promotion: {e}")
+                    except discord.NotFound:
+                        self.logger.debug(f"Starboard message {sb_msg_id} gone during re-promotion.")
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for re-promotion: {e}")
+
+                entry['is_unworthy'] = 0
+                result.needs_db_update = True
+
+            # Write DB changes for any result that needs it
             if result.needs_db_update:
-                await self.db_manager.update_starboard_entry(result.entry)
+                await self.db_manager.update_starboard_entry(entry)
+
+    async def _purge_banned_entries(
+        self,
+        report: VerifyReport,
+        starboard_channel: discord.TextChannel
+    ) -> int:
+        """Deletes all entries flagged ``BANNED`` in the report.
+
+        For each banned entry: deletes the starboard message and reply context
+        message from Discord (if they exist), then removes the DB entry.
+
+        Args:
+            report: The verify report containing flagged entries.
+            starboard_channel: The starboard channel object.
+
+        Returns:
+            The number of entries purged.
+        """
+        purged = 0
+        for result in report.results:
+            if result.status != VerifyStatus.BANNED:
+                continue
+
+            entry = result.entry
+            original_id = entry.get('original_message_id', 0)
+
+            # Delete starboard message from Discord
+            sb_msg_id = entry.get('starboard_message_id')
+            if sb_msg_id:
+                try:
+                    sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                    await sb_msg.delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    self.logger.error(f"Failed to delete starboard message {sb_msg_id} for banned entry: {e}")
+
+            # Delete reply context message from Discord
+            reply_id = entry.get('starboard_reply_id')
+            if reply_id:
+                try:
+                    reply_msg = await starboard_channel.fetch_message(reply_id)
+                    await reply_msg.delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as e:
+                    self.logger.error(f"Failed to delete reply context {reply_id} for banned entry: {e}")
+
+            # Remove DB entry
+            await self.db_manager.remove_starboard_entry(int(original_id))
+            purged += 1
+
+        return purged
 
     async def _should_self_heal(self, guild_id: int) -> bool:
         """Check if 12+ hours have passed since the last self-heal.
@@ -1453,16 +1875,27 @@ class Starboard(BaseCog):
                 if not isinstance(starboard_channel, discord.TextChannel):
                     return
 
-                report = await self._verify_all_entries(guild_id, starboard_channel, cfg.emoji)
-                await self._apply_verify_results(report)
+                report = await self._verify_all_entries(
+                    guild_id, starboard_channel, cfg.emoji, cfg.threshold
+                )
+
+                # Purge banned entries — auto-approved (admin confirmed at ban time)
+                banned_purged = 0
+                if report.has_banned:
+                    banned_purged = await self._purge_banned_entries(report, starboard_channel)
+                    self.logger.info(f"Self-heal purged {banned_purged} banned entries for guild {guild_id}.")
+
+                # Apply verify results (unworthy demotions, re-promotions, DB writes)
+                await self._apply_verify_results(report, starboard_channel, cfg.emoji, cfg.threshold)
 
                 # Update last heal timestamp
                 await self.db_manager.upsert_starboard_config(guild_id, last_heal_at=int(time.time()))
 
                 self.logger.info(
                     f"Self-heal complete for guild {guild_id}: "
-                    f"healthy={report.healthy}, flagged={report.flagged}, "
-                    f"tombstoned={report.tombstoned}, missing_post={report.missing_post}, "
+                    f"healthy={report.healthy}, unworthy={report.unworthy}, "
+                    f"flagged={report.flagged}, tombstoned={report.tombstoned}, "
+                    f"missing_post={report.missing_post}, banned={report.banned}, "
                     f"unresolvable={report.unresolvable}"
                 )
 
@@ -1519,11 +1952,9 @@ class Starboard(BaseCog):
             )
 
             try:
-                report = await self._verify_all_entries(ctx.guild.id, starboard_channel, cfg.emoji, progress)
-                await self._apply_verify_results(report)
-
-                # Update last heal timestamp
-                await self.db_manager.upsert_starboard_config(ctx.guild.id, last_heal_at=int(time.time()))
+                report = await self._verify_all_entries(
+                    ctx.guild.id, starboard_channel, cfg.emoji, cfg.threshold, progress
+                )
             finally:
                 stop_event.set()
                 try:
@@ -1532,11 +1963,46 @@ class Starboard(BaseCog):
                     pass
                 self._fast_mode = False
 
+            # Banned confirmation gate
+            banned_purged = 0
+            if report.has_banned:
+                banned_entries = [r for r in report.results if r.status == VerifyStatus.BANNED]
+                preview = "\n".join(
+                    f"• <#{r.entry.get('original_channel_id')}> — message {r.entry.get('original_message_id')}"
+                    for r in banned_entries[:10]
+                )
+                if len(banned_entries) > 10:
+                    preview += f"\n… and {len(banned_entries) - 10} more."
+                await ctx.send(
+                    f"⚠️ **{len(banned_entries)} entries** from banned channels found.\n{preview}\n"
+                    "These will be permanently deleted. Confirm?"
+                )
+                future: asyncio.Future = asyncio.get_event_loop().create_future()  # type: ignore[var-annotated]
+                modal = FastConfirmModal(future)
+                await launch_modal(ctx, modal)
+                try:
+                    confirmed = await asyncio.wait_for(future, timeout=45.0)
+                except asyncio.TimeoutError:
+                    confirmed = False
+
+                if confirmed:
+                    banned_purged = await self._purge_banned_entries(report, starboard_channel)
+                else:
+                    await ctx.send("Banned entry deletion declined. Skipping.")
+
+            # Apply verify results (unworthy demotions, re-promotions, DB writes)
+            await self._apply_verify_results(report, starboard_channel, cfg.emoji, cfg.threshold)
+
+            # Update last heal timestamp
+            await self.db_manager.upsert_starboard_config(ctx.guild.id, last_heal_at=int(time.time()))
+
             await ctx.send(
                 f"✅ Starboard verify complete.\n"
-                f"Healthy: {report.healthy}, Flagged: {report.flagged}, "
-                f"Tombstoned: {report.tombstoned}, Missing post: {report.missing_post}, "
-                f"Banned: {report.banned}, Unresolvable: {report.unresolvable}"
+                f"Healthy: {report.healthy}, Unworthy: {report.unworthy}, "
+                f"Flagged: {report.flagged}, Tombstoned: {report.tombstoned}, "
+                f"Missing post: {report.missing_post}, "
+                f"Banned: {report.banned} (purged: {banned_purged}), "
+                f"Unresolvable: {report.unresolvable}"
             )
 
     # ── Section 6: Remake Engine ──────────────────────────────────────────────
@@ -1599,10 +2065,11 @@ class Starboard(BaseCog):
         starboard_threshold: int,
         progress: Optional[Dict[str, Any]] = None
     ) -> Tuple[int, int, int]:
-        """Recreate all starboard posts in chronological order from DB.
+        """Recreate all starboard posts in starred order from DB.
 
-        Fetches entries ordered by message_created_at, posts each one,
-        and writes back the new starboard message IDs.
+        Fetches entries in starred order (falling back to message creation
+        order for legacy entries), posts each one, and writes back the new
+        starboard message IDs.
 
         Args:
             guild_id: The guild ID.
@@ -1628,9 +2095,10 @@ class Starboard(BaseCog):
             channel_id = entry.get('original_channel_id')
             failed_checks = entry.get('failed_checks', 0)
 
-            # Tombstoned entries — post tombstone in chronological position
+            # Tombstoned entries — post tombstone in starred-order position
             if failed_checks >= 2:
-                tomb = await self._create_tombstone(starboard_channel, original_id or 0)
+                db_star_count = entry.get('star_count', 0)
+                tomb = await self._create_tombstone(starboard_channel, original_id or 0, star_count=db_star_count)
                 if tomb:
                     await self.db_manager.set_starboard_message_id(original_id, tomb.id)  # type: ignore[arg-type]
                     tombstoned += 1
@@ -1645,7 +2113,8 @@ class Starboard(BaseCog):
             original_channel = self.bot.get_channel(channel_id) if channel_id else None
             if not isinstance(original_channel, MessageableGuildChannel):
                 # Channel gone — tombstone
-                tomb = await self._create_tombstone(starboard_channel, original_id or 0)
+                db_star_count = entry.get('star_count', 0)
+                tomb = await self._create_tombstone(starboard_channel, original_id or 0, star_count=db_star_count)
                 if tomb:
                     await self.db_manager.set_starboard_message_id(original_id, tomb.id)  # type: ignore[arg-type]
                     await self.db_manager.increment_starboard_failed_checks(original_id)  # type: ignore[arg-type]
@@ -1661,7 +2130,8 @@ class Starboard(BaseCog):
                 message = await original_channel.fetch_message(original_id)  # type: ignore[arg-type]
             except discord.NotFound:
                 # Original deleted — tombstone
-                tomb = await self._create_tombstone(starboard_channel, original_id or 0)
+                db_star_count = entry.get('star_count', 0)
+                tomb = await self._create_tombstone(starboard_channel, original_id or 0, star_count=db_star_count)
                 if tomb:
                     await self.db_manager.set_starboard_message_id(original_id, tomb.id)  # type: ignore[arg-type]
                     await self.db_manager.increment_starboard_failed_checks(original_id)  # type: ignore[arg-type]
@@ -1679,12 +2149,16 @@ class Starboard(BaseCog):
                     progress['done'] = progress.get('done', 0) + 1
                 continue
 
-            # Check reaction count (skip if below threshold unless fast mode)
+            # Check reaction count — below threshold is a safety fallback
+            # (unworthy entries should have been purged by the gate in _remake_impl)
             star_reaction = discord.utils.get(message.reactions, emoji=starboard_emoji)
             current_count = star_reaction.count if star_reaction else 0
 
             if not self._fast_mode and current_count < starboard_threshold:
-                self.logger.info(f"Message {original_id} below threshold ({current_count} < {starboard_threshold}), skipping.")
+                self.logger.warning(
+                    f"Message {original_id} below threshold ({current_count} < {starboard_threshold}) "
+                    "during remake — should have been purged by unworthy gate. Skipping."
+                )
                 if progress is not None:
                     progress['done'] = progress.get('done', 0) + 1
                 continue
@@ -1708,8 +2182,9 @@ class Starboard(BaseCog):
     async def _remake_impl(self, ctx: commands.Context) -> None:  # type: ignore[type-arg]
         """Implementation of the remake command.
 
-        Flow: verify → abort on unresolvable → apply verify → delete Discord
-        messages → null DB IDs → recreate in chronological order.
+        Flow: verify → abort on unresolvable → gate on banned (confirm + purge)
+        → gate on unworthy (confirm + delete) → apply verify → delete Discord
+        messages → null DB IDs → recreate in starred order.
 
         Args:
             ctx: The command context.
@@ -1730,9 +2205,11 @@ class Starboard(BaseCog):
         # ── Phase 1: Verify ──
         await ctx.send("**Phase 1/3:** Running verification before remake...")
         verify_progress: Dict[str, Any] = {'done': 0, 'total': 0, 'elapsed': 0}
-        report = await self._verify_all_entries(guild.id, starboard_channel, cfg.emoji, verify_progress)
+        report = await self._verify_all_entries(
+            guild.id, starboard_channel, cfg.emoji, cfg.threshold, verify_progress
+        )
 
-        # Abort on unresolvable
+        # Gate 1: Abort on unresolvable (hard stop)
         if report.has_unresolvable:
             unresolvable_details = [
                 r.message for r in report.results if r.status == VerifyStatus.UNRESOLVABLE
@@ -1745,27 +2222,97 @@ class Starboard(BaseCog):
             await self._notify_user(ctx.author.id, ctx.channel.id, abort_msg)
             return
 
-        # Abort on banned — entries were deleted, let the user inspect before continuing
+        # Gate 2: Banned entries (confirmation → purge and continue, or abort)
+        banned_purged = 0
         if report.has_banned:
-            banned_details = [
-                r.message for r in report.results if r.status == VerifyStatus.BANNED
-            ]
-            detail_text = "\n".join(f"• {d}" for d in banned_details[:10])
-            if len(banned_details) > 10:
-                detail_text += f"\n… and {len(banned_details) - 10} more."
-            abort_msg = (
-                f"⚠️ **Remake paused.** {report.banned} entries were in banned channels and have been deleted.\n"
-                f"Review the deletions, then run `starboard remake` again to continue:\n{detail_text}"
+            banned_entries = [r for r in report.results if r.status == VerifyStatus.BANNED]
+            detail_text = "\n".join(
+                f"• <#{r.entry.get('original_channel_id')}> — message {r.entry.get('original_message_id')}"
+                for r in banned_entries[:10]
             )
-            await self._notify_user(ctx.author.id, ctx.channel.id, abort_msg)
-            return
+            if len(banned_entries) > 10:
+                detail_text += f"\n… and {len(banned_entries) - 10} more."
+            await ctx.send(
+                f"⚠️ **Remake paused.** {len(banned_entries)} entries from banned channels found.\n"
+                f"{detail_text}\nThese will be permanently deleted if you continue. Confirm?"
+            )
+            future: asyncio.Future = asyncio.get_event_loop().create_future()  # type: ignore[var-annotated]
+            modal = FastConfirmModal(future)
+            await launch_modal(ctx, modal)
+            try:
+                confirmed = await asyncio.wait_for(future, timeout=45.0)
+            except asyncio.TimeoutError:
+                confirmed = False
+            if not confirmed:
+                await ctx.send("Remake aborted.")
+                return
+            banned_purged = await self._purge_banned_entries(report, starboard_channel)
+            await ctx.send(f"Purged {banned_purged} banned entries.")
 
-        # Apply verify results (DB updates, in-place tombstone edits)
-        await self._apply_verify_results(report)
+        # Gate 3: Unworthy entries (confirmation → delete and continue, or abort)
+        unworthy_purged = 0
+        unworthy_results = [r for r in report.results if r.status == VerifyStatus.UNWORTHY]
+        # DB entries already marked unworthy that verify now sees as HEALTHY
+        # will be re-promoted by _apply_verify_results, not deleted.
+        # Entries still below threshold get VerifyStatus.UNWORTHY, so
+        # unworthy_results covers both newly-detected and still-unworthy.
+        all_unworthy_count = len(unworthy_results)
+
+        if all_unworthy_count > 0:
+            preview = "\n".join(
+                f"• <#{r.entry.get('original_channel_id')}> — message {r.entry.get('original_message_id')} "
+                f"(⭐ {r.entry.get('star_count', 0)})"
+                for r in unworthy_results[:10]
+            )
+            if all_unworthy_count > 10:
+                preview += f"\n… and {all_unworthy_count - 10} more."
+            await ctx.send(
+                f"⚠️ **Remake paused.** {all_unworthy_count} unworthy entries found.\n"
+                f"{preview}\nThese will be permanently deleted if you continue. Confirm?"
+            )
+            future2: asyncio.Future = asyncio.get_event_loop().create_future()  # type: ignore[var-annotated]
+            modal2 = FastConfirmModal(future2)
+            await launch_modal(ctx, modal2)
+            try:
+                confirmed2 = await asyncio.wait_for(future2, timeout=45.0)
+            except asyncio.TimeoutError:
+                confirmed2 = False
+            if not confirmed2:
+                await ctx.send("Remake aborted.")
+                return
+
+            # Delete all unworthy entries (Discord messages + DB)
+            for r in unworthy_results:
+                entry = r.entry
+                sb_msg_id = entry.get('starboard_message_id')
+                if sb_msg_id:
+                    try:
+                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                        await sb_msg.delete()
+                    except discord.NotFound:
+                        pass
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to delete unworthy starboard message {sb_msg_id}: {e}")
+                reply_id = entry.get('starboard_reply_id')
+                if reply_id:
+                    try:
+                        reply_msg = await starboard_channel.fetch_message(reply_id)
+                        await reply_msg.delete()
+                    except discord.NotFound:
+                        pass
+                    except discord.HTTPException as e:
+                        self.logger.error(f"Failed to delete unworthy reply context {reply_id}: {e}")
+                original_id = entry.get('original_message_id', 0)
+                await self.db_manager.remove_starboard_entry(int(original_id))
+                unworthy_purged += 1
+            await ctx.send(f"Purged {unworthy_purged} unworthy entries.")
+
+        # Apply remaining verify results (DB updates, tombstone edits — no banned/unworthy left)
+        await self._apply_verify_results(report, starboard_channel, cfg.emoji, cfg.threshold)
         await ctx.send(
-            f"Verify done: {report.healthy} healthy, {report.flagged} flagged, "
-            f"{report.tombstoned} tombstoned, {report.missing_post} missing post, "
-            f"{report.banned} banned."
+            f"Verify done: {report.healthy} healthy, {report.unworthy} unworthy (purged: {unworthy_purged}), "
+            f"{report.flagged} flagged, {report.tombstoned} tombstoned, "
+            f"{report.missing_post} missing post, {report.banned} banned (purged: {banned_purged})."
         )
 
         # ── Phase 2: Delete Discord messages ──
@@ -1775,7 +2322,7 @@ class Starboard(BaseCog):
         await ctx.send(f"Deleted {deleted} starboard messages. DB entries preserved.")
 
         # ── Phase 3: Recreate in order ──
-        await ctx.send("**Phase 3/3:** Recreating starboard in chronological order...")
+        await ctx.send("**Phase 3/3:** Recreating starboard in starred order...")
         stop_event = asyncio.Event()
         recreate_progress: Dict[str, Any] = {'done': 0, 'total': 0, 'elapsed': 0}
         status_msg = await ctx.send("Recreating... 0/? processed.")
@@ -1796,23 +2343,24 @@ class Starboard(BaseCog):
 
         await ctx.send(
             f"✅ Starboard remake complete.\n"
-            f"Recreated: {recreated}, Tombstones: {tombstoned}, Failed: {failed_count}."
+            f"Recreated: {recreated}, Tombstones: {tombstoned}, Failed: {failed_count}, "
+            f"Unworthy purged: {unworthy_purged}."
         )
 
     @starboard_group.command(
         name="remake",
-        help="Recreates all starboard posts in chronological order."
+        help="Recreates all starboard posts in starred order."
     )
     @commands.has_guild_permissions(manage_guild=True)
     @app_commands.describe(
         fast="If True, skips rate limits and thresholds (Dangerous!)."
     )
     async def remake_starboard(self, ctx: commands.Context, fast: bool = False) -> None:  # type: ignore[type-arg]
-        """Recreates starboard posts from DB state in chronological order.
+        """Recreates starboard posts from DB state in starred order.
 
         Runs a full verify first. If any entries are unresolvable, aborts and
         notifies the caller. Otherwise deletes existing Discord messages, preserves
-        DB rows, and recreates everything in message_created_at order.
+        DB rows, and recreates everything in starred order.
 
         Args:
             fast: Whether to enable fast mode.
@@ -1870,7 +2418,6 @@ class Starboard(BaseCog):
                     'original_message_id': message.id,
                     'guild_id': message.guild.id,
                     'original_channel_id': message.channel.id,
-                    'message_created_at': snowflake_to_unix(message.id),
                     'star_count': star_reaction.count,
                 })
 
@@ -1882,7 +2429,8 @@ class Starboard(BaseCog):
         Scans each text channel up to a soft limit of 500 messages. If the bot
         was offline for longer than 500 messages cover, keeps going until reaching
         the last heal timestamp. Posts any newly found entries to the starboard
-        channel in chronological order.
+        channel in starred order (falling back to message creation order for
+        legacy entries).
 
         Args:
             guild_id: The guild ID.
@@ -1948,7 +2496,6 @@ class Starboard(BaseCog):
                                     'original_message_id': message.id,
                                     'guild_id': message.guild.id,
                                     'original_channel_id': message.channel.id,
-                                    'message_created_at': snowflake_to_unix(message.id),
                                     'star_count': star_reaction.count,
                                 })
 
@@ -1966,7 +2513,7 @@ class Starboard(BaseCog):
             inserted = await self.db_manager.bulk_insert_starboard_entries(all_found)
             self.logger.info(f"Bounded catch-up crawl for guild {guild_id}: found {len(all_found)}, inserted {inserted} new entries.")
 
-            # Post unposted entries in chronological order
+            # Post unposted entries in starred order
             unposted = await self.db_manager.get_unposted_starboard_entries(guild_id)
             posted_count = 0
             for entry in unposted:
@@ -2115,7 +2662,6 @@ class Starboard(BaseCog):
                                     'original_message_id': message.id,
                                     'guild_id': message.guild.id,
                                     'original_channel_id': message.channel.id,
-                                    'message_created_at': snowflake_to_unix(message.id),
                                     'star_count': star_reaction.count,
                                 })
 
@@ -2433,7 +2979,9 @@ class Starboard(BaseCog):
                     return
 
                 if star_reaction.count >= cfg.threshold:
-                    await self.post_to_starboard(message, cfg.channel_id, cfg.emoji, star_reaction.count)
+                    await self.post_to_starboard(
+                        message, cfg.channel_id, cfg.emoji, star_reaction.count, cfg.threshold
+                    )
         finally:
             if not lock.locked():
                 self._locks.pop(payload.message_id, None)
