@@ -27,6 +27,7 @@ import asyncio
 import discord
 from discord import ui
 from discord.ext import commands
+from discord.ui.view import BaseView
 
 if TYPE_CHECKING:
     from cogs.files import ConversionJob, SettingDef
@@ -600,6 +601,68 @@ async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -
 
 
 # =============================================================================
+# Shared View Utilities
+# =============================================================================
+
+
+async def _race_view_and_text(
+    bot: commands.Bot,
+    view: BaseView,
+    author_id: int,
+    channel_id: int,
+    timeout: float,
+) -> Optional[str]:
+    """Race view interaction against text message input from the author.
+
+    Simultaneously waits for the view to complete (button click or view timeout)
+    and for the author to send a text message — whichever happens first.
+
+    This is the shared mechanism that ensures all numbered selection views
+    accept both button clicks and typed numbers from the original author.
+
+    Args:
+        bot: The bot instance (for wait_for).
+        view: The active view (already sent to Discord).
+        author_id: The user ID allowed to respond.
+        channel_id: The channel ID to listen in.
+        timeout: Timeout in seconds for the text listener.
+
+    Returns:
+        The text content if the user typed a message, None if the view
+        completed via button click or timeout. Caller should check view
+        state to determine button results.
+    """
+    def check(m: discord.Message) -> bool:
+        return m.author.id == author_id and m.channel.id == channel_id
+
+    view_task = asyncio.create_task(view.wait())
+    msg_task = asyncio.create_task(
+        bot.wait_for('message', check=check, timeout=timeout)
+    )
+
+    done, pending = await asyncio.wait(
+        [view_task, msg_task], return_when=asyncio.FIRST_COMPLETED
+    )
+
+    text_content: Optional[str] = None
+
+    if msg_task in done:
+        try:
+            msg = msg_task.result()
+            text_content = msg.content.strip()
+            view.stop()
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass  # Text listener timed out or was cancelled
+        except Exception as e:
+            logging.getLogger(__name__).debug(f"_race_view_and_text message result: {e}")
+
+    for task in pending:
+        task.cancel()
+
+    return text_content
+
+
+# =============================================================================
 # Selection View
 # =============================================================================
 
@@ -662,34 +725,10 @@ async def get_selection(ctx: commands.Context, embed: discord.Embed, options: Di
         result = view.value
     else:
         # Wait for either button click or text message
-        def check(m):
-            return m.author == ctx.author and m.channel == ctx.channel
-
-        view_task = asyncio.create_task(view.wait())
-        msg_task = asyncio.create_task(ctx.bot.wait_for('message', check=check, timeout=timeout))
-
-        done, pending = await asyncio.wait([view_task, msg_task], return_when=asyncio.FIRST_COMPLETED)
-
-        result = None
-
-        if view_task in done:
-            # View finished (button clicked or timeout)
-            if view.value:
-                result = view.value
-            # If timeout (view.value is None), result remains None
-        else:
-            # Message received
-            try:
-                msg = msg_task.result()
-                result = msg.content.strip()
-                view.stop()
-            except asyncio.CancelledError:
-                pass  # Task was cancelled - expected
-            except Exception as e:
-                logging.getLogger(__name__).debug(f"get_selection message result failed: {e}")
-
-        for task in pending:
-            task.cancel()
+        text = await _race_view_and_text(
+            ctx.bot, view, ctx.author.id, ctx.channel.id, timeout
+        )
+        result = text if text is not None else view.value
 
     # Cleanup / UI Update
     if result and result in options.values():
@@ -995,9 +1034,9 @@ class TrackSelectionView(ui.LayoutView):
 
         # Footer - different message if auto-select is enabled
         if self._recommended_id:
-            footer_text = f"-# ⭐ Auto-selects recommended in {int(self._effective_timeout)}s • Pick another to override"
+            footer_text = f"-# ⭐ Auto-selects recommended in {int(self._effective_timeout)}s • Type or click to override"
         else:
-            footer_text = "-# Select by clicking a number • Times out in 30s"
+            footer_text = "-# Type a number or click to select • Times out in 30s"
         container.add_item(ui.TextDisplay(footer_text))
 
         self.add_item(container)
@@ -1085,7 +1124,25 @@ async def get_track_selection(
     message = await ctx.send(view=view)
     view.message = message
 
-    await view.wait()
+    # Race view buttons against text input
+    text = await _race_view_and_text(
+        ctx.bot, view, ctx.author.id, ctx.channel.id,
+        view.timeout or timeout
+    )
+
+    # Handle text input — resolve number to track slot
+    if text is not None:
+        text_lower = text.lower()
+        if text_lower in ('cancel', 'c', 'x'):
+            view._cancelled = True
+        else:
+            try:
+                slot = int(text)
+                slotted = view._slots.get(slot)
+                if slotted:
+                    view.selected_track = slotted.track
+            except ValueError:
+                pass  # Non-numeric, non-cancel text — treat as no selection
 
     # Handle auto-select if timed out with a recommended track
     if not view.selected_track and not view._cancelled and view._recommended_slot is not None:
