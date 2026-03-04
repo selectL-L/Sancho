@@ -1,5 +1,5 @@
 /**
- * @fileoverview Theme detection and management for the availability web UI.
+ * @fileoverview Shared theme utilities for all web pages.
  * 
  * Handles system theme detection, theme application, and CSS variable injection
  * for the theme color from the API.
@@ -67,8 +67,6 @@ export function applyTheme(theme) {
   body.classList.remove('light', 'dark');
   body.classList.add(theme);
   
-  // Update any theme toggle icons (CSS handles this based on .dark/.light on body)
-  updateThemeToggleIcons(theme);
 }
 
 /**
@@ -87,28 +85,6 @@ export function toggleTheme() {
   return newTheme;
 }
 
-/**
- * Update theme toggle button icons.
- * 
- * The CSS handles icon visibility automatically based on .dark/.light class
- * on the <body> element. This function exists for API compatibility but
- * is intentionally a no-op.
- * 
- * The theme toggle buttons should have two SVGs with .icon-sun and .icon-moon
- * classes, and the CSS rules in components.css show/hide them appropriately:
- * 
- *   .dark .theme-toggle .icon-sun { display: block; }
- *   .dark .theme-toggle .icon-moon { display: none; }
- *   .light .theme-toggle .icon-sun { display: none; }
- *   .light .theme-toggle .icon-moon { display: block; }
- * 
- * @param {'light' | 'dark'} theme - Current theme (unused)
- */
-function updateThemeToggleIcons(theme) {
-  // CSS handles icon visibility via .dark/.light class on <html>
-  // No JavaScript manipulation needed
-}
-
 // ============================================================================
 // THEME COLOR
 // ============================================================================
@@ -116,13 +92,18 @@ function updateThemeToggleIcons(theme) {
 /**
  * Parse a hex color to RGB components.
  * 
- * @param {string} hex - Hex color like "#9333ea" or "9333ea"
+ * @param {string} hex - Hex color like "#9333ea", "9333ea", "#fff", or "9e3"
  * @returns {{ r: number, g: number, b: number } | null} RGB components or null if invalid
  */
 export function parseHexColor(hex) {
   // Remove # if present
-  const clean = hex.replace(/^#/, '');
-  
+  let clean = hex.replace(/^#/, '');
+
+  // Expand 3-char shorthand to 6-char form (e.g. "fff" -> "ffffff")
+  if (clean.length === 3) {
+    clean = clean[0] + clean[0] + clean[1] + clean[1] + clean[2] + clean[2];
+  }
+
   if (clean.length !== 6) {
     return null;
   }

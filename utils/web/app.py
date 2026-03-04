@@ -1,7 +1,7 @@
-"""FastAPI application factory for the schedule web server.
+"""FastAPI application factory for the bot's web server.
 
 This module creates and configures the FastAPI application with:
-- Static file serving for the web UI assets
+- Static file serving for all web UIs (schedule, limbus calculator, etc.)
 - Server-side session management (tokens stored in database)
 - Rate limiting (60 requests/minute per IP)
 - CORS blocking (same-origin only)
@@ -53,8 +53,28 @@ def create_app(bot: "CoreBot") -> FastAPI:
     if not config.WEB_SESSION_SECRET:
         raise ValueError("WEB_SESSION_SECRET must be configured for web server")
 
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Server startup and shutdown lifecycle."""
+        # Startup
+        logger.info(f"Web server started on {config.WEB_HOST}:{config.WEB_PORT}")
+        try:
+            deleted = await bot.db_manager.cleanup_stale_sessions(max_age_days=90)  # type: ignore[union-attr]
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} stale web sessions")
+        except Exception as e:
+            logger.warning(f"Failed to clean stale sessions: {e}")
+
+        yield
+
+        # Shutdown
+        logger.info("Web server shutting down")
+
     app = FastAPI(
-        title=f"{config.BOT_NAME} Schedule",
+        title=f"{config.BOT_NAME} Web",
+        lifespan=lifespan,
         docs_url=None,  # Disable Swagger UI
         redoc_url=None,  # Disable ReDoc
         openapi_url=None,  # Disable OpenAPI schema
@@ -88,6 +108,13 @@ def create_app(bot: "CoreBot") -> FastAPI:
             )
 
         _rate_limit_storage[client_ip].append(now)
+
+        # Periodically evict stale IP keys to prevent unbounded memory growth
+        if len(_rate_limit_storage) > 1000:
+            stale = [ip for ip, ts in _rate_limit_storage.items() if not ts]
+            for ip in stale:
+                del _rate_limit_storage[ip]
+
         return await call_next(request)
 
     # CORS blocking middleware - reject cross-origin requests
@@ -132,32 +159,10 @@ def create_app(bot: "CoreBot") -> FastAPI:
     # ============================================================================
     # Web UI serving
     # ============================================================================
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, RedirectResponse
 
     # Base path for web assets
     web_assets_dir = os.path.join(config.ASSETS_PATH, "web")
-
-    # Serve web-core JS modules
-    @app.get("/web-core/{file_path:path}")
-    async def serve_web_core(file_path: str):
-        """Serve web-core module files."""
-        full_path = os.path.join(web_assets_dir, "web-core", file_path)
-        if os.path.exists(full_path) and full_path.endswith('.js'):
-            return FileResponse(full_path, media_type="application/javascript")
-        return JSONResponse(status_code=404, content={"error": "Not found"})
-
-    # Serve web-css stylesheets
-    @app.get("/web-css/{file_path:path}")
-    async def serve_web_css(file_path: str):
-        """Serve web-css stylesheet files."""
-        full_path = os.path.join(web_assets_dir, "web-css", file_path)
-        if os.path.exists(full_path) and full_path.endswith('.css'):
-            return FileResponse(full_path, media_type="text/css")
-        return JSONResponse(status_code=404, content={"error": "Not found"})
-
-    # ============================================================================
-    # Web UI Routing - UA-based desktop/mobile detection
-    # ============================================================================
 
     def is_mobile_request(request: Request) -> bool:
         """Check if request is from a mobile device based on User-Agent."""
@@ -165,39 +170,51 @@ def create_app(bot: "CoreBot") -> FastAPI:
         mobile_keywords = ["mobile", "android", "iphone", "ipad", "ipod", "blackberry", "windows phone"]
         return any(keyword in user_agent for keyword in mobile_keywords)
 
+    # ── Root ──
     @app.get("/")
     async def serve_root():
-        """Redirect root to /index for future homepage flexibility."""
-        from fastapi.responses import RedirectResponse
+        """Redirect root to /index."""
         return RedirectResponse(url="/index", status_code=302)
 
+    # ── Schedule: Index ──
     @app.get("/index")
     @app.get("/index.html")
     async def serve_index(request: Request):
-        """Serve appropriate index.html based on device type."""
-        if is_mobile_request(request):
-            return FileResponse(
-                os.path.join(web_assets_dir, "mobile", "index.html"),
-                media_type="text/html"
-            )
+        """Serve schedule index (UA-based desktop/mobile)."""
+        variant = "mobile" if is_mobile_request(request) else "desktop"
         return FileResponse(
-            os.path.join(web_assets_dir, "desktop", "index.html"),
+            os.path.join(web_assets_dir, "schedule", variant, "index.html"),
             media_type="text/html"
         )
 
+    # ── Schedule: Settings ──
     @app.get("/settings")
     @app.get("/settings.html")
     async def serve_settings(request: Request):
-        """Serve appropriate settings.html based on device type."""
-        if is_mobile_request(request):
-            return FileResponse(
-                os.path.join(web_assets_dir, "mobile", "settings.html"),
-                media_type="text/html"
-            )
+        """Serve schedule settings (UA-based desktop/mobile)."""
+        variant = "mobile" if is_mobile_request(request) else "desktop"
         return FileResponse(
-            os.path.join(web_assets_dir, "desktop", "settings.html"),
+            os.path.join(web_assets_dir, "schedule", variant, "settings.html"),
             media_type="text/html"
         )
+
+    # ── Limbus Calculator ──
+    @app.get("/limbus")
+    async def serve_limbus():
+        """Serve the Limbus Company damage calculator."""
+        path = os.path.join(web_assets_dir, "limbus", "index.html")
+        if os.path.exists(path):
+            return FileResponse(path, media_type="text/html")
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    # ── Identities data (game data served from assets/) ──
+    @app.get("/api/identities")
+    async def serve_identities():
+        """Serve Limbus Company identity data for the calculator."""
+        path = os.path.join(config.ASSETS_PATH, "identities.json")
+        if os.path.exists(path):
+            return FileResponse(path, media_type="application/json")
+        return JSONResponse(status_code=404, content={"error": "Identity data not available"})
 
     # ============================================================================
     # END Web UI serving
@@ -205,22 +222,5 @@ def create_app(bot: "CoreBot") -> FastAPI:
 
     # Static files (web UI) - mounted last so API routes take precedence
     app.mount("/", StaticFiles(directory=web_assets_dir, html=True), name="static")
-
-    @app.on_event("startup")
-    async def on_startup() -> None:
-        """Log server startup and clean stale sessions."""
-        logger.info(f"Web server started on {config.WEB_HOST}:{config.WEB_PORT}")
-        # Clean up sessions that haven't been used in 90 days
-        try:
-            deleted = await bot.db_manager.cleanup_stale_sessions(max_age_days=90)  # type: ignore[union-attr]
-            if deleted > 0:
-                logger.info(f"Cleaned up {deleted} stale web sessions")
-        except Exception as e:
-            logger.warning(f"Failed to clean stale sessions: {e}")
-
-    @app.on_event("shutdown")
-    async def on_shutdown() -> None:
-        """Log server shutdown."""
-        logger.info("Web server shutting down")
 
     return app

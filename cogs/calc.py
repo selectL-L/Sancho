@@ -133,6 +133,11 @@ class Math(BaseCog):
         """
         super().__init__(bot)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # DEPRECATED — This method is no longer dispatched by NLP.
+    # The Limbus cog (cogs/limbus.py) handles limbus rolls now.
+    # Remove this method once the Limbus cog is verified working.
+    # ═══════════════════════════════════════════════════════════════════
     async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str) -> None:
         """Handles Limbus Company-style rolls using a sequential parser.
 

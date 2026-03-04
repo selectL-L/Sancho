@@ -13,7 +13,7 @@ import tempfile
 import time
 import typing
 from datetime import timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
@@ -31,6 +31,9 @@ from utils.musicutils import (
 )
 from utils.musicutils.music_auth import _detect_youtube_auth
 from utils.views import get_selection, show_dashboard, show_status, StatusData, StatusHealth
+
+if TYPE_CHECKING:
+    from cogs.limbus import Limbus
 
 
 class AdminCog(BaseCog):
@@ -1511,6 +1514,139 @@ class AdminCog(BaseCog):
                 "❌ Invalid status. Use: online, idle, dnd, invisible.",
                 ephemeral=True
             )
+
+
+    # ========== LIMBUS DATA MANAGEMENT ==========
+
+    @commands.hybrid_command(
+        name="limbus-rescrape",
+        hidden=True,
+        description="Re-scrape Limbus identity data from the wiki.",
+        help="Re-scrape Limbus identity data. Mode: 'parse' (cache only) or 'full' (re-download + parse).",
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        mode="'parse' (from cache, default) or 'full' (re-download + parse)"
+    )
+    async def limbus_rescrape(self, ctx: commands.Context, mode: str = "parse") -> None:
+        """Re-scrape Limbus identity data.
+
+        Args:
+            ctx: The command context.
+            mode: 'parse' to parse from cache, 'full' to re-download and parse.
+        """
+        mode = mode.lower()
+        if mode not in ("parse", "full"):
+            await ctx.send("Mode must be 'parse' (cache only) or 'full' (re-download + parse).")
+            return
+
+        limbus_cog: Limbus | None = self.bot.get_cog("Limbus")  # type: ignore[assignment]
+        if not limbus_cog:
+            await ctx.send("Limbus cog is not loaded.")
+            return
+
+        redownload = mode == "full"
+        label = "full re-download + parse" if redownload else "parse from cache"
+        status_msg = await ctx.send(f"Rescraping identity data ({label})...")
+
+        log_lines: list[str] = []
+
+        def log_fn(msg: str) -> None:
+            log_lines.append(msg)
+
+        try:
+            downloaded, parsed, restored = await limbus_cog.rescrape(
+                redownload=redownload, log=log_fn
+            )
+
+            summary_parts = []
+            if redownload:
+                summary_parts.append(f"{downloaded} pages downloaded")
+            summary_parts.append(f"{parsed} identities parsed")
+            if restored:
+                summary_parts.append(f"{restored} manual edits preserved")
+
+            await status_msg.edit(content=f"Rescrape complete: {', '.join(summary_parts)}.")
+            self.logger.info(f"Admin {ctx.author} ran limbus rescrape ({mode}): {summary_parts}")
+
+        except Exception as e:
+            self.logger.error(f"Limbus rescrape failed: {e}", exc_info=True)
+            tail = "\n".join(log_lines[-5:]) if log_lines else "No log output"
+            await status_msg.edit(content=f"Rescrape failed: {e}\n```\n{tail}\n```")
+
+    @commands.hybrid_command(
+        name="limbus-edit",
+        hidden=True,
+        description="Edit a Limbus identity's skill data.",
+        help="Edit a Limbus identity's skill data. Search by name.",
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        query="Identity name (or part of it) to search for."
+    )
+    async def limbus_edit(self, ctx: commands.Context, *, query: str) -> None:
+        """Edit a Limbus identity's skill data via an interactive editor.
+
+        Args:
+            ctx: The command context.
+            query: Identity name to search for.
+        """
+        limbus_cog: Limbus | None = self.bot.get_cog("Limbus")  # type: ignore[assignment]
+        if not limbus_cog:
+            await ctx.send("Limbus cog is not loaded.")
+            return
+
+        matches = limbus_cog._search_identities(query)
+        if not matches:
+            await ctx.send(f"No identities matching '{query}'.")
+            return
+
+        # If multiple matches, let admin pick
+        if len(matches) > 1:
+            top = matches[:5]
+            options = {
+                f"{m['name']} ({m['sinner']})": m["id"]
+                for m in top
+            }
+            embed = discord.Embed(
+                title="Multiple identities found",
+                description="Select the identity to edit:",
+                color=discord.Color.blue(),
+            )
+            for m in top:
+                embed.add_field(
+                    name=m["name"],
+                    value=m["sinner"],
+                    inline=False,
+                )
+
+            selected_id = await get_selection(ctx, embed, options)
+            if not selected_id:
+                await ctx.send("Edit cancelled.")
+                return
+
+            identity = limbus_cog.get_identity(selected_id)
+        else:
+            identity = matches[0]
+
+        if not identity or not identity.get("skills"):
+            await ctx.send("Identity has no skills to edit.")
+            return
+
+        from utils.views import SkillEditorState, show_skill_editor
+
+        state = SkillEditorState(
+            identity_id=identity["id"],
+            identity_name=identity["name"],
+            sinner=identity["sinner"],
+            skills=identity["skills"],
+        )
+
+        async def save_callback(identity_id: str, skill_label: str, updates: dict) -> bool:
+            return limbus_cog.update_skill(identity_id, skill_label, updates)
+
+        await show_skill_editor(ctx, state, save_callback)
+        self.logger.info(f"Admin {ctx.author} opened skill editor for {identity['name']}")
 
 
 async def setup(bot: CoreBot) -> None:

@@ -33,10 +33,6 @@ dist/
 htmlcov/
 coverage.xml
 
-# Type checker caches
-.mypy_cache/
-.ruff_cache/
-
 # Installer logs
 pip-log.txt
 
@@ -65,6 +61,9 @@ pip-log.txt
 !*.toml.example
 !pyproject.toml
 
+# Generated Asset files (created by a util within utils, regenerate accordingly)
+identities.json
+
 # Dev mock data module (create your own for local web UI testing)
 utils/web/mock_data.py
 
@@ -79,19 +78,16 @@ deploy.py
 deploy.manifest
 .deploy_known_hosts
 
-# Temporary shelved files
-*.tmp
-*.bak
-*.swp
-*.swo
-*.orig
+# Temporary shelved files/directories, prevents polluting source control
+/bundles
+/wiki_pages
 
 # -----------------------------------------------------------------------------
 # EDITORS / IDEs
 # -----------------------------------------------------------------------------
 
 # VS Code - workspace settings are personal preference
-.vscode/
+.*/
 
 # JetBrains (PyCharm, etc.)
 .idea/

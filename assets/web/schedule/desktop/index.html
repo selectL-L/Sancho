@@ -9,9 +9,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
   <!-- External CSS -->
-  <link rel="stylesheet" href="/web-css/variables.css">
-  <link rel="stylesheet" href="/web-css/components.css">
-  <link rel="stylesheet" href="/web-css/desktop.css">
+  <link rel="stylesheet" href="/shared/css/variables.css">
+  <link rel="stylesheet" href="/shared/css/components.css">
+  <link rel="stylesheet" href="/schedule/css/desktop.css">
 </head>
 <body class="dark">
 
@@ -188,11 +188,11 @@
 
   <!-- Core modules -->
   <script type="module">
-    import * as api from '/web-core/api.js';
-    import * as state from '/web-core/state.js';
-    import * as grid from '/web-core/grid.js';
-    import * as theme from '/web-core/theme.js';
-    import * as utils from '/web-core/utils.js';
+    import * as api from '/schedule/js/api.js';
+    import * as state from '/schedule/js/state.js';
+    import * as grid from '/schedule/js/grid.js';
+    import * as theme from '/shared/js/theme.js';
+    import * as utils from '/schedule/js/utils.js';
 
     // ========== CONSTANTS ==========
     const { DAYS, DAY_LABELS, DAY_LABELS_SHORT, formatRelativeTime, getWeekDates, isToday, debounce, escapeHtml } = utils;

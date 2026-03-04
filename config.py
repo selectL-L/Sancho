@@ -185,7 +185,7 @@ def check_and_create_env_file() -> None:
             "# Binds to localhost only. If empty, TCP control is disabled.",
         # WEB SERVER
         "WEB_ENABLED":
-            "# (Optional) Enable the availability scheduler web server.\n"
+            "# (Optional) Enable the web server for bot web features (schedule, calculator, etc.).\n"
             "# Default: False. Set to True to start the web UI.",
         "WEB_PORT":
             "# (Optional) Port for the web server.\n"
@@ -560,8 +560,9 @@ else:
 NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Math Group
     [
-        # Limbus Company coin flip
-        ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
+        # Limbus Company — \blimbus\b catches named skill rolls ("limbus roll Yi Sang S1"),
+        # \bcoin\s.*flip\b catches manual coin flip requests ("coin flip 4 bp 3 cp")
+        ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Limbus', 'limbus_roll_nlp'),
         # Dice rolling (should be checked before basic calculation)
         ((r'\broll\b', r'\bdice\b'), 'Math', 'roll'),
         # Basic calculation

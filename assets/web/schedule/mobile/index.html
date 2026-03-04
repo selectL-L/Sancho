@@ -9,9 +9,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
   <!-- External CSS -->
-  <link rel="stylesheet" href="/web-css/variables.css">
-  <link rel="stylesheet" href="/web-css/components.css">
-  <link rel="stylesheet" href="/web-css/mobile.css">
+  <link rel="stylesheet" href="/shared/css/variables.css">
+  <link rel="stylesheet" href="/shared/css/components.css">
+  <link rel="stylesheet" href="/schedule/css/mobile.css">
   <style>
     /* Mobile-index-specific styles not in shared CSS */
     .login-overlay {
@@ -241,11 +241,11 @@
 
   <!-- Core modules -->
   <script type="module">
-    import * as api from '/web-core/api.js';
-    import * as state from '/web-core/state.js';
-    import * as grid from '/web-core/grid.js';
-    import * as theme from '/web-core/theme.js';
-    import { DAYS, DAY_LABELS, formatTime, formatHourLabel, formatRelativeTime as formatRelativeTimeUtil, getWeekDates, isToday, formatDateShort, escapeHtml } from '/web-core/utils.js';
+    import * as api from '/schedule/js/api.js';
+    import * as state from '/schedule/js/state.js';
+    import * as grid from '/schedule/js/grid.js';
+    import * as theme from '/shared/js/theme.js';
+    import { DAYS, DAY_LABELS, formatTime, formatHourLabel, formatRelativeTime as formatRelativeTimeUtil, getWeekDates, isToday, formatDateShort, escapeHtml } from '/schedule/js/utils.js';
 
     // ========== DOM REFERENCES ==========
     const $loginOverlay = document.getElementById('login-overlay');

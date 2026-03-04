@@ -11,8 +11,9 @@ Design Philosophy:
 Exports:
     - Wrapper functions (preferred API): get_selection(), show_track_failed(),
       show_now_playing(), show_dashboard(), launch_modal(), get_track_selection(),
-      show_conversion()
-    - Types: TrackFailureAction, NowPlayingState, MusicPlayerProtocol
+      show_conversion(), show_skill_editor()
+    - Types: TrackFailureAction, NowPlayingState, MusicPlayerProtocol,
+      SkillEditorState, SkillSaveCallback
     - View classes (for advanced use): PaginatorView, TrackSelectionView, etc.
 """
 
@@ -2542,3 +2543,421 @@ async def show_conversion(
     message = await ctx.send(view=view)
     view.message = message
     return message
+
+
+# =============================================================================
+# Skill Editor View (Admin — Limbus identity/skill editing)
+# =============================================================================
+
+SkillSaveCallback = Callable[[str, str, Dict[str, Any]], Awaitable[bool]]
+"""(identity_id, skill_label, updates_dict) -> success"""
+
+
+@dataclass
+class SkillEditorState:
+    """State container for the skill editor view."""
+    identity_id: str
+    identity_name: str
+    sinner: str
+    skills: List[Dict[str, Any]]
+    selected_skill_index: int = 0
+
+
+class SkillCoreModal(discord.ui.Modal, title="Edit Core Stats"):
+    """Modal for editing a skill's core numeric stats."""
+
+    def __init__(self, skill: Dict[str, Any]):
+        super().__init__()
+        self.result: Optional[Dict[str, Any]] = None
+        self._interaction: Optional[discord.Interaction] = None
+
+        self.add_item(discord.ui.TextInput(
+            label="Base Power",
+            default=str(skill.get("base_power", 0)),
+            placeholder="-50 to 50",
+            required=True,
+            max_length=5,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Coin Value",
+            default=str(skill.get("coin_value", 0)),
+            placeholder="-50 to 50",
+            required=True,
+            max_length=5,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Number of Coins",
+            default=str(skill.get("num_coins", 1)),
+            placeholder="1 to 15",
+            required=True,
+            max_length=2,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Offense Level Offset",
+            default=str(skill.get("offense_level_offset", 0)),
+            placeholder="-10 to 10",
+            required=True,
+            max_length=4,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Atk Weight",
+            default=str(skill.get("atk_weight", 1)),
+            placeholder="1 to 10",
+            required=True,
+            max_length=2,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        errors: list[str] = []
+        updates: Dict[str, int] = {}
+
+        validators = [
+            (0, "base_power", "Base Power", -50, 50),
+            (1, "coin_value", "Coin Value", -50, 50),
+            (2, "num_coins", "Number of Coins", 1, 15),
+            (3, "offense_level_offset", "Offense Level Offset", -10, 10),
+            (4, "atk_weight", "Atk Weight", 1, 10),
+        ]
+        for idx, key, label, min_val, max_val in validators:
+            raw = self.children[idx].value.strip()  # type: ignore[union-attr]
+            try:
+                val = int(raw)
+                if val < min_val or val > max_val:
+                    errors.append(f"{label}: must be {min_val} to {max_val}")
+                else:
+                    updates[key] = val
+            except ValueError:
+                errors.append(f"{label}: must be a number")
+
+        if errors:
+            await interaction.response.send_message(
+                "**Validation errors:**\n" + "\n".join(f"- {e}" for e in errors),
+                ephemeral=True,
+            )
+            self.result = None
+        else:
+            await interaction.response.defer()
+            self._interaction = interaction
+            self.result = updates
+
+
+class _SkillBonusesModal(discord.ui.Modal):
+    """Base modal for editing a SkillBonuses sub-dict (base_bonuses or best_case)."""
+
+    def __init__(self, bonuses: Dict[str, Any], target_key: str, modal_title: str):
+        super().__init__(title=modal_title)
+        self.result: Optional[Dict[str, Any]] = None
+        self._interaction: Optional[discord.Interaction] = None
+        self._target_key = target_key
+
+        self.add_item(discord.ui.TextInput(
+            label="Base Power Add",
+            default=str(bonuses.get("base_power_add", 0)),
+            placeholder="-50 to 50",
+            required=True,
+            max_length=5,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Coin Power Add",
+            default=str(bonuses.get("coin_power_add", 0)),
+            placeholder="-50 to 50",
+            required=True,
+            max_length=5,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Skill Damage Bonus %",
+            default=str(bonuses.get("skill_dmg_bonus", 0)),
+            placeholder="-100 to 200",
+            required=True,
+            max_length=5,
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Atk Weight Add",
+            default=str(bonuses.get("atk_weight_add", 0)),
+            placeholder="-10 to 10",
+            required=True,
+            max_length=4,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        errors: list[str] = []
+        updates: Dict[str, int] = {}
+
+        validators = [
+            (0, "base_power_add", "Base Power Add", -50, 50),
+            (1, "coin_power_add", "Coin Power Add", -50, 50),
+            (2, "skill_dmg_bonus", "Skill Damage Bonus %", -100, 200),
+            (3, "atk_weight_add", "Atk Weight Add", -10, 10),
+        ]
+        for idx, key, label, min_val, max_val in validators:
+            raw = self.children[idx].value.strip()  # type: ignore[union-attr]
+            try:
+                val = int(raw)
+                if val < min_val or val > max_val:
+                    errors.append(f"{label}: must be {min_val} to {max_val}")
+                else:
+                    updates[key] = val
+            except ValueError:
+                errors.append(f"{label}: must be a number")
+
+        if errors:
+            await interaction.response.send_message(
+                "**Validation errors:**\n" + "\n".join(f"- {e}" for e in errors),
+                ephemeral=True,
+            )
+            self.result = None
+        else:
+            await interaction.response.defer()
+            self._interaction = interaction
+            self.result = {self._target_key: updates}
+
+
+class SkillEditorView(ui.LayoutView):
+    """Components V2 view for editing Limbus identity skill data.
+
+    Displays skill details and provides modal-based editing for core stats,
+    base bonuses, and best-case bonuses. Follows the _build_ui() rebuild pattern.
+    """
+
+    def __init__(
+        self,
+        ctx: commands.Context,
+        state: SkillEditorState,
+        save_callback: SkillSaveCallback,
+        timeout: float = 120.0,
+    ):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.state = state
+        self._save = save_callback
+        self.message: Optional[discord.Message] = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        """Build or rebuild the V2 layout from current state."""
+        self.clear_items()
+
+        skill = self.state.skills[self.state.selected_skill_index]
+        base = skill.get("base_bonuses", {})
+        best = skill.get("best_case", {})
+        edited = skill.get("manually_edited", False)
+
+        container = ui.Container(
+            accent_colour=discord.Colour.orange() if edited else discord.Colour.blue()
+        )
+
+        # Header
+        container.add_item(ui.TextDisplay(
+            f"## {self.state.identity_name}\n"
+            f"{self.state.sinner}"
+        ))
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Skill info
+        cv_sign = "+" if skill.get("coin_value", 0) >= 0 else ""
+        minus_str = "Yes" if skill.get("is_minus_coin") else "No"
+        container.add_item(ui.TextDisplay(
+            f"### {skill['label']}: {skill.get('name', '?')}\n"
+            f"{skill.get('damage_type', '?')} \u00b7 {skill.get('sin_affinity', '?')} "
+            f"\u00b7 OL {skill.get('offense_level_offset', 0):+d} "
+            f"\u00b7 Weight {skill.get('atk_weight', 1)} "
+            f"\u00b7 Deck x{skill.get('deck_count', 3)}\n\n"
+            f"**Core Stats**\n"
+            f"Base Power: **{skill.get('base_power', 0)}** \u00b7 "
+            f"Coin Value: **{cv_sign}{skill.get('coin_value', 0)}** \u00b7 "
+            f"Coins: **{skill.get('num_coins', 1)}** \u00b7 "
+            f"Minus: {minus_str}"
+        ))
+
+        # Base bonuses
+        base_notes = ", ".join(base.get("notes", [])) or "None"
+        container.add_item(ui.TextDisplay(
+            f"**Base Bonuses** (unconditional)\n"
+            f"BP {base.get('base_power_add', 0):+d} \u00b7 "
+            f"CP {base.get('coin_power_add', 0):+d} \u00b7 "
+            f"DMG {base.get('skill_dmg_bonus', 0):+d}% \u00b7 "
+            f"Wt {base.get('atk_weight_add', 0):+d}\n"
+            f"-# {base_notes}"
+        ))
+
+        # Best case
+        best_notes = ", ".join(best.get("notes", [])) or "None"
+        container.add_item(ui.TextDisplay(
+            f"**Best Case** (everything maxed)\n"
+            f"BP {best.get('base_power_add', 0):+d} \u00b7 "
+            f"CP {best.get('coin_power_add', 0):+d} \u00b7 "
+            f"DMG {best.get('skill_dmg_bonus', 0):+d}% \u00b7 "
+            f"Wt {best.get('atk_weight_add', 0):+d}\n"
+            f"-# {best_notes}"
+        ))
+
+        container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        # Skill tab buttons
+        if len(self.state.skills) > 1:
+            tab_row = ui.ActionRow()
+            for i, s in enumerate(self.state.skills):
+                style = discord.ButtonStyle.primary if i == self.state.selected_skill_index else discord.ButtonStyle.secondary
+                btn = ui.Button(
+                    label=s["label"],
+                    style=style,
+                    custom_id=f"skill_tab_{i}",
+                )
+                btn.callback = self._make_tab_callback(i)
+                tab_row.add_item(btn)
+            container.add_item(tab_row)
+
+        # Edit buttons
+        edit_row = ui.ActionRow()
+
+        core_btn = ui.Button(label="Edit Core", style=discord.ButtonStyle.green, custom_id="edit_core")
+        core_btn.callback = self._on_edit_core
+        edit_row.add_item(core_btn)
+
+        base_btn = ui.Button(label="Edit Base", style=discord.ButtonStyle.green, custom_id="edit_base")
+        base_btn.callback = self._on_edit_base
+        edit_row.add_item(base_btn)
+
+        best_btn = ui.Button(label="Edit Best", style=discord.ButtonStyle.green, custom_id="edit_best")
+        best_btn.callback = self._on_edit_best
+        edit_row.add_item(best_btn)
+
+        done_btn = ui.Button(label="Done", style=discord.ButtonStyle.grey, custom_id="edit_done")
+        done_btn.callback = self._on_done
+        edit_row.add_item(done_btn)
+
+        container.add_item(edit_row)
+
+        # Footer
+        if edited:
+            container.add_item(ui.TextDisplay("-# \u270f\ufe0f Manually edited — preserved during rescrape"))
+        else:
+            container.add_item(ui.TextDisplay("-# Edits set the manually_edited flag and survive rescrapes"))
+
+        self.add_item(container)
+
+    def _make_tab_callback(self, index: int):
+        """Create a callback for a skill tab button."""
+        async def callback(interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.ctx.author.id:
+                await interaction.response.send_message("Not your editor.", ephemeral=True)
+                return
+            self.state.selected_skill_index = index
+            self._build_ui()
+            await interaction.response.edit_message(view=self)
+        return callback
+
+    async def _edit_with_modal(self, interaction: discord.Interaction, modal: discord.ui.Modal) -> None:
+        """Open a modal, wait for result, save if valid, rebuild UI."""
+        await interaction.response.send_modal(modal)
+
+        if await modal.wait():
+            return  # Timed out
+
+        if modal.result:  # type: ignore[attr-defined]
+            skill = self.state.skills[self.state.selected_skill_index]
+            success = await self._save(
+                self.state.identity_id,
+                skill["label"],
+                modal.result,  # type: ignore[attr-defined]
+            )
+            if success:
+                # The save callback mutated state.skills[i] in-place (shared reference).
+                # Just mark the flag and rebuild the view.
+                skill["manually_edited"] = True
+                self._build_ui()
+                if self.message:
+                    try:
+                        await self.message.edit(view=self)
+                    except discord.HTTPException:
+                        pass
+            else:
+                # Save failed — send followup on the modal's deferred interaction
+                modal_interaction = getattr(modal, "_interaction", None)
+                if modal_interaction:
+                    try:
+                        await modal_interaction.followup.send(
+                            "Save failed — identity or skill not found.", ephemeral=True
+                        )
+                    except discord.HTTPException:
+                        pass
+
+    async def _on_edit_core(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your editor.", ephemeral=True)
+            return
+        skill = self.state.skills[self.state.selected_skill_index]
+        await self._edit_with_modal(interaction, SkillCoreModal(skill))
+
+    async def _on_edit_base(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your editor.", ephemeral=True)
+            return
+        skill = self.state.skills[self.state.selected_skill_index]
+        await self._edit_with_modal(
+            interaction,
+            _SkillBonusesModal(skill.get("base_bonuses", {}), "base_bonuses", "Edit Base Bonuses"),
+        )
+
+    async def _on_edit_best(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your editor.", ephemeral=True)
+            return
+        skill = self.state.skills[self.state.selected_skill_index]
+        await self._edit_with_modal(
+            interaction,
+            _SkillBonusesModal(skill.get("best_case", {}), "best_case", "Edit Best Case"),
+        )
+
+    async def _on_done(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your editor.", ephemeral=True)
+            return
+        # Build a final confirmation state
+        self.clear_items()
+        container = ui.Container(accent_colour=discord.Colour.green())
+        container.add_item(ui.TextDisplay(
+            f"## {self.state.identity_name}\n"
+            f"Skill editor closed."
+        ))
+        self.add_item(container)
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """Disable the view on timeout."""
+        self.clear_items()
+        container = ui.Container(accent_colour=discord.Colour.dark_grey())
+        container.add_item(ui.TextDisplay(
+            f"## {self.state.identity_name}\n"
+            f"Skill editor timed out."
+        ))
+        self.add_item(container)
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except discord.HTTPException as e:
+                logging.getLogger(__name__).debug(f"SkillEditorView timeout cleanup failed: {e}")
+
+
+async def show_skill_editor(
+    ctx: commands.Context,
+    state: SkillEditorState,
+    save_callback: SkillSaveCallback,
+    timeout: float = 120.0,
+) -> None:
+    """Display the skill editor view.
+
+    This is the preferred API for showing the skill editor.
+
+    Args:
+        ctx: The command context.
+        state: SkillEditorState with identity and skill data.
+        save_callback: Async callback to save edits (identity_id, skill_label, updates).
+        timeout: View timeout in seconds.
+    """
+    view = SkillEditorView(ctx=ctx, state=state, save_callback=save_callback, timeout=timeout)
+    message = await ctx.send(view=view)
+    view.message = message

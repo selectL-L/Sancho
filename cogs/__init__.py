@@ -15,4 +15,6 @@ Modules:
     schedule: Scheduling and availability tracking.
     skills: RPG-style skill tracking and rolling system.
     starboard: Starboard functionality for highlighting popular messages.
+    limbus: Limbus Company damage calculator, rolling, and data management.
+    web: Web server lifecycle management.
 """

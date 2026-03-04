@@ -1,12 +1,8 @@
 """Cog for weekly availability scheduling with web UI.
 
 This cog provides:
-- A FastAPI web server (started in cog_ready) for users to manage availability
 - Discord OAuth2 authentication for the web UI
 - NLP handlers for querying availability via Discord chat
-
-The web server runs in-process, sharing the event loop with the Discord bot.
-It's started via Uvicorn when the cog is ready and stopped on cog unload.
 
 Web UI Features:
 - View your weekly availability in a heatmap grid
@@ -18,6 +14,8 @@ NLP Query Features:
 - "when is @user free" / "is @user free at 3pm Saturday" - Check availability
 - "who's free" / "who's free Saturday afternoon" - Find available people
 - "schedule link" / "edit my availability" - Get web UI link
+
+The web server lifecycle is managed by the Web cog (cogs/web.py).
 """
 
 import asyncio
@@ -49,138 +47,10 @@ DAY_NAMES_FULL = {
 class Schedule(BaseCog):
     """Availability scheduling with web-based management.
 
-    This cog owns the schedule web server lifecycle:
-    - Server starts in cog_ready()
-    - Server stops in cog_unload()
-
-    Attributes:
-        _server_task: The asyncio task running Uvicorn.
-        _server_started: Event signaling server startup complete.
+    Web server lifecycle is managed by the Web cog (cogs/web.py).
+    This cog provides NLP handlers for querying availability,
+    and owns the schedule-specific web UI logic (OAuth, API routes).
     """
-
-    def __init__(self, bot: "CoreBot") -> None:
-        """Initialize the Schedule cog.
-
-        Args:
-            bot: The Discord bot instance.
-        """
-        super().__init__(bot)
-        self._server_task: Optional[asyncio.Task[None]] = None
-        self._server_started = asyncio.Event()
-        self._uvicorn_server: Any = None  # uvicorn.Server, typed as Any for lazy import
-
-    async def cog_ready(self) -> None:
-        """Called when bot is ready. Start the web server if enabled."""
-        # Idempotency guard: Don't start another server if one is already running
-        if self._server_task is not None and not self._server_task.done():
-            self.logger.info("Web server already running, skipping start")
-            return
-
-        if not config.WEB_ENABLED:
-            self.logger.info("Web server disabled (WEB_ENABLED=False)")
-            return
-
-        # Check for required OAuth config
-        if not config.OAUTH_CLIENT_ID or not config.OAUTH_CLIENT_SECRET:
-            self.logger.warning(
-                "Web server enabled but OAuth not configured. "
-                "Set OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET in info.env"
-            )
-            return
-
-        if not config.WEB_SESSION_SECRET:
-            self.logger.warning(
-                "Web server enabled but WEB_SESSION_SECRET not set. "
-                "Generate a random secret for session signing."
-            )
-            return
-
-        # Start web server
-        self._server_task = asyncio.create_task(
-            self._run_web_server(),
-            name="schedule-web-server"
-        )
-
-    async def cog_unload(self) -> None:
-        """Called when cog is unloaded. Stop the web server."""
-        await self._stop_web_server()
-
-    async def _run_web_server(self) -> None:
-        """Run the Uvicorn web server.
-
-        This runs in-process, sharing the event loop with the Discord bot.
-        The server serves static files and API endpoints for the schedule UI.
-        """
-        try:
-            import uvicorn
-            from utils.web import create_app
-
-            app = create_app(self.bot)
-
-            # Custom server class to allow graceful shutdown
-            uvicorn_config = uvicorn.Config(
-                app=app,
-                host=config.WEB_HOST,
-                port=config.WEB_PORT,
-                log_level="warning" if not config.DEV_MODE else "info",
-                # Don't reload in production
-                reload=False,
-                # Access log only in dev
-                access_log=config.DEV_MODE,
-            )
-
-            self._uvicorn_server = uvicorn.Server(uvicorn_config)
-
-            self.logger.info(
-                f"Starting web server on http://{config.WEB_HOST}:{config.WEB_PORT}"
-            )
-            self._server_started.set()
-
-            try:
-                await self._uvicorn_server.serve()
-            except SystemExit as e:
-                # Uvicorn calls sys.exit(1) on port binding failure - don't let it crash the bot
-                if e.code == 1:
-                    self.logger.error(
-                        f"Web server failed to start (port {config.WEB_PORT} likely in use). "
-                        "The bot will continue without the web interface."
-                    )
-                else:
-                    raise
-
-        except ImportError as e:
-            self.logger.error(
-                f"Failed to import web server dependencies: {e}. "
-                "Install with: pip install fastapi uvicorn aiohttp"
-            )
-        except Exception as e:
-            self.logger.error(f"Web server error: {e}", exc_info=True)
-        finally:
-            self._server_started.clear()
-
-    async def _stop_web_server(self) -> None:
-        """Stop the Uvicorn web server gracefully."""
-        if self._uvicorn_server is not None:
-            self.logger.info("Stopping web server...")
-            self._uvicorn_server.should_exit = True
-
-        if self._server_task is not None:
-            try:
-                # Wait for server to finish with timeout
-                await asyncio.wait_for(self._server_task, timeout=5.0)
-                self.logger.info("Web server stopped gracefully")
-            except asyncio.TimeoutError:
-                self.logger.warning("Web server stop timed out, cancelling task")
-                self._server_task.cancel()
-                try:
-                    await self._server_task
-                except asyncio.CancelledError:
-                    pass
-            except Exception as e:
-                self.logger.error(f"Error stopping web server: {e}")
-            finally:
-                self._server_task = None
-                self._uvicorn_server = None
 
     # ========== NLP HANDLERS ==========
     # These methods are called by the NLP dispatcher in bot_class.py
