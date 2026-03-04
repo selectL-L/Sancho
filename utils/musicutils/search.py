@@ -241,10 +241,12 @@ class MetadataExtraction:
 
     Attributes:
         original: SearchResult built from the video's metadata.
-        base_query: Pre-computed search query (mf_title or vd_title depending
-            on video type and mismatch status). Author is NOT included.
-        vd_title: Raw videoDetails title, always the clean song name.
-            Used for CJK query pairing (CJK metadata is reliably mapped).
+        base_query: Pre-computed search query (resolved title or oe_title
+            depending on video type and mismatch status). Author is NOT included.
+        title: Resolved title — the title we decided to trust after mismatch
+            detection. From oEmbed when a catalog mismatch is detected,
+            otherwise from videoDetails. Used for CJK queries, star scoring,
+            YouTube search, and garbage filtering.
         author: Channel/artist name for display and star scoring only.
         jp_names: CJK artist name variants extracted from video tags.
         mismatch_detected: True if videoDetails title diverged from raw YouTube title.
@@ -252,7 +254,7 @@ class MetadataExtraction:
     """
     original: SearchResult
     base_query: str
-    vd_title: str
+    title: str
     author: str
     jp_names: List[str]
     mismatch_detected: bool
@@ -313,16 +315,16 @@ async def search_url_mode(
         return atv_result, [], [], video_id
 
     # Phase 3: Build original SearchResult and extract search parameters
-    ext = _build_original_metadata(video_id, metadata)
+    ext = await _build_original_metadata(video_id, metadata)
 
     # Phase 4: Search for alternatives
     songs, videos, original_found_as_atv = await _search_alternatives(
-        ext.base_query, ext.vd_title, ext.jp_names, video_id, ext.original
+        ext.base_query, ext.title, ext.jp_names, video_id, ext.original
     )
 
     # Phase 5: Pick recommendation
     recommended_id, star = _select_recommendation(
-        ext.original, songs, original_found_as_atv, ext.vd_title, ext.author
+        ext.original, songs, original_found_as_atv, ext.title, ext.author
     )
 
     # Select top 3 songs, but ensure starred track is included if found
@@ -526,6 +528,16 @@ async def _build_quick_result(
     duration = int(video_details.get('lengthSeconds', 0) or 0)
     view_count_val = extract_view_count(metadata)
 
+    # Check for catalog mismatch via oEmbed (same logic as _build_original_metadata)
+    oe_title = await fetch_oembed_title(video_id)
+
+    if oe_title and has_ytm_catalog_mismatch(title, oe_title):
+        logger.info(
+            f"[Quick Result] Catalog mismatch, using oEmbed: "
+            f"'{oe_title}' (videoDetails had '{title}')"
+        )
+        title = oe_title
+
     # Thumbnail: check actual dimensions rather than assuming square
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
     thumb_url = None
@@ -603,21 +615,25 @@ async def _build_quick_result(
     )
 
 
-def _build_original_metadata(
+async def _build_original_metadata(
     video_id: str,
     metadata: Dict[str, Any],
 ) -> MetadataExtraction:
     """Extract search parameters and build original SearchResult from metadata.
 
-    Handles catalog mismatch detection, video-type-aware query strategy,
-    and Japanese name extraction from tags.
+    Handles catalog mismatch detection via oEmbed cross-check,
+    video-type-aware query strategy, and Japanese name extraction from tags.
+
+    Title resolution priority:
+        1. oEmbed title (YouTube's real page title, catalog-independent)
+        2. Microformat title (fallback if oEmbed unavailable)
+        3. videoDetails title (default when no mismatch detected)
 
     Query strategy (base_query selection):
-        - Mismatch detected → microformat title (catalog pointed to wrong song)
-        - UGC → vd_title (author is cover channel, not the artist)
-        - OMV → microformat title if it differs from vd_title (contains artist
-          name in YouTube's raw format, e.g. "Artist - Song"), else vd_title
-        - Other (ATV, etc.) → vd_title (trust videoDetails)
+        - Mismatch detected → oEmbed title (catalog pointed to wrong song)
+        - OMV → oEmbed title if it differs from resolved_title (contains
+          artist name, e.g. "Artist - Song (Official Audio)")
+        - Other → resolved_title
 
     Author is excluded from queries entirely — it's unreliable for UGCs
     (cover channels) and OMVs (VEVO/Topic channels). Kept for display
@@ -639,32 +655,49 @@ def _build_original_metadata(
     duration = int(video_details.get('lengthSeconds', 0) or 0)
     view_count = extract_view_count(metadata)
 
-    # Extract microformat (raw YouTube title) for comparison
+    # Extract microformat (from YTM's catalog — may be contaminated like vd_title)
     microformat = metadata.get('microformat', {}).get('microformatDataRenderer', {})
     mf_title_raw = microformat.get('title', '')
     mf_title = clean_microformat_title(mf_title_raw) if mf_title_raw else ''
 
-    # Check for YTM catalog mismatch (videoDetails points to wrong song).
-    # This happens when YTM's catalog maps the wrong song to a video ID.
-    mismatch_detected = bool(mf_title) and has_ytm_catalog_mismatch(vd_title, mf_title)
-    if mismatch_detected:
-        logger.info(f"[URL Mode] Using microformat title due to catalog mismatch: '{mf_title}'")
+    # Fetch oEmbed title (YouTube's real page title, catalog-independent)
+    oe_title = await fetch_oembed_title(video_id)
 
-    # Determine base query by video type and mismatch status.
-    # Author is intentionally excluded — unreliable for UGCs (cover channels)
-    # and OMVs (VEVO/Topic channels). Microformat title for OMVs already
-    # contains the artist name (e.g. "Pop Smoke - Dior (Official Audio)").
-    if mismatch_detected:
-        base_query = mf_title
-    elif video_type == MUSIC_VIDEO_TYPE_UGC:
-        base_query = vd_title
-    elif video_type == MUSIC_VIDEO_TYPE_OMV:
-        if mf_title and mf_title != vd_title:
-            base_query = mf_title
-        else:
-            base_query = vd_title
+    logger.info(
+        f"[URL Mode] Title sources: vd='{vd_title}' | mf='{mf_title}' | "
+        f"oe='{oe_title or '(unavailable)'}'"
+    )
+
+    # Check for YTM catalog mismatch.
+    # Only oEmbed is reliable — microformat comes from the same YTM catalog
+    # as videoDetails and can be contaminated identically.
+    mismatch_detected = bool(oe_title) and has_ytm_catalog_mismatch(vd_title, oe_title)
+
+    # --- Title resolution ---
+    # vd_title is what YTM's catalog thinks this video is.
+    # oe_title is what YouTube's own page says it is (ground truth).
+    # When they disagree in ways that indicate a catalog error, trust YouTube.
+    # (mismatch_detected=True guarantees oe_title is not None)
+    if mismatch_detected and oe_title:
+        resolved_title = oe_title
+        logger.info(
+            f"[URL Mode] Title resolved from oEmbed: '{oe_title}' "
+            f"(videoDetails had '{vd_title}')"
+        )
     else:
-        base_query = vd_title
+        resolved_title = vd_title
+
+    # Determine base query by video type.
+    # Author is intentionally excluded — unreliable for UGCs (cover channels)
+    # and OMVs (VEVO/Topic channels).
+    #
+    # OMV oEmbed titles bake in the artist name
+    # (e.g. "Artist - Song (Official Audio)"), making them
+    # better search queries than the clean song title alone.
+    if video_type == MUSIC_VIDEO_TYPE_OMV and oe_title and oe_title != resolved_title:
+        base_query = oe_title
+    else:
+        base_query = resolved_title
 
     logger.debug(
         f"[URL Mode] Query strategy: video_type={video_type}, "
@@ -673,7 +706,7 @@ def _build_original_metadata(
 
     # Extract tags for Japanese name extraction
     tags = microformat.get('tags', [])
-    jp_names = extract_jp_names(tags, video_title=vd_title, author=vd_author)
+    jp_names = extract_jp_names(tags, video_title=resolved_title, author=vd_author)
 
     # Build original SearchResult
     thumbnails = video_details.get('thumbnail', {}).get('thumbnails', [])
@@ -681,7 +714,7 @@ def _build_original_metadata(
 
     original = SearchResult(
         video_id=video_id,
-        title=vd_title,
+        title=resolved_title,
         artist=vd_author,
         artist_id=None,
         duration_seconds=duration,
@@ -695,7 +728,7 @@ def _build_original_metadata(
     return MetadataExtraction(
         original=original,
         base_query=base_query,
-        vd_title=vd_title,
+        title=resolved_title,
         author=vd_author,
         jp_names=jp_names,
         mismatch_detected=mismatch_detected,
@@ -705,7 +738,7 @@ def _build_original_metadata(
 
 async def _search_alternatives(
     base_query: str,
-    vd_title: str,
+    title: str,
     jp_names: List[str],
     video_id: str,
     original: SearchResult,
@@ -718,7 +751,7 @@ async def _search_alternatives(
 
     Args:
         base_query: Pre-computed search query (title only, no author).
-        vd_title: Raw videoDetails title for CJK query pairing and filtering.
+        title: Resolved title for CJK query pairing and filtering.
         jp_names: Japanese name variants extracted from tags.
         video_id: Original video ID to exclude from results.
         original: The original SearchResult (mutated to attach artist_id if found).
@@ -727,12 +760,11 @@ async def _search_alternatives(
         Tuple of (songs, videos, original_found_as_atv).
     """
     # Build query list. base_query handles the primary search.
-    # CJK queries always pair vd_title (the clean song name) with Japanese
-    # name variants — CJK metadata on YTM is reliably mapped, so vd_title
-    # is always safe for this pairing.
+    # CJK queries pair the resolved title with Japanese name variants —
+    # CJK metadata on YTM is reliably mapped.
     queries = [base_query]
     for jp_name in jp_names[:2]:
-        queries.append(f"{vd_title} {jp_name}")
+        queries.append(f"{title} {jp_name}")
 
     # Search YTM with all queries, collecting unique results
     all_ytm_results: List[SearchResult] = []
@@ -756,8 +788,8 @@ async def _search_alternatives(
                     original_found_as_atv = True
                     logger.info(f"[URL Mode] Original {video_id} found as ATV in YTM")
 
-    # Search YouTube (vd_title only), excluding IDs already seen
-    yt_results = await search_youtube(vd_title, limit=6)
+    # Search YouTube (resolved title), excluding IDs already seen
+    yt_results = await search_youtube(title, limit=6)
     yt_results = [r for r in yt_results if r.video_id not in seen_ids and r.video_id != video_id]
 
     # Split into songs and videos
@@ -766,13 +798,13 @@ async def _search_alternatives(
 
     # Garbage filter videos only - YTM ATVs are curated, trust them
     # If filtering would remove ALL videos, skip it rather than returning nothing.
-    filtered_videos = [r for r in videos if is_relevant(vd_title, r)]
+    filtered_videos = [r for r in videos if is_relevant(title, r)]
     if filtered_videos or not videos:
         videos = filtered_videos
     else:
         logger.warning(
             f"[URL Mode] Garbage filter would remove ALL {len(videos)} videos "
-            f"for '{vd_title}' — skipping filter"
+            f"for '{title}' — skipping filter"
         )
 
     return songs, videos, original_found_as_atv
@@ -1016,6 +1048,41 @@ async def search_youtube(query: str, limit: int = 6) -> List[SearchResult]:
     except Exception as e:
         logger.warning(f"[YT Search] Error searching: {e}")
         return []
+
+
+async def fetch_oembed_title(video_id: str) -> Optional[str]:
+    """Fetch the real YouTube page title via oEmbed.
+
+    YouTube's oEmbed endpoint returns the actual page title, independent
+    of YTM's catalog layer. This serves as ground truth when YTM's
+    videoDetails and microformat are both contaminated by catalog overrides.
+
+    Args:
+        video_id: YouTube video ID.
+
+    Returns:
+        The cleaned oEmbed title, or None if the fetch fails.
+    """
+    if not AIOHTTP_AVAILABLE:
+        return None
+
+    url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+    try:
+        async with aiohttp.ClientSession() as session:  # type: ignore[union-attr]
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:  # type: ignore[union-attr]
+                if resp.status == 200:
+                    data = await resp.json()
+                    raw_title = data.get('title', '')
+                    if raw_title:
+                        return clean_microformat_title(raw_title)
+                else:
+                    logger.debug(f"[oEmbed] HTTP {resp.status} for {video_id}")
+    except asyncio.TimeoutError:
+        logger.debug(f"[oEmbed] Timeout fetching {video_id}")
+    except Exception as e:
+        logger.debug(f"[oEmbed] Fetch failed for {video_id}: {e}")
+
+    return None
 
 
 # =============================================================================
@@ -2275,40 +2342,41 @@ def clean_microformat_title(title: str) -> str:
 
 
 # Keywords that indicate YTM mapped a remix/alternate version instead of the original.
-# If these appear in videoDetails but NOT in microformat, it's a catalog mismatch.
+# If these appear in videoDetails but NOT in the trusted title, it's a catalog mismatch.
 CATALOG_MISMATCH_KEYWORDS = frozenset({
     'slowed', 'reverb', 'remix', 'nightcore', 'sped', 'speedup',
     'speed', 'bass', 'boosted', 'bassboosted', '8d', 'audio',
     'lofi', 'lo-fi', 'acoustic', 'instrumental', 'karaoke',
     'cover', 'live', 'concert', 'extended', 'edit', 'mashup',
+    'ver',
 })
 
 
-def has_ytm_catalog_mismatch(vd_title: str, mf_title: str) -> bool:
+def has_ytm_catalog_mismatch(vd_title: str, trusted_title: str) -> bool:
     """Detect if YTM videoDetails points to a wrong version (catalog mismatch).
 
     YTM's catalog sometimes maps the wrong song variant to a video ID. For example,
     the original song's ID might return metadata for a "Slowed + Reverb" version.
 
     We detect this by checking if videoDetails contains specific remix/version
-    keywords that don't appear in the microformat (raw YouTube) title. Only these
-    keywords trigger a mismatch—author differences are ignored (channel name vs
-    artist name is expected and doesn't pollute search results significantly).
+    keywords that don't appear in the trusted title (oEmbed or microformat
+    fallback). Only these keywords trigger a mismatch — author differences are
+    ignored (channel name vs artist name is expected).
 
     Args:
-        vd_title: Title from videoDetails.
-        mf_title: Cleaned title from microformat (raw YouTube title).
+        vd_title: Title from videoDetails (potentially contaminated by YTM catalog).
+        trusted_title: Cleaned title from oEmbed (preferred) or microformat (fallback).
 
     Returns:
-        True if mismatch detected (use microformat instead), False otherwise.
+        True if mismatch detected (use trusted title instead), False otherwise.
     """
-    # Compare only titles, not author—author differences are expected
+    # Compare only titles, not author — author differences are expected
     # (channel name vs artist name is normal, not a mismatch)
     vd_words = extract_words(vd_title)
-    mf_words = extract_words(mf_title)
+    trusted_words = extract_words(trusted_title)
 
-    # Words in videoDetails but NOT in microformat
-    extra_in_vd = vd_words - mf_words
+    # Words in videoDetails but NOT in the trusted title
+    extra_in_vd = vd_words - trusted_words
 
     # Check if any are catalog mismatch keywords
     mismatch_words = extra_in_vd & CATALOG_MISMATCH_KEYWORDS
@@ -2317,7 +2385,7 @@ def has_ytm_catalog_mismatch(vd_title: str, mf_title: str) -> bool:
         logger.warning(
             f"[YTM Metadata] Catalog mismatch detected: "
             f"videoDetails='{vd_title}' has version keywords {mismatch_words} "
-            f"not in microformat='{mf_title}'"
+            f"not in trusted title='{trusted_title}'"
         )
         return True
 
