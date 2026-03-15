@@ -85,6 +85,40 @@ function renderAll() {
   renderBuckets();
 }
 
+// ── V6: Inject counter defenses into skills so the calculator can see them ──
+
+function getSkillsWithCounters(identity) {
+  if (!identity) return [];
+  const skills = [...identity.skills];
+  for (const defKey of ['defense', 'defense2']) {
+    const def = identity[defKey];
+    if (!def) continue;
+    if (def.inert) continue;
+    const dtype = (def.type || '').toLowerCase();
+    if (!dtype.includes('counter')) continue;
+    // Build a skill-like object from the defense data
+    skills.push({
+      label: defKey === 'defense' ? 'Counter' : 'Counter 2',
+      name: def.name,
+      base_power: def.base_power || 0,
+      coin_value: def.coin_value || 0,
+      num_coins: def.num_coins || 1,
+      damage_type: def.damage_type || '',
+      sin_affinity: '',
+      offense_level_offset: def.offense_level_offset || 0,
+      atk_weight: 1,
+      deck_count: -1,
+      is_minus_coin: def.is_minus_coin || false,
+      has_unbreakable_coins: false,
+      base_bonuses: def.base_bonuses || {},
+      best_case: def.best_case || {},
+      coin_effects: def.coin_effects || [],
+      raw_conditionals: def.raw_conditionals || [],
+    });
+  }
+  return skills;
+}
+
 // ── Bake skill: apply base/enhanced bonuses into flat values ──
 
 function bakeSkill(rawSkill, tier) {
@@ -100,22 +134,32 @@ function bakeSkill(rawSkill, tier) {
     let totalPowerAdd = 0;
     let dmgBonus = 0;
     let extraHit = 0;
+    let reuse = 0;
     for (const ce of effects) {
       const include = tier === 'enhanced' || !ce.is_conditional;
       if (include) {
         if (ce.power_add) { hasPowerAdd = true; totalPowerAdd += ce.power_add; }
         dmgBonus += ce.dmg_bonus || 0;
         extraHit += ce.extra_hit_pct || 0;
+        reuse = Math.max(reuse, ce.reuse_count || 0);
       }
       // dmg_bonus_on_crit is ALWAYS included (crit always assumed)
       dmgBonus += ce.dmg_bonus_on_crit || 0;
     }
 
-    coins.push({
+    const coinEntry = {
       coinValueOverride: hasPowerAdd ? String(baseCoin + totalPowerAdd) : '',
       dmgBonusAdd: dmgBonus ? String(dmgBonus) : '',
       extraHitPct: extraHit ? String(extraHit) : '',
-    });
+    };
+
+    // V6: Push the coin once, then duplicate for reuse (each reuse = one more identical coin)
+    coins.push(coinEntry);
+    if (tier === 'enhanced') {
+      for (let r = 0; r < reuse; r++) {
+        coins.push({ ...coinEntry });
+      }
+    }
   }
 
   return {
@@ -123,7 +167,7 @@ function bakeSkill(rawSkill, tier) {
     name: rawSkill.name,
     base_power: rawSkill.base_power + (bonuses.base_power_add || 0),
     coin_value: baseCoin,
-    num_coins: rawSkill.num_coins,
+    num_coins: coins.length,  // V6: includes reuse duplicates
     damage_type: rawSkill.damage_type,
     sin_affinity: rawSkill.sin_affinity || '',
     offense_level_offset: rawSkill.offense_level_offset || 0,
@@ -146,7 +190,8 @@ function renderPicker() {
     : getAllIdentities());
 
   const identity = (!isCustom && state.selectedIdentity) ? getIdentityById(state.selectedIdentity) : null;
-  const labels = identity ? [...new Set(identity.skills.map(s => s.label))] : [];
+  const allSkills = getSkillsWithCounters(identity);
+  const labels = identity ? [...new Set(allSkills.map(s => s.label))] : [];
   const hasId = !!identity;
 
   el.innerHTML = `
@@ -271,9 +316,10 @@ function addSkills(label, tier) {
   const identity = getIdentityById(state.selectedIdentity);
   if (!identity) return;
   const bucket = state.buckets[state.buckets.length - 1];
+  const allSkills = getSkillsWithCounters(identity);
   const skills = label === '__all__'
-    ? identity.skills
-    : identity.skills.filter(s => s.label === label);
+    ? allSkills
+    : allSkills.filter(s => s.label === label);
 
   for (const raw of skills) {
     const baked = bakeSkill(raw, tier);
@@ -513,6 +559,19 @@ function setupBucketEvents() {
       addBlankSkill();
       return;
     }
+    if (e.target.id === 'export-json-btn') {
+      const identity = getIdentityById(state.selectedIdentity);
+      if (!identity) return;
+      const json = JSON.stringify(identity, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${identity.name.replace(/[^a-zA-Z0-9 _-]/g, '')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
   });
 
   // Drag and drop
@@ -739,6 +798,7 @@ function renderBuckets() {
   html += `<div class="bottom-actions">
     <button id="add-bucket-btn" class="btn btn-secondary">+ Add Bucket</button>
     <button id="add-custom-btn" class="btn btn-secondary">+ Custom Skill</button>
+    <button id="export-json-btn" class="btn btn-primary" ${state.selectedIdentity ? '' : 'disabled'}>Export Identity JSON</button>
   </div>
   <div class="footer-note">Total% includes offense level modifier and physical &amp; sin resistances. Base crit (+20%) is assumed and not shown.</div>`;
   el.innerHTML = html;
