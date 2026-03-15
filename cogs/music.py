@@ -21,7 +21,6 @@ Dependencies:
 """
 
 import asyncio
-import logging
 import os
 import random
 import time
@@ -132,7 +131,6 @@ class Music(MusicCommandsMixin, BaseCog):
         # Audio fetcher for retry orchestration (replaces self._retry)
         self._audio_fetcher = AudioFetcher(
             self.cache_manager,
-            self.logger,
             on_residential_attempt=self._on_residential_attempt
         )
 
@@ -1554,7 +1552,7 @@ class Music(MusicCommandsMixin, BaseCog):
                 return
 
             # Debug: trace who called this and with what index (guarded - extract_stack is expensive)
-            if self.logger.isEnabledFor(logging.DEBUG):
+            if self.logger.isEnabledFor(10):  # DEBUG
                 import traceback
                 caller = traceback.extract_stack()[-2]
                 self.logger.debug(

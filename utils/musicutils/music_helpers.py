@@ -152,6 +152,37 @@ def get_residential_proxy_url() -> Optional[str]:
 
 
 # ==========================================================================
+# YT-DLP LOGGER ADAPTER
+# ==========================================================================
+
+
+class _YtdlpLoggerAdapter:
+    """Routes yt-dlp warnings and errors through our logging system.
+
+    yt-dlp calls debug(), warning(), and error() on this object.
+    With quiet=True, only warnings and errors flow through — these are
+    the only actionable signals (403s, extraction failures, plugin errors).
+    The POT HTTP provider is opaque and produces no log output on success,
+    so verbose/debug output is pure noise.
+    """
+
+    def __init__(self) -> None:
+        self._logger = logging.getLogger('yt-dlp')
+
+    def debug(self, msg: str) -> None:
+        self._logger.debug(msg)
+
+    def warning(self, msg: str) -> None:
+        self._logger.warning(msg)
+
+    def error(self, msg: str) -> None:
+        self._logger.error(msg)
+
+
+_ytdlp_logger = _YtdlpLoggerAdapter()
+
+
+# ==========================================================================
 # YT-DLP BASE OPTIONS
 # ==========================================================================
 
@@ -167,7 +198,8 @@ YTDLP_OPTIONS = {
     'ignoreerrors': True,  # Skip unavailable videos
     'logtostderr': False,
     'quiet': True,
-    'no_warnings': True,
+    'no_warnings': False,
+    'logger': _ytdlp_logger,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
@@ -327,7 +359,6 @@ from .search import (  # noqa: E402
 
 async def get_audio_url(
     track: 'Track',
-    logger: Any,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> AudioUrlResult:
     """Gets the actual streamable audio URL for a track.
@@ -337,7 +368,6 @@ async def get_audio_url(
 
     Args:
         track: The track to get the audio URL for.
-        logger: Logger instance for debug/error messages.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:

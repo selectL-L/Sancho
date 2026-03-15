@@ -166,7 +166,7 @@ def music_cog(mock_bot):
         cog.loop_mode = LoopMode.OFF
         cog.active_session = None
         cog._playback = PlaybackState()
-        cog._audio_fetcher = AudioFetcher(cog.cache_manager, cog.logger)
+        cog._audio_fetcher = AudioFetcher(cog.cache_manager)
 
         # Mock db_manager for async calls
         cog.db_manager = MagicMock()

@@ -44,10 +44,8 @@ def mock_cache_manager():
 @pytest.fixture
 def fetcher(mock_cache_manager):
     """Create an AudioFetcher with mocked dependencies."""
-    logger = MagicMock()
     return AudioFetcher(
         cache_manager=mock_cache_manager,
-        logger=logger
     )
 
 

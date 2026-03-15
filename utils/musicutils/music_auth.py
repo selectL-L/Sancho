@@ -455,7 +455,6 @@ class AudioFetcher:
 
     # Instance fields
     cache_manager: Any = field(repr=False)  # MusicCacheManager
-    logger: Any = field(repr=False)
 
     # Optional callback fired BEFORE residential proxy attempt (not after)
     # Signature: async def callback(track_title: str) -> None
@@ -516,7 +515,7 @@ class AudioFetcher:
 
         state = self._get_state(track.video_id)
 
-        self.logger.debug(
+        logger.debug(
             f"[AudioFetcher] fetch({context.value}) for {track.title[:30]}... "
             f"(direct={state.direct_attempts}, residential={state.residential_attempts})"
         )
@@ -532,7 +531,7 @@ class AudioFetcher:
             residential_allowed=False,
         )
         if any_cached:
-            self.logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
+            logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
             self.clear_state(track.video_id)  # Clean up - no retry state needed
             return AudioFetchResult(success=True, local_path=any_cached)
 
@@ -543,7 +542,7 @@ class AudioFetcher:
         # ---------------------------------------------------------------------
         if state.direct_attempts < self.DIRECT_MAX:
             state.direct_attempts += 1
-            self.logger.info(
+            logger.info(
                 f"[AudioFetcher] Direct fetch attempt {state.direct_attempts}/{self.DIRECT_MAX}: {track.title}"
             )
             result = await self._try_direct(track)
@@ -568,7 +567,7 @@ class AudioFetcher:
                 # Track 403 for alerting
                 should_alert = _youtube_auth.record_403()
                 if should_alert:
-                    self.logger.warning(
+                    logger.warning(
                         "[AudioFetcher] High 403 rate detected - check YouTube auth"
                     )
 
@@ -584,7 +583,7 @@ class AudioFetcher:
             residential_allowed=True,
         )
         if cached:
-            self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
+            logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
             self.clear_state(track.video_id)  # Clean up - no retry state needed
             return AudioFetchResult(success=True, local_path=cached)
 
@@ -593,7 +592,7 @@ class AudioFetcher:
         # Don't spend proxy bandwidth on speculative prefetching.
         # ---------------------------------------------------------------------
         if context == FetchContext.PREFETCH:
-            self.logger.info(
+            logger.info(
                 "[AudioFetcher] PREFETCH mode - no local cache, stopping (will retry LIVE if played)"
             )
             return AudioFetchResult(
@@ -623,10 +622,10 @@ class AudioFetcher:
         ydl_opts = get_ytdlp_options({'extract_flat': False})
 
         try:
-            result = await get_audio_url(track, self.logger, ydl_opts)
+            result = await get_audio_url(track, ydl_opts)
 
             if result.success:
-                self.logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
+                logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
                 return AudioFetchResult(
                     success=True,
                     url=result.url,
@@ -637,7 +636,7 @@ class AudioFetcher:
 
             # No URL but no exception - likely unavailable or extraction failed
             is_auth = not result.is_unavailable  # If not unavailable, assume auth issue
-            self.logger.info(
+            logger.info(
                 f"[AudioFetcher] Direct fetch failed: {track.title} "
                 f"(unavailable={result.is_unavailable}, auth_issue={is_auth})"
             )
@@ -651,7 +650,7 @@ class AudioFetcher:
         except Exception as e:
             is_auth = is_403_error(e)
             is_gone = is_video_unavailable(e)
-            self.logger.info(
+            logger.info(
                 f"[AudioFetcher] Direct fetch exception: {track.title} "
                 f"(403={is_auth}, unavailable={is_gone}, error={str(e)[:100]})"
             )
@@ -670,7 +669,7 @@ class AudioFetcher:
         """Attempt residential proxy download."""
         # Check attempt limit
         if state.residential_attempts >= self.RESIDENTIAL_MAX:
-            self.logger.info(
+            logger.info(
                 f"[AudioFetcher] Residential exhausted ({state.residential_attempts}/{self.RESIDENTIAL_MAX})"
             )
             return AudioFetchResult(
@@ -682,7 +681,7 @@ class AudioFetcher:
         # Check if proxy is configured
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
-            self.logger.warning("[AudioFetcher] Residential proxy not configured")
+            logger.warning("[AudioFetcher] Residential proxy not configured")
             return AudioFetchResult(
                 success=False,
                 error="Residential proxy not configured"
@@ -692,13 +691,13 @@ class AudioFetcher:
         elapsed = time.time() - self._last_residential_time
         if elapsed < self.RESIDENTIAL_MIN_DELAY and self._last_residential_time > 0:
             delay = self.RESIDENTIAL_MIN_DELAY - elapsed
-            self.logger.debug(f"[AudioFetcher] Rate limiting: waiting {delay:.1f}s")
+            logger.debug(f"[AudioFetcher] Rate limiting: waiting {delay:.1f}s")
             await asyncio.sleep(delay)
 
         state.residential_attempts += 1
         self._last_residential_time = time.time()
 
-        self.logger.info(
+        logger.info(
             f"[AudioFetcher] Residential download {state.residential_attempts}/{self.RESIDENTIAL_MAX}: {track.title}"
         )
 
@@ -707,7 +706,7 @@ class AudioFetcher:
             try:
                 await self.on_residential_attempt(track.title)
             except Exception as e:
-                self.logger.debug(f"[AudioFetcher] Residential callback error: {e}")
+                logger.debug(f"[AudioFetcher] Residential callback error: {e}")
 
         # Download via cache_manager
         success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_live_residential(
@@ -715,7 +714,7 @@ class AudioFetcher:
         )
 
         if success and cached_path:
-            self.logger.info(
+            logger.info(
                 f"[AudioFetcher] Residential success: {track.title} "
                 f"({bytes_downloaded / 1024 / 1024:.2f} MB)"
             )
@@ -727,7 +726,7 @@ class AudioFetcher:
                 residential_bytes=bytes_downloaded,
             )
 
-        self.logger.info(
+        logger.info(
             f"[AudioFetcher] Residential failed: {track.title} - {error_msg}"
         )
         return AudioFetchResult(
