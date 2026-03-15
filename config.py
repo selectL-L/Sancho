@@ -413,49 +413,13 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(funcName)s:
 # =============================================================================
 # ENVIRONMENT VARIABLES - Music (YouTube Authentication)
 # =============================================================================
-# PO Token Provider - HTTP server that generates proof-of-origin tokens for YouTube.
-# This helps bypass 403 errors on datacenter IPs. The server is started/stopped with the bot.
-# One-time setup: clone repo somewhere under APP_PATH (or under the venv), run npm install && npx tsc
+# PO Token Provider — compiled Deno binary that generates proof-of-origin tokens for YouTube.
+# Helps bypass 403 errors on datacenter IPs. Started/stopped with the bot.
+# Setup: compile with deno and place the binary in the bot's venv root.
 
-# Path inside a POT provider directory that identifies a valid build.
-_POT_ENTRY_POINT = os.path.join('server', 'build', 'main.js')
-
-# Directories that never contain a POT provider — skip them during search.
-_POT_SEARCH_PRUNE = {
-    '__pycache__', 'node_modules', '.git', 'logs', 'cache',
-    'assets', 'cogs', 'tests', 'Impls', 'web',
-}
-
-
-def _find_pot_provider() -> Optional[str]:
-    """Discover the POT provider script by walking known root directories.
-
-    Looks for any directory whose name contains "pot" (case-insensitive) and
-    checks for ``server/build/main.js`` inside it. This handles both the
-    original ``pot_provider`` layout and the upstream repo name
-    ``bgutil-ytdlp-pot-provider``.
-
-    Searches APP_PATH first (project folder), then falls back to sys.prefix
-    (venv folder). Returns the first match or None.
-
-    Returns:
-        The absolute path to the POT provider main.js, or None if not found.
-    """
-    search_roots = [APP_PATH, sys.prefix]
-    for root in search_roots:
-        for dirpath, dirnames, _filenames in os.walk(root):
-            # Check child dirs whose name contains "pot" for the entry point
-            for d in dirnames:
-                if 'pot' in d.lower():
-                    candidate = os.path.join(dirpath, d, _POT_ENTRY_POINT)
-                    if os.path.isfile(candidate):
-                        return candidate
-            # Prune directories we never need to descend into
-            dirnames[:] = [d for d in dirnames if d not in _POT_SEARCH_PRUNE]
-    return None
-
-
-POT_PROVIDER_PATH: Optional[str] = _find_pot_provider()
+_POT_BINARY_NAME = 'pot-server.exe' if os.name == 'nt' else 'pot-server'
+_pot_candidate = os.path.join(sys.prefix, _POT_BINARY_NAME)
+POT_PROVIDER_PATH: Optional[str] = _pot_candidate if os.path.isfile(_pot_candidate) else None
 
 raw_pot_port = os.getenv('POT_PROVIDER_PORT')
 POT_PROVIDER_PORT: Optional[int] = int(raw_pot_port) if raw_pot_port and raw_pot_port.isdigit() else None

@@ -29,7 +29,7 @@ from utils.musicutils import (
     MusicCacheManager,
     get_youtube_auth_status,
 )
-from utils.musicutils.music_auth import _detect_youtube_auth
+from utils.musicutils.music_auth import detect_youtube_auth
 from utils.views import get_selection, show_dashboard, show_status, StatusData, StatusHealth
 
 if TYPE_CHECKING:
@@ -740,8 +740,8 @@ class AdminCog(BaseCog):
         # =====================================================================
 
         # Force refresh POT server status before reading
-        # _detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
-        await asyncio.to_thread(_detect_youtube_auth)
+        # detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(detect_youtube_auth, 'status_command')
         auth_status = get_youtube_auth_status()
         auth_method = auth_status.auth_method
         pot_server_running = auth_status.pot_server_running
@@ -1166,8 +1166,8 @@ class AdminCog(BaseCog):
         )
 
         # Check current status
-        # _detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
-        await asyncio.to_thread(_detect_youtube_auth)
+        # detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(detect_youtube_auth, 'cookie_info')
         auth_status = get_youtube_auth_status()
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
         if cookie_path and await asyncio.to_thread(os.path.isfile, cookie_path):
@@ -1281,9 +1281,8 @@ class AdminCog(BaseCog):
             auth_status.last_check = 0
             auth_status.auth_method = None
 
-            # Force re-detection (_detect_youtube_auth is sync with socket timeout)
-            from utils.musicutils.music_auth import _detect_youtube_auth
-            await asyncio.to_thread(_detect_youtube_auth)
+            # Force re-detection (detect_youtube_auth is sync with socket timeout)
+            await asyncio.to_thread(detect_youtube_auth, 'cookie_upload')
 
             # Success message
             embed = discord.Embed(

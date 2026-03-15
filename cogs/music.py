@@ -144,7 +144,7 @@ class Music(MusicCommandsMixin, BaseCog):
 
         # PO Token Provider server subprocess (started in cog_ready)
         self._pot_server_process: Optional[asyncio.subprocess.Process] = None
-        self._pot_server_healthy: bool = False
+        self._pot_health_task: Optional[asyncio.Task[None]] = None
 
     async def _on_residential_attempt(self, track_title: str) -> None:
         """Callback fired BEFORE residential proxy attempt starts.
@@ -244,104 +244,96 @@ class Music(MusicCommandsMixin, BaseCog):
         return status
 
     async def _start_pot_server(self) -> bool:
-        """Start the PO Token Provider HTTP server if available.
+        """Start the PO Token Provider server if available.
 
-        The server generates proof-of-origin tokens for YouTube requests,
-        helping bypass 403 errors on datacenter IPs.
+        Launches the compiled Deno binary directly. The server generates
+        proof-of-origin tokens for YouTube requests, helping bypass 403
+        errors on datacenter IPs.
 
         Returns:
             True if server started successfully, False otherwise.
         """
+        from utils.musicutils.music_auth import _check_pot_server_running, get_youtube_auth_status
+        auth_status = get_youtube_auth_status()
+
         # Idempotency guard: Don't start another server if one is already running
         if self._pot_server_process is not None and self._pot_server_process.returncode is None:
             self.logger.info("POT server already running, skipping start")
-            return self._pot_server_healthy
+            return True
 
-        pot_script = getattr(config, 'POT_PROVIDER_PATH', None)
-        pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
+        pot_binary = config.POT_PROVIDER_PATH
+        pot_port = config.POT_PROVIDER_PORT
 
-        # If port not configured, POT system is disabled
         if pot_port is None:
             self.logger.info("POT_PROVIDER_PORT not configured, skipping POT server")
             return False
 
-        if not pot_script:
-            self.logger.info("POT provider script not found (searched APP_PATH and venv)")
+        # Check if an external instance is already listening on the port
+        if _check_pot_server_running(pot_port):
+            self.logger.info(f"POT server already responding on port {pot_port}, skipping start")
+            auth_status.update_pot_health(True)
+            return True
+
+        if not pot_binary:
+            self.logger.info("POT server binary not found in venv, skipping")
             return False
 
-        self.logger.info(f"Discovered POT provider at: {pot_script}")
-
-        # Check if node is available
-        import shutil
-        if not shutil.which('node'):
-            self.logger.warning("Node.js not found in PATH, cannot start POT server")
-            return False
+        self.logger.info(f"Starting POT server: {pot_binary} --port {pot_port}")
 
         try:
-            self.logger.info(f"Starting POT provider server on port {pot_port}...")
-
-            # Start the Node.js server
             self._pot_server_process = await asyncio.create_subprocess_exec(
-                'node', pot_script, '--port', str(pot_port),
+                pot_binary, '--port', str(pot_port),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
-                # Don't let it inherit our stdin
                 stdin=asyncio.subprocess.DEVNULL,
             )
 
-            # Wait for server to become healthy with retries
-            # Node.js server can take 2-5 seconds to fully initialize
-            max_wait = 10.0  # Total max wait time
-            check_interval = 0.5  # Check every 500ms
+            # Poll for readiness using the single TCP probe
+            max_wait = 10.0
+            check_interval = 0.5
             elapsed = 0.0
 
             while elapsed < max_wait:
                 await asyncio.sleep(check_interval)
                 elapsed += check_interval
 
-                # Check if process died
+                # Check if process died during startup
                 if self._pot_server_process.returncode is not None:
                     stderr_data = await self._pot_server_process.stderr.read() if self._pot_server_process.stderr else b''
                     stderr_text = stderr_data.decode('utf-8', errors='replace')[:500]
                     self.logger.error(f"POT server failed to start: {stderr_text}")
                     self._pot_server_process = None
+                    auth_status.update_pot_health(False)
                     return False
 
-                # Check if healthy
-                if await self._check_pot_server_health():
-                    self._pot_server_healthy = True
-                    self.logger.info(f"POT provider server started successfully (PID: {self._pot_server_process.pid}, took {elapsed:.1f}s)")
+                if _check_pot_server_running(pot_port):
+                    auth_status.update_pot_health(True)
+                    self.logger.info(
+                        f"POT server started successfully "
+                        f"(PID: {self._pot_server_process.pid}, took {elapsed:.1f}s)"
+                    )
                     return True
 
-            # Timed out waiting for health
             self.logger.warning(f"POT server started but not responding after {max_wait}s")
+            auth_status.update_pot_health(False)
             return False
 
         except Exception as e:
             self.logger.error(f"Failed to start POT server: {e}", exc_info=True)
-            return False
-
-    async def _check_pot_server_health(self) -> bool:
-        """Check if the POT server is responding.
-
-        Returns:
-            True if server is healthy, False otherwise.
-        """
-        pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
-        if pot_port is None:
-            return False
-
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.0)) as session:
-                async with session.get(f'http://127.0.0.1:{pot_port}/ping') as resp:
-                    return resp.status == 200
-        except Exception as e:
-            self.logger.debug(f"POT server health check failed: {e}")
+            auth_status.update_pot_health(False)
             return False
 
     async def _stop_pot_server(self) -> None:
         """Stop the PO Token Provider server if running."""
+        # Cancel health watchdog first
+        if self._pot_health_task is not None:
+            self._pot_health_task.cancel()
+            try:
+                await self._pot_health_task
+            except asyncio.CancelledError:
+                pass
+            self._pot_health_task = None
+
         if self._pot_server_process is None:
             return
 
@@ -364,7 +356,64 @@ class Music(MusicCommandsMixin, BaseCog):
             self.logger.error(f"Error stopping POT server: {e}")
         finally:
             self._pot_server_process = None
-            self._pot_server_healthy = False
+            from utils.musicutils.music_auth import get_youtube_auth_status
+            get_youtube_auth_status().update_pot_health(False)
+
+    async def _pot_health_watchdog(self) -> None:
+        """Background watchdog for POT server health.
+
+        Runs every 30 minutes. Uses a layered approach:
+        1. If the subprocess has exited -> immediate death detection
+        2. If a live fetch confirmed health recently (< 30 min) -> skip probe
+        3. Otherwise -> TCP probe (covers idle periods with no fetches)
+
+        On healthy->dead transition, DMs bot owners once.
+        """
+        from utils.musicutils.music_auth import _check_pot_server_running, get_youtube_auth_status
+        auth_status = get_youtube_auth_status()
+        pot_port = config.POT_PROVIDER_PORT
+
+        if pot_port is None:
+            return
+
+        while True:
+            await asyncio.sleep(1800)  # 30 minutes
+
+            # Layer 1: Check if the process itself has exited
+            if self._pot_server_process is not None and self._pot_server_process.returncode is not None:
+                running = False
+                self.logger.warning(
+                    f"POT server process exited with code {self._pot_server_process.returncode}"
+                )
+                self._pot_server_process = None
+
+            # Layer 2: If live traffic has confirmed health recently, skip probe
+            elif (time.time() - auth_status.last_pot_confirmed) < 1800:
+                self.logger.debug("POT health confirmed by recent live fetch, skipping probe")
+                continue
+
+            # Layer 3: No recent live signal — TCP probe
+            else:
+                running = await asyncio.to_thread(_check_pot_server_running, pot_port)
+
+            transition = auth_status.update_pot_health(running)
+
+            if transition is True:
+                # Server just died — notify owners once
+                self.logger.error("POT server health check failed — server appears to be down")
+                for owner_id in config.OWNER_IDS:
+                    try:
+                        owner = self.bot.get_user(owner_id) or await self.bot.fetch_user(owner_id)
+                        await owner.send(
+                            "\u26a0\ufe0f **POT server is down**\n"
+                            "The PO token server stopped responding. "
+                            "YouTube playback may experience 403 errors.\n"
+                            "Use the status command to check current state."
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Failed to DM owner {owner_id} about POT server death: {e}")
+            elif transition is False:
+                self.logger.info("POT server recovered — health check passing again")
 
     async def cog_ready(self) -> None:
         """Called after the bot is fully ready. Sets up ambience subscription and loads playlist."""
@@ -380,6 +429,13 @@ class Music(MusicCommandsMixin, BaseCog):
 
         # Start POT provider server (for YouTube 403 bypass)
         await self._start_pot_server()
+
+        # Run initial auth detection now that POT server is up
+        from utils.musicutils.music_auth import detect_youtube_auth
+        await asyncio.to_thread(detect_youtube_auth, 'startup')
+
+        # Start health watchdog (monitors POT server every 30 minutes)
+        self._pot_health_task = asyncio.create_task(self._pot_health_watchdog())
 
         # Ensure cache directory exists
         os.makedirs(self.cache_path, exist_ok=True)
@@ -475,7 +531,7 @@ class Music(MusicCommandsMixin, BaseCog):
         # Unsubscribe from ambience
         unsubscribe_playlist_change(self._on_playlist_change)
 
-        # Stop POT provider server
+        # Stop POT provider server (also cancels health watchdog)
         await self._stop_pot_server()
 
         # Shutdown cache manager

@@ -156,6 +156,7 @@ __all__ = [
 from utils.musicutils.music_auth import (
     YouTubeAuthStatus,
     get_youtube_auth_status,
+    detect_youtube_auth,
     get_ytdlp_options,
     AudioFetcher,
     AudioFetchResult,
@@ -166,6 +167,7 @@ __all__ += [
     # Auth
     'YouTubeAuthStatus',
     'get_youtube_auth_status',
+    'detect_youtube_auth',
     'get_ytdlp_options',
     'AudioFetcher',
     'AudioFetchResult',
