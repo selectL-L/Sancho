@@ -182,7 +182,6 @@ class Fun(BaseCog):
         # BOD Fate System
         self.bod_quote_triggers: Dict[int, List[Dict[str, Any]]] = {}
         self.bod_quote_display: List[str] = []
-        self._load_bod_quotes()
 
     def _load_bod_quotes(self) -> None:
         """Load BOD quote triggers from TOML file.
@@ -864,6 +863,7 @@ class Fun(BaseCog):
         """
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
+        self._load_bod_quotes()
         await asyncio.sleep(2)
         await self._cleanup_bod_chains()
 
