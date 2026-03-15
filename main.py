@@ -306,6 +306,8 @@ async def run_bot_lifecycle() -> None:
             # Does NOT set restart_signal — systemd expects the process to die so it
             # can spawn a fresh instance. Soft restart (restart_signal=True) is only
             # for the TCP/console "restart" command.
+            # Reason is NOT hardcoded — lifecycle auto-resolves SIGUSR1 to either
+            # RESTART or UPGRADE_RESTART by checking apt-daily-upgrade.service state.
             try:
                 loop.remove_signal_handler(signal.SIGUSR1)
 
@@ -314,7 +316,7 @@ async def run_bot_lifecycle() -> None:
                     _bot._shutdown_task = asyncio.create_task(
                         _lifecycle.shutdown_handler(
                             signal.SIGUSR1, _bot,
-                            reason=_lifecycle.ShutdownReason.RESTART,
+                            reason=None,
                             log_path=_log
                         )
                     )
