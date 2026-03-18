@@ -2493,16 +2493,20 @@ def parse_all(*, log=None) -> list[dict]:
     identities: list[dict] = []
     html_cache: dict[str, str] = {}  # name → raw HTML for postprocessors
     for i, fpath in enumerate(html_files, 1):
-        # Title from filename slug → restore spaces for parser
+        # Title from filename slug → restore spaces for parser (lossy fallback)
         title = fpath.stem.replace('-', ' ')
-        # Try to get a better title from the HTML <title> tag or use the parent dir + slug
         sinner = fpath.parent.name
 
         try:
             html = fpath.read_text(encoding="utf-8")
 
-            # Extract actual title from HTML if available
-            title_match = re.search(r'<title>(.+?)(?:\s*-\s*Limbus Company Wiki)?</title>', html)
+            # Extract canonical title from tab links in the wiki HTML.
+            # action=parse returns only the article body (no <title> or <h1>),
+            # but the Identity Story / Voicelines tab links contain the full page title.
+            title_match = (
+                re.search(r'title="([^"]+)/Identity Story"', html)
+                or re.search(r'title="([^"]+)/Voicelines"', html)
+            )
             if title_match:
                 title = title_match.group(1).strip()
 
