@@ -92,7 +92,7 @@ class Music(MusicCommandsMixin, BaseCog):
         self.loop_mode: LoopMode = LoopMode.ALL
 
         # Presence cycling state (idle mode)
-        self.track_started_at: float = time.time()
+        self.track_started_at: float = 0.0
         self.presence_task: Optional[asyncio.Task[None]] = None
 
         # Voice session state
@@ -471,6 +471,7 @@ class Music(MusicCommandsMixin, BaseCog):
 
         if self.playlist:
             # Start presence cycling
+            self.track_started_at = time.time()
             self.presence_task = self.bot.loop.create_task(
                 self._presence_loop())
             self.logger.info(
@@ -573,7 +574,10 @@ class Music(MusicCommandsMixin, BaseCog):
             self.active_session = None
 
         # Clear presence (respects visibility setting)
-        await self.bot.change_presence_safe(activity=None)
+        try:
+            await self.bot.change_presence_safe(activity=None)
+        except ConnectionError:
+            self.logger.debug("Could not clear presence during unload (WS reconnecting)")
         self.logger.info("Music cog unloaded.")
 
     # ==========================================================================
@@ -1138,50 +1142,75 @@ class Music(MusicCommandsMixin, BaseCog):
 
         while not self.bot.is_closed():
             try:
-                # Check for ambience-driven playlist changes
+                # --- Phase 1: Process ambience switch requests ---
                 had_switch, new_url = self._ambience.consume_switch()
                 if had_switch:
                     if new_url is None:
-                        # Ambience wants us to stop
+                        # Ambience wants us to stop — clear presence first
+                        await self.bot.change_presence_safe(activity=None)
                         self.playlist = []
                         self._ambience.confirm_switch(None)
-                        await self.bot.change_presence_safe(activity=None)
                         self.logger.info("Stopped music per ambience request")
                     elif new_url != self._ambience.current_playlist_url:
-                        # Switch to new playlist
-                        self._ambience.confirm_switch(new_url)
+                        # Switch to new playlist — confirm only after load
                         await self._load_playlist()
-                        self.current_index = 0
-                        self.track_started_at = time.time()
-                        self.logger.info(
-                            "Switched to new playlist from ambience")
+                        if self.playlist:
+                            self._ambience.confirm_switch(new_url)
+                            self.current_index = 0
+                            self.track_started_at = time.time()
+                            self.logger.info(
+                                "Switched to new playlist from ambience")
+                        else:
+                            self.logger.warning(
+                                "Playlist switch failed (no tracks loaded), retrying next cycle")
 
-                # Let ambience decide if it's time to change mood/activity
-                # This may trigger _on_playlist_change callback
+                # --- Phase 2: Let ambience cycle mood/activity ---
                 maybe_cycle()
 
-                # Don't update presence while in VC - playback handles that
+                # --- Phase 3: Yield to playback if in VC ---
                 if self.active_session:
-                    await asyncio.sleep(5)
-                    continue
+                    vc = self.active_session.voice_client
+                    if not vc or not vc.is_connected():
+                        self.logger.warning(
+                            "Zombie voice session detected — VC no longer connected."
+                        )
+                        await self._force_end_session("Voice connection lost (detected by presence loop).")
+                        # Fall through to idle presence cycling
+                    else:
+                        await asyncio.sleep(5)
+                        continue
 
-                # No playlist loaded - check if ambience has one now
+                # --- Phase 4: Try to acquire a playlist if we don't have one ---
                 if not self.playlist:
                     playlist_url = get_current_playlist()
                     if playlist_url and playlist_url != self._ambience.current_playlist_url:
-                        self._ambience.confirm_switch(playlist_url)
                         await self._load_playlist()
-                        self.track_started_at = time.time()
+                        if self.playlist:
+                            self._ambience.confirm_switch(playlist_url)
+                            self.current_index = 0
+                            self.track_started_at = time.time()
 
+                # --- Phase 5: Get current track ---
                 current_track = self._get_current_track()
                 if not current_track:
                     await asyncio.sleep(30)
                     continue
 
-                # Presence logic:
-                # - When music is playing, ALWAYS show "Listening to X"
-                # - Activity status is handled when music ISN'T playing
-                # Format: "Listening to [title]" with "by [artist]" on second line
+                # --- Phase 6: Check if track has "finished" ---
+                elapsed = time.time() - self.track_started_at
+                remaining = max(current_track.duration - elapsed, 0)
+
+                if remaining <= 0:
+                    # Track "finished", advance (always loop in idle mode)
+                    if not self.playlist:
+                        await asyncio.sleep(30)
+                        continue
+                    self.current_index = (
+                        self.current_index + 1) % len(self.playlist)
+                    self.track_started_at = time.time()
+                    continue
+
+                # --- Phase 7: Update presence for current track ---
                 presence_activity = discord.Activity(
                     type=discord.ActivityType.listening,
                     name=current_track.title,
@@ -1189,24 +1218,14 @@ class Music(MusicCommandsMixin, BaseCog):
                 )
                 await self.bot.change_presence_safe(activity=presence_activity)
 
-                # Calculate remaining time for current track
-                elapsed = time.time() - self.track_started_at
-                remaining = max(current_track.duration - elapsed, 0)
-
-                if remaining <= 0:
-                    # Track "finished", advance (always loop in idle mode)
-                    # Presence cycling ignores loop_mode - we always want to cycle
-                    self.current_index = (
-                        self.current_index + 1) % len(self.playlist)
-                    self.track_started_at = time.time()
-                    continue
-
-                # Sleep until track "ends" or 30 seconds, whichever is shorter
-                # (To handle very long tracks gracefully)
+                # Sleep until track ends or 30 seconds (handles long tracks)
                 await asyncio.sleep(min(remaining, 30))
 
             except asyncio.CancelledError:
                 break
+            except ConnectionError:
+                self.logger.debug("Presence update skipped (WS reconnecting)")
+                await asyncio.sleep(10)
             except Exception as e:
                 self.logger.error(
                     f"Error in presence loop: {e}", exc_info=True)
@@ -1219,7 +1238,10 @@ class Music(MusicCommandsMixin, BaseCog):
             name=track.title,
             state=f"by {track.artist}"
         )
-        await self.bot.change_presence_safe(activity=activity)
+        try:
+            await self.bot.change_presence_safe(activity=activity)
+        except ConnectionError:
+            self.logger.debug("Playback presence update skipped (WS reconnecting)")
 
     # ==========================================================================
     # VOICE PLAYBACK
@@ -2052,6 +2074,42 @@ class Music(MusicCommandsMixin, BaseCog):
 
         self.logger.info(f"Voice session ended: {reason}")
 
+    async def _force_end_session(self, reason: str = "Voice connection lost.") -> None:
+        """Force-cleanup a voice session whose VC is already dead.
+
+        Unlike _end_session(), this does NOT try to send messages or call
+        vc.disconnect() — the voice connection is already gone. This is
+        the cleanup path for network disconnects, bot kicks, etc.
+
+        Args:
+            reason: Log-only reason string (not sent to Discord).
+        """
+        if not self.active_session:
+            return
+
+        # Stop playback via managed player (no callback triggered)
+        if self._player:
+            self._player.stop()
+            self._player = None
+
+        self.active_session = None
+
+        # Cancel idle timeout if running
+        if self.idle_timeout_task:
+            self.idle_timeout_task.cancel()
+            self.idle_timeout_task = None
+
+        # Clear all audio URL caches
+        self._clear_audio_caches()
+
+        # Restore playlist state for idle mode
+        await self._restore_idle_playlist()
+
+        # Reset modification flag for next session
+        self._playlist_modified_during_session = False
+
+        self.logger.info(f"Voice session force-ended: {reason}")
+
     async def _idle_timeout_loop(self) -> None:
         """Waits for users to join, disconnects if none do within timeout."""
         try:
@@ -2091,6 +2149,27 @@ class Music(MusicCommandsMixin, BaseCog):
             pass
 
     # ==========================================================================
+    # RECONNECT RECOVERY
+    # ==========================================================================
+
+    @commands.Cog.listener()
+    async def on_resumed(self) -> None:
+        """Re-push presence after WebSocket reconnect."""
+        track = self._get_current_track()
+        if not track:
+            return
+
+        presence_activity = discord.Activity(
+            type=discord.ActivityType.listening,
+            name=track.title,
+            state=f"by {track.artist}"
+        )
+        try:
+            await self.bot.change_presence_safe(activity=presence_activity)
+        except ConnectionError:
+            pass  # WS still settling, loop will catch up
+
+    # ==========================================================================
     # VOICE STATE TRACKING
     # ==========================================================================
 
@@ -2105,8 +2184,13 @@ class Music(MusicCommandsMixin, BaseCog):
         if not self.active_session:
             return
 
-        # Ignore bot's own state changes
+        # Detect bot's own disconnection from voice
         if member.id == self.bot.user.id:
+            if before.channel and not after.channel:
+                self.logger.warning(
+                    "Bot was disconnected from voice — cleaning up session."
+                )
+                await self._force_end_session("Bot disconnected from voice channel.")
             return
 
         vc = self.active_session.voice_client
