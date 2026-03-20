@@ -83,6 +83,9 @@ class Limbus(BaseCog):
             ctx: The command context.
             query: The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         # Try named skill lookup first
         result = self._try_named_roll(query)
         if result:

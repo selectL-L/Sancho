@@ -241,6 +241,9 @@ class Fun(BaseCog):
         cmd = _FUN_COMMAND_LOOKUP.get(name)
         if cmd is not None:
             async def handler(ctx: commands.Context, query: str) -> None:
+                if not self._cog_is_ready:
+                    await self._not_ready_response(ctx)
+                    return
                 await self._dispatch_fun_command(cmd, ctx, query)
             return handler
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
@@ -761,6 +764,9 @@ class Fun(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         user_id = ctx.author.id
         db_manager = self.bot.db_manager
         if not db_manager:
@@ -930,6 +936,9 @@ class Fun(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         db_manager = self.bot.db_manager
         if not db_manager:
             await ctx.reply("The database is not available at the moment. Please try again later.")

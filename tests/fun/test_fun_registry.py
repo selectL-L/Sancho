@@ -48,6 +48,7 @@ def fun_cog(mock_bot):
     """Create a Fun cog instance with mocked bot."""
     with patch.object(Fun, '_load_bod_quotes'):
         cog = Fun(mock_bot)
+        cog._cog_is_ready = True
         cog.bod_quote_triggers = {}
         cog.bod_quote_display = []
         return cog

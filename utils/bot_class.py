@@ -657,15 +657,20 @@ class CoreBot(commands.Bot):
         logger.info("Finished reloading cogs.")
 
     async def ready_all_cogs(self) -> None:
-        """Calls cog_ready() on all loaded cogs.
+        """Calls cog_ready() on all loaded cogs and marks them as ready.
 
         This should be called after the bot is fully connected and ready,
         allowing cogs to start their background tasks and recovery operations.
+        Sets _cog_is_ready = True on each cog after its cog_ready() succeeds.
+        If cog_ready() raises, the cog stays not-ready.
         """
         for cog in self.cogs.values():
             cog_ready_method = getattr(cog, 'cog_ready', None)
             if cog_ready_method is not None:
                 try:
                     await cog_ready_method()
+                    # Mark the cog as ready after successful initialization
+                    if hasattr(cog, '_cog_is_ready'):
+                        cog._cog_is_ready = True
                 except Exception as e:
                     logger.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)

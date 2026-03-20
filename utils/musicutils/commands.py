@@ -221,6 +221,10 @@ class MusicCommandsMixin:
     idle_timeout_task: Any
     _playlist_modified_during_session: bool
 
+    # These are defined by BaseCog - declared here for type hints
+    _cog_is_ready: bool
+    async def _not_ready_response(self, ctx: commands.Context) -> None: ...
+
     # Methods from Music cog that handlers depend on
     def _get_current_track(self) -> Optional[Track]: ...
     def _get_elapsed_seconds(self) -> float: ...
@@ -1093,12 +1097,18 @@ class MusicCommandsMixin:
     @music_cooldown
     async def listen_along_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for listen along requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         await self._do_listen_along(ctx)
 
     @music_cooldown
     @requires_voice
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if await self._do_skip():
             await ctx.send("⏭️ Skipped!")
         else:
@@ -1108,6 +1118,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def pause_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for pause requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if self._player and self._player.is_paused:
             await ctx.send("Already paused! Type 'resume' to continue!")
             return
@@ -1121,6 +1134,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def resume_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for resume requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if self._player and self._player.is_playing:
             await ctx.send("Already playing!")
             return
@@ -1136,6 +1152,9 @@ class MusicCommandsMixin:
     @music_cooldown
     async def play_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for play/queue requests with a song/URL."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
 
         if not song_query:
@@ -1166,6 +1185,9 @@ class MusicCommandsMixin:
     @music_cooldown
     async def now_playing_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for now playing requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         from utils.views import NowPlayingView
 
         track = self._get_current_track()
@@ -1200,12 +1222,18 @@ class MusicCommandsMixin:
     @music_cooldown
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         await self._do_queue(ctx)
 
     @music_cooldown
     @requires_voice
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if not self.playlist:
             await ctx.send("No playlist to shuffle.")
             return
@@ -1217,6 +1245,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for jump requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         match = re.search(r'\b(\d+)\b', query)
         if match:
             position = int(match.group(1))
@@ -1230,6 +1261,9 @@ class MusicCommandsMixin:
     @music_cooldown
     async def loop_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for loop mode requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         query_lower = query.lower()
         mode: Optional[LoopMode] = None
 
@@ -1277,6 +1311,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         await self._end_session("Disconnected by user request.")
         await ctx.send("👋 Disconnected!")
 
@@ -1284,6 +1321,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def remove_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for removing tracks from the playlist."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*(remove|delete)\s*(track|song|number|#)?\s*',
             '', query, flags=re.IGNORECASE
@@ -1294,6 +1334,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def move_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for moving tracks in the playlist."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*move\s*(track|song|number|#)?\s*',
             '', query, flags=re.IGNORECASE
@@ -1303,6 +1346,9 @@ class MusicCommandsMixin:
     @music_cooldown
     async def lyrics_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for lyrics search."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*(lyrics?\s*(for|of|to)?|find\s*lyrics?\s*(for|of|to)?|search\s*lyrics?\s*(for|of|to)?|get\s*lyrics?\s*(for|of|to)?)\s*',
             '',
@@ -1316,6 +1362,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def clear_queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for clearing the queue."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if not self.playlist:
             await ctx.send("The queue is already empty!")
             return

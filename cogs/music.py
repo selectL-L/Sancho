@@ -466,8 +466,14 @@ class Music(MusicCommandsMixin, BaseCog):
         self.logger.info(
             f"Ambience selected playlist ({description}): {playlist_url}")
 
-        # Load playlist from cache (no YouTube hit, quick startup)
-        await self._load_playlist()
+        # Load playlist from cache — but only if no user session is already active.
+        # A user can initiate playback before cog_ready() fires (during the
+        # CONNECT→READY window), so we must not overwrite their state.
+        if not self.active_session and not self.playlist:
+            await self._load_playlist()
+        elif self.active_session:
+            self.logger.info(
+                "Skipping ambient playlist load — user session already active")
 
         if self.playlist:
             # Start presence cycling

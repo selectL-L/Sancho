@@ -1298,6 +1298,9 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         try:
             # Check if this is a reply to link context
             reply_message_id = None
@@ -1392,6 +1395,9 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         try:
             reminders = await self.db_manager.get_user_reminders(ctx.author.id)
 
@@ -1433,6 +1439,9 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         # Find all numbers in the query string to allow for deleting multiple reminders at once.
         numbers_found = re.findall(r'\d+', query)
 
@@ -1497,6 +1506,9 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         # Clean the query to get just the timezone string
         timezone_str = re.sub(r'\b(set|change)\b|\b(timezone|tz)\b', '', query, flags=re.IGNORECASE).strip()
 
@@ -1571,6 +1583,9 @@ class Reminders(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's input string.
         """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         # Find the number in the query (e.g., "edit reminder 3").
         match = re.search(r'\d+', query)
         if not match:
