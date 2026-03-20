@@ -177,6 +177,8 @@ class Fun(BaseCog):
             bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
+        assert bot.db_manager is not None
+        self.db_manager = bot.db_manager
         self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
         self.has_cleaned_up_chains = False
         # BOD Fate System
@@ -457,7 +459,7 @@ class Fun(BaseCog):
         except discord.Forbidden:
             self.logger.warning(f"Missing permissions to read history in channel {channel.id}")
         except Exception as e:
-            self.logger.error(f"Error fetching previous message: {e}")
+            self.logger.error(f"Error fetching previous message: {e}", exc_info=True)
 
         return None
 
@@ -500,13 +502,11 @@ class Fun(BaseCog):
 
             try:
                 if re.search(pattern, previous_content, re.IGNORECASE):
-                    db_manager = self.bot.db_manager
-                    if db_manager:
-                        await db_manager.add_bod_fate(user_id, tier, count)
-                        self.logger.info(
-                            f"BOD fate triggered for user {user_id}: {tier} x{count} "
-                            f"(chain {current_chain}, pattern '{pattern}')"
-                        )
+                    await self.db_manager.add_bod_fate(user_id, tier, count)
+                    self.logger.info(
+                        f"BOD fate triggered for user {user_id}: {tier} x{count} "
+                        f"(chain {current_chain}, pattern '{pattern}')"
+                    )
                     return  # Only first match counts
             except re.error as e:
                 self.logger.warning(f"Invalid regex pattern in bod_quotes.toml: '{pattern}' - {e}")
@@ -522,13 +522,12 @@ class Fun(BaseCog):
         Returns:
             Tier string: 'SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
         """
-        db_manager = self.bot.db_manager
-        if not db_manager:
+        if self.bot.db_manager is None:
             return "NORMAL"
 
         # Check in priority order (SILENT first for admin-rigged rolls without flavor text)
         for tier in ('SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY'):
-            if await db_manager.consume_bod_fate(user_id, tier):
+            if await self.db_manager.consume_bod_fate(user_id, tier):
                 self.logger.info(f"Consumed {tier} fate for user {user_id}")
                 return tier
 
@@ -651,12 +650,7 @@ class Fun(BaseCog):
         try:
             await asyncio.sleep(20 * 60)
 
-            db_manager = self.bot.db_manager
-            if not db_manager:
-                self.logger.error(f"BOD session timeout: DatabaseManager not found for user {user_id}.")
-                return
-
-            player_data = await db_manager.get_bod_player(user_id)
+            player_data = await self.db_manager.get_bod_player(user_id)
             current_chain = player_data.get('current_chain', 0)
 
             # If the user is no longer in a chain, their session ended naturally (by failing a roll).
@@ -668,15 +662,15 @@ class Fun(BaseCog):
             channel = self.bot.get_channel(channel_id)
 
             reply_message = f"Your 20-minute `bod` session has ended. Your final chain was {current_chain}."
-            user_best = await db_manager.get_user_bod_best(user_id)
+            user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                 reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
 
             # Reset chain, start the 12-hour cooldown from now.
-            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
+            await self.db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             if channel and isinstance(channel, discord.TextChannel):
                 await channel.send(f"<@{user_id}>, {reply_message}")
@@ -768,14 +762,8 @@ class Fun(BaseCog):
             await self._not_ready_response(ctx)
             return
         user_id = ctx.author.id
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            await ctx.reply("The database is not available at the moment. Please try again later.")
-            self.logger.error("DatabaseManager not found in bot instance.")
-            return
-
         # Check cooldowns.
-        player_data = await db_manager.get_bod_player(user_id)
+        player_data = await self.db_manager.get_bod_player(user_id)
         last_used = player_data.get('last_used_timestamp', 0)
         current_chain = player_data.get('current_chain', 0)
         current_time = time.time()
@@ -815,7 +803,7 @@ class Fun(BaseCog):
                 # Successful roll, continue the chain
                 new_chain = current_chain + 1
                 # Update timestamp, chain, and the last channel used.
-                await db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
+                await self.db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
 
                 dialogue = (self.BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(self.BOD_CHAIN_DIALOGUE)
                             else f"You've reached an unheard of chain of {new_chain}! The angels sing your name.")
@@ -840,9 +828,9 @@ class Fun(BaseCog):
                     reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
                     self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
 
-                    user_best = await db_manager.get_user_bod_best(user_id)
+                    user_best = await self.db_manager.get_user_bod_best(user_id)
                     if current_chain > user_best:
-                        await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                        await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                         reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}! Yujin would be proud!**"
                     else:
                         reply_message += f"\nYour personal best is {user_best}. Yujin is now heading to sleep!"
@@ -851,7 +839,7 @@ class Fun(BaseCog):
                     self.logger.info(f"BOD chain for user {user_id} failed at chain 0 with a roll of {roll_result}.")
 
                 # Reset chain and start the 12-hour cooldown from now.
-                await db_manager.update_bod_player(user_id, int(current_time), 0, ctx.channel.id)
+                await self.db_manager.update_bod_player(user_id, int(current_time), 0, ctx.channel.id)
                 await ctx.reply(reply_message, file=discord.File(file_path))
 
         except FileNotFoundError as e:
@@ -882,12 +870,7 @@ class Fun(BaseCog):
             return
 
         self.logger.info("Performing one-time check for active BOD chains after restart/reload.")
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            self.logger.error("Cannot perform BOD chain cleanup: DatabaseManager not found.")
-            return
-
-        active_chains = await db_manager.get_all_active_bod_chains()
+        active_chains = await self.db_manager.get_all_active_bod_chains()
 
         if not active_chains:
             self.logger.info("No active BOD chains found to clean up.")
@@ -902,7 +885,7 @@ class Fun(BaseCog):
             current_chain = chain_data['current_chain']
 
             # Reset the user's chain in the database first.
-            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
+            await self.db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             channel = self.bot.get_channel(channel_id)
             if not channel or not isinstance(channel, discord.TextChannel):
@@ -911,9 +894,9 @@ class Fun(BaseCog):
 
             reply_message = f"It looks like I had to restart or reload, which has unfortunately broken your chain of {current_chain}."
 
-            user_best = await db_manager.get_user_bod_best(user_id)
+            user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                 reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -939,13 +922,7 @@ class Fun(BaseCog):
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
             return
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            await ctx.reply("The database is not available at the moment. Please try again later.")
-            self.logger.error("DatabaseManager not found in bot instance.")
-            return
-
-        leaderboard_data = await db_manager.get_bod_leaderboard()
+        leaderboard_data = await self.db_manager.get_bod_leaderboard()
 
         if not leaderboard_data:
             await ctx.reply("The BOD leaderboard is currently empty. Be the first to set a score!")

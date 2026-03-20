@@ -30,6 +30,8 @@ from discord import ui
 from discord.ext import commands
 from discord.ui.view import BaseView
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from cogs.files import ConversionJob, SettingDef
     from utils.musicutils import Track
@@ -176,7 +178,7 @@ class TrackFailedView(discord.ui.View):
             except discord.NotFound:
                 pass  # Message was deleted - expected
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"TrackFailedView timeout cleanup failed: {e}")
+                logger.debug(f"TrackFailedView timeout cleanup failed: {e}")
 
 
 async def show_track_failed(
@@ -655,7 +657,7 @@ async def _race_view_and_text(
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass  # Text listener timed out or was cancelled
         except Exception as e:
-            logging.getLogger(__name__).debug(f"_race_view_and_text message result: {e}")
+            logger.debug(f"_race_view_and_text message result: {e}")
 
     for task in pending:
         task.cancel()
@@ -750,7 +752,7 @@ async def get_selection(ctx: commands.Context, embed: discord.Embed, options: Di
             except discord.NotFound:
                 pass  # Message was deleted - expected
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"get_selection button update failed: {e}")
+                logger.debug(f"get_selection button update failed: {e}")
     else:
         # Timeout or invalid selection (not in options) -> Remove buttons
         try:
@@ -758,7 +760,7 @@ async def get_selection(ctx: commands.Context, embed: discord.Embed, options: Di
         except discord.NotFound:
             pass  # Message was deleted - expected
         except discord.HTTPException as e:
-            logging.getLogger(__name__).debug(f"get_selection timeout cleanup failed: {e}")
+            logger.debug(f"get_selection timeout cleanup failed: {e}")
 
     return result
 
@@ -1212,7 +1214,7 @@ class FastConfirmModal(discord.ui.Modal):
         try:
             value = value.strip().lower()
         except (AttributeError, TypeError) as e:
-            logging.getLogger(__name__).debug(f"FastConfirmModal value processing failed: {e}")
+            logger.debug(f"FastConfirmModal value processing failed: {e}")
             value = ""
         if value == 'i understand the risks':
             await interaction.response.send_message('Fast mode confirmed — proceeding without rate limits. This IS dangerous.', ephemeral=True)
@@ -1253,7 +1255,7 @@ class ModalLauncherView(discord.ui.View):
             except discord.NotFound:
                 pass  # Message was deleted - expected
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"ModalLauncherView timeout cleanup failed: {e}")
+                logger.debug(f"ModalLauncherView timeout cleanup failed: {e}")
 
 
 async def launch_modal(ctx: commands.Context, modal: discord.ui.Modal):
@@ -1314,7 +1316,7 @@ class PaginatorView(discord.ui.View):
             except discord.NotFound:
                 pass  # Message was deleted - expected
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"PaginatorView timeout cleanup failed: {e}")
+                logger.debug(f"PaginatorView timeout cleanup failed: {e}")
 
 
 # =============================================================================
@@ -1433,7 +1435,7 @@ class DashboardView(discord.ui.View):
             except discord.NotFound:
                 pass  # Message was deleted - expected
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"DashboardView timeout cleanup failed: {e}")
+                logger.debug(f"DashboardView timeout cleanup failed: {e}")
 
 
 async def show_dashboard(
@@ -2059,7 +2061,7 @@ class StatusView(discord.ui.LayoutView):
             self._build_ui()
             await interaction.edit_original_response(view=self)
         except Exception as e:
-            logging.getLogger(__name__).error(f"Status refresh failed: {e}", exc_info=True)
+            logger.error(f"Status refresh failed: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Refresh failed: {e}", ephemeral=True)
 
     async def on_timeout(self) -> None:
@@ -2091,7 +2093,7 @@ class StatusView(discord.ui.LayoutView):
             except discord.NotFound:
                 pass
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"StatusView timeout cleanup failed: {e}")
+                logger.debug(f"StatusView timeout cleanup failed: {e}")
 
 
 async def show_status(
@@ -2419,7 +2421,7 @@ class ConversionView(ui.LayoutView):
                     else:
                         await self.ctx.send(file=file)
                 except discord.HTTPException as e:
-                    logging.getLogger(__name__).error(f"Failed to send conversion result: {e}")
+                    logger.error(f"Failed to send conversion result: {e}")
                     await self.ctx.send(f"Failed to upload `{filename}`: {e}")
 
                 # 4s delay between multi-file outputs
@@ -2517,7 +2519,7 @@ class ConversionView(ui.LayoutView):
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    logging.getLogger(__name__).debug(f"ConversionView timeout cleanup failed: {e}")
+                    logger.debug(f"ConversionView timeout cleanup failed: {e}")
 
 
 async def show_conversion(
@@ -2939,7 +2941,7 @@ class SkillEditorView(ui.LayoutView):
             except discord.NotFound:
                 pass
             except discord.HTTPException as e:
-                logging.getLogger(__name__).debug(f"SkillEditorView timeout cleanup failed: {e}")
+                logger.debug(f"SkillEditorView timeout cleanup failed: {e}")
 
 
 async def show_skill_editor(

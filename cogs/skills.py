@@ -116,7 +116,8 @@ class Skills(BaseCog):
 
         try:
             lexer = DiceLexer(dice_roll)
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Roll validation parse error: {e}")
             return False, "Invalid syntax."
 
         # 1. Check Limits via Tokens
@@ -435,6 +436,7 @@ class Skills(BaseCog):
         try:
             result_data = await math_cog.evaluate_roll(final_roll_query)
         except (ValueError, TypeError, SyntaxError) as e:
+            self.logger.debug(f"Skill roll failed for {ctx.author.id}: {e}")
             await ctx.send(f"Error executing skill: {e}")
             return
 

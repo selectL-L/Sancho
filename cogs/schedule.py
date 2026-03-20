@@ -52,6 +52,16 @@ class Schedule(BaseCog):
     and owns the schedule-specific web UI logic (OAuth, API routes).
     """
 
+    def __init__(self, bot: "CoreBot") -> None:
+        """Initialize the schedule cog.
+
+        Args:
+            bot: The bot instance.
+        """
+        super().__init__(bot)
+        assert bot.db_manager is not None
+        self.db_manager = bot.db_manager
+
     # ========== NLP HANDLERS ==========
     # These methods are called by the NLP dispatcher in bot_class.py
     # Patterns are defined in config.NLP_COMMANDS
@@ -65,7 +75,7 @@ class Schedule(BaseCog):
         Returns:
             The pytz-compatible timezone string, defaulting to 'UTC'.
         """
-        return await self.bot.db_manager.get_user_timezone(user_id) or "UTC"  # type: ignore[union-attr]
+        return await self.db_manager.get_user_timezone(user_id) or "UTC"
 
     async def _parse_time_from_query(self, query: str, user_id: int) -> Optional[datetime]:
         """Parse a time expression from the query string.
@@ -254,100 +264,69 @@ class Schedule(BaseCog):
             ctx: Command context from Discord.
             query: The full query string from the user.
         """
-        if ctx.guild is None:
-            await ctx.send("This command only works in servers.")
-            return
+        try:
+            if ctx.guild is None:
+                await ctx.send("This command only works in servers.")
+                return
 
-        # Get mentioned users
-        mentions = ctx.message.mentions
-        if not mentions:
-            await ctx.send("Please mention one or more users to check their availability.")
-            return
+            # Get mentioned users
+            mentions = ctx.message.mentions
+            if not mentions:
+                await ctx.send("Please mention one or more users to check their availability.")
+                return
 
-        requester_id = ctx.author.id
-        guild_id = ctx.guild.id
+            requester_id = ctx.author.id
+            guild_id = ctx.guild.id
 
-        # Try to parse a specific time from the query
-        parsed_time = await self._parse_time_from_query(query, requester_id)
+            # Try to parse a specific time from the query
+            parsed_time = await self._parse_time_from_query(query, requester_id)
 
-        # Gather availability for all mentioned users
-        user_slots: Dict[int, Tuple[discord.User | discord.Member, List[str]]] = {}
-        blocked_users: List[str] = []
+            # Gather availability for all mentioned users
+            user_slots: Dict[int, Tuple[discord.User | discord.Member, List[str]]] = {}
+            blocked_users: List[str] = []
 
-        for user in mentions:
-            can_view = await self.bot.db_manager.schedule_can_view(  # type: ignore[union-attr]
-                requester_id=requester_id,
-                target_id=user.id,
-                guild_id=guild_id
-            )
+            for user in mentions:
+                can_view = await self.db_manager.schedule_can_view(
+                    requester_id=requester_id,
+                    target_id=user.id,
+                    guild_id=guild_id
+                )
 
-            if not can_view:
-                blocked_users.append(user.display_name)
-                continue
+                if not can_view:
+                    blocked_users.append(user.display_name)
+                    continue
 
-            slots = await self.bot.db_manager.schedule_get_availability(user.id)  # type: ignore[union-attr]
-            user_slots[user.id] = (user, slots)
+                slots = await self.db_manager.schedule_get_availability(user.id)
+                user_slots[user.id] = (user, slots)
 
-        # Handle blocked users
-        if blocked_users and not user_slots:
-            names = ", ".join(blocked_users)
-            await ctx.send(
-                f"{names} {'have' if len(blocked_users) > 1 else 'has'}n't shared "
-                "availability in this server, or blocked you from viewing it."
-            )
-            return
+            # Handle blocked users
+            if blocked_users and not user_slots:
+                names = ", ".join(blocked_users)
+                await ctx.send(
+                    f"{names} {'have' if len(blocked_users) > 1 else 'has'}n't shared "
+                    "availability in this server, or blocked you from viewing it."
+                )
+                return
 
-        # Single user, no specific time → show full availability
-        if len(user_slots) == 1 and parsed_time is None:
-            user, slots = next(iter(user_slots.values()))
-            message = self._format_user_availability(slots, user.display_name)
-            if blocked_users:
-                message += f"\n\n⚠️ Couldn't view: {', '.join(blocked_users)}"
-            await ctx.send(message)
-            return
+            # Single user, no specific time -> show full availability
+            if len(user_slots) == 1 and parsed_time is None:
+                user, slots = next(iter(user_slots.values()))
+                message = self._format_user_availability(slots, user.display_name)
+                if blocked_users:
+                    message += f"\n\n⚠️ Couldn't view: {', '.join(blocked_users)}"
+                await ctx.send(message)
+                return
 
-        # Single user, specific time → check that slot
-        if len(user_slots) == 1 and parsed_time is not None:
-            user, slots = next(iter(user_slots.values()))
+            # Single user, specific time -> check that slot
+            if len(user_slots) == 1 and parsed_time is not None:
+                user, slots = next(iter(user_slots.values()))
 
-            # Convert query time to user's timezone for comparison
-            if parsed_time.tzinfo is None:
-                query_utc = parsed_time.replace(tzinfo=pytz.UTC)
-            else:
-                query_utc = parsed_time.astimezone(pytz.UTC)
+                # Convert query time to user's timezone for comparison
+                if parsed_time.tzinfo is None:
+                    query_utc = parsed_time.replace(tzinfo=pytz.UTC)
+                else:
+                    query_utc = parsed_time.astimezone(pytz.UTC)
 
-            user_tz_str = await self._get_user_timezone(user.id)
-            try:
-                user_tz = pytz.timezone(user_tz_str)
-            except pytz.UnknownTimeZoneError:
-                user_tz = pytz.UTC
-
-            query_in_user_tz = query_utc.astimezone(user_tz)
-            target_slots = self._datetime_to_slot_range(query_in_user_tz)
-
-            matching = [s for s in slots if s in target_slots]
-
-            if matching:
-                time_str = parsed_time.strftime("%A at %H:%M")
-                await ctx.send(f"✅ **{user.display_name}** is available around {time_str}!")
-            else:
-                time_str = parsed_time.strftime("%A at %H:%M")
-                await ctx.send(f"❌ **{user.display_name}** is not available around {time_str}.")
-            return
-
-        # Multiple users → find overlap
-        if parsed_time is not None:
-            # Convert query time to UTC first
-            if parsed_time.tzinfo is None:
-                query_utc = parsed_time.replace(tzinfo=pytz.UTC)
-            else:
-                query_utc = parsed_time.astimezone(pytz.UTC)
-
-            # Check specific time for all users (in their respective timezones)
-            available_users: List[str] = []
-            unavailable_users: List[str] = []
-
-            for user, slots in user_slots.values():
                 user_tz_str = await self._get_user_timezone(user.id)
                 try:
                     user_tz = pytz.timezone(user_tz_str)
@@ -356,31 +335,58 @@ class Schedule(BaseCog):
 
                 query_in_user_tz = query_utc.astimezone(user_tz)
                 target_slots = self._datetime_to_slot_range(query_in_user_tz)
+                matching = [s for s in slots if s in target_slots]
+                time_str = parsed_time.strftime("%A at %H:%M")
 
-                if any(s in target_slots for s in slots):
-                    available_users.append(user.display_name)
+                if matching:
+                    await ctx.send(f"✅ **{user.display_name}** is available around {time_str}!")
                 else:
-                    unavailable_users.append(user.display_name)
+                    await ctx.send(f"❌ **{user.display_name}** is not available around {time_str}.")
+                return
 
-            time_str = parsed_time.strftime("%A at %H:%M")
-            lines = [f"📅 **Availability for {time_str}**\n"]
+            # Multiple users -> find overlap
+            if parsed_time is not None:
+                # Convert query time to UTC first
+                if parsed_time.tzinfo is None:
+                    query_utc = parsed_time.replace(tzinfo=pytz.UTC)
+                else:
+                    query_utc = parsed_time.astimezone(pytz.UTC)
 
-            if available_users:
-                lines.append(f"✅ Available: {', '.join(available_users)}")
-            if unavailable_users:
-                lines.append(f"❌ Unavailable: {', '.join(unavailable_users)}")
-            if blocked_users:
-                lines.append(f"⚠️ Couldn't view: {', '.join(blocked_users)}")
+                # Check specific time for all users (in their respective timezones)
+                available_users: List[str] = []
+                unavailable_users: List[str] = []
 
-            await ctx.send("\n".join(lines))
-        else:
+                for user, slots in user_slots.values():
+                    user_tz_str = await self._get_user_timezone(user.id)
+                    try:
+                        user_tz = pytz.timezone(user_tz_str)
+                    except pytz.UnknownTimeZoneError:
+                        user_tz = pytz.UTC
+
+                    query_in_user_tz = query_utc.astimezone(user_tz)
+                    target_slots = self._datetime_to_slot_range(query_in_user_tz)
+
+                    if any(s in target_slots for s in slots):
+                        available_users.append(user.display_name)
+                    else:
+                        unavailable_users.append(user.display_name)
+
+                time_str = parsed_time.strftime("%A at %H:%M")
+                lines = [f"📅 **Availability for {time_str}**\n"]
+
+                if available_users:
+                    lines.append(f"✅ Available: {', '.join(available_users)}")
+                if unavailable_users:
+                    lines.append(f"❌ Unavailable: {', '.join(unavailable_users)}")
+                if blocked_users:
+                    lines.append(f"⚠️ Couldn't view: {', '.join(blocked_users)}")
+
+                await ctx.send("\n".join(lines))
+                return
+
             # Find overlapping slots across all users
             all_slot_sets = [set(slots) for _, slots in user_slots.values()]
-            if all_slot_sets:
-                overlap = all_slot_sets[0].intersection(*all_slot_sets[1:])
-            else:
-                overlap = set()
-
+            overlap = all_slot_sets[0].intersection(*all_slot_sets[1:]) if all_slot_sets else set()
             names = ", ".join(u.display_name for u, _ in user_slots.values())
 
             if not overlap:
@@ -407,6 +413,9 @@ class Schedule(BaseCog):
                 lines.append(f"\n⚠️ Couldn't view: {', '.join(blocked_users)}")
 
             await ctx.send("\n".join(lines))
+        except Exception as e:
+            self.logger.error(f"Error in check_availability for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("Sorry, something went wrong checking availability.")
 
     async def who_available_nlp(self, ctx: commands.Context, query: str) -> None:
         """Find who is available, optionally at a specific time.
@@ -419,81 +428,84 @@ class Schedule(BaseCog):
             ctx: Command context from Discord.
             query: The full query string from the user.
         """
-        if ctx.guild is None:
-            await ctx.send("This command only works in servers.")
-            return
+        try:
+            if ctx.guild is None:
+                await ctx.send("This command only works in servers.")
+                return
 
-        requester_id = ctx.author.id
-        guild_id = ctx.guild.id
+            requester_id = ctx.author.id
+            guild_id = ctx.guild.id
 
-        # Try to parse a specific time, default to now
-        parsed_time = await self._parse_time_from_query(query, requester_id)
-        if parsed_time is None:
-            # Use current time in user's timezone
-            tz_str = await self._get_user_timezone(requester_id)
-            settings: Dict[str, Any] = {
-                'TIMEZONE': tz_str,
-                'RETURN_AS_TIMEZONE_AWARE': True,
-            }
-            parsed_time = await asyncio.to_thread(
-                dateparser.parse, "now", languages=['en'], settings=cast(Any, settings)
+            # Try to parse a specific time, default to now
+            parsed_time = await self._parse_time_from_query(query, requester_id)
+            if parsed_time is None:
+                # Use current time in user's timezone
+                tz_str = await self._get_user_timezone(requester_id)
+                settings: Dict[str, Any] = {
+                    'TIMEZONE': tz_str,
+                    'RETURN_AS_TIMEZONE_AWARE': True,
+                }
+                parsed_time = await asyncio.to_thread(
+                    dateparser.parse, "now", languages=['en'], settings=cast(Any, settings)
+                )
+
+            if parsed_time is None:
+                await ctx.send("Couldn't determine the time to check. Please try again.")
+                return
+
+            # Get all visible availability in guild
+            all_availability = await self.db_manager.schedule_get_guild_availability(
+                guild_id=guild_id,
+                requester_id=requester_id
             )
 
-        if parsed_time is None:
-            await ctx.send("Couldn't determine the time to check. Please try again.")
-            return
+            if not all_availability:
+                await ctx.send(
+                    "No one in this server has shared their availability yet.\n"
+                    "Use the schedule link command to get started!"
+                )
+                return
 
-        # Get all visible availability in guild
-        all_availability = await self.bot.db_manager.schedule_get_guild_availability(  # type: ignore[union-attr]
-            guild_id=guild_id,
-            requester_id=requester_id
-        )
+            # Check who's available at the target time
+            # Convert query time to UTC first for consistent comparison
+            if parsed_time.tzinfo is None:
+                query_utc = parsed_time.replace(tzinfo=pytz.UTC)
+            else:
+                query_utc = parsed_time.astimezone(pytz.UTC)
 
-        if not all_availability:
-            await ctx.send(
-                "No one in this server has shared their availability yet.\n"
-                "Use the schedule link command to get started!"
-            )
-            return
+            available_users: List[str] = []
 
-        # Check who's available at the target time
-        # Convert query time to UTC first for consistent comparison
-        if parsed_time.tzinfo is None:
-            # If somehow not tz-aware, assume UTC
-            query_utc = parsed_time.replace(tzinfo=pytz.UTC)
-        else:
-            query_utc = parsed_time.astimezone(pytz.UTC)
+            for user_id, slots in all_availability.items():
+                # Get this user's timezone and convert query time to their local time
+                user_tz_str = await self._get_user_timezone(user_id)
+                try:
+                    user_tz = pytz.timezone(user_tz_str)
+                except pytz.UnknownTimeZoneError:
+                    user_tz = pytz.UTC
 
-        available_users: List[str] = []
+                # Convert query time to this user's timezone
+                query_in_user_tz = query_utc.astimezone(user_tz)
 
-        for user_id, slots in all_availability.items():
-            # Get this user's timezone and convert query time to their local time
-            user_tz_str = await self._get_user_timezone(user_id)
-            try:
-                user_tz = pytz.timezone(user_tz_str)
-            except pytz.UnknownTimeZoneError:
-                user_tz = pytz.UTC
+                # Generate slots based on the time in the user's timezone
+                target_slots = self._datetime_to_slot_range(query_in_user_tz, window_minutes=30)
 
-            # Convert query time to this user's timezone
-            query_in_user_tz = query_utc.astimezone(user_tz)
+                if any(s in target_slots for s in slots):
+                    member = ctx.guild.get_member(user_id)
+                    if member:
+                        available_users.append(member.display_name)
 
-            # Generate slots based on the time in the user's timezone
-            target_slots = self._datetime_to_slot_range(query_in_user_tz, window_minutes=30)
+            time_str = parsed_time.strftime("%A at %H:%M")
 
-            if any(s in target_slots for s in slots):
-                member = ctx.guild.get_member(user_id)
-                if member:
-                    available_users.append(member.display_name)
-
-        time_str = parsed_time.strftime("%A at %H:%M")
-
-        if available_users:
-            await ctx.send(
-                f"📅 **Available {time_str}:**\n"
-                f"{', '.join(available_users)}"
-            )
-        else:
-            await ctx.send(f"😕 No one is available around {time_str}.")
+            if available_users:
+                await ctx.send(
+                    f"📅 **Available {time_str}:**\n"
+                    f"{', '.join(available_users)}"
+                )
+            else:
+                await ctx.send(f"😕 No one is available around {time_str}.")
+        except Exception as e:
+            self.logger.error(f"Error in who_available for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("Sorry, something went wrong checking who is available.")
 
     async def schedule_link_nlp(self, ctx: commands.Context, query: str) -> None:
         """Send the link to the schedule web UI.
@@ -502,18 +514,22 @@ class Schedule(BaseCog):
             ctx: Command context from Discord.
             query: The full query string (unused).
         """
-        if not config.WEB_ENABLED:
-            await ctx.send("The schedule web interface is not currently enabled.")
-            return
+        try:
+            if not config.WEB_ENABLED:
+                await ctx.send("The schedule web interface is not currently enabled.")
+                return
 
-        base_url = config.OAUTH_REDIRECT_URI.rsplit("/callback", 1)[0]
-        guild_param = f"?guild={ctx.guild.id}" if ctx.guild else ""
+            base_url = config.OAUTH_REDIRECT_URI.rsplit("/callback", 1)[0]
+            guild_param = f"?guild={ctx.guild.id}" if ctx.guild else ""
 
-        await ctx.send(
-            f"📅 **Schedule Manager**\n"
-            f"Set your availability: {base_url}/settings.html\n"
-            f"View others' schedules: {base_url}/{guild_param}"
-        )
+            await ctx.send(
+                f"📅 **Schedule Manager**\n"
+                f"Set your availability: {base_url}/settings.html\n"
+                f"View others' schedules: {base_url}/{guild_param}"
+            )
+        except Exception as e:
+            self.logger.error(f"Error in schedule_link for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("Sorry, something went wrong generating the schedule link.")
 
 
 async def setup(bot: "CoreBot") -> None:

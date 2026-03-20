@@ -41,6 +41,8 @@ import shutil
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar, TYPE_CHECKING
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .music_data import Track
 
@@ -98,14 +100,12 @@ class MusicCacheManager:
     def __init__(
         self,
         cache_root: str,
-        logger: logging.Logger,
         on_track_unavailable: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
     ):
         """Initialize the music cache manager.
 
         Args:
             cache_root: Path to cache/music/ directory.
-            logger: Logger instance for messages.
             on_track_unavailable: Async callback fired when a track is marked
                 unavailable after all download methods fail. Signature:
                 async def callback(title: str, artist: str, url: str) -> None
@@ -854,7 +854,6 @@ class MusicCacheManager:
         result = await download_track_as_m4a(
             url=url,
             output_dir=self.tracks_path,
-            logger=self.logger,
             custom_title=entry_snap.get('title'),
             custom_artist=entry_snap.get('artist'),
             custom_album=entry_snap.get('album'),
@@ -971,7 +970,6 @@ class MusicCacheManager:
             result = await download_track_as_m4a(
                 url=url,
                 output_dir=self.tracks_path,
-                logger=self.logger,
                 custom_title=entry_snap.get('title'),
                 custom_artist=entry_snap.get('artist'),
                 custom_album=entry_snap.get('album'),
@@ -1150,7 +1148,7 @@ class MusicCacheManager:
 
         for url in urls:
             try:
-                tracks = await fetch_playlist_metadata(url, self.logger)
+                tracks = await fetch_playlist_metadata(url)
                 if tracks:
                     results[url] = tracks
                     track_ids = [t.video_id for t in tracks if t.video_id]
@@ -1248,7 +1246,7 @@ class MusicCacheManager:
         # Cancel existing timer
         self.cancel_refresh_timer()
 
-        tracks = await fetch_playlist_metadata(playlist_url, self.logger)
+        tracks = await fetch_playlist_metadata(playlist_url)
         if tracks:
             track_ids = [t.video_id for t in tracks if t.video_id]
             new_playlist_data = {

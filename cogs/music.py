@@ -124,7 +124,6 @@ class Music(MusicCommandsMixin, BaseCog):
         # Music cache manager for proactive caching
         self.cache_manager = MusicCacheManager(
             self.cache_path,
-            self.logger,
             on_track_unavailable=self._on_track_unavailable,
         )
 
@@ -629,7 +628,7 @@ class Music(MusicCommandsMixin, BaseCog):
 
         self.logger.info(f"Fetching playlist from YouTube: {playlist_url}")
 
-        tracks = await fetch_playlist_metadata(playlist_url, self.logger)
+        tracks = await fetch_playlist_metadata(playlist_url)
 
         if tracks:
             self.playlist = tracks
@@ -1298,7 +1297,7 @@ class Music(MusicCommandsMixin, BaseCog):
             - error_message: Human-readable error if failed, None if success
             - warning_message: Non-fatal warning (e.g., mix truncation), None if none
         """
-        return await fetch_url_info(url, self.logger, force_playlist=force_playlist)
+        return await fetch_url_info(url, force_playlist=force_playlist)
 
     async def _prefetch_next_track(self) -> None:
         """Pre-fetches everything needed for the next sequential track.

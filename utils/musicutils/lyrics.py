@@ -195,7 +195,7 @@ class LyricalNonsenseScraper:
                         break
 
         except Exception as e:
-            logger.debug(f"Genius page scrape failed for {result.url}: {e}")
+            logger.debug(f"LyricalNonsense page scrape failed for {result.url}: {e}")
 
         return result
 

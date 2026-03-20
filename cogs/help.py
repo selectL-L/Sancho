@@ -70,8 +70,8 @@ class Help(BaseCog):
                     try:
                         if await command.can_run(ctx):
                             should_show = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"can_run check failed for {command.qualified_name}: {e}")
 
             if should_show and command:
                 await self.send_command_help(ctx, command)

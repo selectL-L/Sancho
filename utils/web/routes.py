@@ -602,8 +602,6 @@ async def delete_account(request: Request) -> JSONResponse:
 
     return JSONResponse(content={"success": True})
 
-    return JSONResponse(content={"success": True})
-
 
 @router.get("/guilds/{guild_id}/viewable-users")
 async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:

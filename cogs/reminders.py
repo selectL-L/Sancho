@@ -295,7 +295,7 @@ class Reminders(BaseCog):
                 await self.db_manager.delete_reminders([reminder['id']])
 
         except Exception as e:
-            self.logger.error(f"Error handling missed recurring reminder {reminder['id']}: {e}")
+            self.logger.error(f"Error handling missed recurring reminder {reminder['id']}: {e}", exc_info=True)
 
     async def _scheduler_loop(self) -> None:
         """The main loop that waits for the next reminder and fires it."""
@@ -391,8 +391,11 @@ class Reminders(BaseCog):
             else:
                 await self.db_manager.delete_reminders([reminder['id']])
 
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as e:
             # User blocked bot or left server -> Delete reminder.
+            self.logger.debug(
+                f"Reminder {reminder['id']} delivery failed ({type(e).__name__}), deleting"
+            )
             await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
             self.logger.error(f"Error firing reminder {reminder['id']}: {e}", exc_info=True)
@@ -416,7 +419,7 @@ class Reminders(BaseCog):
             else:
                 await self.db_manager.delete_reminders([reminder['id']])
         except Exception as e:
-            self.logger.error(f"Failed to reschedule {reminder['id']}: {e}")
+            self.logger.error(f"Failed to reschedule {reminder['id']}: {e}", exc_info=True)
             await self.db_manager.delete_reminders([reminder['id']])
 
     @staticmethod

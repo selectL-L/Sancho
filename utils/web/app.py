@@ -59,7 +59,6 @@ def create_app(bot: "CoreBot") -> FastAPI:
     async def lifespan(app: FastAPI):
         """Server startup and shutdown lifecycle."""
         # Startup
-        logger.info(f"Web server started on {config.WEB_HOST}:{config.WEB_PORT}")
         try:
             deleted = await bot.db_manager.cleanup_stale_sessions(max_age_days=90)  # type: ignore[union-attr]
             if deleted > 0:

@@ -415,10 +415,6 @@ class MusicCommandsMixin:
             # Error messages already sent by helper methods
             return
 
-        if not tracks_to_add:
-            await ctx.send("No tracks to add.")
-            return
-
         # Queue size limit
         MAX_QUEUE_SIZE = 2000
         current_queue_size = len(self.playlist) if self.active_session else 0

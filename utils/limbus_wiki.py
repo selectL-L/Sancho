@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import html as html_lib
 import json
+import logging
 import os
 import re
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Optional
 
 import config
+
+logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section 1: Data Models (unchanged from v1)
@@ -2385,7 +2387,7 @@ def _run_postprocessors(identities: list[dict], html_cache: dict[str, str], log=
         html_cache: Map of identity name → raw HTML (for Magic Bullet Outis).
         log: Optional progress logger.
     """
-    _log = log or (lambda msg: None)
+    _log = log or logger.info
 
     for identity in identities:
         name = identity.get("name", "")
@@ -2431,7 +2433,7 @@ def download_all(*, redownload: bool = False, log=None) -> int:
     Returns:
         Number of pages downloaded (not cached hits).
     """
-    _log = log or (lambda msg: print(msg, file=sys.stderr))
+    _log = log or logger.info
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     client = CachedClient(CACHE_DIR)
@@ -2481,7 +2483,7 @@ def parse_all(*, log=None) -> list[dict]:
     Returns:
         List of identity dicts.
     """
-    _log = log or (lambda msg: print(msg, file=sys.stderr))
+    _log = log or logger.info
 
     html_files = sorted(CACHE_DIR.rglob("*.html"))
     if not html_files:

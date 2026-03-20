@@ -517,7 +517,6 @@ def detect_mix_in_url(url: str) -> tuple[bool, Optional[str], Optional[str]]:
 
 async def fetch_url_info(
     url: str,
-    logger: Any,
     force_playlist: bool = False,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> tuple[List['Track'], Optional[str], Optional[str]]:
@@ -531,7 +530,6 @@ async def fetch_url_info(
 
     Args:
         url: The YouTube URL to fetch.
-        logger: Logger instance for error messages.
         force_playlist: If True, extract the playlist even if URL has a video ID.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
@@ -691,7 +689,6 @@ async def fetch_url_info(
 
 async def fetch_playlist_metadata(
     playlist_url: str,
-    logger: Any,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> List['Track']:
     """Fetches playlist metadata from YouTube using yt-dlp (flat extraction).
@@ -701,7 +698,6 @@ async def fetch_playlist_metadata(
 
     Args:
         playlist_url: The YouTube playlist URL to fetch.
-        logger: Logger instance for info/error messages.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:
@@ -912,7 +908,6 @@ def ytdlp_move_temp_file(
     final_path: str,
     *,
     overwrite: bool,
-    logger: Any,
 ) -> bool:
     """Move a yt-dlp temp file to its final destination.
 
@@ -920,7 +915,6 @@ def ytdlp_move_temp_file(
         temp_path: Full path to the temp file.
         final_path: Destination path for the final file.
         overwrite: Whether to overwrite an existing final file.
-        logger: Logger for warnings.
 
     Returns:
         True if the move succeeded, False otherwise.
@@ -955,7 +949,6 @@ def ytdlp_cleanup_temp_files(output_dir: str, video_id: str, keep_ext: str) -> N
 async def download_track_as_m4a(
     url: str,
     output_dir: str,
-    logger: Any,
     custom_title: Optional[str] = None,
     custom_artist: Optional[str] = None,
     custom_album: Optional[str] = None,
@@ -980,7 +973,6 @@ async def download_track_as_m4a(
     Args:
         url: YouTube URL to download.
         output_dir: Directory to save the M4A file.
-        logger: Logger instance for messages.
         custom_title: Override the track title (None = use YouTube title).
         custom_artist: Override the artist (None = use uploader/channel).
         custom_album: Album name to embed.
@@ -1101,7 +1093,6 @@ async def download_track_as_m4a(
                 temp_m4a_path,
                 final_path,
                 overwrite=True,
-                logger=logger,
             ):
                 return DownloadResult(
                     success=False,

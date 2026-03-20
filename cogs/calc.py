@@ -261,7 +261,7 @@ class Math(BaseCog):
         except (ValueError, TypeError) as e:
             await ctx.send(f"Invalid input: {e}. Please enter a valid number.")
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred: {e}")
+            await ctx.send("An unexpected error occurred. The issue has been logged.")
             self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
 
     async def send_calc_help(self, ctx: commands.Context) -> None:
