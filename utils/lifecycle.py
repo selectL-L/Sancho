@@ -700,9 +700,23 @@ async def startup_handler(bot: "CoreBot") -> None:
     Called from on_ready event. Logs connection info, syncs commands,
     sends startup message, then starts background tasks.
 
+    Discord.py fires on_ready after every reconnect (not just initial startup).
+    The _has_initialized guard ensures the full startup sequence only runs once;
+    reconnects only restore presence and log the event.
+
     Args:
         bot: The CoreBot instance.
     """
+    global _has_initialized
+    if _has_initialized:
+        logging.info("Reconnect detected (on_ready fired again). Skipping startup sequence.")
+        # Restore presence — discord.py may have reset it during reconnect
+        try:
+            await bot.change_presence(status=bot.current_visibility)
+        except Exception as e:
+            logging.warning(f"Failed to restore presence after reconnect: {e}")
+        return
+
     # ─── CONNECT ───
     log_phase("CONNECT")
 
@@ -767,12 +781,6 @@ async def startup_handler(bot: "CoreBot") -> None:
     if bot.current_visibility != discord.Status.online:
         logging.info(f"Initial visibility set to: {bot.current_visibility.name}")
 
-    # Guard: Discord.py fires on_ready after every reconnect, not just initial startup.
-    # We only want to run cog_ready() once to avoid duplicate tasks, servers, etc.
-    global _has_initialized
-    if _has_initialized:
-        logging.info("Reconnect detected (on_ready fired again). Skipping cog_ready() calls.")
-        return
     _has_initialized = True
 
     # Call cog_ready() on all cogs to start their background tasks
