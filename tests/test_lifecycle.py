@@ -36,6 +36,7 @@ from utils.lifecycle import (
     _send_owner_notification,
     _teardown_cogs_ordered,
     shutdown_handler,
+    startup_handler,
     teardown_shutdown_detection,
 )
 import utils.lifecycle as lifecycle_module
@@ -792,3 +793,86 @@ class TestLogPhase:
         log_phase("FIRST")
         log_phase("SECOND")
         assert lifecycle_module._current_phase == "SECOND"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test: Startup Handler Guard
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestStartupHandlerGuard:
+    """Tests that startup_handler is idempotent against reconnect on_ready calls."""
+
+    @pytest.mark.asyncio
+    @patch('utils.lifecycle.config')
+    async def test_first_call_runs_full_startup(self, mock_config: MagicMock, mock_bot: MagicMock) -> None:
+        """First on_ready call runs the full CONNECT + READY sequence."""
+        mock_config.DEV_MODE = False
+        mock_config.DEV_GUILD = None
+        mock_config.BOT_NAME = "TestBot"
+        mock_config.SYSTEM_CHANNEL_ID = 123456
+        mock_config.RESOURCE_TRACK_INTERVAL = 5
+
+        await startup_handler(mock_bot)
+
+        assert lifecycle_module._has_initialized is True
+        mock_bot.register_nlp_command.assert_called_once()
+        mock_bot.tree.sync.assert_awaited_once()
+        mock_bot.ready_all_cogs.assert_awaited_once()
+        mock_bot.resource_tracker.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch('utils.lifecycle.config')
+    async def test_second_call_skips_startup(self, mock_config: MagicMock, mock_bot: MagicMock) -> None:
+        """Second on_ready (reconnect) skips the full startup sequence."""
+        mock_config.DEV_MODE = False
+        mock_config.DEV_GUILD = None
+        mock_config.BOT_NAME = "TestBot"
+        mock_config.SYSTEM_CHANNEL_ID = 123456
+        mock_config.RESOURCE_TRACK_INTERVAL = 5
+
+        # First call — full startup
+        await startup_handler(mock_bot)
+        mock_bot.reset_mock()
+
+        # Second call — should be guarded
+        await startup_handler(mock_bot)
+
+        mock_bot.register_nlp_command.assert_not_called()
+        mock_bot.tree.sync.assert_not_awaited()
+        mock_bot.ready_all_cogs.assert_not_awaited()
+        mock_bot.resource_tracker.start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch('utils.lifecycle.config')
+    async def test_reconnect_restores_presence(self, mock_config: MagicMock, mock_bot: MagicMock) -> None:
+        """Reconnect path restores presence to the configured visibility."""
+        mock_config.DEV_MODE = False
+        mock_config.DEV_GUILD = None
+        mock_config.BOT_NAME = "TestBot"
+        mock_config.SYSTEM_CHANNEL_ID = 123456
+        mock_config.RESOURCE_TRACK_INTERVAL = 5
+
+        await startup_handler(mock_bot)
+        mock_bot.reset_mock()
+
+        mock_bot.current_visibility = discord.Status.idle
+        await startup_handler(mock_bot)
+
+        mock_bot.change_presence.assert_awaited_once_with(status=discord.Status.idle)
+
+    @pytest.mark.asyncio
+    @patch('utils.lifecycle.config')
+    async def test_no_startup_message_on_reconnect(self, mock_config: MagicMock, mock_bot: MagicMock) -> None:
+        """Reconnect does NOT re-send the startup message to the system channel."""
+        mock_config.DEV_MODE = False
+        mock_config.DEV_GUILD = None
+        mock_config.BOT_NAME = "TestBot"
+        mock_config.SYSTEM_CHANNEL_ID = 123456
+        mock_config.RESOURCE_TRACK_INTERVAL = 5
+
+        await startup_handler(mock_bot)
+        mock_bot.reset_mock()
+        await startup_handler(mock_bot)
+
+        # get_channel should not even be called on reconnect
+        mock_bot.get_channel.assert_not_called()
