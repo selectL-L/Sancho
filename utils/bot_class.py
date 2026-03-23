@@ -671,6 +671,6 @@ class CoreBot(commands.Bot):
                     await cog_ready_method()
                     # Mark the cog as ready after successful initialization
                     if hasattr(cog, '_cog_is_ready'):
-                        cog._cog_is_ready = True
+                        cog._cog_is_ready = True  # type: ignore[union-attr]
                 except Exception as e:
                     logger.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)
