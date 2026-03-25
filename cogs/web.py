@@ -111,7 +111,7 @@ class Web(BaseCog):
         except Exception as e:
             self.logger.error(f"Web server error: {e}", exc_info=True)
         finally:
-            pass
+            self.logger.info("Web server task exited.")
 
     async def _stop_web_server(self) -> None:
         """Stop the Uvicorn web server gracefully."""

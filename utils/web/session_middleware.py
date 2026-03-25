@@ -111,7 +111,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
         # Session is valid - attach to request
         request.state.user_id = user_id
         request.state.session_id = session_id
-        logger.debug(f"_process_session: session valid, set user_id={user_id}")
 
         # Update last_seen_at (fire and forget - don't block request)
         try:

@@ -116,6 +116,18 @@ def create_app(bot: "CoreBot") -> FastAPI:
 
         return await call_next(request)
 
+    # HTTP error logging middleware - log non-2xx responses
+    @app.middleware("http")
+    async def error_log_middleware(request: Request, call_next):
+        """Log non-2xx responses for error visibility in production."""
+        response = await call_next(request)
+        if response.status_code >= 400:
+            logger.warning(
+                f"HTTP {response.status_code} {request.method} {request.url.path} "
+                f"from {request.client.host if request.client else 'unknown'}"
+            )
+        return response
+
     # CORS blocking middleware - reject cross-origin requests
     @app.middleware("http")
     async def cors_blocking_middleware(request: Request, call_next):

@@ -301,6 +301,10 @@ class Schedule(BaseCog):
 
             # Handle blocked users
             if blocked_users and not user_slots:
+                self.logger.info(
+                    f"[Schedule] check_availability: all {len(blocked_users)} user(s) blocked "
+                    f"for requester {ctx.author.id}"
+                )
                 names = ", ".join(blocked_users)
                 await ctx.send(
                     f"{names} {'have' if len(blocked_users) > 1 else 'has'}n't shared "
@@ -311,6 +315,10 @@ class Schedule(BaseCog):
             # Single user, no specific time -> show full availability
             if len(user_slots) == 1 and parsed_time is None:
                 user, slots = next(iter(user_slots.values()))
+                self.logger.info(
+                    f"[Schedule] check_availability: showing full schedule for user {user.id} "
+                    f"to requester {ctx.author.id} in guild {ctx.guild.id}"
+                )
                 message = self._format_user_availability(slots, user.display_name)
                 if blocked_users:
                     message += f"\n\n⚠️ Couldn't view: {', '.join(blocked_users)}"
@@ -338,6 +346,10 @@ class Schedule(BaseCog):
                 matching = [s for s in slots if s in target_slots]
                 time_str = parsed_time.strftime("%A at %H:%M")
 
+                self.logger.info(
+                    f"[Schedule] check_availability: {user.id} {'available' if matching else 'not available'} "
+                    f"at {time_str} per request from {ctx.author.id}"
+                )
                 if matching:
                     await ctx.send(f"✅ **{user.display_name}** is available around {time_str}!")
                 else:
@@ -381,6 +393,10 @@ class Schedule(BaseCog):
                 if blocked_users:
                     lines.append(f"⚠️ Couldn't view: {', '.join(blocked_users)}")
 
+                self.logger.info(
+                    f"[Schedule] check_availability: checking {len(mentions)} users "
+                    f"at {parsed_time.isoformat()}, requester {ctx.author.id}"
+                )
                 await ctx.send("\n".join(lines))
                 return
 
@@ -389,6 +405,10 @@ class Schedule(BaseCog):
             overlap = all_slot_sets[0].intersection(*all_slot_sets[1:]) if all_slot_sets else set()
             names = ", ".join(u.display_name for u, _ in user_slots.values())
 
+            self.logger.info(
+                f"[Schedule] check_availability: overlap for {len(mentions)} users — "
+                f"{'found' if overlap else 'none'}, requester {ctx.author.id}"
+            )
             if not overlap:
                 await ctx.send(f"😕 No overlapping availability found for {names}.")
                 return
@@ -450,6 +470,10 @@ class Schedule(BaseCog):
                 )
 
             if parsed_time is None:
+                self.logger.info(
+                    f"[Schedule] who_available: could not parse time from query in guild {guild_id}, "
+                    f"requester {requester_id}"
+                )
                 await ctx.send("Couldn't determine the time to check. Please try again.")
                 return
 
@@ -460,6 +484,10 @@ class Schedule(BaseCog):
             )
 
             if not all_availability:
+                self.logger.info(
+                    f"[Schedule] who_available: no guild availability data in guild {guild_id}, "
+                    f"requester {requester_id}"
+                )
                 await ctx.send(
                     "No one in this server has shared their availability yet.\n"
                     "Use the schedule link command to get started!"
@@ -496,6 +524,10 @@ class Schedule(BaseCog):
 
             time_str = parsed_time.strftime("%A at %H:%M")
 
+            self.logger.info(
+                f"[Schedule] who_available: {len(available_users)} available at {time_str} "
+                f"in guild {guild_id}, requester {requester_id}"
+            )
             if available_users:
                 await ctx.send(
                     f"📅 **Available {time_str}:**\n"
@@ -516,6 +548,9 @@ class Schedule(BaseCog):
         """
         try:
             if not config.WEB_ENABLED:
+                self.logger.info(
+                    f"[Schedule] schedule_link: web disabled, sent notice to user {ctx.author.id}"
+                )
                 await ctx.send("The schedule web interface is not currently enabled.")
                 return
 
@@ -526,6 +561,10 @@ class Schedule(BaseCog):
                 f"📅 **Schedule Manager**\n"
                 f"Set your availability: {base_url}/settings.html\n"
                 f"View others' schedules: {base_url}/{guild_param}"
+            )
+            self.logger.info(
+                f"[Schedule] schedule_link: sent web UI link to user {ctx.author.id} "
+                f"in guild {ctx.guild.id if ctx.guild else 'DM'}"
             )
         except Exception as e:
             self.logger.error(f"Error in schedule_link for {ctx.author.id}: {e}", exc_info=True)

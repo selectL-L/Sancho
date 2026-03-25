@@ -141,6 +141,7 @@ async def login(request: Request) -> RedirectResponse:
         httponly=True,
         samesite="lax"
     )
+    logger.info(f"[Auth] OAuth login initiated from {request.client.host if request.client else 'unknown'}")
     return response
 
 

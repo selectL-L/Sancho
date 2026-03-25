@@ -82,7 +82,6 @@ async def refresh_discord_token(refresh_token: str) -> tuple[str, str, int]:
                     logger.error(f"Token refresh response missing tokens: {body}")
                     raise TokenRefreshException("Missing tokens in response")
 
-                logger.debug("Successfully refreshed Discord token")
                 return access_token, new_refresh_token, expires_in
 
     except aiohttp.ClientError as e:

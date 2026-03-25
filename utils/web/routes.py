@@ -306,8 +306,6 @@ async def set_availability(request: Request) -> JSONResponse:
 
     await bot.db_manager.schedule_set_availability(user_id, valid_slots)
 
-    logger.info(f"User {user_id} saved {len(valid_slots)} availability slots")
-
     return JSONResponse(content={"success": True, "count": len(valid_slots)})
 
 
@@ -332,8 +330,6 @@ async def clear_availability(request: Request) -> JSONResponse:
 
     bot = request.app.state.bot
     await bot.db_manager.schedule_clear_availability(user_id)
-
-    logger.info(f"User {user_id} cleared all availability")
 
     return JSONResponse(content={"success": True})
 
@@ -390,6 +386,7 @@ async def get_guilds(request: Request) -> JSONResponse:
     # Sort by name
     guilds.sort(key=lambda g: g["name"].lower())
 
+    logger.info(f"get-guilds: returning {len(guilds)} guilds for user {user_id}")
     return JSONResponse(content={"guilds": guilds})
 
 
@@ -448,8 +445,6 @@ async def set_guild_visibility(request: Request, guild_id: str) -> JSONResponse:
     bot = request.app.state.bot
     await bot.db_manager.schedule_set_guild_visibility(user_id, guild_id_int, visible)
 
-    logger.info(f"User {user_id} set visibility in guild {guild_id_int} to {visible}")
-
     return JSONResponse(content={"success": True})
 
 
@@ -486,6 +481,7 @@ async def get_blacklist(request: Request) -> JSONResponse:
             "avatar": user.display_avatar.url if user else None,
         })
 
+    logger.info(f"get-blacklist: returning {len(users)} entries for user {user_id}")
     return JSONResponse(content={"users": users})
 
 
@@ -527,8 +523,6 @@ async def add_to_blacklist(request: Request, blocked_user_id: str) -> JSONRespon
     bot = request.app.state.bot
     await bot.db_manager.schedule_add_to_blacklist(user_id, blocked_user_id_int)
 
-    logger.info(f"User {user_id} blocked user {blocked_user_id_int}")
-
     return JSONResponse(content={"success": True})
 
 
@@ -563,8 +557,6 @@ async def remove_from_blacklist(request: Request, blocked_user_id: str) -> JSONR
 
     bot = request.app.state.bot
     await bot.db_manager.schedule_remove_from_blacklist(user_id, blocked_user_id_int)
-
-    logger.info(f"User {user_id} unblocked user {blocked_user_id_int}")
 
     return JSONResponse(content={"success": True})
 
@@ -666,14 +658,12 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
     for target_id in visible_user_ids:
         # Skip users the requester has blocked (but not self)
         if target_id != user_id and target_id in my_blacklist:
-            logger.debug(f"viewable-users: skipping {target_id} (in my_blacklist)")
             continue
 
         # Check if target has blocked requester (but not self)
         if target_id != user_id:
             target_blacklist = set(await bot.db_manager.schedule_get_blacklist(target_id))
             if user_id in target_blacklist:
-                logger.debug(f"viewable-users: skipping {target_id} (blocked me)")
                 continue
 
         # Get user info - try cache first, then fetch from Discord API
@@ -699,7 +689,7 @@ async def get_viewable_users(request: Request, guild_id: str) -> JSONResponse:
         else:
             logger.warning(f"viewable-users: member {target_id} not found in guild {guild_id_int}")
 
-    logger.info(f"viewable-users: returning {len(users)} users for guild {guild.name}")
+    logger.info(f"viewable-users: returning {len(users)} users for guild {guild.name}, requester {user_id}")
 
     # Sort by username
     users.sort(key=lambda u: u["username"].lower())
@@ -817,6 +807,7 @@ async def get_all_viewable_users(request: Request, focus_guild: str = "0") -> JS
     users = list(user_data.values())
     users.sort(key=lambda u: u["username"].lower())
 
+    logger.info(f"all-viewable-users: returning {len(users)} users for requester {user_id}")
     return JSONResponse(content={"users": users})
 
 
