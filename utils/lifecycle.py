@@ -868,8 +868,6 @@ async def shutdown_handler(
         )
         logging.info(f"Cog teardown timings: {timings_summary}")
 
-    logging.info("Closing Discord connection...")
-
     # Close the final GOODBYE region
     global _current_phase
     if _current_phase:
