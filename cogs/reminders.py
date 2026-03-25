@@ -167,6 +167,7 @@ class Reminders(BaseCog):
         destination_pref = await self.db_manager.get_user_config(user_id, 'reminder_destination')
 
         if destination_pref == 'dm':
+            self.logger.info(f"[Destination] User {user_id} → DM (preference)")
             return user
 
         if destination_pref and destination_pref.isdigit():
@@ -175,8 +176,13 @@ class Reminders(BaseCog):
                 channel = self.bot.get_channel(chan_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(chan_id)
+                self.logger.info(f"[Destination] User {user_id} → channel {chan_id} (preference)")
                 return channel
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                self.logger.warning(
+                    f"[Destination] Preferred channel {destination_pref} unavailable for user {user_id} "
+                    f"({type(e).__name__}), falling back to DM"
+                )
                 return user  # Fallback to DM.
 
         # Try origin channel.
@@ -186,10 +192,16 @@ class Reminders(BaseCog):
                 channel = self.bot.get_channel(channel_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
+                self.logger.info(f"[Destination] User {user_id} → origin channel {channel_id}")
                 return channel
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                self.logger.warning(
+                    f"[Destination] Origin channel {channel_id} unavailable for user {user_id} "
+                    f"({type(e).__name__}), falling back to DM"
+                )
                 return user  # Fallback to DM.
 
+        self.logger.info(f"[Destination] User {user_id} → DM (no channel stored)")
         return user  # No channel stored, fallback to DM.
 
     async def _handle_missed_reminder(self, reminder: Dict[str, Any], current_time: int) -> None:
@@ -234,10 +246,20 @@ class Reminders(BaseCog):
                        f"It was due at <t:{reminder['reminder_time']}:F> (<t:{reminder['reminder_time']}:R>).")
                 await targetable_dest.send(msg)
                 await self.db_manager.delete_reminders([reminder_id])
-                self.logger.info(f"Delivered missed reminder {reminder_id} to user {user_id}.")
+                overdue_secs = current_time - reminder['reminder_time']
+                self.logger.info(f"Delivered missed reminder {reminder_id} to user {user_id} ({overdue_secs}s overdue).")
 
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
-            self.logger.error(f"Discord error handling missed reminder {reminder_id}: {e}. Deleting to prevent loops.")
+        except (discord.NotFound, discord.Forbidden) as e:
+            self.logger.warning(
+                f"[MissedReminder] Could not deliver reminder {reminder_id} to user {user_id} "
+                f"({type(e).__name__}), deleting."
+            )
+            await self.db_manager.delete_reminders([reminder_id])
+        except discord.HTTPException as e:
+            self.logger.warning(
+                f"[MissedReminder] HTTP error delivering reminder {reminder_id} to user {user_id}: {e}. "
+                f"Deleting to prevent loops."
+            )
             await self.db_manager.delete_reminders([reminder_id])
         except Exception as e:
             self.logger.error(f"Failed to handle missed reminder {reminder_id}: {e}", exc_info=True)
@@ -330,14 +352,14 @@ class Reminders(BaseCog):
                     try:
                         await asyncio.wait_for(self.scheduler_event.wait(), timeout=delay)
                         # Event triggered (new reminder added/changed).
-                        self.logger.info("Scheduler woke up due to event.")
+                        self.logger.info(f"Scheduler woken early (new event received while waiting for reminder {next_reminder['id']}).")
                     except asyncio.TimeoutError:
                         # Timeout reached, time to check DB again.
                         pass
                 else:
                     self.logger.info("No upcoming reminders. Waiting for new ones...")
                     await self.scheduler_event.wait()
-                    self.logger.info("Scheduler woke up due to event.")
+                    self.logger.info("Scheduler woken from idle by new event.")
 
             except asyncio.CancelledError:
                 break
@@ -358,6 +380,13 @@ class Reminders(BaseCog):
 
             # Resolve destination.
             targetable = await self._resolve_destination(reminder, user)
+
+            if not targetable:
+                self.logger.warning(
+                    f"[Delivery] Could not resolve any destination for reminder {reminder['id']} "
+                    f"(user {reminder['user_id']}). Skipping delivery."
+                )
+                return
 
             if targetable:
                 # Reply Logic.
@@ -627,6 +656,7 @@ class Reminders(BaseCog):
             if front_diff >= 60 and back_diff >= 60:
                 return True
 
+        self.logger.info(f"[Complementary] '{front}' + '{back}' → rejected, falling back to scoring")
         return False
 
     def _format_recurrence_rule(self, rule_str: str) -> str:
@@ -686,7 +716,7 @@ class Reminders(BaseCog):
             return f"Repeats {period}"
 
         except Exception as e:
-            self.logger.error(f"Failed to parse rrule string '{rule_str}': {e}")
+            self.logger.error(f"Failed to parse rrule string '{rule_str}': {e}", exc_info=True)
             return f"Repeats: {rule_str}"  # Fallback to raw rule
 
     def _extract_recurrence_rule(self, text: str) -> Tuple[Optional[str], str]:
@@ -712,6 +742,7 @@ class Reminders(BaseCog):
             }
             clean_freq = simple_freq_match.group(1).lower().replace('-', '')
             recurrence_rule = f"FREQ={freq_map.get(clean_freq, 'DAILY')}"
+            self.logger.info(f"[Recurrence] Pattern A matched: '{matched_text}' → {recurrence_rule}")
             return recurrence_rule, matched_text
 
         # Pattern B: "Every Xth of the month"
@@ -720,6 +751,7 @@ class Reminders(BaseCog):
             matched_text = month_day_match.group(0)
             day_of_month = int(month_day_match.group('month_day'))
             recurrence_rule = f"FREQ=MONTHLY;BYMONTHDAY={day_of_month}"
+            self.logger.info(f"[Recurrence] Pattern B matched: '{matched_text}' → {recurrence_rule}")
             return recurrence_rule, matched_text
 
         # Pattern C: Complex phrases like "Every 2 days", "Every other Monday", "Every weekend"
@@ -762,6 +794,8 @@ class Reminders(BaseCog):
             elif unit in day_map:
                 recurrence_rule = f"FREQ=WEEKLY;BYDAY={day_map[unit]};INTERVAL={interval}"
 
+            if recurrence_rule:
+                self.logger.info(f"[Recurrence] Pattern C matched: '{matched_text}' → {recurrence_rule}")
             return recurrence_rule, matched_text
 
         return None, ""
@@ -844,7 +878,7 @@ class Reminders(BaseCog):
             '', sanitized_query, flags=re.IGNORECASE
         )
         if modifier_stripped != sanitized_query:
-            self.logger.info(f"Stripped day modifier: '{sanitized_query}' -> '{modifier_stripped}'")
+            self.logger.debug(f"[Preprocessing] Stripped day modifier: '{sanitized_query}' -> '{modifier_stripped}'")
             sanitized_query = modifier_stripped.strip()
             sanitized_query = re.sub(r'\s+', ' ', sanitized_query)  # Clean double spaces
 
@@ -867,7 +901,7 @@ class Reminders(BaseCog):
             if re.search(pattern, sanitized_query, re.IGNORECASE):
                 old_query = sanitized_query
                 sanitized_query = re.sub(pattern, replacement, sanitized_query, flags=re.IGNORECASE)
-                self.logger.info(f"Normalized fractional time: '{old_query}' -> '{sanitized_query}'")
+                self.logger.debug(f"[Preprocessing] Normalized fractional time: '{old_query}' -> '{sanitized_query}'")
 
         # Handle "X and a half hours" pattern (e.g., "2 and a half hours" → "150 minutes")
         x_and_half_match = re.search(r'\b(\d+)\s+and\s+a\s+half\s+hours?\b', sanitized_query, re.IGNORECASE)
@@ -880,7 +914,7 @@ class Reminders(BaseCog):
                 f'{total_minutes} minutes',
                 sanitized_query, flags=re.IGNORECASE
             )
-            self.logger.info(f"Normalized X.5 hours: '{old_query}' -> '{sanitized_query}'")
+            self.logger.debug(f"[Preprocessing] Normalized X.5 hours: '{old_query}' -> '{sanitized_query}'")
 
         # ==========================================
         # Stage 4 & 5: Split-Head/Tail Time Extraction
@@ -1028,20 +1062,20 @@ class Reminders(BaseCog):
                 self._is_complementary_pair, front_time_str, back_time_str, 'UTC'
             )
             if use_combined:
-                self.logger.debug(f"Combined time '{combined_candidate}' is a valid complementary pair.")
+                self.logger.info(f"Combined time '{combined_candidate}' is a valid complementary pair.")
 
             if use_combined:
                 final_time_string = combined_candidate
                 message_words = words[front_word_count: len(words) - back_word_count]
             else:
                 # Combined is None or doesn't add meaningful info → use scoring to pick winner.
-                self.logger.info(
-                    f"Combined time invalid or redundant. Invoking scoring for "
-                    f"'{front_time_str}' vs '{back_time_str}'."
+                self.logger.debug(
+                    f"[Scoring] Complementary check failed for "
+                    f"'{front_time_str}' vs '{back_time_str}'. Scoring..."
                 )
                 front_score = self._score_time_candidate(front_time_str)
                 back_score = self._score_time_candidate(back_time_str)
-                self.logger.info(f"Scores: front='{front_time_str}'({front_score}) vs back='{back_time_str}'({back_score})")
+                self.logger.debug(f"[Scoring] front='{front_time_str}'({front_score}), back='{back_time_str}'({back_score})")
 
                 if front_score > back_score:
                     self.logger.info(f"Front wins. Using '{front_time_str}'.")
@@ -1197,12 +1231,15 @@ class Reminders(BaseCog):
                     )
 
                 case 'no':
+                    self.logger.info(f"User {ctx.author.id} rejected reminder confirmation.")
                     await ctx.send("Reminder cancelled. You can start over if you wish.")
 
                 case _:
+                    self.logger.info(f"User {ctx.author.id} gave unrecognized confirmation response.")
                     await ctx.send("I didn't catch that. Reminder cancelled. You can start over if you wish.")
 
         except asyncio.TimeoutError:
+            self.logger.info(f"User {ctx.author.id} timed out during reminder confirmation.")
             await ctx.send("You took too long to respond. Reminder creation cancelled.")
         except Exception as e:
             self.logger.error(f"Error in confirmation flow for {ctx.author.id}: {e}", exc_info=True)
@@ -1230,12 +1267,15 @@ class Reminders(BaseCog):
             return m.author == ctx.author and m.channel == ctx.channel
 
         try:
+            self.logger.info(f"[InteractiveFlow] User {ctx.author.id} entered interactive reminder flow")
+
             # 1. Get Reminder Message
             reminder_message = initial_message
             if not reminder_message:
                 await ctx.send("What should I remind you about? You can say `exit` to cancel.")
                 msg = await self.bot.wait_for('message', check=check, timeout=120.0)
                 if msg.content.lower() == 'exit':
+                    self.logger.info(f"[InteractiveFlow] User {ctx.author.id} cancelled at message step.")
                     await ctx.send("Reminder creation cancelled.")
                     return
                 reminder_message = msg.content
@@ -1256,6 +1296,7 @@ class Reminders(BaseCog):
                     await ctx.send(f"When should I remind you about '{reminder_message}'? (e.g., 'in 2 hours', 'every day at 5pm')")
                     msg = await self.bot.wait_for('message', check=check, timeout=120.0)
                     if msg.content.lower() == 'exit':
+                        self.logger.info(f"[InteractiveFlow] User {ctx.author.id} cancelled at time step.")
                         await ctx.send("Reminder creation cancelled.")
                         return
                     time_str = msg.content
@@ -1289,6 +1330,7 @@ class Reminders(BaseCog):
             await self._confirm_and_save_reminder(ctx, reminder_message, time_str, dt_object, recurrence_rule, reply_message_id)
 
         except asyncio.TimeoutError:
+            self.logger.info(f"[InteractiveFlow] User {ctx.author.id} timed out during reminder creation.")
             await ctx.send("You took too long to respond. Reminder creation cancelled.")
         except Exception as e:
             self.logger.error(f"Error in interactive reminder flow for {ctx.author.id}: {e}", exc_info=True)
@@ -1334,6 +1376,10 @@ class Reminders(BaseCog):
                 return
 
             reminder_message, time_str, recurrence_rule = parsed
+            self.logger.info(
+                f"[remind] Parsed for user {ctx.author.id}: message='{reminder_message}', "
+                f"time='{time_str}', recurrence={recurrence_rule or 'none'}"
+            )
 
             user_tz_str = await self._get_user_timezone(ctx.author.id)
             user_tz = pytz.timezone(user_tz_str)
@@ -1377,6 +1423,10 @@ class Reminders(BaseCog):
             timestamp = int(dt_object.timestamp())
             # Prevent setting reminders in the past.
             if timestamp <= int(time.time()):
+                self.logger.info(
+                    f"[remind] Parsed time {timestamp} is in the past for user {ctx.author.id}. "
+                    f"Query: '{query}'. Starting interactive flow."
+                )
                 await ctx.send("You can't set a reminder in the past! Please try again.")
                 # We retain context here because the user's intent was clear, just the time was wrong.
                 await self._interactive_reminder_flow(ctx, initial_message=reminder_message or "", initial_recurrence=recurrence_rule, reply_message_id=reply_message_id)
@@ -1405,6 +1455,7 @@ class Reminders(BaseCog):
             reminders = await self.db_manager.get_user_reminders(ctx.author.id)
 
             if not reminders:
+                self.logger.info(f"User {ctx.author.id} checked reminders: none found.")
                 await ctx.send("You have no pending reminders.")
                 return
 
@@ -1431,6 +1482,7 @@ class Reminders(BaseCog):
 
             embed.description = "\n\n".join(description_lines)
             await ctx.send(embed=embed)
+            self.logger.info(f"User {ctx.author.id} checked reminders: {len(reminders)} shown.")
         except Exception as e:
             self.logger.error(f"Error checking reminders for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("An error occurred while fetching your reminders.")
@@ -1709,7 +1761,7 @@ class Reminders(BaseCog):
                 rows_affected = await self.db_manager.update_reminder(reminder_to_edit['id'], ctx.author.id, updates)
                 if rows_affected > 0:
                     await ctx.send(f"✅ Successfully updated reminder **#{reminder_num_to_edit}**.")
-                    self.logger.info(f"User {ctx.author.id} updated reminder {reminder_to_edit['id']}.")
+                    self.logger.info(f"User {ctx.author.id} updated reminder {reminder_to_edit['id']}: {updates}")
 
                     if should_reschedule:
                         # Wake up the scheduler to pick up the changes
@@ -1781,9 +1833,11 @@ class Reminders(BaseCog):
 
             if sub_choice == '1':
                 await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'dm')
+                self.logger.info(f"User {ctx.author.id} changed reminder destination to DM.")
                 await ctx.send("✅ Destination set to **Direct Messages**.")
             elif sub_choice == '2':
                 await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', 'origin')
+                self.logger.info(f"User {ctx.author.id} changed reminder destination to origin channel.")
                 await ctx.send("✅ Destination set to **Origin Channel**.")
             elif sub_choice == '3':
                 await ctx.send("Please mention the channel you want to use (e.g. `#general`).")
@@ -1805,6 +1859,7 @@ class Reminders(BaseCog):
                     channel = self.bot.get_channel(chan_id)
                     if channel:
                         await self.db_manager.set_user_config(ctx.author.id, 'reminder_destination', str(chan_id))
+                        self.logger.info(f"User {ctx.author.id} changed reminder destination to channel {chan_id}.")
                         mention_str = getattr(channel, 'mention', f"#{getattr(channel, 'name', chan_id)}")
                         await ctx.send(f"✅ Destination set to {mention_str}.")
                     else:
