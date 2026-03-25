@@ -589,7 +589,7 @@ async def _build_quick_result(
                 else:
                     logger.info(f"[Quick Result] ATV {video_id} not found in songs search")
         except Exception as e:
-            logger.info(f"[Quick Result] ATV songs search failed for {video_id}: {e}")
+            logger.error(f"[Quick Result] ATV songs search failed for {video_id}: {e}", exc_info=True)
 
     logger.info(
         f"[Quick Result] Resolved {video_id}: '{title}' by '{artist}' "
@@ -1298,7 +1298,7 @@ def is_relevant(query: str, result: SearchResult) -> bool:
             f"sim={best_sim:.2f}, threshold={threshold} | FILTERED"
         )
 
-    logger.info(
+    logger.debug(
         f"Filtered as garbage: {result.title} by {result.artist} "
         f"(overlap={overlap_ratio:.0%}, containment={has_containment}, sim={best_sim:.2f})"
     )

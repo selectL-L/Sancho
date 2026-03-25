@@ -1711,7 +1711,7 @@ class Music(MusicCommandsMixin, BaseCog):
                 if prebuffered_source:
                     # Phase 5: Use pre-validated source (instant playback)
                     self._player.play(track, source=prebuffered_source)
-                    self.logger.info(f"Now playing (prebuffered): {track.title}")
+                    self.logger.debug(f"[Play] Dispatching track to ManagedPlayer (prebuffered): {track.title}")
                 else:
                     # Traditional: play from URL
                     self._player.play(
@@ -1719,7 +1719,7 @@ class Music(MusicCommandsMixin, BaseCog):
                         audio_source,
                         http_headers=http_headers if not is_local_file else None,
                     )
-                    self.logger.info(f"Now playing: {track.title}" + (" (local)" if is_local_file else ""))
+                    self.logger.debug(f"[Play] Dispatching track to ManagedPlayer: {track.title}" + (" (local)" if is_local_file else ""))
 
                 # Cache streaming URL for loop ONE replay
                 # (Don't cache prebuffered - those are one-shot validated sources)
@@ -1970,6 +1970,8 @@ class Music(MusicCommandsMixin, BaseCog):
         # Normal track end - clean up per-track state
         self._residential_notified_this_track = False
         track = self._get_current_track()
+        if track:
+            self.logger.info(f"[Play] Track finished: {track.title} — {track.artist}")
         if track and track.video_id:
             self._audio_fetcher.clear_state(track.video_id)
 

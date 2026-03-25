@@ -285,6 +285,7 @@ def detect_youtube_auth(reason: str = 'periodic') -> None:
         _youtube_auth.auth_method = 'pot_server'
         _youtube_auth.auth_path = None
         logger.debug("YouTube auth: Using PO token server (auto-generation)")
+        logger.info("[Auth] YouTube auth method selected: pot_server (auth_path=none, pot_server=True)")
         return
 
     # Priority 2: Cookie file (fallback)
@@ -296,12 +297,14 @@ def detect_youtube_auth(reason: str = 'periodic') -> None:
             logger.debug("YouTube auth: Using cookies + manual PO token")
         else:
             logger.debug(f"YouTube auth: Using cookies from {cookie_path}")
+        logger.info(f"[Auth] YouTube auth method selected: cookies (auth_path={cookie_path}, pot_server=False)")
         return
 
     # No auth available
     _youtube_auth.auth_method = None
     _youtube_auth.auth_path = None
     logger.debug("YouTube auth: No authentication configured")
+    logger.info("[Auth] YouTube auth method selected: none (auth_path=none, pot_server=False)")
 
 
 def get_ytdlp_options(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -611,6 +614,9 @@ class AudioFetcher:
             return await self._try_residential(track, state)
 
         # Shouldn't reach here, but handle gracefully
+        logger.error(
+            f"[AudioFetcher] All fetch strategies exhausted for {track.title} — {track.artist}"
+        )
         return AudioFetchResult(
             success=False,
             is_auth_failure=state.auth_failed,
@@ -669,8 +675,10 @@ class AudioFetcher:
         """Attempt residential proxy download."""
         # Check attempt limit
         if state.residential_attempts >= self.RESIDENTIAL_MAX:
-            logger.info(
-                f"[AudioFetcher] Residential exhausted ({state.residential_attempts}/{self.RESIDENTIAL_MAX})"
+            logger.error(
+                f"[AudioFetcher] Residential proxy failed — "
+                f"escalated to paid residential and it STILL failed "
+                f"({state.residential_attempts}/{self.RESIDENTIAL_MAX} attempts)"
             )
             return AudioFetchResult(
                 success=False,

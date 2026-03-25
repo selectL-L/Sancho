@@ -135,7 +135,8 @@ def music_cooldown(func: NlpHandler) -> NlpHandler:
         if command_name in user_cooldowns:
             elapsed = now - user_cooldowns[command_name]
             if elapsed < MUSIC_COMMAND_COOLDOWN:
-                # Still on cooldown - silently ignore
+                remaining = MUSIC_COMMAND_COOLDOWN - elapsed
+                self.logger.info(f"[Music] Cooldown active for user {user_id}: {remaining:.1f}s remaining")
                 return
 
         # Update last invocation time and proceed
@@ -176,11 +177,13 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
         # Check 3: Is user in a voice channel?
         author_voice = getattr(ctx.author, 'voice', None)
         if not author_voice or not author_voice.channel:
+            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: not in a voice channel")
             await ctx.send("You need to be in the voice channel to control playback!")
             return
 
         # Check 4: Is user in the SAME channel as the bot?
         if author_voice.channel.id != self.active_session.channel_id:
+            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: in different channel")
             await ctx.send("You need to be in the voice channel to control playback!")
             return
 
@@ -405,6 +408,7 @@ class MusicCommandsMixin:
 
             else:
                 # Regular URL (single video, possibly from a playlist) - use YTM flow
+                self.logger.info(f"[URL Mode] Direct URL play by user {ctx.author.id}: {query}")
                 tracks_to_add = await self._do_play_url_with_ytm(ctx, query)
 
         else:
@@ -805,6 +809,7 @@ class MusicCommandsMixin:
                 all_results = filtered
 
         if not all_results:
+            self.logger.info(f"[Lyrics] No lyrics found for user {ctx.author.id}: query='{query}'")
             if searching_msg:
                 try:
                     await searching_msg.edit(
@@ -876,6 +881,10 @@ class MusicCommandsMixin:
             await ctx.send(f"❌ Couldn't retrieve lyrics from {selected.source}. Try another source.")
             return
 
+        self.logger.info(
+            f"[Lyrics] Found lyrics for user {ctx.author.id}: "
+            f"{selected.title} — {selected.artist} (via {selected.source})"
+        )
         pages: List[discord.Embed] = []
         lyrics_chunks = chunk_text(selected.lyrics_text, 1200)
 
@@ -949,6 +958,7 @@ class MusicCommandsMixin:
         is_current = (target_index == self.current_index)
 
         self._remove_track(target_index)
+        self.logger.info(f"[Play] Track removed by user {ctx.author.id}: {track.title} (position {target_index + 1})")
         await ctx.send(f"🗑️ Removed **{track.title}** from the playlist.")
 
         if is_current and self._player:
@@ -1073,6 +1083,7 @@ class MusicCommandsMixin:
             result = self._swap_tracks(from_index, to_index)
             if result:
                 track_a, track_b = result
+                self.logger.info(f"[Play] Track swapped by user {ctx.author.id}: position {from_index + 1} ↔ {to_index + 1}")
                 await ctx.send(
                     f"🔄 Swapped **{track_a.title}** (#{from_index + 1}) "
                     f"with **{track_b.title}** (#{to_index + 1})."
@@ -1082,6 +1093,7 @@ class MusicCommandsMixin:
         else:
             track = self._move_track(from_index, to_index)
             if track:
+                self.logger.info(f"[Play] Track moved by user {ctx.author.id}: position {from_index + 1} → {to_index + 1}")
                 await ctx.send(f"📋 Moved **{track.title}** to position {to_index + 1}.")
             else:
                 await ctx.send("Something went wrong moving that track.")
@@ -1105,7 +1117,10 @@ class MusicCommandsMixin:
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
             return
+        current_track = self._get_current_track()
         if await self._do_skip():
+            if current_track:
+                self.logger.info(f"[Play] Track skipped by user {ctx.author.id}: was playing {current_track.title}")
             await ctx.send("⏭️ Skipped!")
         else:
             await ctx.send("Nothing is playing right now.")
@@ -1235,6 +1250,7 @@ class MusicCommandsMixin:
             return
 
         self._apply_shuffle(preserve_current=True)
+        self.logger.info(f"[Play] Queue shuffled by user {ctx.author.id}: {len(self.playlist)} tracks")
         await ctx.send("🔀 Playlist shuffled!")
 
     @music_cooldown
@@ -1293,7 +1309,9 @@ class MusicCommandsMixin:
                 self.idle_timeout_task.cancel()
                 self.idle_timeout_task = None
 
+        old_mode = self.loop_mode
         self.loop_mode = mode
+        self.logger.info(f"[Play] Loop mode changed by user {ctx.author.id}: {old_mode.display} → {mode.display}")
 
         if mode == LoopMode.OFF:
             await ctx.send(
@@ -1310,6 +1328,7 @@ class MusicCommandsMixin:
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
             return
+        self.logger.info(f"[Play] Leave requested by user {ctx.author.id}: disconnecting from voice")
         await self._end_session("Disconnected by user request.")
         await ctx.send("👋 Disconnected!")
 
@@ -1365,16 +1384,19 @@ class MusicCommandsMixin:
             await ctx.send("The queue is already empty!")
             return
 
+        count = len(self.playlist)
         current_track = self._get_current_track()
         if current_track:
             self.playlist = [current_track]
             self.current_index = 0
             self._playlist_modified_during_session = True
             self._refresh_prefetch_if_stale()
+            self.logger.info(f"[Play] Queue cleared by user {ctx.author.id}: removed {count - 1} tracks")
             await ctx.send(f"🗑️ Queue cleared! Only **{current_track.title}** remains.")
         else:
             self.playlist = []
             self.current_index = 0
+            self.logger.info(f"[Play] Queue cleared by user {ctx.author.id}: removed {count} tracks")
             await ctx.send("🗑️ Queue cleared!")
 
     # ==========================================================================

@@ -479,3 +479,4 @@ class ManagedPlayer:
             voice_client: New voice client.
         """
         self._vc = voice_client
+        logger.info("[ManagedPlayer] Voice client updated (reconnect recovery)")

@@ -511,6 +511,7 @@ class MusicCacheManager:
 
         was_cleared = await self._mutate(clear_downloaded)
         if was_cleared:
+            self.logger.info(f"[CacheManager] Re-queued missing download: {video_id} (file not found on disk)")
             await self._enqueue_download(video_id)
 
     def get_cached_tracks(self, playlist_url: str) -> List[Track]:
@@ -986,7 +987,11 @@ class MusicCacheManager:
                         entry['downloaded_at'] = time.time()
 
                 await self._mutate(mark_downloaded)
-                self.logger.info(f"[CacheManager] Downloaded: {entry_snap.get('title')}")
+                file_size = os.path.getsize(result.file_path) if result.file_path else 0
+                self.logger.info(
+                    f"[CacheManager] Downloaded: {entry_snap.get('title')} "
+                    f"({file_size // 1024} KB) → {os.path.basename(result.file_path) if result.file_path else 'unknown'}"
+                )
                 return result.file_path
 
             # Check for 403/IP-block
@@ -1096,6 +1101,7 @@ class MusicCacheManager:
                 # Remove from dedup tracking
                 self._queued_ids.discard(video_id)
 
+                self.logger.info(f"[CacheManager] Starting download: {video_id}")
                 await self.download_track(video_id)
 
                 # Rate limit: small delay between downloads
@@ -1524,6 +1530,7 @@ class MusicCacheManager:
                 await self.reconcile_downloads(playlists, old_membership)
                 await self.cleanup_expired_orphans()
                 await self.queue_missing_downloads()
+                self.logger.info("[CacheManager] Playlist refresh complete")
 
             except asyncio.CancelledError:
                 break
