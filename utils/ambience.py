@@ -809,7 +809,7 @@ def initialize() -> None:
     # Idempotency guard: Don't reset state if already initialized
     # Re-initialization would silently corrupt user's mood selection
     if _initialized:
-        logger.info("[Ambience] Already initialized, skipping")
+        logger.info("[Ambience] Already initialized — skipping re-init to preserve current mood/activity state")
         return
     _initialized = True
 
@@ -858,11 +858,13 @@ def set_mood(mood_id: str) -> bool:
     global _current_mood, _current_activity
 
     if mood_id not in MOODS:
+        logger.warning(f"[Ambience] set_mood called with unknown mood '{mood_id}' — valid moods: {list(MOODS.keys())}")
         return False
 
     _current_mood = mood_id
     mood = MOODS[mood_id]
     _current_activity = random.choice(list(mood.activities.values()))
+    logger.info(f"[Ambience] Mood set to '{mood_id}', activity='{_current_activity.id}'")
     return True
 
 
@@ -880,16 +882,20 @@ def set_activity(activity_id: str) -> bool:
     # Special case: daydreaming can happen in any mood
     if activity_id == "daydreaming":
         _current_activity = _DAYDREAMING
+        logger.info("[Ambience] Activity set to 'daydreaming' (special case)")
         return True
 
     if _current_mood is None:
+        logger.warning("[Ambience] set_activity called but no mood is active")
         return False
 
     mood = MOODS[_current_mood]
     if activity_id not in mood.activities:
+        logger.warning(f"[Ambience] set_activity called with unknown activity '{activity_id}' for mood='{_current_mood}'")
         return False
 
     _current_activity = mood.activities[activity_id]
+    logger.info(f"[Ambience] Activity set to '{activity_id}' in mood='{_current_mood}'")
     return True
 
 
@@ -939,6 +945,7 @@ def maybe_cycle() -> bool:
 
     time_since_change = time.time() - _music_state.last_mood_change
     if time_since_change < cycle_seconds:
+        logger.debug(f"[Ambience] Cycle check: {time_since_change:.0f}s/{cycle_seconds:.0f}s — no cycle")
         return False
 
     # Random chance to even consider changing
@@ -1135,7 +1142,7 @@ def _notify_playlist_change(playlist_url: Optional[str], description: Optional[s
         try:
             callback(playlist_url, description)
         except Exception as e:
-            logger.debug(f"[Ambience] Playlist callback failed: {e}")
+            logger.warning(f"[Ambience] Playlist change callback failed: {e}")
 
 
 def get_music_state() -> MusicState:
@@ -1176,6 +1183,7 @@ def start_music(music_mood: Optional[str] = None) -> tuple[Optional[str], Option
 
     available = get_available_music_moods()
     if not available:
+        logger.warning("[Ambience] start_music called but no music moods have playlists configured")
         return None, None
 
     # Pick mood
@@ -1186,6 +1194,7 @@ def start_music(music_mood: Optional[str] = None) -> tuple[Optional[str], Option
 
     playlist = get_playlist(selected)
     if not playlist:
+        logger.warning(f"[Ambience] start_music: get_playlist returned None for mood '{selected}' despite it appearing available — TOML may be misconfigured")
         return None, None
 
     description = get_playlist_description(selected)
@@ -1230,6 +1239,7 @@ def switch_music_mood(music_mood: Optional[str] = None) -> tuple[Optional[str], 
 
     available = get_available_music_moods()
     if not available:
+        logger.warning("[Ambience] switch_music_mood called but no music moods available")
         return None, None
 
     # Pick different mood
@@ -1243,6 +1253,7 @@ def switch_music_mood(music_mood: Optional[str] = None) -> tuple[Optional[str], 
 
     playlist = get_playlist(selected)
     if not playlist:
+        logger.warning(f"[Ambience] switch_music_mood: get_playlist returned None for mood '{selected}' — TOML may be misconfigured")
         return None, None
 
     description = get_playlist_description(selected)
@@ -1266,6 +1277,7 @@ def ensure_music_for_user() -> tuple[Optional[str], Optional[str]]:
         Tuple of (playlist_url, description).
     """
     if _music_state.is_playing and _music_state.current_playlist:
+        logger.info(f"[Ambience] ensure_music_for_user: music already playing (mood={_music_state.current_mood}), returning existing playlist")
         return _music_state.current_playlist, _music_state.playlist_description
     return start_music()
 

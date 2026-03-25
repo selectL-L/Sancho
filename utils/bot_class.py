@@ -148,6 +148,7 @@ class CoreBot(commands.Bot):
         """
         # If bot is invisible, skip presence updates entirely
         if self._current_visibility == discord.Status.invisible:
+            logger.debug("Presence update suppressed (bot is invisible)")
             return
 
         # Use current visibility if no status specified
@@ -185,6 +186,7 @@ class CoreBot(commands.Bot):
             q_lower = query.lower()
             handler = self.find_nlp_handler(q_lower)
             if not handler:
+                logger.info(f"Slash NLP query: '{query}' → no match")
                 return
 
             _cog, method, _method_name = handler
@@ -273,6 +275,7 @@ class CoreBot(commands.Bot):
                 (keyword_patterns, cog_name, method_name).
         """
         self._dynamic_nlp_groups.append(entries)
+        logger.info(f"[NLP] Dynamic group registered ({len(entries)} entries)")
 
     def register_nlp_command(self) -> None:
         """Registers the /nlp slash command if not already registered.
@@ -516,6 +519,7 @@ class CoreBot(commands.Bot):
 
         # If in developer mode, only respond to owners.
         if config.DEV_MODE and message.author.id not in config.OWNER_IDS:
+            logger.info(f"[DEV_MODE] Ignoring message from non-owner {message.author} ({message.author.id})")
             return
 
         # Get context once and reuse it for both command processing and NLP check.
@@ -547,14 +551,14 @@ class CoreBot(commands.Bot):
             return
 
         query_lower = query.lower()
-        logger.info(f"prefix NLP query from '{message.author}': '{query}'")
-
         # Use the NLP matcher to find the handler.
         handler = self.find_nlp_handler(query_lower)
         if not handler:
+            logger.info(f"prefix NLP query from '{message.author}': '{query}' → no match")
             return
 
         cog, method, method_name = handler
+        logger.info(f"prefix NLP query from '{message.author}': '{query}' → {cog.__class__.__name__}.{method_name}")
         try:
             if asyncio.iscoroutinefunction(method):
                 await method(ctx, query=query)
@@ -674,3 +678,4 @@ class CoreBot(commands.Bot):
                         cog._cog_is_ready = True  # type: ignore[union-attr]
                 except Exception as e:
                     logger.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)
+                    logger.warning(f"{cog.__class__.__name__} will remain not-ready — NLP commands for this cog will be rejected")

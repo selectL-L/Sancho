@@ -107,12 +107,13 @@ async def process_control_command(
         await shutdown_handler(signal.SIGINT, bot, reason=reason, log_path=log_path)
         return "OK: Restarting"
     elif command == 'reload':
-        logging.info("'reload' command received. Reloading cogs...")
+        logging.info("'reload' command received.")
         await bot.reload_all_cogs()
         return "OK: Cogs reloaded"
     elif command == 'status':
         return f"OK: {bot.user.name if bot.user else 'Bot'} is running"
     else:
+        logging.warning(f"Unknown control command received: '{command}'")
         return f"ERROR: Unknown command '{command}'"
 
 
@@ -324,6 +325,8 @@ async def run_bot_lifecycle() -> None:
                 loop.add_signal_handler(signal.SIGUSR1, _sigusr1_handler)
             except (NotImplementedError, OSError):
                 pass
+
+            logging.info("Registered signal handlers: SIGINT, SIGTERM, SIGUSR1")
 
         # Initialize and attach resource tracker
         resource_tracker = mod_logging.ResourceTracker(interval_minutes=config.RESOURCE_TRACK_INTERVAL)

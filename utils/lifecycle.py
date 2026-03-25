@@ -520,8 +520,10 @@ def build_shutdown_context(
         # Service-level restart. Check if caused by daemon-reexec during upgrade.
         if _is_apt_upgrade_active():
             reason = ShutdownReason.UPGRADE_RESTART
+            logging.info("Shutdown context: SIGUSR1 with apt-daily-upgrade active → UPGRADE_RESTART")
         else:
             reason = ShutdownReason.RESTART
+            logging.info("Shutdown context: SIGUSR1 without apt-daily-upgrade → RESTART")
 
     elif _pending_system_shutdown is not None:
         # SIGTERM with D-Bus context — system is going down.
@@ -533,10 +535,15 @@ def build_shutdown_context(
             reason = ShutdownReason.SYSTEM_UPGRADE
         else:
             reason = ShutdownReason.SYSTEM_REBOOT
+        logging.info(
+            f"Shutdown context: SIGTERM with D-Bus pending "
+            f"(type={_pending_system_shutdown.shutdown_type}, pkgs={len(packages)}) → {reason.value}"
+        )
 
     else:
         # SIGTERM without D-Bus — manual stop.
         reason = ShutdownReason.MANUAL_STOP
+        logging.info("Shutdown context: SIGTERM without PrepareForShutdown → MANUAL_STOP")
 
     return ShutdownContext(
         trigger=sig,
@@ -561,6 +568,7 @@ async def _send_goodbye_message(bot: "CoreBot", context: ShutdownContext) -> Non
         context: The shutdown context with the resolved reason.
     """
     if not config.SYSTEM_CHANNEL_ID:
+        logging.info("No system channel configured — goodbye message will not be sent")
         return
 
     channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
@@ -621,6 +629,7 @@ async def _send_owner_upgrade_notification(bot: "CoreBot", context: ShutdownCont
         try:
             user = await bot.fetch_user(owner_id)
             await user.send(view=view)
+            logging.info(f"Sent upgrade notification DM to owner {owner_id}")
         except discord.HTTPException as e:
             logging.warning(f"Failed to DM owner {owner_id} upgrade notification: {e}")
 
@@ -644,6 +653,7 @@ async def _send_owner_reexec_notification(bot: "CoreBot") -> None:
         try:
             user = await bot.fetch_user(owner_id)
             await user.send(view=view)
+            logging.info(f"Sent reexec notification DM to owner {owner_id}")
         except discord.HTTPException as e:
             logging.warning(f"Failed to DM owner {owner_id} reexec notification: {e}")
 
@@ -770,6 +780,8 @@ async def startup_handler(bot: "CoreBot") -> None:
                 logging.warning(f"System channel {config.SYSTEM_CHANNEL_ID} is not a valid text channel.")
         except discord.HTTPException as e:
             logging.error(f"Failed to send startup message: {e}")
+    else:
+        logging.info("SYSTEM_CHANNEL_ID not configured — startup/goodbye messages will be skipped")
 
     # ─── READY ───
     log_phase("READY")
@@ -834,6 +846,8 @@ async def shutdown_handler(
         tg.create_task(_send_goodbye_message(bot, context))
         if context.reason in _OWNER_NOTIFY_REASONS:
             tg.create_task(_send_owner_notification(bot, context))
+
+    logging.info("Teardown tasks complete (cogs unloaded, goodbye sent)")
 
     # Stop resource tracker (after cogs, uses their timing data)
     if hasattr(bot, 'resource_tracker') and bot.resource_tracker:

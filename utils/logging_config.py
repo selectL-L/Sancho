@@ -28,6 +28,9 @@ import config
 # Module-level listener reference for proper cleanup
 _queue_listener: Optional[QueueListener] = None
 
+# Module-level logger for this utility module
+_logger = logging.getLogger(__name__)
+
 
 def stop_queue_listener() -> None:
     """Stops the queue listener thread without closing file handlers.
@@ -187,7 +190,7 @@ class ResourceTracker:
         self._ram_peak: float = 0.0
         self._samples_lock = asyncio.Lock()
         self.start_time: float = time.time()
-        self._logger = logging.getLogger("logging")
+        self._logger = logging.getLogger(__name__)
 
     def _get_instantaneous_cpu(self) -> float:
         """Gets an instantaneous CPU reading (blocking, ~0.5s).
@@ -582,10 +585,10 @@ def cleanup_old_logs(logs_dir: str, retention_count: int) -> None:
         while len(completed_logs) > retention_count:
             file_to_remove = completed_logs.pop(0)
             os.remove(os.path.join(logs_dir, file_to_remove))
-            logging.info(f"Removed old log file: {file_to_remove}")
+            _logger.info(f"Removed old log file: {file_to_remove}")
 
     except Exception as e:
-        logging.error(f"Error cleaning up old logs: {e}")
+        _logger.error(f"Error cleaning up old logs: {e}")
 
 
 def _close_file_handlers() -> None:
@@ -626,7 +629,7 @@ def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
         The new log file path, or None if renaming failed.
     """
     if not os.path.exists(log_path):
-        logging.warning(f"Log file not found for finalization: {log_path}")
+        _logger.warning(f"Log file not found for finalization: {log_path}")
         return None
 
     # Close file handlers to release the file lock before renaming
@@ -643,11 +646,11 @@ def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
         new_path = f"{base}_runtime-{runtime_str}{ext}"
 
         os.rename(log_path, new_path)
-        logging.info(f"Log file finalized: {os.path.basename(new_path)}")
+        _logger.info(f"Log file finalized: {os.path.basename(new_path)}")
         return new_path
 
     except Exception as e:
-        logging.error(f"Error finalizing log file: {e}")
+        _logger.error(f"Error finalizing log file: {e}")
         return None
 
 
@@ -756,6 +759,6 @@ def setup_logging(
     # Filter out harmless asyncio noise
     logging.getLogger('asyncio').addFilter(NoisyAsyncioFilter())
 
-    root_logger.info("Logging configured with console and rotating file handlers.")
+    root_logger.info(f"Logging configured: level={level}, file={log_file_path or 'console only'}")
 
     return log_file_path
