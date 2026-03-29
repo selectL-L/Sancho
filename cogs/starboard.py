@@ -1215,7 +1215,7 @@ class Starboard(BaseCog):
             await reply_msg.edit(embed=placeholder_embed)
             return True
         except discord.NotFound:
-            self.logger.debug(f"Reply context {reply_id} not found for placeholder edit.")
+            self.logger.info(f"Reply context {reply_id} not found for placeholder edit.")
             return False
         except discord.HTTPException as e:
             self.logger.error(f"Failed to edit reply context {reply_id} to placeholder: {e}", exc_info=True)
@@ -1274,7 +1274,7 @@ class Starboard(BaseCog):
                         reply_msg = await starboard_channel.fetch_message(reply_id)
                         await reply_msg.edit(embed=reply_embed)
                     except discord.NotFound:
-                        self.logger.debug(f"Reply context {reply_id} not found during re-promotion.")
+                        self.logger.info(f"Reply context {reply_id} not found during re-promotion.")
                     except discord.HTTPException as e:
                         self.logger.error(f"Failed to restore reply context {reply_id}: {e}", exc_info=True)
                     finally:
@@ -1282,7 +1282,7 @@ class Starboard(BaseCog):
                             f.close()
                 except discord.NotFound:
                     # Replied-to message is gone — leave the placeholder
-                    self.logger.debug(f"Replied-to message gone for {original_message.id}, leaving placeholder.")
+                    self.logger.info(f"Replied-to message gone for {original_message.id}, leaving placeholder.")
                 except discord.HTTPException as e:
                     self.logger.error(f"Failed to fetch replied-to message for re-promotion: {e}", exc_info=True)
 
@@ -1359,7 +1359,7 @@ class Starboard(BaseCog):
 
             except discord.NotFound:
                 # Replied-to message is gone — fall through to single post
-                self.logger.debug(f"Replied-to message not found for {message.id}, falling back to single post.")
+                self.logger.info(f"Replied-to message not found for {message.id}, falling back to single post.")
             except discord.HTTPException as e:
                 self.logger.error(f"Failed to create two-part starboard post: {e}", exc_info=True)
                 if reply_context_message:
@@ -1380,6 +1380,57 @@ class Starboard(BaseCog):
             return sb_msg.id, None
         return None, None
 
+    async def _queue_entry_for_remake(
+        self,
+        entry: Dict[str, Any],
+        reason: str
+    ) -> None:
+        """Clears live starboard message IDs so remake can recreate the entry.
+
+        Args:
+            entry: The starboard entry to preserve.
+            reason: Human-readable explanation for the queue decision.
+        """
+        original_id = entry.get('original_message_id')
+        sb_msg_id = entry.get('starboard_message_id')
+        reply_id = entry.get('starboard_reply_id')
+
+        entry['starboard_message_id'] = None
+        entry['starboard_reply_id'] = None
+        entry['failed_checks'] = 0
+
+        await self.db_manager.update_starboard_entry(entry)
+        self.logger.info(
+            f"Queued starboard entry {original_id} for remake: {reason} "
+            f"(starboard_message_id={sb_msg_id}, starboard_reply_id={reply_id})"
+        )
+
+    async def _sync_existing_entry_from_live_message(
+        self,
+        entry: Dict[str, Any],
+        message: discord.Message,
+        star_count: int
+    ) -> None:
+        """Sync cached metadata for a tracked entry from a live message.
+
+        Args:
+            entry: The tracked starboard entry.
+            message: The live original message.
+            star_count: The current live reaction count.
+        """
+        await self.db_manager.update_starboard_star_count(message.id, star_count)
+        entry['star_count'] = star_count
+
+        if entry.get('original_channel_id') != message.channel.id:
+            old_channel_id = entry.get('original_channel_id')
+            await self.db_manager.update_starboard_channel(message.id, message.channel.id)
+            entry['original_channel_id'] = message.channel.id
+            self.logger.info(f"Hot-path healed channel for {message.id}: {old_channel_id} -> {message.channel.id}")
+
+        if entry.get('failed_checks', 0) > 0:
+            await self.db_manager.reset_starboard_failed_checks(message.id)
+            entry['failed_checks'] = 0
+
     async def post_to_starboard(
         self,
         message: discord.Message,
@@ -1392,8 +1443,8 @@ class Starboard(BaseCog):
 
         If an entry exists, updates the star count on the existing post.
         If the entry is unworthy and stars are now above threshold, re-promotes.
-        If the starboard message is missing (404), removes the stale ID and
-        recreates. If no entry exists, creates a new post and DB entry.
+        If the live starboard message is missing, preserves the DB row and
+        queues it for remake. If no entry exists, creates a new post and DB row.
 
         Args:
             message: The original message.
@@ -1411,17 +1462,9 @@ class Starboard(BaseCog):
         existing_entry = await self.db_manager.get_starboard_entry(message.id)
 
         if existing_entry:
-            # --- Hot-path healing: sync star_count ---
-            await self.db_manager.update_starboard_star_count(message.id, star_count)
-
-            # --- Hot-path healing: sync channel ID if it drifted ---
-            if existing_entry.get('original_channel_id') != message.channel.id:
-                await self.db_manager.update_starboard_channel(message.id, message.channel.id)
-                self.logger.info(f"Hot-path healed channel for {message.id}: {existing_entry['original_channel_id']} -> {message.channel.id}")
-
-            # --- Hot-path healing: reset failed_checks (message is alive) ---
-            if existing_entry.get('failed_checks', 0) > 0:
-                await self.db_manager.reset_starboard_failed_checks(message.id)
+            await self._sync_existing_entry_from_live_message(
+                existing_entry, message, star_count
+            )
 
             sb_msg_id = existing_entry.get('starboard_message_id')
 
@@ -1435,37 +1478,50 @@ class Starboard(BaseCog):
                             starboard_channel, reply_id=existing_entry.get('starboard_reply_id')
                         )
                     except discord.NotFound:
-                        # Starboard message gone — recreate normally
-                        sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
-                        if sb_id:
-                            await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
+                        existing_entry['is_unworthy'] = 0
+                        await self._queue_entry_for_remake(
+                            existing_entry,
+                            reason=(
+                                f"original {message.id} regained worthiness but its live post "
+                                "was missing"
+                            )
+                        )
                     except discord.HTTPException as e:
                         self.logger.error(f"Failed to re-promote {message.id}: {e}", exc_info=True)
+                    else:
+                        await self.db_manager.set_starboard_unworthy(message.id, 0)
                 else:
-                    # No starboard message — create new post
-                    sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
-                    if sb_id:
-                        await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
-                await self.db_manager.set_starboard_unworthy(message.id, 0)
+                    existing_entry['is_unworthy'] = 0
+                    await self._queue_entry_for_remake(
+                        existing_entry,
+                        reason=f"original {message.id} regained worthiness without a live post"
+                    )
+                return
+
+            if existing_entry.get('is_unworthy') == 1:
+                self.logger.info(
+                    f"Starboard entry {message.id} remains unworthy at {star_count}/{starboard_threshold}; "
+                    "leaving the existing DB row and demoted state intact."
+                )
                 return
 
             if not sb_msg_id:
-                # Entry exists but has no starboard message (crawled, not yet posted).
-                # Create the post.
-                sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
-                if sb_id:
-                    await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
+                self.logger.info(
+                    f"Starboard entry {message.id} already has no live post; leaving it queued for remake."
+                )
                 return
 
             try:
                 starboard_message = await starboard_channel.fetch_message(sb_msg_id)
                 await starboard_message.edit(content=content)
             except discord.NotFound:
-                # Starboard message was deleted — recreate
-                self.logger.warning(f"Starboard message for {message.id} not found. Recreating.")
-                sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
-                if sb_id:
-                    await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
+                await self._queue_entry_for_remake(
+                    existing_entry,
+                    reason=(
+                        f"live post missing while syncing original {message.id} "
+                        "above threshold"
+                    )
+                )
         else:
             # New entry — create post and DB row
             sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
@@ -1573,11 +1629,25 @@ class Starboard(BaseCog):
                 message=f"OK (stars={live_count})"
             )
 
-        # -- Starboard message missing, original alive: MISSING_POST --
-        if original_exists and not sb_exists:
+        # -- Starboard message missing, original alive --
+        if original_exists and not sb_exists and original_msg:
+            star_reaction = discord.utils.get(original_msg.reactions, emoji=starboard_emoji)
+            live_count = star_reaction.count if star_reaction else 0
+            entry['star_count'] = live_count
             entry['starboard_message_id'] = None
             entry['starboard_reply_id'] = None
             entry['failed_checks'] = 0
+
+            if live_count < starboard_threshold:
+                return VerifyResult(
+                    entry=entry, status=VerifyStatus.UNWORTHY,
+                    needs_db_update=True,
+                    message=(
+                        f"Starboard message {sb_msg_id} missing and original {original_id} is below "
+                        f"threshold (stars={live_count}, threshold={starboard_threshold}); kept for purge review."
+                    )
+                )
+
             return VerifyResult(
                 entry=entry, status=VerifyStatus.MISSING_POST,
                 needs_db_update=True,
@@ -1741,11 +1811,11 @@ class Starboard(BaseCog):
                                     sb_msg, original_msg, entry.get('star_count', 0), starboard_emoji
                                 )
                             except discord.NotFound:
-                                self.logger.debug(f"Original {original_id} gone during unworthy demotion.")
+                                self.logger.info(f"Original {original_id} gone during unworthy demotion.")
                             except discord.HTTPException as e:
                                 self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}", exc_info=True)
                     except discord.NotFound:
-                        self.logger.debug(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
+                        self.logger.info(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
                     except discord.HTTPException as e:
                         self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}", exc_info=True)
 
@@ -1773,11 +1843,11 @@ class Starboard(BaseCog):
                                     reply_id=entry.get('starboard_reply_id')
                                 )
                             except discord.NotFound:
-                                self.logger.debug(f"Original {original_id} gone during re-promotion.")
+                                self.logger.info(f"Original {original_id} gone during re-promotion.")
                             except discord.HTTPException as e:
                                 self.logger.error(f"Failed to fetch original {original_id} for re-promotion: {e}", exc_info=True)
                     except discord.NotFound:
-                        self.logger.debug(f"Starboard message {sb_msg_id} gone during re-promotion.")
+                        self.logger.info(f"Starboard message {sb_msg_id} gone during re-promotion.")
                     except discord.HTTPException as e:
                         self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for re-promotion: {e}", exc_info=True)
 
@@ -2320,6 +2390,7 @@ class Starboard(BaseCog):
                 await self.db_manager.remove_starboard_entry(int(original_id))
                 unworthy_purged += 1
             await ctx.send(f"Purged {unworthy_purged} unworthy entries.")
+            report.results = [r for r in report.results if r.status != VerifyStatus.UNWORTHY]
 
         # Apply remaining verify results (DB updates, tombstone edits — no banned/unworthy left)
         await self._apply_verify_results(report, starboard_channel, cfg.emoji, cfg.threshold)
@@ -2514,7 +2585,7 @@ class Starboard(BaseCog):
                                 })
 
                 except (discord.Forbidden, discord.HTTPException) as e:
-                    self.logger.debug(f"Cannot scan #{ch.name} during catch-up: {e}")
+                    self.logger.warning(f"Cannot scan #{ch.name} during catch-up: {e}")
                     continue
 
             if not all_found:
@@ -2860,7 +2931,7 @@ class Starboard(BaseCog):
                     f"(starting in {RESUME_DELAY}s)."
                 )
         except Exception:
-            self.logger.debug("Failed to notify user about crawl resume.", exc_info=True)
+            self.logger.warning("Failed to notify user about crawl resume.", exc_info=True)
 
         await asyncio.sleep(RESUME_DELAY)
 
@@ -3000,6 +3071,26 @@ class Starboard(BaseCog):
                     await self.post_to_starboard(
                         message, cfg.channel_id, cfg.emoji, star_reaction.count, cfg.threshold
                     )
+                    return
+
+                existing_entry = await self.db_manager.get_starboard_entry(message.id)
+                if not existing_entry:
+                    return
+
+                await self._sync_existing_entry_from_live_message(
+                    existing_entry, message, star_reaction.count
+                )
+
+                if existing_entry.get('is_unworthy') == 1:
+                    self.logger.info(
+                        f"Reaction add: starboard entry {message.id} remains unworthy at "
+                        f"{star_reaction.count}/{cfg.threshold}; cached state synced."
+                    )
+                else:
+                    self.logger.info(
+                        f"Reaction add: synced tracked starboard entry {message.id} below threshold at "
+                        f"{star_reaction.count}/{cfg.threshold}."
+                    )
         finally:
             if not lock.locked():
                 self._locks.pop(payload.message_id, None)
@@ -3010,7 +3101,8 @@ class Starboard(BaseCog):
 
         Updates the star count on the starboard message. If reactions drop
         below threshold, deletes the starboard message and its reply context,
-        and removes the DB entry.
+        and removes the DB entry. If the live starboard post is missing but the
+        original is still worthy, the entry is preserved and queued for remake.
 
         Args:
             payload: The reaction event payload.
@@ -3036,47 +3128,62 @@ class Starboard(BaseCog):
 
         try:
             message = await channel.fetch_message(payload.message_id)
-            star_reaction = discord.utils.get(message.reactions, emoji=cfg.emoji)
-            star_count = star_reaction.count if star_reaction else 0
-
-            # Sync star count to DB
-            await self.db_manager.update_starboard_star_count(message.id, star_count)
-
-            sb_msg_id = existing_entry.get('starboard_message_id')
-            if not sb_msg_id:
-                return  # No starboard message to update/delete
-
-            starboard_message = await starboard_channel.fetch_message(sb_msg_id)
-
-            if star_count < cfg.threshold:
-                # Delete starboard message + reply context
-                await starboard_message.delete()
-                reply_id = existing_entry.get('starboard_reply_id')
-                if reply_id:
-                    try:
-                        reply_msg = await starboard_channel.fetch_message(reply_id)
-                        await reply_msg.delete()
-                    except discord.NotFound:
-                        pass
-
-                await self.db_manager.remove_starboard_entry(message.id)
-                self.logger.info(f"Removed starboard entry for {message.id} (below threshold).")
-            else:
-                content = f"{cfg.emoji} **{star_count}** in <#{message.channel.id}>"
-                await starboard_message.edit(content=content)
-
         except discord.NotFound:
-            # BUG: This handler does NOT distinguish between "original message deleted" and
-            # "starboard message manually deleted by an admin". In both cases, it nukes the
-            # DB entry. If only the starboard message was deleted, the entry should be preserved
-            # for remake to recreate — NOT silently removed. Self-heal catching this could leave
-            # it in a dangerous state. This NEEDS TO BE FIXED to only remove the entry when the
-            # ORIGINAL message is confirmed gone, not when the starboard post is missing.
-            self.logger.debug(
-                f"Reaction remove: message {payload.message_id} or starboard post not found — "
-                f"removing DB entry (BUG: should distinguish original vs starboard deletion)"
+            self.logger.info(
+                f"Reaction remove: original message {payload.message_id} not found; "
+                "deferring cleanup to cold-path verification."
             )
-            await self.db_manager.remove_starboard_entry(payload.message_id)
+            return
+
+        star_reaction = discord.utils.get(message.reactions, emoji=cfg.emoji)
+        star_count = star_reaction.count if star_reaction else 0
+
+        # Sync star count to DB
+        await self.db_manager.update_starboard_star_count(message.id, star_count)
+        existing_entry['star_count'] = star_count
+        existing_entry['original_channel_id'] = message.channel.id
+
+        sb_msg_id = existing_entry.get('starboard_message_id')
+
+        if star_count < cfg.threshold:
+            if sb_msg_id:
+                try:
+                    starboard_message = await starboard_channel.fetch_message(sb_msg_id)
+                    await starboard_message.delete()
+                except discord.NotFound:
+                    pass
+
+            reply_id = existing_entry.get('starboard_reply_id')
+            if reply_id:
+                try:
+                    reply_msg = await starboard_channel.fetch_message(reply_id)
+                    await reply_msg.delete()
+                except discord.NotFound:
+                    pass
+
+            await self.db_manager.remove_starboard_entry(message.id)
+            self.logger.info(f"Removed starboard entry for {message.id} (below threshold).")
+            return
+
+        if not sb_msg_id:
+            self.logger.info(
+                f"Reaction remove: starboard entry {message.id} already has no live post; "
+                "leaving it queued for remake."
+            )
+            return
+
+        try:
+            starboard_message = await starboard_channel.fetch_message(sb_msg_id)
+            content = f"{cfg.emoji} **{star_count}** in <#{message.channel.id}>"
+            await starboard_message.edit(content=content)
+        except discord.NotFound:
+            await self._queue_entry_for_remake(
+                existing_entry,
+                reason=(
+                    f"live post missing after reaction removal while original {message.id} "
+                    "remains above threshold"
+                )
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

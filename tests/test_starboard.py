@@ -372,6 +372,7 @@ class TestOnRawReactionAdd:
         # Add reaction below threshold
         mock_message.reactions = [create_star_reaction("⭐", 2)]
         mock_channel.fetch_message.return_value = mock_message
+        mock_bot.db_manager.get_starboard_entry.return_value = None
 
         starboard_cog.post_to_starboard = AsyncMock()
         starboard_cog._should_self_heal = AsyncMock(return_value=False)
@@ -379,6 +380,53 @@ class TestOnRawReactionAdd:
         await starboard_cog.on_raw_reaction_add(payload)
 
         starboard_cog.post_to_starboard.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_syncs_existing_unworthy_row_below_threshold(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
+        """Below-threshold adds still sync tracked unworthy rows without promoting them."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.user_id = 123
+        payload.emoji = "⭐"
+        payload.channel_id = mock_channel.id
+        payload.message_id = mock_message.id
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id,
+            threshold=6,
+        )
+        mock_bot.db_manager.is_starboard_channel_banned.return_value = False
+        mock_bot.get_channel.side_effect = lambda ch_id: {
+            mock_channel.id: mock_channel,
+            mock_starboard_channel.id: mock_starboard_channel,
+        }.get(ch_id)
+
+        mock_message.reactions = [create_star_reaction("⭐", 5)]
+        mock_channel.fetch_message.return_value = mock_message
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': mock_channel.id,
+            'starboard_reply_id': None,
+            'star_count': 4,
+            'failed_checks': 2,
+            'starred_at': 123456,
+            'is_unworthy': 1,
+        }
+
+        starboard_cog.post_to_starboard = AsyncMock()
+        starboard_cog._should_self_heal = AsyncMock(return_value=False)
+
+        await starboard_cog.on_raw_reaction_add(payload)
+
+        starboard_cog.post_to_starboard.assert_not_called()
+        mock_bot.db_manager.update_starboard_star_count.assert_called_once_with(mock_message.id, 5)
+        mock_bot.db_manager.reset_starboard_failed_checks.assert_called_once_with(mock_message.id)
+        mock_bot.db_manager.update_starboard_channel.assert_not_called()
+        mock_bot.db_manager.remove_starboard_entry.assert_not_called()
 
 
 # =============================================================================
@@ -438,7 +486,7 @@ class TestPostToStarboard:
     async def test_recreates_when_starboard_message_missing(
         self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
     ):
-        """Recreates post when starboard message is deleted."""
+        """Queues existing entry for remake when live post is missing."""
         mock_bot.get_channel.return_value = mock_starboard_channel
 
         mock_bot.db_manager.get_starboard_entry.return_value = {
@@ -446,7 +494,11 @@ class TestPostToStarboard:
             'starboard_message_id': 5001,
             'guild_id': 1001,
             'original_channel_id': 2001,
-            'failed_checks': 0,
+            'starboard_reply_id': 5000,
+            'star_count': 4,
+            'failed_checks': 1,
+            'starred_at': 123456,
+            'is_unworthy': 0,
         }
         mock_starboard_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
 
@@ -454,14 +506,21 @@ class TestPostToStarboard:
 
         await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
 
-        starboard_cog.create_new_starboard_post.assert_called_once()
-        mock_bot.db_manager.set_starboard_message_id.assert_called_once()
+        starboard_cog.create_new_starboard_post.assert_not_called()
+        mock_bot.db_manager.set_starboard_message_id.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_called_once()
+
+        queued_entry = mock_bot.db_manager.update_starboard_entry.call_args.args[0]
+        assert queued_entry['starboard_message_id'] is None
+        assert queued_entry['starboard_reply_id'] is None
+        assert queued_entry['star_count'] == 5
+        assert queued_entry['failed_checks'] == 0
 
     @pytest.mark.asyncio
     async def test_creates_post_when_entry_has_no_starboard_message_id(
         self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
     ):
-        """Creates post when entry exists but has no starboard_message_id (crawled)."""
+        """Leaves existing unposted entry queued for remake."""
         mock_bot.get_channel.return_value = mock_starboard_channel
 
         mock_bot.db_manager.get_starboard_entry.return_value = {
@@ -469,15 +528,85 @@ class TestPostToStarboard:
             'starboard_message_id': None,
             'guild_id': 1001,
             'original_channel_id': 2001,
+            'starboard_reply_id': None,
+            'star_count': 5,
             'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 0,
         }
 
         starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5001, None))
 
         await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
 
-        starboard_cog.create_new_starboard_post.assert_called_once()
-        mock_bot.db_manager.set_starboard_message_id.assert_called_once()
+        starboard_cog.create_new_starboard_post.assert_not_called()
+        mock_bot.db_manager.set_starboard_message_id.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queues_unworthy_repromotion_when_live_post_missing(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
+        """Queues remake instead of hot-posting when re-promotion lacks a live post."""
+        mock_bot.get_channel.return_value = mock_starboard_channel
+
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': 2001,
+            'starboard_reply_id': 5000,
+            'star_count': 2,
+            'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 1,
+        }
+        mock_starboard_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5002, None))
+        starboard_cog._restore_from_unworthy = AsyncMock()
+
+        await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5)
+
+        starboard_cog.create_new_starboard_post.assert_not_called()
+        starboard_cog._restore_from_unworthy.assert_not_called()
+        mock_bot.db_manager.set_starboard_unworthy.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_called_once()
+
+        queued_entry = mock_bot.db_manager.update_starboard_entry.call_args.args[0]
+        assert queued_entry['starboard_message_id'] is None
+        assert queued_entry['starboard_reply_id'] is None
+        assert queued_entry['is_unworthy'] == 0
+
+    @pytest.mark.asyncio
+    async def test_keeps_existing_unworthy_entry_when_still_below_threshold(
+        self, starboard_cog, mock_bot, mock_starboard_channel, mock_message
+    ):
+        """Leaves an unworthy row intact when a helper call is still below threshold."""
+        mock_bot.get_channel.return_value = mock_starboard_channel
+
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': 2001,
+            'starboard_reply_id': None,
+            'star_count': 4,
+            'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 1,
+        }
+
+        starboard_cog.create_new_starboard_post = AsyncMock(return_value=(5002, None))
+
+        await starboard_cog.post_to_starboard(mock_message, mock_starboard_channel.id, "⭐", 5, 6)
+
+        mock_bot.db_manager.update_starboard_star_count.assert_called_once_with(mock_message.id, 5)
+        mock_bot.db_manager.set_starboard_unworthy.assert_not_called()
+        mock_bot.db_manager.set_starboard_message_id.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_not_called()
+        starboard_cog.create_new_starboard_post.assert_not_called()
+        mock_starboard_channel.fetch_message.assert_not_called()
 
 
 # =============================================================================
@@ -630,6 +759,130 @@ class TestOnRawReactionRemove:
         sb_msg.edit.assert_called_once()
         assert "⭐ **4**" in sb_msg.edit.call_args[1]['content']
 
+    @pytest.mark.asyncio
+    async def test_queues_for_remake_when_post_missing_but_still_above_threshold(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
+        """Preserves the row when the original is worthy but the live post is gone."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.emoji = "⭐"
+        payload.channel_id = mock_channel.id
+        payload.message_id = mock_message.id
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.get_channel.side_effect = lambda ch_id: {
+            mock_channel.id: mock_channel,
+            mock_starboard_channel.id: mock_starboard_channel,
+        }.get(ch_id)
+
+        mock_message.reactions = [create_star_reaction("⭐", 4)]
+        mock_channel.fetch_message.return_value = mock_message
+        mock_starboard_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': mock_channel.id,
+            'starboard_reply_id': 5000,
+            'star_count': 5,
+            'failed_checks': 1,
+            'starred_at': 123456,
+            'is_unworthy': 0,
+        }
+
+        await starboard_cog.on_raw_reaction_remove(payload)
+
+        mock_bot.db_manager.remove_starboard_entry.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_called_once()
+
+        queued_entry = mock_bot.db_manager.update_starboard_entry.call_args.args[0]
+        assert queued_entry['starboard_message_id'] is None
+        assert queued_entry['starboard_reply_id'] is None
+        assert queued_entry['star_count'] == 4
+        assert queued_entry['failed_checks'] == 0
+
+    @pytest.mark.asyncio
+    async def test_removes_row_when_below_threshold_even_if_live_post_is_missing(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
+        """Deletes the DB row on threshold drop even when the live post is already gone."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.emoji = "⭐"
+        payload.channel_id = mock_channel.id
+        payload.message_id = mock_message.id
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.get_channel.side_effect = lambda ch_id: {
+            mock_channel.id: mock_channel,
+            mock_starboard_channel.id: mock_starboard_channel,
+        }.get(ch_id)
+
+        mock_message.reactions = [create_star_reaction("⭐", 2)]
+        mock_channel.fetch_message.return_value = mock_message
+        mock_starboard_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': mock_channel.id,
+            'starboard_reply_id': None,
+            'star_count': 5,
+            'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 0,
+        }
+
+        await starboard_cog.on_raw_reaction_remove(payload)
+
+        mock_bot.db_manager.remove_starboard_entry.assert_called_once_with(mock_message.id)
+        mock_bot.db_manager.update_starboard_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_defers_original_missing_to_cold_path(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel
+    ):
+        """Leaves the row untouched when the original cannot be fetched on hot path."""
+        payload = MagicMock(spec=discord.RawReactionActionEvent)
+        payload.guild_id = 1001
+        payload.emoji = "⭐"
+        payload.channel_id = mock_channel.id
+        payload.message_id = 4001
+
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.get_channel.side_effect = lambda ch_id: {
+            mock_channel.id: mock_channel,
+            mock_starboard_channel.id: mock_starboard_channel,
+        }.get(ch_id)
+        mock_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+        mock_bot.db_manager.get_starboard_entry.return_value = {
+            'original_message_id': 4001,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': mock_channel.id,
+            'starboard_reply_id': None,
+            'star_count': 5,
+            'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 0,
+        }
+
+        await starboard_cog.on_raw_reaction_remove(payload)
+
+        mock_bot.db_manager.remove_starboard_entry.assert_not_called()
+        mock_bot.db_manager.update_starboard_star_count.assert_not_called()
+        mock_bot.db_manager.update_starboard_entry.assert_not_called()
+
 
 # =============================================================================
 # TOMBSTONE TESTS
@@ -663,6 +916,46 @@ class TestCreateTombstone:
         result = await starboard_cog._create_tombstone(mock_starboard_channel, 4001)
 
         assert result is None
+
+
+# =============================================================================
+# VERIFY ENGINE TESTS
+# =============================================================================
+
+
+class TestVerifyEngine:
+    """Tests for verify engine edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_missing_post_below_threshold_is_reported_unworthy(
+        self, starboard_cog, mock_bot, mock_channel, mock_starboard_channel, mock_message
+    ):
+        """Missing live post should not hide an unworthy original during verify."""
+        entry = {
+            'original_message_id': mock_message.id,
+            'starboard_message_id': 5001,
+            'guild_id': 1001,
+            'original_channel_id': mock_channel.id,
+            'starboard_reply_id': 5000,
+            'star_count': 5,
+            'failed_checks': 1,
+            'starred_at': 123456,
+            'is_unworthy': 0,
+        }
+
+        mock_message.reactions = [create_star_reaction("⭐", 2)]
+        mock_bot.get_channel.return_value = mock_channel
+        starboard_cog._run_rate_limited = AsyncMock(side_effect=[discord.NotFound(MagicMock(), "Not found"), mock_message])
+
+        result = await starboard_cog._verify_single_entry(entry, mock_starboard_channel, "⭐", 3)
+
+        from cogs.starboard import VerifyStatus
+        assert result.status == VerifyStatus.UNWORTHY
+        assert result.needs_db_update is True
+        assert result.entry['starboard_message_id'] is None
+        assert result.entry['starboard_reply_id'] is None
+        assert result.entry['failed_checks'] == 0
+        assert result.entry['star_count'] == 2
 
 
 # =============================================================================
@@ -812,6 +1105,58 @@ class TestRemakeCommand:
         sb_msg.delete.assert_called_once()
         # DB IDs were nulled
         mock_bot.db_manager.null_starboard_message_ids.assert_called_once_with(mock_guild.id)
+
+    @pytest.mark.asyncio
+    async def test_remake_does_not_reapply_purged_unworthy_results(
+        self, starboard_cog, mock_ctx, mock_bot, mock_starboard_channel, mock_guild
+    ):
+        """Purged unworthy results should not be sent back through apply_verify_results."""
+        mock_bot.db_manager.get_starboard_config.return_value = make_config_row(
+            channel_id=mock_starboard_channel.id
+        )
+        mock_bot.get_channel.return_value = mock_starboard_channel
+
+        from cogs.starboard import VerifyReport, VerifyResult, VerifyStatus
+        unworthy_entry = {
+            'original_message_id': 4001,
+            'starboard_message_id': 5001,
+            'guild_id': mock_guild.id,
+            'original_channel_id': 2001,
+            'starboard_reply_id': None,
+            'star_count': 2,
+            'failed_checks': 0,
+            'starred_at': 123456,
+            'is_unworthy': 0,
+        }
+        healthy_entry = {
+            'original_message_id': 4002,
+            'starboard_message_id': 5002,
+            'guild_id': mock_guild.id,
+            'original_channel_id': 2001,
+            'starboard_reply_id': None,
+            'star_count': 5,
+            'failed_checks': 0,
+            'starred_at': 123457,
+            'is_unworthy': 0,
+        }
+        report = VerifyReport(
+            results=[
+                VerifyResult(unworthy_entry, VerifyStatus.UNWORTHY, True, "below threshold"),
+                VerifyResult(healthy_entry, VerifyStatus.HEALTHY, False, "ok"),
+            ],
+            healthy=1,
+            unworthy=1,
+        )
+
+        starboard_cog._verify_all_entries = AsyncMock(return_value=report)
+        starboard_cog._apply_verify_results = AsyncMock()
+        mock_bot.db_manager.get_starboard_entries_ordered.return_value = []
+
+        with patch('cogs.starboard.launch_modal', new=AsyncMock()), patch('asyncio.wait_for', new=AsyncMock(return_value=True)):
+            await starboard_cog._remake_impl(mock_ctx)
+
+        applied_report = starboard_cog._apply_verify_results.call_args.args[0]
+        assert all(result.status != VerifyStatus.UNWORTHY for result in applied_report.results)
 
 
 # =============================================================================
