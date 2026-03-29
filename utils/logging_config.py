@@ -755,6 +755,12 @@ def setup_logging(
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
     logging.getLogger('aiosqlite').setLevel(logging.WARNING)
+    # Uvicorn: errors/warnings always visible; access logs only in dev mode.
+    # Requires log_config=None in uvicorn.Config to prevent uvicorn from
+    # creating its own handlers (which would bypass the file handler pipeline).
+    logging.getLogger('uvicorn').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.INFO if config.DEV_MODE else logging.WARNING)
 
     # Filter out harmless asyncio noise
     logging.getLogger('asyncio').addFilter(NoisyAsyncioFilter())

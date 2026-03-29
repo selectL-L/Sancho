@@ -80,6 +80,7 @@ class Web(BaseCog):
                 app=app,
                 host=config.WEB_HOST,
                 port=config.WEB_PORT,
+                log_config=None,  # Prevent uvicorn from reconfiguring root logger — let records propagate to bot's handlers
                 log_level="warning" if not config.DEV_MODE else "info",
                 reload=False,
                 access_log=config.DEV_MODE,
