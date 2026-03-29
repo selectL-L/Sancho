@@ -127,7 +127,7 @@ class Help(BaseCog):
                     self.logger.debug(f"[Help] '{command.name}': no app_command or decorator found")
 
         else:
-            self.logger.warning("Bot does not have a command tree, cannot look for app command descriptions.")
+            self.logger.warning(f"Bot has no command tree; parameter descriptions unavailable for '{command.name}' (requested by {ctx.author.id}).")
 
         # Format usage.
         # Use the command's usage if provided, otherwise generate signature

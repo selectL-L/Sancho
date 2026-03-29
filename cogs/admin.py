@@ -341,6 +341,7 @@ class AdminCog(BaseCog):
                 name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
             # 5. Launch Dashboard
+            self.logger.warning(f"Admin {ctx.author.id} opened dashboard ({len(all_skills)} skills, {len(all_reminders)} reminders).")
             await show_dashboard(
                 ctx=ctx,
                 skill_pages=skill_pages,
@@ -506,10 +507,13 @@ class AdminCog(BaseCog):
                     await ctx.send("✅ Reminder updated.")
                     self.logger.warning(f"Admin {ctx.author} updated reminder #{entry_id}: {updates}")
 
+        except asyncio.TimeoutError:
+            self.logger.debug(f"Admin {ctx.author.id} timed out during edit_entry ({entry_type} #{entry_id}).")
+            await ctx.send("Edit timed out.")
         except Exception as e:
             self.logger.error(
                 f"Error editing {entry_type} #{entry_id}: {e}", exc_info=True)
-            await ctx.send(f"An error occurred: {e}")
+            await ctx.send("An error occurred. Check logs for details.")
 
     @commands.hybrid_command(
         name="mood",
@@ -603,6 +607,7 @@ class AdminCog(BaseCog):
             await ctx.send(f"✅ Mood changed to `{mood_name}`{activity_info}")
             self.logger.warning(f"Admin {ctx.author} changed mood to {mood_name}.")
         else:
+            self.logger.warning(f"Admin {ctx.author.id} attempted mood change to {mood_name} but set_mood() returned False.")
             await ctx.send(f"❌ Failed to set mood to `{mood_name}`.")
 
     @commands.hybrid_command(
@@ -651,6 +656,7 @@ class AdminCog(BaseCog):
 
             await ctx.send("Historical resource usage attached:", file=discord.File(temp_path, filename="usage_history.txt"))
             os.remove(temp_path)
+            self.logger.info(f"Admin {ctx.author.id} requested resource usage history export.")
             return
 
         # Send initial message
@@ -666,6 +672,7 @@ class AdminCog(BaseCog):
         # Delete the loading message and show the status view
         await message.delete()
         await show_status(ctx, data, refresh_callback=refresh_callback)
+        self.logger.info(f"Admin {ctx.author.id} ran status check.")
 
     async def _gather_status_data(self, ctx: commands.Context, message: Optional[discord.Message] = None) -> StatusData:
         """Gather all data needed for the status view.
@@ -1052,6 +1059,7 @@ class AdminCog(BaseCog):
             playlists, old_membership = await cache_manager.refresh_all_playlists()
 
             if not playlists:
+                self.logger.warning(f"Admin {ctx.author.id} ran cache refresh but no playlists were found in ambience.toml.")
                 await status_msg.edit(content="⚠️ No playlists found in ambience.toml or all failed to fetch.")
                 cache_manager.start_refresh_timer()
                 return
@@ -1098,8 +1106,8 @@ class AdminCog(BaseCog):
             )
 
             await status_msg.edit(content=None, embed=result_embed)
-            self.logger.info(
-                f"Cache refresh completed: {len(playlists)} playlists, "
+            self.logger.warning(
+                f"Admin {ctx.author.id} ran cache refresh: {len(playlists)} playlists, "
                 f"{queued} queued, {expired} expired orphans cleaned."
             )
 
@@ -1221,6 +1229,7 @@ class AdminCog(BaseCog):
         """
         # Validate file
         if not attachment.filename.endswith('.txt'):
+            self.logger.warning(f"Admin {ctx.author.id} attempted cookie upload with invalid file: {attachment.filename}")
             msg = "❌ File must be a `.txt` file (Netscape cookie format)"
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1229,6 +1238,7 @@ class AdminCog(BaseCog):
             return
 
         if attachment.size > 100_000:  # 100KB should be way more than enough
+            self.logger.warning(f"Admin {ctx.author.id} attempted cookie upload but file too large: {attachment.size} bytes ({attachment.filename})")
             msg = "❌ File too large. Cookie files are typically under 10KB."
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1250,6 +1260,7 @@ class AdminCog(BaseCog):
 
         # Basic validation - should contain youtube.com cookies
         if 'youtube.com' not in text.lower() and '.youtube.com' not in text:
+            self.logger.warning(f"Admin {ctx.author.id} uploaded file that does not appear to contain YouTube cookies: {attachment.filename}")
             msg = "❌ File doesn't appear to contain YouTube cookies."
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1566,7 +1577,7 @@ class AdminCog(BaseCog):
                 summary_parts.append(f"{restored} manual edits preserved")
 
             await status_msg.edit(content=f"Rescrape complete: {', '.join(summary_parts)}.")
-            self.logger.info(f"Admin {ctx.author} ran limbus rescrape ({mode}): {summary_parts}")
+            self.logger.warning(f"Admin {ctx.author.id} ran limbus rescrape ({mode}): {summary_parts}")
 
         except Exception as e:
             self.logger.error(f"Limbus rescrape failed: {e}", exc_info=True)
@@ -1642,10 +1653,21 @@ class AdminCog(BaseCog):
         )
 
         async def save_callback(identity_id: str, skill_label: str, updates: dict) -> bool:
-            return limbus_cog.update_skill(identity_id, skill_label, updates)
+            result = limbus_cog.update_skill(identity_id, skill_label, updates)
+            if result:
+                self.logger.warning(
+                    f"Admin {ctx.author.id} saved skill edit: identity={identity_id}, "
+                    f"skill={skill_label}, updates={list(updates.keys())}"
+                )
+            else:
+                self.logger.warning(
+                    f"Admin {ctx.author.id} attempted skill edit but update_skill() returned False: "
+                    f"identity={identity_id}, skill={skill_label}"
+                )
+            return result
 
         await show_skill_editor(ctx, state, save_callback)
-        self.logger.info(f"Admin {ctx.author} opened skill editor for {identity['name']}")
+        self.logger.debug(f"Admin {ctx.author.id} opened skill editor for {identity['name']} ({identity['id']})")
 
 
 async def setup(bot: CoreBot) -> None:

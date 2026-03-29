@@ -213,7 +213,7 @@ class Fun(BaseCog):
         except FileNotFoundError:
             self.logger.warning("bod_quotes.toml not found. BOD fate triggers will be disabled.")
         except tomllib.TOMLDecodeError as e:
-            self.logger.error(f"Failed to parse bod_quotes.toml: {e}")
+            self.logger.error(f"Failed to parse bod_quotes.toml: {e}", exc_info=True)
         except Exception as e:
             self.logger.error(f"Unexpected error loading bod_quotes.toml: {e}", exc_info=True)
 
@@ -297,9 +297,9 @@ class Fun(BaseCog):
             else:
                 await ctx.reply(item)
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             await ctx.reply(cmd.error_msg)
-            self.logger.error(f"Asset missing for fun command '{cmd.name}'")
+            self.logger.error(f"Asset missing for fun command '{cmd.name}' (user {ctx.author.id}): {e}", exc_info=True)
         except Exception as e:
             await ctx.reply(cmd.error_msg)
             self.logger.error(f"Error in fun command '{cmd.name}': {e}", exc_info=True)
@@ -522,9 +522,6 @@ class Fun(BaseCog):
         Returns:
             Tier string: 'SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
         """
-        if self.bot.db_manager is None:
-            return "NORMAL"
-
         # Check in priority order (SILENT first for admin-rigged rolls without flavor text)
         for tier in ('SILENT', 'GUARANTEED', 'BLESSED', 'LUCKY'):
             if await self.db_manager.consume_bod_fate(user_id, tier):
@@ -665,6 +662,7 @@ class Fun(BaseCog):
             user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
                 await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                self.logger.info(f"BOD session timeout: new personal best for user {user_id} with chain {current_chain}.")
                 reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -688,7 +686,6 @@ class Fun(BaseCog):
             # Always remove the task from the tracking dictionary upon completion or cancellation.
             if user_id in self.bod_timeout_tasks:
                 self.bod_timeout_tasks.pop(user_id, None)
-                self.logger.info(f"Removed BOD task for user {user_id} from tracking.")
 
     @commands.hybrid_command(name='allquotes', description='Show all Yujin quotes (admin only)')
     @commands.is_owner()
@@ -740,7 +737,7 @@ class Fun(BaseCog):
                 embed.add_field(name=field_name, value=chunk, inline=False)
 
         await ctx.reply(embed=embed)
-        self.logger.info(f"All Yujin quotes displayed for admin {ctx.author}.")
+        self.logger.info(f"All Yujin quotes displayed for admin {ctx.author.id}.")
 
     async def bod(self, ctx: commands.Context, query: str) -> None:
         """A special command that rolls a 1d4.
@@ -802,6 +799,7 @@ class Fun(BaseCog):
             if roll_result == 4:
                 # Successful roll, continue the chain
                 new_chain = current_chain + 1
+                self.logger.info(f"BOD roll success for user {user_id}: tier={fate_tier}, roll=4, chain={new_chain}.")
                 # Update timestamp, chain, and the last channel used.
                 await self.db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
 
@@ -855,11 +853,13 @@ class Fun(BaseCog):
         This runs in POST-READY phase after the bot is fully connected,
         ensuring the cache is populated before we check for active chains.
         """
+        self.logger.info("Starting Fun cog...")
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
         self._load_bod_quotes()
         await asyncio.sleep(2)
         await self._cleanup_bod_chains()
+        self.logger.info("Fun cog ready.")
 
     async def _cleanup_bod_chains(self) -> None:
         """Checks for any BOD chains that were active and notifies participants.
@@ -897,6 +897,7 @@ class Fun(BaseCog):
             user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
                 await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                self.logger.info(f"BOD restart cleanup: new personal best for user {user_id} with chain {current_chain}.")
                 reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."

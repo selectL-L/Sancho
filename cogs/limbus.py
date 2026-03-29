@@ -42,6 +42,7 @@ class Limbus(BaseCog):
 
     async def cog_ready(self) -> None:
         """Load identity data from assets/identities.json."""
+        self.logger.info("Starting Limbus data load...")
         self._load_data()
 
     def _load_data(self) -> None:
@@ -90,10 +91,12 @@ class Limbus(BaseCog):
         result = self._try_named_roll(query)
         if result:
             identity, skill, roll = result
+            self.logger.info(f"Named roll for user {ctx.author.id}: {identity['name']} {skill['label']} → {roll['final_power']}")
             await ctx.send(self._format_named_roll(ctx.author, identity, skill, roll))
             return
 
         # Fall back to manual parameter parsing
+        self.logger.debug(f"Named roll lookup failed for query {query!r}, falling back to manual mode")
         await self._manual_roll(ctx, query)
 
     # ── Named skill roll ──
@@ -364,6 +367,7 @@ class Limbus(BaseCog):
                 f"Calculation: `(Base) {base_power} + (Coins) {coin_total} + (Mods) {modifier}`\n"
                 f"{description}"
             )
+            self.logger.info(f"Manual roll for user {ctx.author.id}: base={base_power}, coins={num_coins}, cp={coin_power}, sp={sp} → {final_result}")
             await ctx.send(response)
 
         except asyncio.TimeoutError:
@@ -372,7 +376,7 @@ class Limbus(BaseCog):
             await ctx.send(f"Invalid input: {e}. Please enter a valid number.")
         except Exception as e:
             await ctx.send("An unexpected error occurred. The issue has been logged.")
-            self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
+            self.logger.error(f"Error during limbus roll for user {ctx.author.id}: {e}", exc_info=True)
 
     # ========== DATA MANAGEMENT ==========
 
@@ -430,6 +434,7 @@ class Limbus(BaseCog):
         """
         identity = self.get_identity(identity_id)
         if not identity:
+            self.logger.warning(f"update_skill: identity {identity_id!r} not found (skill: {skill_label})")
             return False
 
         for skill in identity.get("skills", []):
@@ -440,6 +445,7 @@ class Limbus(BaseCog):
                     else:
                         skill[key] = value
                 skill["manually_edited"] = True
+                self.logger.info(f"Skill updated: {identity_id} {skill_label}, fields: {list(updates.keys())}")
                 self._save_data()
                 return True
         return False
@@ -498,6 +504,7 @@ class Limbus(BaseCog):
         """
         from utils.limbus_wiki import download_all, parse_all
 
+        self.logger.info(f"Rescrape started (redownload={redownload})")
         # 1. Save manual overrides before the file gets overwritten
         overrides = self._extract_manual_overrides()
         override_count = sum(len(v) for v in overrides.values())
@@ -519,6 +526,7 @@ class Limbus(BaseCog):
         restored = 0
         if overrides:
             restored = self._apply_manual_overrides(overrides)
+            self.logger.info(f"Manual overrides restored: {restored} skill(s) after rescrape")
             log(f"Restored {restored} manually-edited skill(s)")
 
         return (downloaded, len(identities), restored)

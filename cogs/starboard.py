@@ -371,7 +371,7 @@ class Starboard(BaseCog):
             except discord.Forbidden:
                 self.logger.warning(f"No permission to rename channel {channel.id}.")
             except discord.HTTPException as e:
-                self.logger.error(f"Failed to rename channel {channel.id}: {e}")
+                self.logger.error(f"Failed to rename channel {channel.id}: {e}", exc_info=True)
 
     async def _remove_channel_prefix(self, channel: discord.TextChannel) -> None:
         """Remove the 🌟- prefix from a starboard channel name.
@@ -385,7 +385,7 @@ class Starboard(BaseCog):
             except discord.Forbidden:
                 self.logger.warning(f"No permission to rename channel {channel.id}.")
             except discord.HTTPException as e:
-                self.logger.error(f"Failed to rename channel {channel.id}: {e}")
+                self.logger.error(f"Failed to rename channel {channel.id}: {e}", exc_info=True)
 
     async def _resolve_channel_arg(
         self, ctx: commands.Context, value: str
@@ -525,6 +525,7 @@ class Starboard(BaseCog):
             return
 
         await self.db_manager.upsert_starboard_config(ctx.guild.id, emoji=emoji)
+        self.logger.info(f"Starboard emoji set to {emoji!r} in guild {ctx.guild.id} by {ctx.author.id}")
         await ctx.send(f"Starboard emoji set to {emoji}")
 
     @starboard_group.command(
@@ -554,6 +555,7 @@ class Starboard(BaseCog):
             return
 
         await self.db_manager.upsert_starboard_config(ctx.guild.id, threshold=threshold)
+        self.logger.info(f"Starboard threshold set to {threshold} in guild {ctx.guild.id} by {ctx.author.id}")
         await ctx.send(f"Starboard threshold set to **{threshold}**")
 
     @starboard_group.command(
@@ -625,6 +627,7 @@ class Starboard(BaseCog):
 
             await self.db_manager.set_starboard_enabled(ctx.guild.id, True)
             await self._add_channel_prefix(channel)
+            self.logger.info(f"Starboard enabled in guild {ctx.guild.id} by {ctx.author.id} (channel={config.channel_id})")
             await ctx.send(f"Starboard enabled in {channel.mention}.")
         else:
             # Disable
@@ -639,6 +642,7 @@ class Starboard(BaseCog):
                 if isinstance(channel, discord.TextChannel):
                     await self._remove_channel_prefix(channel)
 
+            self.logger.info(f"Starboard disabled in guild {ctx.guild.id} by {ctx.author.id}")
             await ctx.send("Starboard disabled. Settings and entries are preserved.")
 
     @starboard_group.command(
@@ -668,6 +672,7 @@ class Starboard(BaseCog):
             await self._remove_channel_prefix(channel)
 
         await self.db_manager.upsert_starboard_config(ctx.guild.id, channel_id=None, enabled=0)
+        self.logger.info(f"Starboard unset in guild {ctx.guild.id} by {ctx.author.id} (old channel={old_channel_id})")
         await ctx.send(
             f"Starboard unset. <#{old_channel_id}> has been added to the ban list. "
             "Emoji, threshold, and entries are preserved."
@@ -725,6 +730,7 @@ class Starboard(BaseCog):
                 return
 
         await self.db_manager.add_starboard_banned_channel(ctx.guild.id, channel_id)
+        self.logger.info(f"Starboard channel {channel_id} banned in guild {ctx.guild.id} by {ctx.author.id}")
         await ctx.send(f"{label} has been banned from the starboard.")
 
     @starboard_group.command(
@@ -754,6 +760,7 @@ class Starboard(BaseCog):
             return
 
         await self.db_manager.remove_starboard_banned_channel(ctx.guild.id, channel_id)
+        self.logger.info(f"Starboard channel {channel_id} unbanned in guild {ctx.guild.id} by {ctx.author.id}")
         await ctx.send(f"{label} has been unbanned from the starboard.")
 
     # ── Section 3: Shared Infrastructure ──────────────────────────────────────
@@ -984,7 +991,7 @@ class Starboard(BaseCog):
                         current_total_size += file_size
                         files.append(discord.File(data, filename=filename, spoiler=spoiler))
             except Exception as e:
-                self.logger.error(f"Failed to download attachment {filename}: {e}")
+                self.logger.error(f"Failed to download attachment {filename}: {e}", exc_info=True)
 
         # Message content
         if message.content:
@@ -1051,7 +1058,7 @@ class Starboard(BaseCog):
         try:
             return await starboard_channel.send(f"🪦 **{star_count}** — something was here.")
         except Exception as e:
-            self.logger.error(f"Failed to create tombstone for {original_message_id}: {e}")
+            self.logger.error(f"Failed to create tombstone for {original_message_id}: {e}", exc_info=True)
             return None
 
     async def _edit_to_tombstone(
@@ -1080,7 +1087,7 @@ class Starboard(BaseCog):
             )
             return True
         except Exception as e:
-            self.logger.error(f"Failed to edit starboard message {starboard_message.id} into tombstone: {e}")
+            self.logger.error(f"Failed to edit starboard message {starboard_message.id} into tombstone: {e}", exc_info=True)
             return False
 
     async def _cleanup_tombstone_reply(
@@ -1105,7 +1112,7 @@ class Starboard(BaseCog):
         except discord.NotFound:
             pass
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to delete reply context {reply_id}: {e}")
+            self.logger.error(f"Failed to delete reply context {reply_id}: {e}", exc_info=True)
         original_id = entry.get('original_message_id')
         if original_id:
             await self.db_manager.set_starboard_reply_id(original_id, None)
@@ -1152,7 +1159,7 @@ class Starboard(BaseCog):
         try:
             return await starboard_channel.send(content=content, embed=embed)
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to create unworthy post for {message.id}: {e}")
+            self.logger.error(f"Failed to create unworthy post for {message.id}: {e}", exc_info=True)
             return None
 
     async def _edit_to_unworthy(
@@ -1179,7 +1186,7 @@ class Starboard(BaseCog):
             await starboard_message.edit(content=content, embed=embed)
             return True
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to edit starboard message {starboard_message.id} to unworthy: {e}")
+            self.logger.error(f"Failed to edit starboard message {starboard_message.id} to unworthy: {e}", exc_info=True)
             return False
 
     async def _edit_reply_to_placeholder(
@@ -1211,7 +1218,7 @@ class Starboard(BaseCog):
             self.logger.debug(f"Reply context {reply_id} not found for placeholder edit.")
             return False
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to edit reply context {reply_id} to placeholder: {e}")
+            self.logger.error(f"Failed to edit reply context {reply_id} to placeholder: {e}", exc_info=True)
             return False
 
     async def _restore_from_unworthy(
@@ -1247,7 +1254,7 @@ class Starboard(BaseCog):
         try:
             await starboard_message.edit(content=content, embed=embed)
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to restore starboard message {starboard_message.id} from unworthy: {e}")
+            self.logger.error(f"Failed to restore starboard message {starboard_message.id} from unworthy: {e}", exc_info=True)
             return False
         finally:
             for f in files:
@@ -1269,7 +1276,7 @@ class Starboard(BaseCog):
                     except discord.NotFound:
                         self.logger.debug(f"Reply context {reply_id} not found during re-promotion.")
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to restore reply context {reply_id}: {e}")
+                        self.logger.error(f"Failed to restore reply context {reply_id}: {e}", exc_info=True)
                     finally:
                         for f in reply_files:
                             f.close()
@@ -1277,7 +1284,7 @@ class Starboard(BaseCog):
                     # Replied-to message is gone — leave the placeholder
                     self.logger.debug(f"Replied-to message gone for {original_message.id}, leaving placeholder.")
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to fetch replied-to message for re-promotion: {e}")
+                    self.logger.error(f"Failed to fetch replied-to message for re-promotion: {e}", exc_info=True)
 
         return True
 
@@ -1303,7 +1310,7 @@ class Starboard(BaseCog):
             self.logger.info(f"Created starboard post {starboard_message.id} for original {message.id}.")
             return starboard_message
         except discord.HTTPException as e:
-            self.logger.error(f"Failed to create single starboard post: {e}")
+            self.logger.error(f"Failed to create single starboard post: {e}", exc_info=True)
             return None
         finally:
             for f in files:
@@ -1354,7 +1361,7 @@ class Starboard(BaseCog):
                 # Replied-to message is gone — fall through to single post
                 self.logger.debug(f"Replied-to message not found for {message.id}, falling back to single post.")
             except discord.HTTPException as e:
-                self.logger.error(f"Failed to create two-part starboard post: {e}")
+                self.logger.error(f"Failed to create two-part starboard post: {e}", exc_info=True)
                 if reply_context_message:
                     try:
                         await reply_context_message.delete()
@@ -1433,7 +1440,7 @@ class Starboard(BaseCog):
                         if sb_id:
                             await self.db_manager.set_starboard_message_id(message.id, sb_id, reply_id)
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to re-promote {message.id}: {e}")
+                        self.logger.error(f"Failed to re-promote {message.id}: {e}", exc_info=True)
                 else:
                     # No starboard message — create new post
                     sb_id, reply_id = await self.create_new_starboard_post(message, starboard_channel, content)
@@ -1736,11 +1743,11 @@ class Starboard(BaseCog):
                             except discord.NotFound:
                                 self.logger.debug(f"Original {original_id} gone during unworthy demotion.")
                             except discord.HTTPException as e:
-                                self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}")
+                                self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}", exc_info=True)
                     except discord.NotFound:
                         self.logger.debug(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}")
+                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}", exc_info=True)
 
                 # Edit reply context to placeholder if present
                 reply_id = entry.get('starboard_reply_id')
@@ -1768,11 +1775,11 @@ class Starboard(BaseCog):
                             except discord.NotFound:
                                 self.logger.debug(f"Original {original_id} gone during re-promotion.")
                             except discord.HTTPException as e:
-                                self.logger.error(f"Failed to fetch original {original_id} for re-promotion: {e}")
+                                self.logger.error(f"Failed to fetch original {original_id} for re-promotion: {e}", exc_info=True)
                     except discord.NotFound:
                         self.logger.debug(f"Starboard message {sb_msg_id} gone during re-promotion.")
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for re-promotion: {e}")
+                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for re-promotion: {e}", exc_info=True)
 
                 entry['is_unworthy'] = 0
                 result.needs_db_update = True
@@ -1815,7 +1822,7 @@ class Starboard(BaseCog):
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to delete starboard message {sb_msg_id} for banned entry: {e}")
+                    self.logger.error(f"Failed to delete starboard message {sb_msg_id} for banned entry: {e}", exc_info=True)
 
             # Delete reply context message from Discord
             reply_id = entry.get('starboard_reply_id')
@@ -1826,7 +1833,7 @@ class Starboard(BaseCog):
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to delete reply context {reply_id} for banned entry: {e}")
+                    self.logger.error(f"Failed to delete reply context {reply_id} for banned entry: {e}", exc_info=True)
 
             # Remove DB entry
             await self.db_manager.remove_starboard_entry(int(original_id))
@@ -1932,6 +1939,7 @@ class Starboard(BaseCog):
             return
 
         async with lock:
+            self.logger.info(f"verify_starboard invoked by {ctx.author.id} in guild {ctx.guild.id}")
             cfg = await self.get_starboard_config(ctx.guild.id)
             if not cfg.channel_id:
                 await ctx.send("Starboard channel is not configured.")
@@ -1996,6 +2004,11 @@ class Starboard(BaseCog):
             # Update last heal timestamp
             await self.db_manager.upsert_starboard_config(ctx.guild.id, last_heal_at=int(time.time()))
 
+            self.logger.info(
+                f"verify_starboard complete [{ctx.guild.id}]: healthy={report.healthy}, unworthy={report.unworthy}, "
+                f"flagged={report.flagged}, tombstoned={report.tombstoned}, missing_post={report.missing_post}, "
+                f"banned={report.banned} (purged={banned_purged}), unresolvable={report.unresolvable}"
+            )
             await ctx.send(
                 f"✅ Starboard verify complete.\n"
                 f"Healthy: {report.healthy}, Unworthy: {report.unworthy}, "
@@ -2040,7 +2053,7 @@ class Starboard(BaseCog):
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to delete starboard message {sb_msg_id}: {e}")
+                    self.logger.error(f"Failed to delete starboard message {sb_msg_id}: {e}", exc_info=True)
 
             if reply_id:
                 try:
@@ -2049,7 +2062,7 @@ class Starboard(BaseCog):
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to delete reply context {reply_id}: {e}")
+                    self.logger.error(f"Failed to delete reply context {reply_id}: {e}", exc_info=True)
 
         # Null all message IDs in one DB call
         if guild_id is not None:
@@ -2143,7 +2156,7 @@ class Starboard(BaseCog):
                 await asyncio.sleep(0.5)
                 continue
             except Exception as e:
-                self.logger.error(f"Failed to fetch original message {original_id}: {e}")
+                self.logger.error(f"Failed to fetch original message {original_id}: {e}", exc_info=True)
                 failed += 1
                 if progress is not None:
                     progress['done'] = progress.get('done', 0) + 1
@@ -2192,6 +2205,7 @@ class Starboard(BaseCog):
         if not ctx.guild:
             return
         guild = ctx.guild
+        self.logger.warning(f"remake_starboard invoked by {ctx.author.id} in guild {guild.id}")
 
         cfg = await self.get_starboard_config(guild.id)
         if not cfg.channel_id:
@@ -2292,7 +2306,7 @@ class Starboard(BaseCog):
                     except discord.NotFound:
                         pass
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to delete unworthy starboard message {sb_msg_id}: {e}")
+                        self.logger.error(f"Failed to delete unworthy starboard message {sb_msg_id}: {e}", exc_info=True)
                 reply_id = entry.get('starboard_reply_id')
                 if reply_id:
                     try:
@@ -2301,7 +2315,7 @@ class Starboard(BaseCog):
                     except discord.NotFound:
                         pass
                     except discord.HTTPException as e:
-                        self.logger.error(f"Failed to delete unworthy reply context {reply_id}: {e}")
+                        self.logger.error(f"Failed to delete unworthy reply context {reply_id}: {e}", exc_info=True)
                 original_id = entry.get('original_message_id', 0)
                 await self.db_manager.remove_starboard_entry(int(original_id))
                 unworthy_purged += 1
@@ -2531,13 +2545,13 @@ class Starboard(BaseCog):
                         posted_count += 1
                     await asyncio.sleep(1.0)  # Rate limit between posts
                 except Exception as e:
-                    self.logger.error(f"Failed to post catch-up entry {entry['original_message_id']}: {e}")
+                    self.logger.error(f"Failed to post catch-up entry {entry['original_message_id']}: {e}", exc_info=True)
 
             self.logger.info(f"Bounded catch-up crawl complete for guild {guild_id}: posted {posted_count} new entries.")
             await self.db_manager.upsert_starboard_config(guild_id, last_heal_at=int(time.time()))
 
         except Exception as e:
-            self.logger.error(f"Bounded catch-up crawl failed for guild {guild_id}: {e}")
+            self.logger.error(f"Bounded catch-up crawl failed for guild {guild_id}: {e}", exc_info=True)
 
     async def _deep_crawl_task(self, guild_id: int, target_channel_id: Optional[int] = None) -> None:
         """Background task for deep historical crawl.
@@ -2928,6 +2942,10 @@ class Starboard(BaseCog):
 
         task = asyncio.create_task(self._deep_crawl_task(ctx.guild.id, target_channel_id=target_channel_id))
         self._crawl_tasks[ctx.guild.id] = task
+        self.logger.warning(
+            f"crawl_starboard invoked by {ctx.author.id} in guild {ctx.guild.id} "
+            f"(target={target_channel_id or 'full server'})"
+        )
 
     # ── Section 8: Reaction Event Handlers ────────────────────────────────────
 
@@ -3048,7 +3066,16 @@ class Starboard(BaseCog):
                 await starboard_message.edit(content=content)
 
         except discord.NotFound:
-            # Original or starboard message deleted
+            # BUG: This handler does NOT distinguish between "original message deleted" and
+            # "starboard message manually deleted by an admin". In both cases, it nukes the
+            # DB entry. If only the starboard message was deleted, the entry should be preserved
+            # for remake to recreate — NOT silently removed. Self-heal catching this could leave
+            # it in a dangerous state. This NEEDS TO BE FIXED to only remove the entry when the
+            # ORIGINAL message is confirmed gone, not when the starboard post is missing.
+            self.logger.debug(
+                f"Reaction remove: message {payload.message_id} or starboard post not found — "
+                f"removing DB entry (BUG: should distinguish original vs starboard deletion)"
+            )
             await self.db_manager.remove_starboard_entry(payload.message_id)
 
 

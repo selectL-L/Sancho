@@ -1055,6 +1055,7 @@ async def _convert_with_ffmpeg(job: ConversionJob) -> List[Tuple[str, bytes]]:
         success, stderr = await _run_ffmpeg(args)
 
         if not success:
+            # No exc_info: this is an external process failure, not a caught exception. stderr IS the diagnostic.
             logger.error(f"FFmpeg conversion failed: {stderr[:500]}")
             return []
 
@@ -1115,6 +1116,7 @@ async def _split_channels(ffmpeg: str, input_path: str, base: str, ext: str, job
 
     success, stderr = await _run_ffmpeg(args)
     if not success:
+        # No exc_info: this is an external process failure, not a caught exception. stderr IS the diagnostic.
         logger.error(f"Channel split failed: {stderr[:500]}")
         return []
 
@@ -1501,7 +1503,7 @@ class FilesCog(BaseCog):
                 else:
                     await ctx.send(content=f"Here are {target.display_name}'s avatars:", embeds=embeds)
         except Exception as e:
-            self.logger.error(f"Failed to fetch avatar: {e}", exc_info=True)
+            self.logger.error(f"Failed to fetch avatar for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to fetch that profile picture.")
 
     async def banner(self, ctx: commands.Context, *, query: str) -> None:
@@ -1544,7 +1546,7 @@ class FilesCog(BaseCog):
                 else:
                     await ctx.send(content=f"Here are {target.display_name}'s banners:", embeds=embeds)
         except Exception as e:
-            self.logger.error(f"Failed to fetch banner: {e}", exc_info=True)
+            self.logger.error(f"Failed to fetch banner for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to fetch that banner.")
 
     # -------------------------------------------------------------------------
@@ -1601,8 +1603,9 @@ class FilesCog(BaseCog):
                     await ctx.send(f"Here is the image resized to {label}:", file=files[0])
                 else:
                     await ctx.send(f"Here are {len(files)} images resized to {label}:", files=files)
+                self.logger.info(f"Resized {len(files)} image(s) to {label} for user {ctx.author.id}")
         except Exception as e:
-            self.logger.error(f"Failed to resize image: {e}", exc_info=True)
+            self.logger.error(f"Failed to resize image for user {ctx.author.id}: {e}", exc_info=True)
             await ctx.send("Sorry, I encountered an error trying to resize that image.")
 
     # -------------------------------------------------------------------------
@@ -1660,7 +1663,7 @@ class FilesCog(BaseCog):
             try:
                 file_bytes = await attachment.read()
             except Exception as e:
-                self.logger.error(f"Failed to read attachment: {e}", exc_info=True)
+                self.logger.error(f"Failed to read attachment from user {ctx.author.id}: {e}", exc_info=True)
                 await ctx.send("I couldn't download that file. Please try again.")
                 return
 
@@ -1673,6 +1676,7 @@ class FilesCog(BaseCog):
             target_cat = _category_of(target_format)
 
             if not is_conversion_allowed(source_cat, target_cat):
+                self.logger.warning(f"Conversion rejected for user {ctx.author.id}: {source_cat} → {target_cat} not allowed")
                 await ctx.send(
                     f"I can't convert a **{source_cat.replace('_', ' ')}** to a **{target_cat.replace('_', ' ')}**. "
                     f"That conversion path isn't supported."
@@ -1683,10 +1687,12 @@ class FilesCog(BaseCog):
             if probe.duration is not None:
                 if source_cat == "video" and probe.duration > config.CONVERT_MAX_VIDEO_DURATION:
                     mins = config.CONVERT_MAX_VIDEO_DURATION // 60
+                    self.logger.warning(f"Conversion rejected for user {ctx.author.id}: video too long ({probe.duration / 60:.1f} min, max {mins} min)")
                     await ctx.send(f"That video is too long ({probe.duration / 60:.1f} min). Maximum is {mins} minutes.")
                     return
                 if source_cat == "audio" and probe.duration > config.CONVERT_MAX_AUDIO_DURATION:
                     mins = config.CONVERT_MAX_AUDIO_DURATION // 60
+                    self.logger.warning(f"Conversion rejected for user {ctx.author.id}: audio too long ({probe.duration / 60:.1f} min, max {mins} min)")
                     await ctx.send(f"That audio is too long ({probe.duration / 60:.1f} min). Maximum is {mins} minutes.")
                     return
 
@@ -1707,6 +1713,7 @@ class FilesCog(BaseCog):
                 original_message=ctx.message,
             )
 
+            self.logger.info(f"Conversion job created: user {ctx.author.id}, {probe.format_name} → {target_format}, {attachment.size / 1024 / 1024:.1f} MB")
             from utils.views import show_conversion
             await show_conversion(ctx, job, self._execute_conversion)
 
@@ -1728,6 +1735,7 @@ class FilesCog(BaseCog):
             output_files is a list of (filename, bytes) tuples.
         """
         if not await _conversion_limiter.acquire(job.author_id):
+            self.logger.debug(f"Conversion concurrency blocked for user {job.author_id} (already has a conversion running)")
             return False, [], "You already have a conversion running. Please wait for it to finish."
 
         start_time = time.monotonic()
@@ -1753,6 +1761,7 @@ class FilesCog(BaseCog):
             results = await run_conversion(job)
 
             if not results:
+                self.logger.warning(f"Conversion engine returned no output for user {job.author_id}, {job.source_category} → {job.target_format} (source: {job.source_filename!r})")
                 return False, [], "Conversion failed. The file may be corrupt or unsupported."
 
             for filename, data in results:
@@ -1764,6 +1773,7 @@ class FilesCog(BaseCog):
                     )
 
             elapsed = time.monotonic() - start_time
+            self.logger.info(f"Conversion complete: user {job.author_id}, {job.source_category} → {job.target_format}, {len(results)} file(s), {elapsed:.1f}s")
             return True, results, f"Conversion complete (took {elapsed:.1f}s)"
 
         except Exception as e:

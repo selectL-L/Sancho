@@ -430,8 +430,6 @@ class Skills(BaseCog):
         # when modifiers are added. Example: (2d6+2) + 5
         final_roll_query = f"({found_skill['dice_roll']}) {rest_of_query}"
 
-        self.logger.info(f"Executing skill '{found_skill['name']}' for {ctx.author.id}. Original query: '{query}', constructed roll: '{final_roll_query}'")
-
         # Delegate to Math cog for evaluation, but handle formatting here.
         try:
             result_data = await math_cog.evaluate_roll(final_roll_query)
@@ -441,6 +439,7 @@ class Skills(BaseCog):
             return
 
         result_display = result_data['total']
+        self.logger.info(f"Skill '{found_skill['name']}' executed for {ctx.author.id}: result={result_display}, roll='{final_roll_query}'")
         roll_descriptions = result_data['breakdown']
 
         # Format the response
@@ -653,8 +652,9 @@ class Skills(BaseCog):
                 rows_affected = await self.db_manager.update_skill(skill_to_edit['id'], ctx.author.id, updates)
                 if rows_affected > 0:
                     await ctx.send(f"✅ Successfully updated your skill: **{skill_to_edit['name']}**.")
-                    self.logger.info(f"User {ctx.author.id} updated skill '{skill_to_edit['name']}'.")
+                    self.logger.info(f"User {ctx.author.id} updated skill '{skill_to_edit['name']}' (id={skill_to_edit['id']}): fields={list(updates.keys())}")
                 else:
+                    self.logger.warning(f"Update skill returned 0 rows for user {ctx.author.id}, skill id={skill_to_edit['id']} ('{skill_to_edit['name']}'). Fields attempted: {list(updates.keys())}.")
                     await ctx.send("Something went wrong. I couldn't update that skill.")
             else:
                 await ctx.send("No changes were made.")
@@ -725,21 +725,27 @@ class Skills(BaseCog):
             return
 
         skill_num_to_delete = int(match.group(0))
-        skills = await self.db_manager.get_user_skills(ctx.author.id)
 
-        # Validate index.
-        if not (1 <= skill_num_to_delete <= len(skills)):
-            await ctx.send(f"Invalid number. You only have {len(skills)} skills.")
-            return
+        try:
+            skills = await self.db_manager.get_user_skills(ctx.author.id)
 
-        skill_to_delete = skills[skill_num_to_delete - 1]
-        rows_affected = await self.db_manager.delete_skill(ctx.author.id, skill_to_delete['id'])
+            # Validate index.
+            if not (1 <= skill_num_to_delete <= len(skills)):
+                await ctx.send(f"Invalid number. You only have {len(skills)} skills.")
+                return
 
-        if rows_affected > 0:
-            await ctx.send(f"✅ Successfully deleted your skill: **{skill_to_delete['name']}**.")
-            self.logger.info(f"User {ctx.author.id} deleted skill '{skill_to_delete['name']}'.")
-        else:
-            await ctx.send("Something went wrong. I couldn't delete that skill.")
+            skill_to_delete = skills[skill_num_to_delete - 1]
+            rows_affected = await self.db_manager.delete_skill(ctx.author.id, skill_to_delete['id'])
+
+            if rows_affected > 0:
+                await ctx.send(f"✅ Successfully deleted your skill: **{skill_to_delete['name']}**.")
+                self.logger.info(f"User {ctx.author.id} deleted skill '{skill_to_delete['name']}'.")
+            else:
+                self.logger.warning(f"Delete skill returned 0 rows for user {ctx.author.id}, skill id={skill_to_delete['id']} ('{skill_to_delete['name']}').")
+                await ctx.send("Something went wrong. I couldn't delete that skill.")
+        except Exception as e:
+            self.logger.error(f"Error deleting skill for {ctx.author.id}: {e}", exc_info=True)
+            await ctx.send("An unexpected error occurred while deleting the skill.")
 
 
 async def setup(bot: CoreBot) -> None:

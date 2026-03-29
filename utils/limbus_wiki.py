@@ -318,7 +318,8 @@ def fetch_ammo_types_from_wiki() -> set[str]:
             if name_m:
                 ammo_names.add(name_m.group(1).strip().lower())
         return ammo_names
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[LimbusWiki] Failed to fetch ammo types from wiki: {e}")
         return set()
 
 
@@ -2525,6 +2526,7 @@ def parse_all(*, log=None) -> list[dict]:
 
         except Exception as e:
             _log(f"  [{i:3d}/{len(html_files)}] FAILED: {title}: {e}")
+            logger.warning(f"[LimbusWiki] Failed to parse {title!r}: {e}")
             identities.append({
                 "id": _title_to_slug(title),
                 "name": title,

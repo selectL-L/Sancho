@@ -415,14 +415,6 @@ class TestConsumeFateAndGetTier:
 
         assert result == 'NORMAL'
 
-    @pytest.mark.asyncio
-    async def test_normal_when_no_db_manager(self, fun_cog):
-        """Test NORMAL returned when database manager unavailable."""
-        fun_cog.bot.db_manager = None
-
-        result = await fun_cog._consume_fate_and_get_tier(12345)
-
-        assert result == 'NORMAL'
 
 
 # =============================================================================
