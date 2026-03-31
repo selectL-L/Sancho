@@ -217,9 +217,16 @@ class SourceAcquisitionMixin:
         """Walk the priority chain and return the first playable source.
 
         Priority:
-        1. Local file cache (ambient or residential)
+        1. Ambient cache (high-quality local files from playlist downloads)
         2. Fresh streaming URL via yt-dlp (direct, then residential if needed)
-        3. Full file download via residential proxy
+        3. Residential cache (lower-quality fallback files from previous downloads)
+        4. Full file download via residential proxy
+
+        Ambient files are always preferred over streaming because they're free
+        and already local.  Residential files are only used AFTER direct
+        streaming has been exhausted, because they're lower quality -- the
+        advantage of having them is that they're there if we need them, not
+        that they should be used first.
 
         Returns ``None`` when all options are exhausted.  The caller can
         inspect ``self._get_attempts(track.video_id).unavailable`` to choose
@@ -230,12 +237,12 @@ class SourceAcquisitionMixin:
 
         attempts = self._get_attempts(track.video_id)
 
-        # ---- Priority 1: local file cache ------------------------------------
+        # ---- Priority 1: ambient cache (high quality) ------------------------
         local = self.cache_manager.get_any_local_path(
-            track.video_id, residential_allowed=True,
+            track.video_id, residential_allowed=False,
         )
         if local:
-            attempts.last_residential_path = local
+            logger.info(f"[Acquisition] Ambient cache hit: {track.title}")
             return PlayableSource(local_path=local)
 
         # ---- Priority 2: stream via fresh URL --------------------------------
@@ -246,10 +253,20 @@ class SourceAcquisitionMixin:
                 return None
             if result.has_source and result.direct_url:
                 attempts.direct_plays += 1
+                logger.info(f"[Acquisition] Direct URL resolved: {track.title}")
                 return PlayableSource(
                     url=result.direct_url,
                     http_headers=result.http_headers,
                 )
+
+        # ---- Priority 3: residential cache (lower quality fallback) ----------
+        residential_local = self.cache_manager.get_any_local_path(
+            track.video_id, residential_allowed=True,
+        )
+        if residential_local:
+            logger.info(f"[Acquisition] Residential cache hit: {track.title}")
+            attempts.last_residential_path = residential_local
+            return PlayableSource(local_path=residential_local)
 
         # ---- Duration policy gate (before spending money) --------------------
         if track.duration > MAX_RESIDENTIAL_PLAYBACK_DURATION_SECONDS:
@@ -277,6 +294,10 @@ class SourceAcquisitionMixin:
             attempts.last_residential_time = time.time()
 
             attempts.residential_downloads += 1
+            logger.info(
+                f"[Acquisition] Residential download attempt "
+                f"{attempts.residential_downloads}/{MAX_RESIDENTIAL_DOWNLOADS}: {track.title}"
+            )
             success, _err, bytes_dl, path = (
                 await self.cache_manager.download_live_residential(track)
             )
@@ -284,6 +305,10 @@ class SourceAcquisitionMixin:
             if success and path:
                 if bytes_dl > 0 and self.db_manager:
                     await self.db_manager.increment_proxy_usage(bytes_dl)
+                logger.info(
+                    f"[Acquisition] Residential download complete: {track.title} "
+                    f"({bytes_dl / 1024 / 1024:.2f} MB)"
+                )
                 attempts.last_residential_path = path
                 return PlayableSource(local_path=path)
 

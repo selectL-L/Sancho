@@ -600,10 +600,18 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             except asyncio.CancelledError:
                 pass
 
-        # Disconnect from voice if connected
-        if self.active_session and self.active_session.voice_client:
-            await self.active_session.voice_client.disconnect()
-            self.active_session = None
+        # Stop the player before disconnecting so its generation increment
+        # filters out the stale after-callback that disconnect triggers.
+        # Without this, _on_track_end races the disconnect and can start
+        # yt-dlp resolution during shutdown.
+        if self._player:
+            self._player.stop()
+
+        # Clear session BEFORE disconnect so _on_track_end's guard sees None.
+        session = self.active_session
+        self.active_session = None
+        if session and session.voice_client:
+            await session.voice_client.disconnect()
 
         # Clear presence (respects visibility setting)
         try:
@@ -699,16 +707,21 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         return self.playlist[self.current_index % len(self.playlist)]
 
     def _get_elapsed_seconds(self) -> float:
-        """Gets the current elapsed time in the track, accounting for pause state.
+        """Gets the current playback position in seconds.
 
-        When paused, returns the position where we paused.
-        When playing, calculates from track_started_at.
+        Uses the audio source's byte-offset position when a player is active.
+        This correctly resets to 0 when loop-one rewinds the archive cursor,
+        unlike wall-clock math which would keep climbing past the track end.
+
+        Falls back to wall-clock when no player is active (idle presence).
 
         Returns:
             Elapsed seconds into the current track.
         """
         if self._playback.paused_at_position is not None:
             return self._playback.paused_at_position
+        if self._player and self._player.is_playing:
+            return self._player.position
         return time.time() - self.track_started_at
 
     async def _send_system_message(
@@ -1378,6 +1391,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         self._prefetched_thumbnail = None
 
         try:
+            self.logger.info(f"[Prefetch] Acquiring source for: {next_track.title}")
             source = await self._acquire_source(next_track)
             if not source:
                 self.logger.info(f"[Prefetch] No source for: {next_track.title}")
@@ -1500,9 +1514,11 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             # Check prefetch first, fall back to live acquisition.
             source = self._consume_prefetch(track)
             if source is None:
+                self.logger.info(f"[Play] Acquiring source for: {track.title}")
                 source = await self._acquire_source(track)
 
             if source is None:
+                self.logger.info(f"[Play] No source available for: {track.title}")
                 attempts = self._get_attempts(track.video_id) if track.video_id else None
                 is_unavailable = attempts.unavailable if attempts else False
                 await self._handle_track_failure(
@@ -1580,7 +1596,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                 await self._play_current_track()
                 return
 
-            self.logger.info("No alternate track available after skip - waiting for user action.")
+            self.logger.info("[Play] No alternate track available after skip — waiting for user action.")
             await self._send_system_message(
                 "🎵 There's nothing else for me to play right now. "
                 "I'll wait here in case you add something else or change the queue."
@@ -1645,7 +1661,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             issue_kind=issue_kind,
             timeout_action=timeout_action,
         )
-        self.logger.info(f"Track failure action: {action.name} for '{track.title}'")
+        self.logger.info(f"[Play] Track failure action: {action.name} for '{track.title}'")
         await self._apply_track_issue_action(track, action)
 
     async def _handle_empty_playlist_after_removal(self) -> None:
@@ -1700,6 +1716,10 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             return
 
         action, issue_kind = classify_failure(report)
+        self.logger.info(
+            f"[Play] Track ended: {track.title} | "
+            f"action={action.name} | elapsed={report.elapsed:.1f}s"
+        )
 
         if action == FailureAction.RETRY:
             # Clean up broken residential files before retrying.

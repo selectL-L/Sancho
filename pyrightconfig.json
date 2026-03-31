@@ -1,8 +1,11 @@
 {
     "exclude": [
+        "__pycache__",
+        "node_modules",
         "Impls",
         ".venv",
         "build",
-        "dist"
+        "dist",
+        "Test_files"
     ]
 }

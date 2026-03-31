@@ -757,11 +757,13 @@ class MusicCommandsMixin:
             await ctx.send(f"❌ Invalid position. Please choose a number between 1 and {len(self.playlist)}.")
             return
 
+        # Clear attempt state for the track we're leaving.
+        old_track = self._get_current_track()
+        if old_track and old_track.video_id:
+            self._clear_attempts(old_track.video_id)
+
         self.current_index = index
         self.track_started_at = time.time()
-        current = self._get_current_track()
-        if current and current.video_id:
-            self._clear_attempts(current.video_id)
 
         track = self._get_current_track()
 
@@ -789,6 +791,12 @@ class MusicCommandsMixin:
         if not self.playlist:
             return False
 
+        # Clear attempt state for the track we're leaving -- it played fine,
+        # so its retry budget should be fresh if we come back to it.
+        old_track = self._get_current_track()
+        if old_track and old_track.video_id:
+            self._clear_attempts(old_track.video_id)
+
         self.current_index += 1
         if self.current_index >= len(self.playlist):
             if self.loop_mode == LoopMode.ALL:
@@ -798,9 +806,6 @@ class MusicCommandsMixin:
 
         self.track_started_at = time.time()
         self._playback.paused_at_position = None
-        current = self._get_current_track()
-        if current and current.video_id:
-            self._clear_attempts(current.video_id)
 
         self._player.stop()
         await self._play_current_track()

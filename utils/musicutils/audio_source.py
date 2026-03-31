@@ -15,6 +15,7 @@ source construction, and no callback-driven playback restart are needed.
 
 import dataclasses
 import io
+import os
 import logging
 import shlex
 import subprocess
@@ -209,7 +210,7 @@ class SeekableAudioSource(discord.AudioSource):
         )
         self._stdout_thread.start()
 
-        logger.debug(f"[SeekableAudioSource] Spawned FFmpeg at position {start_position:.1f}s")
+        logger.debug(f"[AudioSource] Spawned FFmpeg at position {start_position:.1f}s")
 
     def _cleanup_process(self) -> None:
         """Terminate and clean up the current FFmpeg process."""
@@ -240,7 +241,7 @@ class SeekableAudioSource(discord.AudioSource):
         # Log captured stderr if anything interesting was captured
         if self._stderr_lines:
             logger.debug(
-                f"[SeekableAudioSource] FFmpeg stderr ({len(self._stderr_lines)} lines): "
+                f"[AudioSource] FFmpeg stderr ({len(self._stderr_lines)} lines): "
                 f"{self._stderr_lines[:5]}{'...' if len(self._stderr_lines) > 5 else ''}"
             )
 
@@ -264,7 +265,7 @@ class SeekableAudioSource(discord.AudioSource):
                     self._parser.consume_line(decoded)
                     self._health = self._snapshot_health()
         except Exception as exc:
-            logger.debug(f"[SeekableAudioSource] Stderr reader error: {exc}")
+            logger.debug(f"[AudioSource] Stderr reader error: {exc}")
 
     def _stdout_reader_loop(self) -> None:
         """Drain FFmpeg stdout into the in-memory PCM archive.
@@ -304,11 +305,11 @@ class SeekableAudioSource(discord.AudioSource):
                     self._frames_read += len(archive_chunk) // FRAME_SIZE
                     self._archive_condition.notify_all()
         except Exception as exc:
-            logger.warning(f"[SeekableAudioSource] Producer read error: {exc}")
+            logger.warning(f"[AudioSource] Producer read error: {exc}")
         finally:
             if remainder:
                 logger.debug(
-                    f"[SeekableAudioSource] Dropping trailing partial PCM block of {len(remainder)} bytes"
+                    f"[AudioSource] Dropping trailing partial PCM block of {len(remainder)} bytes"
                 )
             with self._archive_condition:
                 self._archive_complete = True
@@ -362,7 +363,7 @@ class SeekableAudioSource(discord.AudioSource):
                 data = chunk[self._play_chunk_offset:self._play_chunk_offset + FRAME_SIZE]
                 if len(data) != FRAME_SIZE:
                     logger.warning(
-                        f"[SeekableAudioSource] Archive alignment error at chunk {self._play_chunk_index}"
+                        f"[AudioSource] Archive alignment error at chunk {self._play_chunk_index}"
                     )
                     return b''
 
@@ -428,13 +429,13 @@ class SeekableAudioSource(discord.AudioSource):
         """Pause playback so read() returns silence."""
         if not self._is_paused:
             self._is_paused = True
-            logger.debug(f"[SeekableAudioSource] Paused at {self.position:.1f}s")
+            logger.debug(f"[AudioSource] Paused at {self.position:.1f}s")
 
     def resume(self) -> None:
         """Resume playback from the current archive cursor."""
         if self._is_paused:
             self._is_paused = False
-            logger.debug(f"[SeekableAudioSource] Resumed at {self.position:.1f}s")
+            logger.debug(f"[AudioSource] Resumed at {self.position:.1f}s")
 
     def set_repeat_one(self, enabled: bool) -> None:
         """Enable or disable source-owned loop-one rewind behavior.
@@ -489,7 +490,7 @@ class SeekableAudioSource(discord.AudioSource):
         """
         position = max(0.0, position)
         was_paused = self._is_paused
-        logger.debug(f"[SeekableAudioSource] Seeking to {position:.1f}s")
+        logger.debug(f"[AudioSource] Seeking to {position:.1f}s")
         self._spawn_ffmpeg(position)
         if was_paused:
             self.pause()
@@ -542,7 +543,7 @@ class SeekableAudioSource(discord.AudioSource):
         min_valid_bytes = int(min_valid_seconds * PCM_BYTES_PER_SECOND)
 
         logger.debug(
-            f"[SeekableAudioSource] Prebuffering: target={target_seconds}s ({target_bytes} bytes), "
+            f"[AudioSource] Prebuffering: target={target_seconds}s ({target_bytes} bytes), "
             f"min_valid={min_valid_seconds}s ({min_valid_bytes} bytes)"
         )
 
@@ -555,7 +556,7 @@ class SeekableAudioSource(discord.AudioSource):
         buffered_seconds = buffered_bytes / PCM_BYTES_PER_SECOND
         is_valid = buffered_bytes >= min_valid_bytes
         logger.info(
-            f"[SeekableAudioSource] Prebuffer complete: {buffered_seconds:.1f}s archived, valid={is_valid}"
+            f"[AudioSource] Prebuffer complete: {buffered_seconds:.1f}s archived, valid={is_valid}"
         )
         return is_valid
 
@@ -572,12 +573,18 @@ class SeekableAudioSource(discord.AudioSource):
 
     def cleanup(self) -> None:
         """Clean up process and archive resources."""
+        # Build a short identifier for this source in logs.
+        if self.source.startswith(('http://', 'https://')):
+            source_label = f"stream:{self.source[:60]}..."
+        else:
+            source_label = f"local:{os.path.basename(self.source)}"
+
         with self._archive_condition:
             archived_bytes = self._archive_total_bytes
 
         if archived_bytes > 0:
             mem_mb = archived_bytes / (1024 * 1024)
-            logger.info(f"[SeekableAudioSource] Releasing archive (~{mem_mb:.1f}MB)")
+            logger.info(f"[AudioSource] Releasing archive (~{mem_mb:.1f}MB) for {source_label}")
 
         self._cleanup_process()
 
@@ -590,7 +597,7 @@ class SeekableAudioSource(discord.AudioSource):
             self._archive_complete = True
             self._archive_condition.notify_all()
 
-        logger.info("[SeekableAudioSource] Cleaned up")
+        logger.info(f"[AudioSource] Cleaned up {source_label}")
 
     @property
     def stderr_lines(self) -> list[str]:
