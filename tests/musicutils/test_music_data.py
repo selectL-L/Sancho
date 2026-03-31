@@ -15,7 +15,6 @@ from utils.musicutils.music_data import (
     LoopMode,
     Track,
     AmbienceState,
-    FetchContext,
 )
 
 
@@ -243,13 +242,3 @@ class TestAmbienceStateSwitch:
 
         assert had_switch is True
         assert url is None
-
-
-class TestFetchContext:
-    """Basic tests for FetchContext enum (mostly existence checks)."""
-
-    def test_values_exist(self):
-        """All expected values exist."""
-        assert FetchContext.PREFETCH.value == "prefetch"
-        assert FetchContext.LIVE.value == "live"
-        assert FetchContext.RETRY.value == "retry"

@@ -15,6 +15,7 @@ from typing import Callable, Optional, Protocol
 import discord
 
 from utils.musicutils.audio_source import SeekableAudioSource
+from utils.musicutils.music_data import FFmpegHealth, PlaybackEndReport
 
 logger = logging.getLogger(__name__)
 
@@ -91,14 +92,14 @@ class ManagedPlayer:
     def __init__(
         self,
         voice_client: discord.VoiceClient,
-        on_track_end: Callable[[Optional[Exception]], None],
+        on_track_end: Callable[[PlaybackEndReport], None],
     ) -> None:
         """Initialize the managed player.
 
         Args:
             voice_client: Discord voice client to play audio through.
             on_track_end: Callback for when track naturally ends or errors.
-                Called with the exception if playback failed, None otherwise.
+                Called with a typed playback report.
                 NOT called for intentional stops (skip, stop, etc.).
         """
         self._vc = voice_client
@@ -108,6 +109,7 @@ class ManagedPlayer:
         self._source: Optional[SeekableAudioSource] = None
         self._current_track: Optional[TrackInfo] = None
         self._state = PlayerState.STOPPED
+        self._repeat_one_enabled = False
 
         # Generation counter for filtering stale callbacks.
         # Each play()/stop() increments this. Callbacks carry the generation they
@@ -232,6 +234,8 @@ class ManagedPlayer:
             )
             is_prebuffered = False
 
+        self._source.set_repeat_one(self._repeat_one_enabled)
+
         self._play_started_at = time.time()
 
         # Create callback that captures the current generation.
@@ -296,6 +300,27 @@ class ManagedPlayer:
         logger.info(f"[ManagedPlayer] Seeked to {position:.1f}s")
         return True
 
+    def rewind(self, seconds: float) -> bool:
+        """Rewind within the current source archive without rebuilding it.
+
+        This is primarily used by pause/resume so the player can step back one
+        second for smooth continuation without changing the source's loop-one
+        anchor.
+
+        Args:
+            seconds: How far to rewind.
+
+        Returns:
+            ``True`` if the rewind succeeded from the existing archive.
+        """
+        if not self._source:
+            return False
+
+        rewound = self._source.rewind(seconds)
+        if rewound:
+            logger.info(f"[ManagedPlayer] Rewound by {seconds:.1f}s")
+        return rewound
+
     def stop(self) -> None:
         """Stop playback entirely.
 
@@ -318,6 +343,13 @@ class ManagedPlayer:
         self._current_track = None
         self._state = PlayerState.STOPPED
         logger.info("[ManagedPlayer] Stopped")
+
+    def set_repeat_one(self, enabled: bool) -> None:
+        """Update loop-one behavior on the active source and future plays."""
+        self._repeat_one_enabled = enabled
+        if self._source is not None:
+            self._source.set_repeat_one(enabled)
+        logger.debug(f"[ManagedPlayer] Repeat-one {'enabled' if enabled else 'disabled'}")
 
     def _after_callback(self, error: Optional[Exception], callback_generation: int) -> None:
         """Called by discord.py when the audio source is exhausted or errors.
@@ -356,29 +388,22 @@ class ManagedPlayer:
     ) -> None:
         """Handle track end on the event loop.
 
-        Error detection pipeline:
-        1. Capture parsed error from FFmpeg stderr (may be NONE with placeholder patterns)
-        2. ALWAYS run heuristic check (lightweight, ensures we always get *something*)
-        3. Final error type = parsed if available, else heuristic's guess
-        4. Log both for pattern refinement
-
-        The heuristic is a safety net that ensures we never silently fail
-        without knowing FFmpeg died. It's not meant to be replaced - parsed
-        errors just give us more detail when available.
-
         Args:
             error: Exception if playback failed (from discord.py).
-            elapsed: Time since play started, for heuristic detection.
+            elapsed: Time since play started.
         """
-        from utils.musicutils.music_data import AudioErrorType
-
-        # Capture stderr and health before cleanup (for diagnosis)
-        # These are critical for refining error patterns - we need to see
-        # what FFmpeg actually says vs what we parse/guess.
-        stderr_lines = self._source.stderr_lines if self._source else []
-        health = self._source.health if self._source else None
-        parsed_error_type = health.error_type if health else AudioErrorType.NONE
-        parsed_error_detail = health.error_detail if health else None
+        track = self._current_track
+        ffmpeg_report = FFmpegHealth()
+        if self._source:
+            # Finalize the captured FFmpeg transcript into a typed outcome before
+            # cleanup so the cog receives more than a bare retry signal.
+            ffmpeg_report = self._source.build_ffmpeg_health(
+                context='playback',
+                elapsed=elapsed,
+                expected_duration=track.duration if track else None,
+                explicit_error=error is not None,
+            )
+        stderr_lines = ffmpeg_report.stderr_lines.copy()
 
         # Clean up source
         if self._source:
@@ -387,88 +412,32 @@ class ManagedPlayer:
 
         self._state = PlayerState.STOPPED
 
-        track = self._current_track
-
-        # -------------------------------------------------------------------
-        # HEURISTIC CHECK - ALWAYS RUNS
-        # -------------------------------------------------------------------
-        # This is a lightweight pass-through that ensures we always detect
-        # when FFmpeg died unexpectedly. Even if we have a parsed error,
-        # we want to know what the heuristic would have said for comparison.
-        heuristic_would_trigger = (
-            elapsed < 3.0 and
-            track is not None and
-            track.duration > 10
-        )
-
-        # -------------------------------------------------------------------
-        # DETERMINE FINAL ERROR STATE
-        # -------------------------------------------------------------------
-        # Pipeline: FFmpeg died → Read parsed error → Pass through heuristic
-        # → Use parsed if available, heuristic if not
-
-        if error:
-            # Explicit error from discord.py (FFmpeg crashed, pipe broken, etc.)
-            if elapsed < 3.0:
-                logger.warning(
-                    f"[ManagedPlayer] Playback failed after {elapsed:.1f}s "
-                    f"(likely stale URL): {error}"
-                )
-            else:
-                logger.error(f"[ManagedPlayer] Playback error: {error}")
-
-        elif heuristic_would_trigger and track is not None:
-            # Silent failure: track "ended" way too fast with no explicit error.
-            # Heuristic caught this - FFmpeg died without telling discord.py.
+        if ffmpeg_report.has_error:
             logger.warning(
-                f"[ManagedPlayer] Track ended suspiciously fast ({elapsed:.1f}s) "
-                f"for {track.duration}s track - heuristic triggered"
+                f"[ManagedPlayer] Playback failed: "
+                f"{ffmpeg_report.summary or 'FFmpeg reported a playback failure.'}"
             )
-            # Convert to error so retry logic kicks in
-            error = ConnectionError("Playback ended too fast (likely 403)")
-
-        # -------------------------------------------------------------------
-        # FINAL ERROR TYPE RESOLUTION
-        # -------------------------------------------------------------------
-        # Use parsed error if FFmpeg told us something, otherwise fall back
-        # to heuristic's best guess (HTTP_403 for silent fast failures).
-        final_error_type = parsed_error_type
-
-        if error and parsed_error_type == AudioErrorType.NONE:
-            # FFmpeg gave us nothing - use heuristic's guess
-            final_error_type = AudioErrorType.HTTP_403
-            logger.info(
-                "[ManagedPlayer] No FFmpeg error parsed, "
-                "using heuristic guess: HTTP_403"
-            )
-
-        # -------------------------------------------------------------------
-        # LOGGING FOR PATTERN REFINEMENT
-        # -------------------------------------------------------------------
-        # ALWAYS log on failures - this is how we collect real error patterns
-        # to refine the placeholder patterns in _parse_stderr_line()
-        if error:
-            # Log structured data for pattern analysis:
-            # - What FFmpeg said (parsed error type)
-            # - What heuristic would say (elapsed-based check)
-            # - What we're actually using (final_error_type)
             logger.info(
                 f"[ManagedPlayer] Failure analysis | "
                 f"elapsed={elapsed:.1f}s | "
-                f"parsed={parsed_error_type.value} | "
-                f"heuristic_triggered={heuristic_would_trigger} | "
-                f"final={final_error_type.value} | "
-                f"detail={parsed_error_detail}"
+                f"type={ffmpeg_report.error_type.value} | "
+                f"action={ffmpeg_report.response_action.value} | "
+                f"heuristic={ffmpeg_report.used_heuristic} | "
+                f"reconnects={ffmpeg_report.reconnect_count} | "
+                f"detail={ffmpeg_report.error_detail}"
             )
             if stderr_lines:
-                # Log full stderr separately so it's easy to grep
                 logger.info(
                     f"[ManagedPlayer] FFmpeg stderr ({len(stderr_lines)} lines): "
                     f"{stderr_lines}"
                 )
 
-        # Invoke the callback
-        self._on_track_end_callback(error)
+        report = PlaybackEndReport(
+            error=error,
+            ffmpeg=ffmpeg_report,
+            elapsed=elapsed,
+        )
+        self._on_track_end_callback(report)
 
     def update_voice_client(self, voice_client: discord.VoiceClient) -> None:
         """Update the voice client reference.

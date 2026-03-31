@@ -1,33 +1,26 @@
-"""YouTube authentication and audio fetching with retry orchestration.
+"""YouTube authentication helpers and low-level source resolution.
 
 Handles:
-- YouTube authentication detection (PO Token Server, Cookies)
+- YouTube authentication detection (PO Token Server, cookies)
 - 403 error tracking and alerting
-- AudioFetcher class: context-aware retry orchestration (Phase 12)
-
-AudioFetcher Architecture:
-- Cog owns buffer storage (knows playlist context for ambient cache)
-- AudioFetcher owns retry strategy (tracks attempts per video_id)
-- FetchContext enum communicates intent: PREFETCH (conservative) vs LIVE/RETRY (aggressive)
+- yt-dlp option construction for authenticated extraction
+- Single-attempt source resolution for the track coordinator
 """
 
-import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .music_data import Track
 
-from .music_data import FetchContext
 from .music_helpers import (
     YTDLP_OPTIONS,
     get_audio_url,
     get_residential_proxy_url,
     is_403_error,
-    is_video_unavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -346,408 +339,72 @@ def get_ytdlp_options(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, 
     return opts
 
 
-# ==========================================================================
-# AUDIO FETCHER WITH RETRY ORCHESTRATION
-# ==========================================================================
-
-
 @dataclass
-class AudioFetchResult:
-    """Result from AudioFetcher.fetch().
+class SourceResolutionResult:
+    """Result from a single yt-dlp resolution attempt."""
 
-    Contains everything the Music cog needs to play audio or handle failures.
-    Enriched with failure details so cog knows what happened.
-    """
-    success: bool
-    url: Optional[str] = None  # Direct streaming URL
+    has_source: bool
+    direct_url: Optional[str] = None
     http_headers: Optional[Dict[str, str]] = None
-    local_path: Optional[str] = None  # Residential/ambient cache path
     thumbnail: Optional[str] = None
     thumbnail_is_square: bool = False
-    thumbnail_bytes: Optional[bytes] = None  # Pre-fetched thumbnail
-
-    # Failure details
-    is_unavailable: bool = False  # Track permanently gone (remove from playlist)
-    is_auth_failure: bool = False  # yt-dlp 403 - auth issue, not stale URL
-    residential_used: bool = False  # Did we use residential proxy?
-    residential_bytes: int = 0  # Bytes downloaded (for cost tracking)
-    error: Optional[str] = None
-
-    # Prebuffered source for instant playback (Phase 5)
-    # When prefetch validates a URL, it stores the live FFmpeg source here.
-    # The source has audio buffered and is ready for immediate playback.
-    # Caller must call cleanup() if not using the prebuffered source.
-    prebuffered_source: Optional[Any] = None  # SeekableAudioSource (Any to avoid circular import)
-
-    # FFmpeg validation error (if prebuffer failed)
-    # Tells LIVE fetch what went wrong so it can retry smartly
-    ffmpeg_error_type: Optional[str] = None  # AudioErrorType.value
-
-    def __bool__(self) -> bool:
-        """Allow `if result:` to check success."""
-        return self.success
-
-    def cleanup(self) -> None:
-        """Clean up prebuffered source if not used.
-
-        Call this when:
-        - Prefetch is invalidated (playlist changed)
-        - Prefetch failed and source needs cleanup
-        - Result is being discarded
-        """
-        if self.prebuffered_source is not None:
-            buffered_secs = getattr(self.prebuffered_source, 'buffered_seconds', 0.0)
-            frame_count = len(getattr(self.prebuffered_source, '_prebuffer', []))
-            # Estimate memory: ~3840 bytes per frame (20ms of stereo 48kHz audio)
-            mem_mb = (frame_count * 3840) / (1024 * 1024)
-            logger.info(
-                f"[AudioFetchResult] Cleaning up prebuffered source: "
-                f"{buffered_secs:.1f}s buffered, {frame_count} frames (~{mem_mb:.1f}MB)"
-            )
-            self.prebuffered_source.cleanup()
-            self.prebuffered_source = None
+    unavailable: bool = False
+    is_auth_failure: bool = False
+    summary: Optional[str] = None
 
 
-@dataclass
-class TrackFetchState:
-    """Per-track state tracked by AudioFetcher.
+async def resolve_track_source(
+    track: 'Track',
+    *,
+    use_residential_ytdlp: bool,
+) -> SourceResolutionResult:
+    """Resolve a fresh direct media source for a track.
 
-    Tracks what has been attempted for a specific video_id so that
-    subsequent fetch() calls know where to pick up.
+    This helper does not own retry policy. It performs a single yt-dlp
+    extraction attempt using either the normal network path or the residential
+    proxy path and reports whether a source was found.
+
+    Args:
+        track: Track to resolve.
+        use_residential_ytdlp: Whether to route yt-dlp through the configured
+            residential proxy.
+
+    Returns:
+        A reduced source-resolution result for coordinator policy.
     """
-    video_id: str
-    direct_attempts: int = 0
-    auth_failed: bool = False  # yt-dlp 403 (not FFmpeg stale)
-    residential_attempts: int = 0
-
-
-@dataclass
-class AudioFetcher:
-    """Context-aware audio URL fetcher with retry orchestration.
-
-    Design (Phase 12):
-    - Cog owns buffer storage (knows playlist context)
-    - AudioFetcher owns retry strategy (tracks attempts per video_id)
-    - FetchContext tells AudioFetcher how aggressive to be:
-        - PREFETCH: Conservative - stops at direct failure, no residential
-        - LIVE: Aggressive - full retry including residential
-        - RETRY: Aggressive - FFmpeg failed, need fresh URL or residential
-
-    Usage:
-        # Prefetch (background, conservative)
-        result = await fetcher.fetch(track, FetchContext.PREFETCH)
-
-        # Live play (aggressive, full retry)
-        result = await fetcher.fetch(track, FetchContext.LIVE)
-
-        # Retry after FFmpeg 403 (aggressive)
-        result = await fetcher.fetch(track, FetchContext.RETRY)
-
-    The cog stores results and decides when to use them. AudioFetcher
-    just executes the fetch with appropriate retry strategy.
-
-    Residential Callback:
-        Set `on_residential_attempt` to receive notification BEFORE residential
-        proxy is attempted. This allows the cog to notify users that an
-        alternative method is being tried. Signature: async def callback(track_title: str)
-    """
-    # Class-level constants
-    DIRECT_MAX: ClassVar[int] = 2  # Max direct (yt-dlp) attempts
-    RESIDENTIAL_MAX: ClassVar[int] = 3  # Max residential proxy attempts
-    RESIDENTIAL_MIN_DELAY: ClassVar[float] = 2.0  # Min seconds between residential
-
-    # Instance fields
-    cache_manager: Any = field(repr=False)  # MusicCacheManager
-
-    # Optional callback fired BEFORE residential proxy attempt (not after)
-    # Signature: async def callback(track_title: str) -> None
-    on_residential_attempt: Optional[Callable[[str], Awaitable[None]]] = field(default=None, repr=False)
-
-    # Per-track state (keyed by video_id)
-    _track_states: Dict[str, TrackFetchState] = field(default_factory=dict, init=False)
-
-    # Cross-track rate limiting for residential
-    _last_residential_time: float = field(default=0.0, init=False)
-
-    def _get_state(self, video_id: str) -> TrackFetchState:
-        """Get or create state for a track."""
-        if video_id not in self._track_states:
-            self._track_states[video_id] = TrackFetchState(video_id=video_id)
-        return self._track_states[video_id]
-
-    def clear_state(self, video_id: Optional[str] = None) -> None:
-        """Clear state for a track (or all tracks).
-
-        Args:
-            video_id: Specific track to clear, or None to clear all.
-        """
-        if video_id:
-            self._track_states.pop(video_id, None)
-        else:
-            self._track_states.clear()
-
-    def reset(self) -> None:
-        """Reset all fetcher state. Alias for clear_state()."""
-        self.clear_state()
-
-    async def fetch(
-        self,
-        track: 'Track',
-        context: FetchContext
-    ) -> AudioFetchResult:
-        """Get playable audio URL or path for a track.
-
-        Priority order (quality-first strategy):
-        1. Ambient cache - High quality local files (playlist downloads)
-        2. YouTube direct - Best quality streaming
-        3. Residential cache - Lower quality fallback (already downloaded)
-        4. Residential download - Last resort, costs bandwidth
-
-        Args:
-            track: Track to get audio for.
-            context: PREFETCH (conservative), LIVE (aggressive), or RETRY (aggressive).
-
-        Returns:
-            AudioFetchResult with url/local_path on success, failure details otherwise.
-        """
-        if not track.video_id:
-            return AudioFetchResult(
-                success=False,
-                error="Track has no video_id"
-            )
-
-        state = self._get_state(track.video_id)
-
-        logger.debug(
-            f"[AudioFetcher] fetch({context.value}) for {track.title[:30]}... "
-            f"(direct={state.direct_attempts}, residential={state.residential_attempts})"
-        )
-
-        # ---------------------------------------------------------------------
-        # Priority 1: Ambient cache (HIGH QUALITY)
-        # Check playlist downloads and orphaned files first - these are the
-        # best quality local files we have. Orphaned files have limited lifetime
-        # but are still usable while they exist.
-        # ---------------------------------------------------------------------
-        any_cached = self.cache_manager.get_any_local_path(
-            track.video_id,
-            residential_allowed=False,
-        )
-        if any_cached:
-            logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
-            self.clear_state(track.video_id)  # Clean up - no retry state needed
-            return AudioFetchResult(success=True, local_path=any_cached)
-
-        # ---------------------------------------------------------------------
-        # Priority 2: YouTube direct streaming (BEST QUALITY)
-        # Try to stream directly from YouTube - this gives the best audio
-        # quality without using local storage or proxy bandwidth.
-        # ---------------------------------------------------------------------
-        if state.direct_attempts < self.DIRECT_MAX:
-            state.direct_attempts += 1
-            logger.info(
-                f"[AudioFetcher] Direct fetch attempt {state.direct_attempts}/{self.DIRECT_MAX}: {track.title}"
-            )
-            result = await self._try_direct(track)
-
-            if result.success:
-                # PREFETCH: Keep state - URL might go stale before playback
-                # LIVE: Clear state - first play, fresh start
-                # RETRY: Keep state - counter must accumulate across FFmpeg
-                #   rejections (yt-dlp "succeeds" but URL may 403 at FFmpeg
-                #   level). Without this, the retry loop is infinite.
-                if context == FetchContext.LIVE:
-                    self.clear_state(track.video_id)
-                return result
-
-            # Unavailable video - no point checking cache or trying residential
-            if result.is_unavailable:
-                self.clear_state(track.video_id)
-                return result
-
-            if result.is_auth_failure:
-                state.auth_failed = True
-                # Track 403 for alerting
-                should_alert = _youtube_auth.record_403()
-                if should_alert:
-                    logger.warning(
-                        "[AudioFetcher] High 403 rate detected - check YouTube auth"
-                    )
-
-        # ---------------------------------------------------------------------
-        # Priority 3: Residential cache (LOWER QUALITY FALLBACK)
-        # If direct failed, check if we have a residential-downloaded file.
-        # These are lower quality but instant - no download needed.
-        # Note: No "having trouble" message here - cache hit is instant,
-        # we don't want users expecting residential downloads to be fast.
-        # ---------------------------------------------------------------------
-        cached = self.cache_manager.get_any_local_path(
-            track.video_id,
-            residential_allowed=True,
-        )
-        if cached:
-            logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
-            self.clear_state(track.video_id)  # Clean up - no retry state needed
-            return AudioFetchResult(success=True, local_path=cached)
-
-        # ---------------------------------------------------------------------
-        # PREFETCH stops here - we've checked all local/free sources.
-        # Don't spend proxy bandwidth on speculative prefetching.
-        # ---------------------------------------------------------------------
-        if context == FetchContext.PREFETCH:
-            logger.info(
-                "[AudioFetcher] PREFETCH mode - no local cache, stopping (will retry LIVE if played)"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_auth_failure=state.auth_failed,
-                error="No local cache available (PREFETCH mode)"
-            )
-
-        # ---------------------------------------------------------------------
-        # Priority 4: Residential proxy download (LAST RESORT)
-        # LIVE/RETRY contexts only. This costs proxy bandwidth, so we only
-        # do it when the track is actually being played, not for prefetch.
-        # The "having trouble" notification fires inside _try_residential().
-        # ---------------------------------------------------------------------
-        if context in (FetchContext.LIVE, FetchContext.RETRY):
-            return await self._try_residential(track, state)
-
-        # Shouldn't reach here, but handle gracefully
-        logger.error(
-            f"[AudioFetcher] All fetch strategies exhausted for {track.title} — {track.artist}"
-        )
-        return AudioFetchResult(
-            success=False,
-            is_auth_failure=state.auth_failed,
-            error="All fetch methods exhausted"
-        )
-
-    async def _try_direct(self, track: 'Track') -> AudioFetchResult:
-        """Attempt yt-dlp fetch."""
-        ydl_opts = get_ytdlp_options({'extract_flat': False})
-
-        try:
-            result = await get_audio_url(track, ydl_opts)
-
-            if result.success:
-                logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
-                return AudioFetchResult(
-                    success=True,
-                    url=result.url,
-                    http_headers=result.http_headers,
-                    thumbnail=result.thumbnail,
-                    thumbnail_is_square=result.thumbnail_is_square,
-                )
-
-            # No URL but no exception - likely unavailable or extraction failed
-            is_auth = not result.is_unavailable  # If not unavailable, assume auth issue
-            logger.info(
-                f"[AudioFetcher] Direct fetch failed: {track.title} "
-                f"(unavailable={result.is_unavailable}, auth_issue={is_auth})"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_unavailable=result.is_unavailable,
-                is_auth_failure=is_auth,
-                error=result.error or "Failed to get audio URL"
-            )
-
-        except Exception as e:
-            is_auth = is_403_error(e)
-            is_gone = is_video_unavailable(e)
-            logger.info(
-                f"[AudioFetcher] Direct fetch exception: {track.title} "
-                f"(403={is_auth}, unavailable={is_gone}, error={str(e)[:100]})"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_auth_failure=is_auth,
-                is_unavailable=is_gone,
-                error=str(e)
-            )
-
-    async def _try_residential(
-        self,
-        track: 'Track',
-        state: TrackFetchState
-    ) -> AudioFetchResult:
-        """Attempt residential proxy download."""
-        # Check attempt limit
-        if state.residential_attempts >= self.RESIDENTIAL_MAX:
-            logger.error(
-                f"[AudioFetcher] Residential proxy failed — "
-                f"escalated to paid residential and it STILL failed "
-                f"({state.residential_attempts}/{self.RESIDENTIAL_MAX} attempts)"
-            )
-            return AudioFetchResult(
-                success=False,
-                residential_used=True,
-                error="Residential retries exhausted"
-            )
-
-        # Check if proxy is configured
+    if use_residential_ytdlp:
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
-            logger.warning("[AudioFetcher] Residential proxy not configured")
-            return AudioFetchResult(
-                success=False,
-                error="Residential proxy not configured"
+            return SourceResolutionResult(
+                has_source=False,
+                summary='Residential proxy is not configured.',
             )
+        ydl_opts = get_ytdlp_options({'extract_flat': False, 'proxy': proxy_url})
+    else:
+        ydl_opts = get_ytdlp_options({'extract_flat': False})
 
-        # Rate limiting between residential attempts (cross-track)
-        elapsed = time.time() - self._last_residential_time
-        if elapsed < self.RESIDENTIAL_MIN_DELAY and self._last_residential_time > 0:
-            delay = self.RESIDENTIAL_MIN_DELAY - elapsed
-            logger.debug(f"[AudioFetcher] Rate limiting: waiting {delay:.1f}s")
-            await asyncio.sleep(delay)
+    result = await get_audio_url(track, ydl_opts)
 
-        state.residential_attempts += 1
-        self._last_residential_time = time.time()
-
-        logger.info(
-            f"[AudioFetcher] Residential download {state.residential_attempts}/{self.RESIDENTIAL_MAX}: {track.title}"
+    if result.success and result.url:
+        return SourceResolutionResult(
+            has_source=True,
+            direct_url=result.url,
+            http_headers=result.http_headers,
+            thumbnail=result.thumbnail,
+            thumbnail_is_square=result.thumbnail_is_square,
+            summary='Resolved a direct media source for playback.',
         )
 
-        # Notify cog BEFORE attempting residential (so user sees "trying another way" BEFORE success/failure)
-        if self.on_residential_attempt and state.residential_attempts == 1:
-            try:
-                await self.on_residential_attempt(track.title)
-            except Exception as e:
-                logger.debug(f"[AudioFetcher] Residential callback error: {e}")
+    is_auth = bool(result.error and is_403_error(Exception(result.error)))
+    summary = result.error or 'yt-dlp could not resolve a playable source.'
 
-        # Download via cache_manager
-        success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_live_residential(
-            track
-        )
+    return SourceResolutionResult(
+        has_source=False,
+        unavailable=result.is_unavailable,
+        is_auth_failure=is_auth,
+        thumbnail=result.thumbnail,
+        thumbnail_is_square=result.thumbnail_is_square,
+        summary=summary,
+    )
 
-        if success and cached_path:
-            logger.info(
-                f"[AudioFetcher] Residential success: {track.title} "
-                f"({bytes_downloaded / 1024 / 1024:.2f} MB)"
-            )
-            self.clear_state(track.video_id)  # Clean up - fetch succeeded
-            return AudioFetchResult(
-                success=True,
-                local_path=cached_path,
-                residential_used=True,
-                residential_bytes=bytes_downloaded,
-            )
 
-        logger.info(
-            f"[AudioFetcher] Residential failed: {track.title} - {error_msg}"
-        )
-        return AudioFetchResult(
-            success=False,
-            residential_used=True,
-            error=error_msg or "Residential download failed"
-        )
-
-    def get_state_info(self, video_id: str) -> Optional[TrackFetchState]:
-        """Get state info for debugging/logging."""
-        return self._track_states.get(video_id)
-
-    @property
-    def active_tracks(self) -> int:
-        """Number of tracks with state being tracked."""
-        return len(self._track_states)

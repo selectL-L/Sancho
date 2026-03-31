@@ -125,6 +125,15 @@ def get_ffmpeg_path() -> str:
     return _ffmpeg_path
 
 
+def get_ffmpeg_stderr_loglevel() -> str:
+    """Return the FFmpeg stderr loglevel for the current runtime mode."""
+    import config
+
+    if config.DEV_MODE:
+        return '+repeat+level+trace'
+    return '+repeat+level+warning'
+
+
 # ==========================================================================
 # RESIDENTIAL PROXY
 # ==========================================================================
@@ -363,8 +372,9 @@ async def get_audio_url(
 ) -> AudioUrlResult:
     """Gets the actual streamable audio URL for a track.
 
-    NOTE: This is a low-level function. For production use with retry logic
-    and auth handling, use AudioFetcher from music_auth module instead.
+    NOTE: This is a low-level function. Production playback should go through
+    SourceAcquisitionMixin so source resolution, retries, and spending policy
+    stay centralized in one place.
 
     Args:
         track: The track to get the audio URL for.

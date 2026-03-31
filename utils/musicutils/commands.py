@@ -74,7 +74,13 @@ import discord
 from discord.ext import commands
 
 from .lyrics import chunk_text
-from .music_data import LoopMode, LyricsResult, Track
+from .music_data import (
+    LoopMode,
+    LyricsResult,
+    Track,
+    MAX_ACCEPTABLE_TRACK_DURATION_SECONDS,
+    format_duration_hms,
+)
 from .music_helpers import (
     YTDLP_AVAILABLE,
     detect_mix_in_url,
@@ -236,7 +242,7 @@ class MusicCommandsMixin:
     def _remove_track(self, index: int) -> None: ...
     def _move_track(self, from_index: int, to_index: int) -> Optional[Track]: ...
     def _swap_tracks(self, index_a: int, index_b: int) -> Optional[tuple[Track, Track]]: ...
-    def _clear_current_track_cache(self) -> None: ...
+    def _clear_attempts(self, video_id: str) -> None: ...
     def _refresh_prefetch_if_stale(self) -> None: ...
     def _do_pause(self) -> bool: ...
     async def _do_resume(self) -> bool: ...
@@ -419,6 +425,26 @@ class MusicCommandsMixin:
             # Error messages already sent by helper methods
             return
 
+        overlong_tracks = [
+            track for track in tracks_to_add
+            if track.duration > MAX_ACCEPTABLE_TRACK_DURATION_SECONDS
+        ]
+        if overlong_tracks:
+            if len(tracks_to_add) == 1:
+                await self._send_too_long_track_rejection(ctx, overlong_tracks[0])
+                return
+
+            tracks_to_add = [
+                track for track in tracks_to_add
+                if track.duration <= MAX_ACCEPTABLE_TRACK_DURATION_SECONDS
+            ]
+            await ctx.send(
+                f"⚠️ Skipping {len(overlong_tracks)} tracks longer than "
+                f"{format_duration_hms(MAX_ACCEPTABLE_TRACK_DURATION_SECONDS)}."
+            )
+            if not tracks_to_add:
+                return
+
         # Queue size limit
         MAX_QUEUE_SIZE = 2000
         current_queue_size = len(self.playlist) if self.active_session else 0
@@ -461,6 +487,7 @@ class MusicCommandsMixin:
                 )
 
                 self._player = ManagedPlayer(vc, self._on_player_track_end)  # type: ignore[arg-type]
+                self._player.set_repeat_one(self.loop_mode == LoopMode.ONE)
                 await self._play_current_track()
 
                 if len(tracks_to_add) == 1:
@@ -639,6 +666,21 @@ class MusicCommandsMixin:
 
         return [selected]
 
+    async def _send_too_long_track_rejection(self, ctx: commands.Context, track: Track) -> None:
+        """Reject tracks above the hard playback duration cap with the easter egg UX."""
+        are_you_serious_gif_url = "https://tenor.com/yZeB.gif"
+        duration_text = format_duration_hms(track.duration)
+        limit_text = format_duration_hms(MAX_ACCEPTABLE_TRACK_DURATION_SECONDS)
+        self.logger.info(
+            f"[Duration Policy] Rejecting overlong track for user {ctx.author.id}: "
+            f"{track.title} ({duration_text})"
+        )
+        await ctx.send(are_you_serious_gif_url)
+        await ctx.send(
+            f"**{track.title}** is {duration_text} long! "
+            f"I can't play anything over {limit_text}, sorry~"
+        )
+
     async def _do_queue(self, ctx: commands.Context) -> None:
         """Internal implementation for queue display.
 
@@ -717,7 +759,9 @@ class MusicCommandsMixin:
 
         self.current_index = index
         self.track_started_at = time.time()
-        self._clear_current_track_cache()
+        current = self._get_current_track()
+        if current and current.video_id:
+            self._clear_attempts(current.video_id)
 
         track = self._get_current_track()
 
@@ -754,7 +798,9 @@ class MusicCommandsMixin:
 
         self.track_started_at = time.time()
         self._playback.paused_at_position = None
-        self._clear_current_track_cache()
+        current = self._get_current_track()
+        if current and current.video_id:
+            self._clear_attempts(current.video_id)
 
         self._player.stop()
         await self._play_current_track()
@@ -1311,6 +1357,8 @@ class MusicCommandsMixin:
 
         old_mode = self.loop_mode
         self.loop_mode = mode
+        if self._player:
+            self._player.set_repeat_one(mode == LoopMode.ONE)
         self.logger.info(f"[Play] Loop mode changed by user {ctx.author.id}: {old_mode.display} → {mode.display}")
 
         if mode == LoopMode.OFF:
@@ -1490,6 +1538,9 @@ class MusicCommandsMixin:
             self.loop_mode = LoopMode.OFF
         else:
             self.loop_mode = LoopMode.ALL
+
+        if self._player:
+            self._player.set_repeat_one(self.loop_mode == LoopMode.ONE)
 
     async def get_current_thumbnail(self) -> Optional[bytes]:
         """Fetch thumbnail bytes for the current track."""

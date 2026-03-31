@@ -1,47 +1,73 @@
 """Custom audio sources for discord.py voice playback.
 
-This module provides audio source implementations with features beyond
-discord.py's built-in FFmpegPCMAudio, such as seeking support.
+This module provides audio source implementations with behavior beyond
+discord.py's built-in ``FFmpegPCMAudio``. The important design points are:
+
+1. Seeking is owned by the source rather than the voice client.
+2. FFmpeg stderr is captured and parsed continuously for recovery decisions.
+3. The decoded PCM output is archived in memory while playback is happening.
+
+That archive is the key to the rebuilt loop-one behavior. Once FFmpeg has
+decoded the track into the archive, loop-one replay is just a read-cursor
+rewind inside the same source object. No fresh yt-dlp resolution, no new
+source construction, and no callback-driven playback restart are needed.
 """
 
-import collections
+import dataclasses
 import io
 import logging
 import shlex
 import subprocess
 import sys
 import threading
-import time
 from typing import Optional
 
 import discord
 
-from utils.musicutils.music_data import AudioErrorType, FFmpegHealth
-from utils.musicutils.music_helpers import FFMPEG_OPTIONS, get_ffmpeg_path
+import config
+from utils.musicutils.ffmpeg_parser import FFmpegStderrParser
+from utils.musicutils.music_data import FFmpegHealth
+from utils.musicutils.music_helpers import FFMPEG_OPTIONS, get_ffmpeg_path, get_ffmpeg_stderr_loglevel
 
 logger = logging.getLogger(__name__)
 
-# Discord voice uses 48kHz, 2 channels, 16-bit audio
-# 20ms of audio = 48000 * 2 * 2 * 0.02 = 3840 bytes
+# Discord voice uses 48kHz, 2 channels, 16-bit audio.
+# 20 ms of audio = 48_000 * 2 * 2 * 0.02 = 3840 bytes.
 FRAME_SIZE = 3840
 
 
+def _shallow_copy_health(health: FFmpegHealth) -> FFmpegHealth:
+    """Create a cheap defensive copy of an FFmpegHealth report.
+
+    Every field is either a primitive, an enum, or ``list[str]``.  A shallow
+    dataclass copy plus a fresh list for ``stderr_lines`` is sufficient --
+    ``copy.deepcopy`` is needlessly expensive here because it walks every
+    object recursively (including enum singletons that can't be meaningfully
+    copied anyway).
+    """
+    snapshot = dataclasses.replace(health, stderr_lines=health.stderr_lines.copy())
+    return snapshot
+FRAMES_PER_SECOND = 50
+PCM_BYTES_PER_SECOND = FRAME_SIZE * FRAMES_PER_SECOND
+ARCHIVE_READ_BLOCK_SIZE = FRAME_SIZE * 250  # 5 seconds of PCM per producer read.
+
+
 class SeekableAudioSource(discord.AudioSource):
-    """FFmpeg audio source with seek support.
+    """FFmpeg-backed PCM source with seeking and in-memory archive replay.
 
-    Unlike discord.FFmpegPCMAudio, this source:
-    - Supports seeking without involving VoiceClient
-    - Tracks playback position
-    - Can be paused/resumed at the source level
+    Unlike ``discord.FFmpegPCMAudio``, this source owns a producer/consumer
+    archive of decoded PCM:
 
-    The key insight is that VoiceClient.play() just calls read() repeatedly.
-    We control the FFmpeg subprocess directly, so seek() can restart FFmpeg
-    with a new -ss position without the VoiceClient knowing.
+    - A background producer drains FFmpeg stdout into an in-memory PCM archive.
+    - `read()` serves 20 ms frames from that archive at Discord playback speed.
 
-    Attributes:
-        source: Path to local file or streaming URL.
-        position: Current playback position in seconds.
-        is_paused: Whether the source is paused (read() returns silence).
+    This keeps the currently playing track replayable without any fresh source
+    acquisition. When loop one is enabled, the source simply rewinds its own
+    read cursor instead of returning EOF.
+
+    The source still supports manual ``seek()`` by respawning FFmpeg from a new
+    starting position, but normal clean loop-one repetition never leaves this
+    source object.
     """
 
     def __init__(
@@ -57,8 +83,8 @@ class SeekableAudioSource(discord.AudioSource):
         Args:
             source: Path to local file or streaming URL.
             start_position: Position in seconds to start playback from.
-            http_headers: HTTP headers for streaming URLs (e.g., User-Agent).
-            volume: Volume multiplier (0.0 to 1.0). Applied via PCM scaling.
+            http_headers: HTTP headers for streaming URLs.
+            volume: Volume multiplier (0.0 to 1.0).
         """
         self.source = source
         self._http_headers = http_headers
@@ -66,46 +92,42 @@ class SeekableAudioSource(discord.AudioSource):
 
         self._process: Optional[subprocess.Popen[bytes]] = None
         self._start_position = start_position
-        self._started_at: float = 0.0
-        self._paused_at: Optional[float] = None
         self._is_paused = False
 
-        # Silence frame for paused state
+        # Silence frame for paused state.
         self._silence = b'\x00' * FRAME_SIZE
 
-        # Stderr capture for error diagnosis (Phase 1: observation only)
-        # The stderr thread reads FFmpeg's stderr output and logs it.
-        # This helps us understand what FFmpeg reports when URLs fail (403, etc.)
-        # without changing any behavior - we're just collecting data.
         self._stderr_thread: Optional[threading.Thread] = None
+        self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_lines: list[str] = []
         self._health: FFmpegHealth = FFmpegHealth()
+        self._parser = FFmpegStderrParser()
 
-        # Prebuffer for validated prefetch (Phase 2).
-        # When prebuffer() is called, we read frames into this deque.
-        # read() serves from here first, then falls back to live FFmpeg reads.
-        # This enables:
-        # 1. URL validation - if we can read 30s, the URL works
-        # 2. Instant playback - buffer is ready when track starts
-        # The FFmpeg process sits blocked on stdout write while buffer is full,
-        # which is fine - it uses minimal resources while waiting.
-        self._prebuffer: collections.deque[bytes] = collections.deque()
-        self._frames_read: int = 0  # Total frames read (for stats)
+        # Archive state: producer appends PCM blocks, read() advances an
+        # independent play cursor through those archived blocks.
+        self._archive_condition = threading.Condition()
+        self._archive_chunks: list[bytes] = []
+        self._archive_total_bytes = 0
+        self._archive_complete = False
+        self._play_chunk_index = 0
+        self._play_chunk_offset = 0
+        self._play_absolute_bytes = 0
+        self._repeat_one_enabled = False
+        self._frames_read = 0  # Total frames read from FFmpeg into the archive.
 
         self._spawn_ffmpeg(start_position)
 
     def _spawn_ffmpeg(self, start_position: float) -> None:
-        """Spawn FFmpeg subprocess starting at given position.
+        """Spawn FFmpeg starting at the requested position.
 
-        Args:
-            start_position: Position in seconds to start from.
+        Seeking still restarts FFmpeg, but replay after a clean end remains
+        source-owned because the archived PCM is retained until cleanup.
         """
         self._cleanup_process()
 
         ffmpeg_path = get_ffmpeg_path()
         is_local = not self.source.startswith(('http://', 'https://'))
 
-        # Build before_options
         before_parts = []
 
         # Seek position (must come before input)
@@ -127,7 +149,7 @@ class SeekableAudioSource(discord.AudioSource):
         # Build the command
         # Output format: signed 16-bit little-endian PCM, 48kHz, stereo
         cmd = (
-            f'{ffmpeg_path} -hide_banner -loglevel warning '
+            f'{ffmpeg_path} -hide_banner -loglevel {get_ffmpeg_stderr_loglevel()} '
             f'{before_options} -i "{self.source}" '
             f'{FFMPEG_OPTIONS["options"]} '
             '-f s16le -ar 48000 -ac 2 pipe:1'
@@ -157,22 +179,35 @@ class SeekableAudioSource(discord.AudioSource):
             )
 
         self._start_position = start_position
-        self._started_at = time.time()
-        self._paused_at = None
         self._is_paused = False
 
-        # Start stderr reader thread.
-        # This thread reads FFmpeg's stderr in the background so we can see
-        # what errors FFmpeg reports (403, connection reset, etc.).
-        # The thread exits naturally when the process terminates.
         self._stderr_lines = []  # Reset for new process
         self._health = FFmpegHealth()  # Reset health for new process
+        self._parser = FFmpegStderrParser()
+
+        with self._archive_condition:
+            self._archive_chunks = []
+            self._archive_total_bytes = 0
+            self._archive_complete = False
+            self._play_chunk_index = 0
+            self._play_chunk_offset = 0
+            self._play_absolute_bytes = 0
+            self._frames_read = 0
+            self._archive_condition.notify_all()
+
         self._stderr_thread = threading.Thread(
             target=self._stderr_reader_loop,
             name=f"FFmpeg-stderr-{id(self)}",
             daemon=True,
         )
         self._stderr_thread.start()
+
+        self._stdout_thread = threading.Thread(
+            target=self._stdout_reader_loop,
+            name=f"FFmpeg-stdout-{id(self)}",
+            daemon=True,
+        )
+        self._stdout_thread.start()
 
         logger.debug(f"[SeekableAudioSource] Spawned FFmpeg at position {start_position:.1f}s")
 
@@ -182,15 +217,22 @@ class SeekableAudioSource(discord.AudioSource):
             try:
                 self._process.terminate()
                 self._process.wait(timeout=1.0)
-            except (OSError, subprocess.TimeoutExpired) as e:
-                logger.debug(f"FFmpeg terminate failed, killing: {e}")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                logger.debug(f"FFmpeg terminate failed, killing: {exc}")
                 try:
                     self._process.kill()
-                except OSError as e:
-                    logger.debug(f"FFmpeg kill failed (likely already dead): {e}")
+                except OSError as kill_exc:
+                    logger.debug(f"FFmpeg kill failed (likely already dead): {kill_exc}")
             self._process = None
 
-        # Wait for stderr thread to finish (it will exit when process dies)
+        with self._archive_condition:
+            self._archive_complete = True
+            self._archive_condition.notify_all()
+
+        if self._stdout_thread and self._stdout_thread.is_alive():
+            self._stdout_thread.join(timeout=0.5)
+        self._stdout_thread = None
+
         if self._stderr_thread and self._stderr_thread.is_alive():
             self._stderr_thread.join(timeout=0.5)
         self._stderr_thread = None
@@ -203,14 +245,7 @@ class SeekableAudioSource(discord.AudioSource):
             )
 
     def _stderr_reader_loop(self) -> None:
-        """Background thread: read FFmpeg stderr and log for diagnosis.
-
-        Captures stderr and parses for error patterns. When an error is
-        detected, self._health is updated with the error type.
-
-        The thread exits naturally when the FFmpeg process terminates
-        (stderr read returns empty).
-        """
+        """Read FFmpeg stderr in the background and keep parser state live."""
         if not self._process or not self._process.stderr:
             return
 
@@ -224,126 +259,135 @@ class SeekableAudioSource(discord.AudioSource):
                 decoded = line.decode('utf-8', errors='replace').strip()
                 if decoded:
                     self._stderr_lines.append(decoded)
-                    self._health.stderr_lines.append(decoded)
-                    # Log at DEBUG so we can see what FFmpeg says during failures
-                    logger.debug(f"[FFmpeg stderr] {decoded}")
-                    # Parse for error patterns
-                    self._parse_stderr_line(decoded)
+                    if config.DEV_MODE:
+                        logger.debug(f"[FFmpeg raw] {decoded}")
+                    self._parser.consume_line(decoded)
+                    self._health = self._snapshot_health()
+        except Exception as exc:
+            logger.debug(f"[SeekableAudioSource] Stderr reader error: {exc}")
 
-        except Exception as e:
-            # Thread must not raise - just log and exit
-            logger.debug(f"[SeekableAudioSource] Stderr reader error: {e}")
+    def _stdout_reader_loop(self) -> None:
+        """Drain FFmpeg stdout into the in-memory PCM archive.
 
-    def _parse_stderr_line(self, line: str) -> None:
-        """Parse a stderr line for error patterns and update health.
-
-        TODO(Phase 3): These patterns are PLACEHOLDERS based on expected
-        FFmpeg output. Once we collect real stderr from failures, update
-        these patterns to match actual error formats.
-
-        Expected patterns (to be verified):
-        - "[https @ 0x...] HTTP error 403 Forbidden"
-        - "[https @ 0x...] HTTP error 404 Not Found"
-        - "[https @ 0x...] Connection reset by peer"
-        - "[https @ 0x...] Connection refused"
-        - "Server returned 4XX/5XX"
-
-        Args:
-            line: A single line from FFmpeg stderr.
+        FFmpeg is allowed to run ahead of playback speed. The archive grows as
+        quickly as FFmpeg can decode, while Discord consumes 20 ms frames at
+        real-time speed through ``read()``. That lets short tracks finish fully
+        archiving during prefetch and lets longer tracks continue archiving in
+        the background while the first pass is already playing.
         """
-        # Only update if we haven't already found an error
-        # (first error is usually the root cause)
-        if self._health.error_type != AudioErrorType.NONE:
+        if not self._process or not self._process.stdout:
+            with self._archive_condition:
+                self._archive_complete = True
+                self._archive_condition.notify_all()
             return
 
-        line_lower = line.lower()
+        remainder = b''
 
-        # TODO: Verify these patterns against real FFmpeg output
-        # HTTP 403 - auth failure (URL expired or blocked)
-        if '403' in line and ('http' in line_lower or 'forbidden' in line_lower):
-            self._health.error_type = AudioErrorType.HTTP_403
-            self._health.error_detail = line
-            logger.debug(f"[SeekableAudioSource] Detected HTTP 403: {line}")
+        try:
+            while True:
+                block = self._process.stdout.read(ARCHIVE_READ_BLOCK_SIZE)
+                if not block:
+                    break
 
-        # HTTP 404 - track removed
-        elif '404' in line and ('http' in line_lower or 'not found' in line_lower):
-            self._health.error_type = AudioErrorType.HTTP_404
-            self._health.error_detail = line
-            logger.debug(f"[SeekableAudioSource] Detected HTTP 404: {line}")
+                combined = remainder + block
+                complete_bytes = len(combined) - (len(combined) % FRAME_SIZE)
+                if complete_bytes <= 0:
+                    remainder = combined
+                    continue
 
-        # Other HTTP errors (5xx, etc.)
-        elif 'http error' in line_lower or 'server returned' in line_lower:
-            self._health.error_type = AudioErrorType.HTTP_OTHER
-            self._health.error_detail = line
-            logger.debug(f"[SeekableAudioSource] Detected HTTP error: {line}")
+                archive_chunk = combined[:complete_bytes]
+                remainder = combined[complete_bytes:]
 
-        # Connection errors
-        elif any(pattern in line_lower for pattern in [
-            'connection reset',
-            'connection refused',
-            'connection timed out',
-            'network is unreachable',
-            'no route to host',
-        ]):
-            self._health.error_type = AudioErrorType.CONNECTION
-            self._health.error_detail = line
-            logger.debug(f"[SeekableAudioSource] Detected connection error: {line}")
-
-        # Format/stream errors
-        elif any(pattern in line_lower for pattern in [
-            'invalid data',
-            'corrupt',
-            'moov atom not found',
-            'invalid stream',
-        ]):
-            self._health.error_type = AudioErrorType.FORMAT
-            self._health.error_detail = line
-            logger.debug(f"[SeekableAudioSource] Detected format error: {line}")
+                with self._archive_condition:
+                    self._archive_chunks.append(archive_chunk)
+                    self._archive_total_bytes += len(archive_chunk)
+                    self._frames_read += len(archive_chunk) // FRAME_SIZE
+                    self._archive_condition.notify_all()
+        except Exception as exc:
+            logger.warning(f"[SeekableAudioSource] Producer read error: {exc}")
+        finally:
+            if remainder:
+                logger.debug(
+                    f"[SeekableAudioSource] Dropping trailing partial PCM block of {len(remainder)} bytes"
+                )
+            with self._archive_condition:
+                self._archive_complete = True
+                self._archive_condition.notify_all()
 
     def read(self) -> bytes:
-        """Read the next frame of audio data.
+        """Read the next 20 ms frame of audio data.
 
-        Called by discord.py's voice client ~50 times per second.
-        Serves from prebuffer first (if any), then reads live from FFmpeg.
+        Called by discord.py's voice client about 50 times per second.
+
+        The read path serves frames from the in-memory archive, not directly
+        from FFmpeg stdout.  This gives us three important behaviors:
+
+        1. Prefetched audio can start instantly because frames are already in
+           memory.
+        2. Playback can keep going even if FFmpeg has already finished and the
+           URL would otherwise expire later.
+        3. Loop one can be seamless because the source can rewind its archive
+           cursor instead of returning EOF.
+
+        IMPORTANT: This method must NEVER block.  discord.py's voice sending
+        thread calls read() on a tight 20 ms cadence.  If the archive hasn't
+        caught up yet (producer is still decoding), we return a silence frame
+        so the voice connection stays healthy.  The next call will try again.
 
         Returns:
-            3840 bytes of PCM audio data, or empty bytes if EOF/incomplete.
+            Exactly ``FRAME_SIZE`` bytes of PCM audio, or ``b''`` only when
+            the source has truly ended and loop one is disabled.
         """
         if self._is_paused:
             return self._silence
 
-        # Serve from prebuffer first (instant, no FFmpeg wait)
-        if self._prebuffer:
-            data = self._prebuffer.popleft()
-            # Apply volume if not 1.0
-            if self._volume != 1.0:
-                data = self._apply_volume(data)
-            return data
+        with self._archive_condition:
+            # Fast path: archive has a full frame ready at the current cursor.
+            if self._play_absolute_bytes + FRAME_SIZE <= self._archive_total_bytes:
+                # Advance past any fully-consumed chunks.
+                while (
+                    self._play_chunk_index < len(self._archive_chunks)
+                    and self._play_chunk_offset >= len(self._archive_chunks[self._play_chunk_index])
+                ):
+                    self._play_chunk_index += 1
+                    self._play_chunk_offset = 0
 
-        # Fall back to live FFmpeg read
-        if not self._process or not self._process.stdout:
-            return b''
+                if self._play_chunk_index >= len(self._archive_chunks):
+                    # Byte accounting says data exists but the chunk list
+                    # disagrees -- return silence and let the next call retry
+                    # rather than blocking the voice thread.
+                    return self._silence
 
-        try:
-            data = self._process.stdout.read(FRAME_SIZE)
+                chunk = self._archive_chunks[self._play_chunk_index]
+                data = chunk[self._play_chunk_offset:self._play_chunk_offset + FRAME_SIZE]
+                if len(data) != FRAME_SIZE:
+                    logger.warning(
+                        f"[SeekableAudioSource] Archive alignment error at chunk {self._play_chunk_index}"
+                    )
+                    return b''
 
-            # CRITICAL: Discord.py expects exactly FRAME_SIZE bytes.
-            # Returning partial frames causes audio corruption/static.
-            # This can happen at stream start while FFmpeg is buffering,
-            # or at stream end. Return empty to signal EOF for partial data.
-            if len(data) != FRAME_SIZE:
+                self._play_chunk_offset += FRAME_SIZE
+                self._play_absolute_bytes += FRAME_SIZE
+
+                if self._volume != 1.0:
+                    return self._apply_volume(data)
+                return data
+
+            # Archive is complete -- either loop or signal EOF.
+            if self._archive_complete:
+                if self._repeat_one_enabled and self._archive_total_bytes >= FRAME_SIZE:
+                    self._play_chunk_index = 0
+                    self._play_chunk_offset = 0
+                    self._play_absolute_bytes = 0
+                    # Recurse once to serve the first frame immediately.
+                    # _archive_complete + data present guarantees no infinite loop.
+                    return self.read()
                 return b''
 
-            self._frames_read += 1
-
-            # Apply volume if not 1.0
-            if self._volume != 1.0:
-                data = self._apply_volume(data)
-
-            return data
-        except Exception as e:
-            logger.warning(f"[SeekableAudioSource] Read error: {e}")
-            return b''
+            # Producer is still decoding -- return silence so the voice
+            # connection doesn't stall.  The next read() 20 ms from now will
+            # pick up the newly archived data.
+            return self._silence
 
     def _apply_volume(self, data: bytes) -> bytes:
         """Apply volume scaling to PCM data.
@@ -371,10 +415,9 @@ class SeekableAudioSource(discord.AudioSource):
 
     @property
     def position(self) -> float:
-        """Current playback position in seconds."""
-        if self._is_paused and self._paused_at is not None:
-            return self._start_position + (self._paused_at - self._started_at)
-        return self._start_position + (time.time() - self._started_at)
+        """Current playback position in seconds relative to the source start."""
+        with self._archive_condition:
+            return self._start_position + (self._play_absolute_bytes / PCM_BYTES_PER_SECOND)
 
     @property
     def is_paused(self) -> bool:
@@ -382,31 +425,67 @@ class SeekableAudioSource(discord.AudioSource):
         return self._is_paused
 
     def pause(self) -> None:
-        """Pause playback (read() returns silence)."""
+        """Pause playback so read() returns silence."""
         if not self._is_paused:
             self._is_paused = True
-            self._paused_at = time.time()
             logger.debug(f"[SeekableAudioSource] Paused at {self.position:.1f}s")
 
     def resume(self) -> None:
-        """Resume playback from paused position."""
+        """Resume playback from the current archive cursor."""
         if self._is_paused:
             self._is_paused = False
-            # Adjust started_at to account for pause duration
-            if self._paused_at is not None:
-                pause_duration = time.time() - self._paused_at
-                self._started_at += pause_duration
-            self._paused_at = None
             logger.debug(f"[SeekableAudioSource] Resumed at {self.position:.1f}s")
 
-    def seek(self, position: float) -> None:
-        """Seek to a specific position.
+    def set_repeat_one(self, enabled: bool) -> None:
+        """Enable or disable source-owned loop-one rewind behavior.
 
-        This restarts FFmpeg with a new -ss value. The VoiceClient
-        continues calling read() and doesn't know a seek happened.
+        This is updated live by ``ManagedPlayer`` so mid-playback loop mode
+        changes take effect at the next end-of-archive boundary.
+        """
+        with self._archive_condition:
+            self._repeat_one_enabled = enabled
+            self._archive_condition.notify_all()
+
+    def rewind(self, seconds: float) -> bool:
+        """Move the play cursor backward within already-archived audio.
+
+        This is the safe path used by pause/resume. It preserves the source's
+        full-track archive and therefore does not change where loop one will
+        wrap when the current pass reaches the true end of the track.
 
         Args:
-            position: Target position in seconds.
+            seconds: How far to move the play cursor backward.
+
+        Returns:
+            ``True`` if the requested rewind could be satisfied from the
+            existing archive, otherwise ``False``.
+        """
+        if seconds <= 0:
+            return True
+
+        rewind_bytes = round(seconds * PCM_BYTES_PER_SECOND)
+
+        with self._archive_condition:
+            target_bytes = max(0, self._play_absolute_bytes - rewind_bytes)
+            target_bytes -= target_bytes % FRAME_SIZE
+
+            chunk_index, chunk_offset = self._locate_archive_offset_locked(target_bytes)
+            self._play_chunk_index = chunk_index
+            self._play_chunk_offset = chunk_offset
+            self._play_absolute_bytes = target_bytes
+            self._archive_condition.notify_all()
+            return True
+
+    def seek(self, position: float) -> None:
+        """Seek by respawning FFmpeg from a new starting position.
+
+        This resets the archive to the new start position. Manual seeks are
+        still supported, even though loop-one replay remains source-owned.
+
+        NOTE: Seeking is not currently exposed to users via any command.  When
+        it is eventually wired up, be aware that a seek resets the archive
+        anchor -- loop-one will repeat from the *seek point*, not from the
+        original start of the track.  This may or may not be the desired UX.
         """
         position = max(0.0, position)
         was_paused = self._is_paused
@@ -415,132 +494,142 @@ class SeekableAudioSource(discord.AudioSource):
         if was_paused:
             self.pause()
 
+    def _locate_archive_offset_locked(self, target_bytes: int) -> tuple[int, int]:
+        """Translate an absolute byte offset into chunk index + chunk offset.
+
+        The caller must already hold ``self._archive_condition``.
+        """
+        if target_bytes <= 0 or not self._archive_chunks:
+            return 0, 0
+
+        remaining = target_bytes
+        for chunk_index, chunk in enumerate(self._archive_chunks):
+            if remaining < len(chunk):
+                return chunk_index, remaining
+            remaining -= len(chunk)
+
+        last_index = len(self._archive_chunks) - 1
+        return last_index, len(self._archive_chunks[last_index])
+
     def prebuffer(self, target_seconds: float = 30.0, min_valid_seconds: float = 30.0) -> bool:
-        """Buffer audio frames to validate URL and enable instant playback.
+        """Wait until the archive reaches the requested lead buffer.
 
-        This is the core of prefetch validation. We read frames from FFmpeg
-        until we hit the target OR encounter an error. If we read at least
-        min_valid_seconds, the URL is considered valid.
+        This is the rebuilt version of prefetch validation.
 
-        The FFmpeg process continues running after this returns - it will
-        block on stdout write (pipe buffer full) until read() drains the buffer.
-        This is intentional: the process sits ready to continue feeding audio.
+        The old source kept a separate deque of one-shot prebuffer frames and
+        then fell back to direct FFmpeg reads during playback. The new source
+        does not split those concepts. Prefetch and live playback both use the
+        same archive:
+
+        - If a track is short, callers pass the full duration so the entire
+          song is archived before handoff.
+        - If a track is larger, callers pass a shorter lead buffer so playback
+          can start promptly while the producer keeps archiving the rest.
 
         Args:
-            target_seconds: How much audio to try buffering.
-                - For short tracks (≤10min): pass track duration to buffer whole song
-                - For long tracks: pass 30.0 to just validate
-            min_valid_seconds: Minimum buffered to consider URL "valid".
-                YouTube can throw 403s 15-25s into playback, so 30s proves the URL works.
+            target_seconds: How much audio to wait for before returning.
+                - For short tracks this is usually the entire duration.
+                - For larger tracks this is the "ready enough" lead buffer.
+            min_valid_seconds: Minimum archived audio required to trust the
+                current FFmpeg source as valid.
 
         Returns:
-            True if we buffered at least min_valid_seconds (URL is valid).
-            False if we hit EOF/error before min_valid_seconds.
-
-        After success:
-            - self._prebuffer contains frames ready for read()
-            - self.buffered_seconds shows how much we have
-            - FFmpeg process is alive, blocked, ready to continue
-
-        After failure:
-            - self._stderr_lines contains FFmpeg's error output
-            - Caller should cleanup() and handle the error
+            ``True`` if at least ``min_valid_seconds`` of audio was archived.
+            ``False`` if the archive completed or failed before reaching that
+            minimum.
         """
-        # Calculate frame targets (50 frames = 1 second at 20ms/frame)
-        frames_per_second = 50
-        target_frames = int(target_seconds * frames_per_second)
-        min_valid_frames = int(min_valid_seconds * frames_per_second)
+        target_bytes = int(target_seconds * PCM_BYTES_PER_SECOND)
+        min_valid_bytes = int(min_valid_seconds * PCM_BYTES_PER_SECOND)
 
         logger.debug(
-            f"[SeekableAudioSource] Prebuffering: target={target_seconds}s "
-            f"({target_frames} frames), min_valid={min_valid_seconds}s ({min_valid_frames} frames)"
+            f"[SeekableAudioSource] Prebuffering: target={target_seconds}s ({target_bytes} bytes), "
+            f"min_valid={min_valid_seconds}s ({min_valid_bytes} bytes)"
         )
 
-        if not self._process or not self._process.stdout:
-            logger.warning("[SeekableAudioSource] Prebuffer called with no process")
-            return False
+        with self._archive_condition:
+            while self._archive_total_bytes < target_bytes and not self._archive_complete:
+                self._archive_condition.wait(timeout=0.05)
 
-        frames_buffered = 0
+            buffered_bytes = self._archive_total_bytes
 
-        while frames_buffered < target_frames:
-            try:
-                data = self._process.stdout.read(FRAME_SIZE)
-
-                # EOF or partial frame = stream ended
-                if len(data) != FRAME_SIZE:
-                    logger.debug(
-                        f"[SeekableAudioSource] Prebuffer EOF after {frames_buffered} frames "
-                        f"({frames_buffered / frames_per_second:.1f}s)"
-                    )
-                    break
-
-                self._prebuffer.append(data)
-                self._frames_read += 1
-                frames_buffered += 1
-
-            except Exception as e:
-                logger.warning(f"[SeekableAudioSource] Prebuffer read error: {e}")
-                break
-
-        # Did we get enough to consider URL valid?
-        is_valid = frames_buffered >= min_valid_frames
-
+        buffered_seconds = buffered_bytes / PCM_BYTES_PER_SECOND
+        is_valid = buffered_bytes >= min_valid_bytes
         logger.info(
-            f"[SeekableAudioSource] Prebuffer complete: {frames_buffered} frames "
-            f"({frames_buffered / frames_per_second:.1f}s), valid={is_valid}"
+            f"[SeekableAudioSource] Prebuffer complete: {buffered_seconds:.1f}s archived, valid={is_valid}"
         )
-
         return is_valid
 
     @property
     def buffered_seconds(self) -> float:
-        """Seconds of audio currently in the prebuffer."""
-        return len(self._prebuffer) / 50.0  # 50 frames per second
+        """Seconds of PCM currently archived in memory."""
+        with self._archive_condition:
+            return self._archive_total_bytes / PCM_BYTES_PER_SECOND
 
     @property
     def frames_read(self) -> int:
-        """Total frames read from FFmpeg (prebuffer + live)."""
+        """Total frames read from FFmpeg into the archive."""
         return self._frames_read
 
     def cleanup(self) -> None:
-        """Clean up resources. Called when source is no longer needed."""
-        frame_count = len(self._prebuffer)
-        if frame_count > 0:
-            # Estimate memory: ~3840 bytes per frame (20ms of stereo 48kHz audio)
-            mem_mb = (frame_count * 3840) / (1024 * 1024)
-            logger.info(f"[SeekableAudioSource] Releasing {frame_count} frames (~{mem_mb:.1f}MB)")
-        self._prebuffer.clear()  # Release buffer memory
+        """Clean up process and archive resources."""
+        with self._archive_condition:
+            archived_bytes = self._archive_total_bytes
+
+        if archived_bytes > 0:
+            mem_mb = archived_bytes / (1024 * 1024)
+            logger.info(f"[SeekableAudioSource] Releasing archive (~{mem_mb:.1f}MB)")
+
         self._cleanup_process()
+
+        with self._archive_condition:
+            self._archive_chunks = []
+            self._archive_total_bytes = 0
+            self._play_chunk_index = 0
+            self._play_chunk_offset = 0
+            self._play_absolute_bytes = 0
+            self._archive_complete = True
+            self._archive_condition.notify_all()
+
         logger.info("[SeekableAudioSource] Cleaned up")
 
     @property
     def stderr_lines(self) -> list[str]:
-        """Captured stderr output from FFmpeg.
-
-        Useful for diagnosing playback failures. Contains lines like:
-        - "[https @ 0x...] HTTP error 403 Forbidden"
-        - "[https @ 0x...] Connection reset by peer"
-        """
+        """Captured stderr output from FFmpeg."""
         return self._stderr_lines.copy()
+
+    def build_ffmpeg_health(
+        self,
+        *,
+        context: str,
+        elapsed: Optional[float] = None,
+        expected_duration: Optional[int] = None,
+        explicit_error: bool = False,
+    ) -> FFmpegHealth:
+        """Finalize current FFmpeg parser state for a caller decision."""
+        process_returncode = self._process.poll() if self._process else None
+        report = self._parser.finalize(
+            frames_read=self._frames_read,
+            process_returncode=process_returncode,
+            context=context,
+            elapsed=elapsed,
+            expected_duration=expected_duration,
+            explicit_error=explicit_error,
+        )
+        self._health = _shallow_copy_health(report)
+        return _shallow_copy_health(self._health)
 
     @property
     def health(self) -> FFmpegHealth:
-        """Health status of the FFmpeg process.
-
-        Populated by the stderr reader thread as it parses error patterns.
-        Check this after playback ends or prebuffer() fails to understand
-        what went wrong.
-
-        TODO(Phase 3): The error classification depends on placeholder patterns
-        in _parse_stderr_line(). Refine once we have real error samples.
-
-        Returns:
-            FFmpegHealth with error_type, error_detail, and stderr_lines.
-        """
-        # Update frames_read in health before returning
-        self._health.frames_read = self._frames_read
-        return self._health
+        """Current FFmpeg parser state without playback-end heuristics."""
+        return self._snapshot_health()
 
     def is_opus(self) -> bool:
         """Whether this source produces Opus packets (it doesn't)."""
         return False
+
+    def _snapshot_health(self) -> FFmpegHealth:
+        """Create a defensive copy of the current parser state."""
+        snapshot = _shallow_copy_health(self._parser.report)
+        snapshot.frames_read = self._frames_read
+        snapshot.stderr_lines = self._stderr_lines.copy()
+        return snapshot

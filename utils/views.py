@@ -30,6 +30,8 @@ from discord import ui
 from discord.ext import commands
 from discord.ui.view import BaseView
 
+from utils.musicutils.music_data import TrackIssueKind
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -45,14 +47,13 @@ class TrackFailureAction(Enum):
     """Actions a user can take when a track fails to play."""
     SKIP = auto()    # Skip but keep in playlist (might work later)
     REMOVE = auto()  # Remove from playlist entirely
-    TIMEOUT = auto()  # User didn't respond - defaults to REMOVE
 
 
 class TrackFailedView(discord.ui.View):
     """View displayed when a track fails to play, giving users options.
 
-    This view presents Retry, Skip, and Remove buttons when a track can't
-    be played (e.g., 403 errors, region locks, unavailable videos).
+    This view presents Skip and Remove buttons when a track can't be played.
+    Callers choose whether timeout should default to skipping or removing.
 
     The view is single-use - once a button is clicked, buttons are disabled
     and the view stops.
@@ -61,13 +62,16 @@ class TrackFailedView(discord.ui.View):
         view = TrackFailedView(track_title, track_url)
         message = await channel.send(embed=view.create_embed(), view=view)
         await view.wait()
-        action = view.action  # TrackFailureAction.SKIP / REMOVE / TIMEOUT
+        action = view.action  # TrackFailureAction.SKIP / REMOVE
     """
 
     def __init__(
         self,
         track_title: str,
         track_url: str,
+        *,
+        issue_kind: TrackIssueKind = TrackIssueKind.TRANSIENT,
+        timeout_action: TrackFailureAction = TrackFailureAction.REMOVE,
         timeout: float = 60.0,
     ):
         """Initialize the track failed view.
@@ -75,13 +79,36 @@ class TrackFailedView(discord.ui.View):
         Args:
             track_title: Title of the failed track.
             track_url: URL of the failed track.
+            issue_kind: Coarse category used to choose generic prompt copy.
+            timeout_action: Action to apply if nobody responds before timeout.
             timeout: View timeout in seconds (default 60s).
         """
         super().__init__(timeout=timeout)
         self.track_title = track_title
         self.track_url = track_url
-        self.action: TrackFailureAction = TrackFailureAction.TIMEOUT
+        self.issue_kind = issue_kind
+        self.timeout_action = timeout_action
+        self.action: TrackFailureAction = timeout_action
         self.message: Optional[discord.Message] = None
+
+    def _resolve_copy(self) -> tuple[str, str]:
+        """Return the title and generic body text for this issue kind."""
+        if self.issue_kind == TrackIssueKind.UNAVAILABLE:
+            return (
+                "⚠️ Track Unavailable",
+                "I tried everything I could, but this track doesn't seem to be available anymore.",
+            )
+
+        if self.issue_kind == TrackIssueKind.INTERNAL:
+            return (
+                "⚠️ Playback Error",
+                "Something went wrong on my end trying to play this one. I've made a note of it!",
+            )
+
+        return (
+            "⚠️ Track Had Trouble",
+            "I'm having trouble playing this track right now. It might work again later!",
+        )
 
     def create_embed(self) -> discord.Embed:
         """Create the failure notification embed.
@@ -94,12 +121,26 @@ class TrackFailedView(discord.ui.View):
         if len(display_title) > 50:
             display_title = display_title[:47] + "..."
 
+        title, reason_text = self._resolve_copy()
+
+        default_note = (
+            "I'll skip it for now if nobody responds, but you can remove it from the queue if you'd like."
+            if self.timeout_action == TrackFailureAction.SKIP
+            else "I'll remove it if nobody responds, but you can keep it in the queue by choosing Skip."
+        )
+
+        timeout_footer = (
+            "Auto-skips in 60 seconds if no response"
+            if self.timeout_action == TrackFailureAction.SKIP
+            else "Auto-removes in 60 seconds if no response"
+        )
+
         embed = discord.Embed(
-            title="⚠️ Track Unavailable",
+            title=title,
             description=(
                 f"**[{display_title}]({self.track_url})**\n\n"
-                "This track couldn't be played after multiple attempts. "
-                "YouTube may be blocking playback, or the video is unavailable.\n\n"
+                f"{reason_text}\n\n"
+                f"{default_note}\n\n"
                 "**What would you like to do?**"
             ),
             color=discord.Color.orange()
@@ -116,7 +157,7 @@ class TrackFailedView(discord.ui.View):
             inline=True
         )
 
-        embed.set_footer(text="Auto-removes in 60 seconds if no response")
+        embed.set_footer(text=timeout_footer)
 
         return embed
 
@@ -160,8 +201,8 @@ class TrackFailedView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self) -> None:
-        """Handle view timeout - auto-remove after 60s to keep playlist clean."""
-        self.action = TrackFailureAction.TIMEOUT
+        """Handle view timeout by applying the configured default action."""
+        self.action = self.timeout_action
         if self.message:
             try:
                 for child in self.children:
@@ -170,7 +211,12 @@ class TrackFailedView(discord.ui.View):
 
                 embed = self.message.embeds[0] if self.message.embeds else None
                 if embed:
-                    embed.set_footer(text="⏱️ Timed out - removed from playlist")
+                    timeout_text = (
+                        "⏱️ Timed out - skipped for now"
+                        if self.timeout_action == TrackFailureAction.SKIP
+                        else "⏱️ Timed out - removed from playlist"
+                    )
+                    embed.set_footer(text=timeout_text)
                     embed.color = discord.Color.greyple()
                     await self.message.edit(embed=embed, view=self)
                 else:
@@ -185,6 +231,9 @@ async def show_track_failed(
     channel: discord.abc.Messageable,
     track_title: str,
     track_url: str,
+    *,
+    issue_kind: TrackIssueKind = TrackIssueKind.TRANSIENT,
+    timeout_action: TrackFailureAction = TrackFailureAction.REMOVE,
     timeout: float = 60.0
 ) -> TrackFailureAction:
     """Show a track failure dialog and return the user's choice.
@@ -196,14 +245,18 @@ async def show_track_failed(
         channel: The channel to send the failure message to.
         track_title: Title of the failed track.
         track_url: URL of the failed track.
+        issue_kind: Coarse category used to choose generic prompt copy.
+        timeout_action: Action to apply automatically if the prompt times out.
         timeout: How long to wait for response (default 60s).
 
     Returns:
-        TrackFailureAction indicating what the user chose (SKIP, REMOVE, or TIMEOUT).
+        TrackFailureAction indicating what the user chose or what the timeout default applied.
     """
     view = TrackFailedView(
         track_title=track_title,
         track_url=track_url,
+        issue_kind=issue_kind,
+        timeout_action=timeout_action,
         timeout=timeout
     )
 

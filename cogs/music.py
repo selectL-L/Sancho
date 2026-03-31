@@ -24,7 +24,7 @@ import asyncio
 import os
 import random
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import discord
 from discord.ext import commands
@@ -48,22 +48,28 @@ from utils.musicutils import (
     YTDLP_AVAILABLE,
     ActiveSession,
     AmbienceState,
-    AudioFetcher,
-    AudioFetchResult,
-    FetchContext,
+    FFmpegResponseAction,
     LoopMode,
     ManagedPlayer,
     MusicCacheManager,
     MusicCommandsMixin,
+    PlaybackEndReport,
     PlaybackState,
     SearchResult,
     Track,
+    TrackIssueKind,
     fetch_playlist_metadata,
     fetch_url_info,
-    get_thumbnail_bytes,
     search_query_mode,
     search_url_mode,
 )
+from utils.musicutils.source_acquisition import (
+    FailureAction,
+    PlayableSource,
+    SourceAcquisitionMixin,
+    classify_failure,
+)
+from utils.musicutils.search import get_thumbnail_bytes
 from utils.views import (
     TrackFailureAction,
     show_track_failed,
@@ -73,7 +79,7 @@ if TYPE_CHECKING:
     from utils.bot_class import CoreBot
 
 
-class Music(MusicCommandsMixin, BaseCog):
+class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
     """A cog for ambient music presence and voice playback."""
 
     def __init__(self, bot: 'CoreBot'):
@@ -104,10 +110,11 @@ class Music(MusicCommandsMixin, BaseCog):
         self._playback = PlaybackState()
         self._ambience = AmbienceState()
 
-        # Phase 12: New prefetch buffer (cog owns storage, AudioFetcher owns strategy)
-        self._next_prepared: Optional[AudioFetchResult] = None
-        self._next_prepared_track: Optional[Track] = None  # Track this prefetch is for
-        self._prefetch_task: Optional[asyncio.Task[None]] = None  # Background prefetch task
+        # Prefetch state (cog owns scheduling, mixin owns acquisition)
+        self._prefetch_task: Optional[asyncio.Task[None]] = None
+        self._prefetched_source: Optional[PlayableSource] = None
+        self._prefetched_track: Optional[Track] = None
+        self._prefetched_thumbnail: Optional[bytes] = None
 
         # Managed audio player - owns playback state, eliminates callback dance
         # Created when session starts, destroyed when session ends
@@ -127,37 +134,17 @@ class Music(MusicCommandsMixin, BaseCog):
             on_track_unavailable=self._on_track_unavailable,
         )
 
-        # Audio fetcher for retry orchestration (replaces self._retry)
-        self._audio_fetcher = AudioFetcher(
-            self.cache_manager,
-            on_residential_attempt=self._on_residential_attempt
-        )
-
-        # Track if we've notified the user about residential proxy for the current track
-        self._residential_notified_this_track: bool = False
+        # Source acquisition mixin state (per-track retry counters).
+        from utils.musicutils.source_acquisition import TrackAttempts
+        self._track_attempts: dict[str, TrackAttempts] = {}
 
         # Background cache init task (started in cog_ready)
         self._cache_init_task: Optional[asyncio.Task[None]] = None
 
-        # PO Token Provider server subprocess (started in cog_ready)
+        # PO Token Provider startup/health state (started in cog_ready)
         self._pot_server_process: Optional[asyncio.subprocess.Process] = None
+        self._pot_start_task: Optional[asyncio.Task[None]] = None
         self._pot_health_task: Optional[asyncio.Task[None]] = None
-
-    async def _on_residential_attempt(self, track_title: str) -> None:
-        """Callback fired BEFORE residential proxy attempt starts.
-
-        Notifies the user that we're having trouble and trying an alternative,
-        BEFORE the alternative method succeeds or fails.
-
-        Args:
-            track_title: Title of the track being fetched.
-        """
-        if not self._residential_notified_this_track:
-            self._residential_notified_this_track = True
-            await self._send_system_message(
-                f"🔄 Hmm, having some trouble with **{track_title}**... "
-                f"Let me try another way!"
-            )
 
     async def _on_track_unavailable(self, title: str, artist: str, url: str) -> None:
         """Callback fired when a track is marked unavailable after download failure.
@@ -266,7 +253,7 @@ class Music(MusicCommandsMixin, BaseCog):
             return False
 
         # Check if an external instance is already listening on the port
-        if _check_pot_server_running(pot_port):
+        if await asyncio.to_thread(_check_pot_server_running, pot_port):
             self.logger.info(f"POT server already responding on port {pot_port}, skipping start")
             auth_status.update_pot_health(True)
             return True
@@ -303,7 +290,7 @@ class Music(MusicCommandsMixin, BaseCog):
                     auth_status.update_pot_health(False)
                     return False
 
-                if _check_pot_server_running(pot_port):
+                if await asyncio.to_thread(_check_pot_server_running, pot_port):
                     auth_status.update_pot_health(True)
                     self.logger.info(
                         f"POT server started successfully "
@@ -320,8 +307,55 @@ class Music(MusicCommandsMixin, BaseCog):
             auth_status.update_pot_health(False)
             return False
 
+    def _schedule_pot_startup(self) -> None:
+        """Start POT initialization in the background.
+
+        This keeps cog_ready responsive while the POT server performs its
+        readiness checks.
+        """
+        if self._pot_start_task is not None and not self._pot_start_task.done():
+            self.logger.info("POT provider initialization already running, skipping reschedule")
+            return
+
+        self.logger.info("Scheduling POT provider initialization in background")
+        self._pot_start_task = asyncio.create_task(self._initialize_pot_system())
+
+    async def _initialize_pot_system(self) -> None:
+        """Initialize POT startup checks and health monitoring in the background."""
+        try:
+            await self._start_pot_server()
+
+            from utils.musicutils.music_auth import detect_youtube_auth
+            await asyncio.to_thread(detect_youtube_auth, 'startup')
+
+            if self._pot_health_task is None or self._pot_health_task.done():
+                self._pot_health_task = asyncio.create_task(self._pot_health_watchdog())
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Background POT initialization failed: {e}", exc_info=True)
+        finally:
+            current_task = asyncio.current_task()
+            if current_task is not None and self._pot_start_task is current_task:
+                self._pot_start_task = None
+
     async def _stop_pot_server(self) -> None:
         """Stop the PO Token Provider server if running."""
+        current_task = asyncio.current_task()
+
+        if (
+            self._pot_start_task is not None
+            and self._pot_start_task is not current_task
+            and not self._pot_start_task.done()
+        ):
+            self._pot_start_task.cancel()
+            try:
+                await self._pot_start_task
+            except asyncio.CancelledError:
+                pass
+        self._pot_start_task = None
+
         # Cancel health watchdog first
         if self._pot_health_task is not None:
             self._pot_health_task.cancel()
@@ -424,15 +458,8 @@ class Music(MusicCommandsMixin, BaseCog):
                 "yt-dlp is not installed. Music cog will be limited.")
             return
 
-        # Start POT provider server (for YouTube 403 bypass)
-        await self._start_pot_server()
-
-        # Run initial auth detection now that POT server is up
-        from utils.musicutils.music_auth import detect_youtube_auth
-        await asyncio.to_thread(detect_youtube_auth, 'startup')
-
-        # Start health watchdog (monitors POT server every 30 minutes)
-        self._pot_health_task = asyncio.create_task(self._pot_health_watchdog())
+        # Start POT provider initialization without delaying cog readiness.
+        self._schedule_pot_startup()
 
         # Ensure cache directory exists
         os.makedirs(self.cache_path, exist_ok=True)
@@ -824,6 +851,28 @@ class Music(MusicCommandsMixin, BaseCog):
         self._playback.paused_at_position = None  # Clear pause state on track change
         return self._get_current_track()
 
+    def _advance_track_after_skip(self) -> Optional[Track]:
+        """Advance away from the current track for a temporary skip.
+
+        Skip-for-now behavior should not immediately replay the same broken
+        track when loop ONE is active. If there is only one track in the
+        playlist, there is nowhere else to go, so the session waits for user
+        action instead of looping the same failure.
+
+        Returns:
+            The next track to play, or None if there is no alternate track.
+        """
+        if not self.playlist or len(self.playlist) == 1:
+            return None
+
+        if self.loop_mode == LoopMode.ONE:
+            self.current_index = (self.current_index + 1) % len(self.playlist)
+            self.track_started_at = time.time()
+            self._playback.paused_at_position = None
+            return self._get_current_track()
+
+        return self._advance_track()
+
     def _do_pause(self) -> bool:
         """Pauses playback via ManagedPlayer.
 
@@ -843,7 +892,8 @@ class Music(MusicCommandsMixin, BaseCog):
     async def _do_resume(self) -> bool:
         """Resumes playback from paused position, rewinding 1 second for smoothness.
 
-        Uses ManagedPlayer's seek to restart at (pause_position - 1 second).
+        Uses the source archive rewind path so loop one still wraps to the real
+        beginning of the track instead of anchoring itself to the resume point.
 
         Returns:
             True if resume succeeded, False if not paused or failed.
@@ -855,8 +905,12 @@ class Music(MusicCommandsMixin, BaseCog):
         current_pos = self._player.position
         seek_position = max(0.0, current_pos - 1.0)
 
-        # Seek to the rewound position (this restarts FFmpeg internally)
-        self._player.seek(seek_position)
+        # This should always succeed because pause/resume only rewinds through
+        # audio that has already been played and therefore already exists in
+        # the source archive.
+        if not self._player.rewind(1.0):
+            self.logger.error("[Playback] Archive rewind failed during resume", exc_info=False)
+            return False
 
         # Resume playback
         self._player.resume()
@@ -1300,275 +1354,136 @@ class Music(MusicCommandsMixin, BaseCog):
         return await fetch_url_info(url, force_playlist=force_playlist)
 
     async def _prefetch_next_track(self) -> None:
-        """Pre-fetches everything needed for the next sequential track.
+        """Speculatively acquire and validate a source for the next track.
 
-        Always prefetches the next track in sequence, regardless of loop mode.
-        This ensures the prefetch is ready if:
-        - User skips to next track
-        - Loop mode changes from ONE to ALL/OFF
-        - Current track ends with loop ALL/OFF
-
-        Phase 12 Design:
-        - Cog owns buffer storage (_next_prepared)
-        - AudioFetcher owns retry strategy (PREFETCH = conservative)
-        - Cache checks happen HERE (cog has playlist context)
-        - YouTube fetch delegates to AudioFetcher
-
-        Phase 5 Enhancement (validated prefetch):
-        - For streaming URLs: spawn FFmpeg and prebuffer 30s (or full track if ≤10min)
-        - This validates the URL works (YouTube throws late 403s at 15-25s)
-        - If valid: store prebuffered source for instant playback handoff
-        - If invalid: mark auth failure, cleanup source, LIVE will retry
-
-        Priority order:
-        1. Ambient cache (playlist-specific, cog context required)
-        2. Residential cache (checked by AudioFetcher)
-        3. YouTube via AudioFetcher (conservative - no residential)
+        Uses ``_acquire_source`` from the mixin then, for streaming URLs,
+        spawns FFmpeg to prebuffer and prove the URL isn't stale.
         """
         if not self.playlist:
-            self.logger.debug("[Prefetch] No playlist, clearing")
-            self._clear_prefetch_v2()
+            self._clear_prefetch()
             return
 
         next_track = self._get_next_sequential_track()
-        if not next_track:
-            self.logger.debug("[Prefetch] No next track")
-            self._clear_prefetch_v2()
+        if not next_track or not next_track.video_id:
+            self._clear_prefetch()
             return
 
-        # Check if we already have a valid prefetch for this track
-        if (self._next_prepared and
-            self._next_prepared.success and
-            self._next_prepared_track and
-                self._next_prepared_track.video_id == next_track.video_id):
-            self.logger.debug(f"[Prefetch] Already valid for: {next_track.title}")
-            return
+        if (self._prefetched_track and
+                self._prefetched_track.video_id == next_track.video_id):
+            return  # Already prepared
 
-        # Note: Stale prefetch is cleared by caller (_play_current_track)
-        # before creating this task, to avoid self-cancellation
-        self._next_prepared_track = next_track
+        # Clear stale prefetch before starting fresh.
+        self._prefetched_source = None
+        self._prefetched_track = None
+        self._prefetched_thumbnail = None
 
         try:
-            self.logger.info(
-                f"[Prefetch] Starting for: {next_track.title}"
-            )
+            source = await self._acquire_source(next_track)
+            if not source:
+                self.logger.info(f"[Prefetch] No source for: {next_track.title}")
+                return
 
-            # AudioFetcher handles all cache checks (residential + ambient)
-            # PREFETCH context = conservative, stops at direct failure
-            result = await self._audio_fetcher.fetch(next_track, FetchContext.PREFETCH)
-
-            # Update track thumbnail if we found one
-            if result.thumbnail and not next_track.thumbnail:
-                next_track.thumbnail = result.thumbnail
-                next_track.thumbnail_is_square = result.thumbnail_is_square
-                self.logger.info(f"[Prefetch] Updated thumbnail (is_square={result.thumbnail_is_square})")
-
-            # Fetch thumbnail bytes for instant display
+            # Thumbnail for instant now-playing display.
+            thumbnail_bytes: Optional[bytes] = None
             try:
-                result.thumbnail_bytes = await get_thumbnail_bytes(next_track, self.cache_manager)
-                if result.thumbnail_bytes:
-                    self.logger.info(f"[Prefetch] Got thumbnail: {len(result.thumbnail_bytes)} bytes")
-            except Exception as e:
-                self.logger.warning(f"[Prefetch] Thumbnail fetch failed (non-fatal): {e}")
+                thumbnail_bytes = await get_thumbnail_bytes(next_track, self.cache_manager)
+            except Exception:
+                pass
 
-            # Phase 5: Validate streaming URLs by spawning FFmpeg and prebuffering
-            # This catches late 403s that YouTube throws 15-25s into playback
-            if result.success and result.url and not result.local_path:
-                await self._validate_prefetch_url(result, next_track)
+            # Validate streaming URLs with prebuffer (catches late YouTube 403s).
+            if source.url and not source.local_path:
+                from utils.musicutils.audio_source import SeekableAudioSource
 
-            self._next_prepared = result
+                duration = next_track.duration or 0
+                target = float(duration) if 0 < duration <= 600 else 60.0
 
-            if result.success:
-                prebuf_info = ""
-                if result.prebuffered_source:
-                    prebuf_info = f", prebuffered={result.prebuffered_source.buffered_seconds:.1f}s"
-                self.logger.info(
-                    f"[Prefetch] Success: {next_track.title} | "
-                    f"url={bool(result.url)}, local={bool(result.local_path)}{prebuf_info}"
-                )
-            else:
-                self.logger.info(
-                    f"[Prefetch] Failed: {next_track.title} | "
-                    f"auth_fail={result.is_auth_failure}, unavail={result.is_unavailable}, "
-                    f"ffmpeg_err={result.ffmpeg_error_type}"
-                )
+                audio_source = SeekableAudioSource(source.url, http_headers=source.http_headers)
+                is_valid = await asyncio.to_thread(audio_source.prebuffer, target, 30.0)
+
+                if is_valid:
+                    source.prebuffered = audio_source
+                    self.logger.info(
+                        f"[Prefetch] Validated URL ({audio_source.buffered_seconds:.1f}s): "
+                        f"{next_track.title}"
+                    )
+                else:
+                    audio_source.cleanup()
+                    source = None  # Will re-acquire at play time
+                    self.logger.info(f"[Prefetch] Prebuffer validation failed: {next_track.title}")
+
+            self._prefetched_source = source
+            self._prefetched_track = next_track
+            self._prefetched_thumbnail = thumbnail_bytes
+
+            if source:
+                self.logger.info(f"[Prefetch] Ready: {next_track.title}")
 
         except asyncio.CancelledError:
             self.logger.debug("[Prefetch] Task cancelled")
-            self._clear_prefetch_v2()
             raise
         except Exception as e:
-            self.logger.debug(f"[Prefetch] Exception: {e}")
-            self._clear_prefetch_v2()
+            self.logger.error(f"[Prefetch] Exception: {e}", exc_info=True)
+            self._clear_prefetch()
 
-    async def _validate_prefetch_url(
-        self,
-        result: AudioFetchResult,
-        track: Track
-    ) -> None:
-        """Validate a streaming URL by spawning FFmpeg and prebuffering.
+    def _consume_prefetch(self, track: Track) -> Optional[PlayableSource]:
+        """Take the prefetched source if it matches the given track.
 
-        This is the "track playing in shadow" - FFmpeg is running, audio is buffered,
-        ready for instant handoff when playback transitions.
-
-        Modifies result in-place:
-        - On success: sets result.prebuffered_source with validated source
-        - On failure: sets result.success=False, result.is_auth_failure=True,
-          result.ffmpeg_error_type with what went wrong
-
-        Args:
-            result: AudioFetchResult to validate (modified in-place)
-            track: Track for logging and duration info
+        Returns the source and clears prefetch state, or returns None.
         """
-        from utils.musicutils.audio_source import SeekableAudioSource
+        if (self._prefetched_source and
+            self._prefetched_track and
+                self._prefetched_track.video_id == track.video_id):
+            source = self._prefetched_source
+            self._prefetched_source = None
+            self._prefetched_track = None
+            # Keep thumbnail -- _play_with_source may use it.
+            self.logger.info(f"[Prefetch] Consumed for: {track.title}")
+            return source
+        return None
 
-        # Ensure we have a URL (caller checked but assert for type safety)
-        if not result.url:
-            return
-
-        # Duration-based buffering: short tracks buffer fully, long tracks validate with 30s
-        # This balances memory usage with validation confidence
-        duration = track.duration or 0
-        if duration > 0 and duration <= 600:  # 10 minutes or less
-            target_seconds = float(duration)  # Buffer entire track
-        else:
-            target_seconds = 60.0  # Buffer 60s for long/unknown tracks
-
-        min_valid_seconds = 30.0  # YouTube throws 403s at 15-25s, so 30s proves URL works
-
-        self.logger.debug(
-            f"[Prefetch] Validating URL: target={target_seconds}s, min_valid={min_valid_seconds}s"
-        )
-
-        source: Optional[SeekableAudioSource] = None
-        try:
-            # Spawn FFmpeg subprocess (non-blocking, handled in thread)
-            source = SeekableAudioSource(
-                result.url,
-                http_headers=result.http_headers,
-            )
-
-            # Prebuffer in thread - returns once we have enough or hit error/EOF
-            is_valid = await asyncio.to_thread(
-                source.prebuffer,
-                target_seconds,
-                min_valid_seconds,
-            )
-
-            if is_valid:
-                # URL validated! Store source for instant handoff
-                result.prebuffered_source = source
-                self.logger.info(
-                    f"[Prefetch] URL validated: {source.buffered_seconds:.1f}s buffered, "
-                    f"health={source.health}"
-                )
-            else:
-                # Validation failed - extract error info
-                health = source.health
-                result.success = False
-                result.is_auth_failure = True  # Signal LIVE fetch to retry
-                result.ffmpeg_error_type = health.error_type.value if health.error_type else None
-                self.logger.warning(
-                    f"[Prefetch] URL validation failed: {health.error_type}, "
-                    f"only got {source.buffered_seconds:.1f}s"
-                )
-                source.cleanup()
-
-        except Exception as e:
-            self.logger.warning(f"[Prefetch] URL validation exception: {e}")
-            result.success = False
-            result.is_auth_failure = True
-            if source:
-                source.cleanup()
-
-    def _clear_prefetch_v2(self) -> None:
-        """Clears Phase 12 prefetch buffer and cancels any pending task.
-
-        Also clears AudioFetcher state for the prefetched track, since a
-        cancelled prefetch shouldn't count against the retry budget.
-
-        Phase 5: Also cleans up any prebuffered source (FFmpeg subprocess).
-        """
-        # Clear AudioFetcher state for the track we were prefetching
-        # A cancelled attempt shouldn't count against retry budget
-        if self._next_prepared_track and self._next_prepared_track.video_id:
-            self._audio_fetcher.clear_state(self._next_prepared_track.video_id)
-
-        # Phase 5: Cleanup prebuffered source (kills FFmpeg subprocess)
-        if self._next_prepared:
-            self._next_prepared.cleanup()
-
-        self._next_prepared = None
-        self._next_prepared_track = None
+    def _clear_prefetch(self) -> None:
+        """Cancel speculative prefetch work and drop stored state."""
         if self._prefetch_task and not self._prefetch_task.done():
             self._prefetch_task.cancel()
         self._prefetch_task = None
+        if self._prefetched_source:
+            self._prefetched_source.cleanup()
+        self._prefetched_source = None
+        self._prefetched_track = None
+        self._prefetched_thumbnail = None
 
     def _refresh_prefetch_if_stale(self) -> None:
-        """Re-prefetch if a playlist mutation changed the next sequential track.
-
-        Called after operations that can change what's at current_index + 1:
-        move, swap, remove, dedup, shuffle, clear queue.
-
-        Uses _get_next_sequential_track() since prefetch always targets the
-        next track in sequence, regardless of loop mode.
-        """
-        if not self._next_prepared_track:
-            return  # No prefetch to invalidate
+        """Re-prefetch if a playlist mutation changed the next sequential track."""
+        if not self._prefetched_track:
+            return
 
         next_track = self._get_next_sequential_track()
-
-        # Check if prefetch still matches
-        if next_track and next_track.video_id == self._next_prepared_track.video_id:
+        if next_track and self._prefetched_track.video_id == next_track.video_id:
             return  # Still valid
 
-        # Prefetch is stale - clear and re-prefetch
         self.logger.debug(
-            f"[Prefetch] Stale after playlist mutation: had {self._next_prepared_track.title}, "
+            f"[Prefetch] Stale after playlist mutation: "
+            f"had {self._prefetched_track.title}, "
             f"next is now {next_track.title if next_track else 'None'}"
         )
-        self._clear_prefetch_v2()
+        self._clear_prefetch()
 
         if next_track and self.active_session:
             self._prefetch_task = asyncio.create_task(self._prefetch_next_track())
 
-    def _clear_prefetch(self) -> None:
-        """Clears prefetch cache and cancels any pending prefetch task."""
-        self.logger.debug("[Prefetch] Clearing prefetch cache")
-        self._clear_prefetch_v2()
-
-    def _clear_current_track_cache(self) -> None:
-        """Clears only the current track's cached audio URL.
-
-        Use this for retry logic where we want to re-fetch the current track
-        but preserve the prefetch (which is for the NEXT track).
-        """
-        self._playback.current_audio_url = None
-        self._playback.current_audio_track_url = None
-        self._playback.current_audio_headers = None
-        self.logger.debug("Cleared current track audio cache (prefetch preserved)")
-
-    def _clear_audio_caches(self) -> None:
-        """Clears all audio URL caches (prefetch and current track).
-
-        Use this when changing tracks (skip, jump) where the next track
-        is now different from what we prefetched.
-        """
+    def _reset_playback_runtime_state(self) -> None:
+        """Reset all session-local playback bookkeeping."""
+        self._clear_all_attempts()
         self._clear_prefetch()
-        self._clear_current_track_cache()
-        self.logger.debug("Cleared all audio URL caches")
+        self._playback.clear()
+        self.track_started_at = 0.0
+        self.logger.debug("[Playback] Cleared session runtime state")
 
     async def _play_current_track(self) -> None:
-        """Plays the current track in the active voice session.
+        """The play loop.  Acquires a source and hands it to ManagedPlayer.
 
-        Phase 12 Design:
-        - Check Phase 12 prefetch buffer (_next_prepared) first
-        - If prefetch valid: use it directly
-        - If prefetch failed: call AudioFetcher with LIVE context (will go to residential)
-        - If no prefetch: call AudioFetcher with LIVE context
-        - Legacy caches (loop replay, ambient) checked for backwards compat
-
-        Uses a while loop to retry on track failures instead of recursion.
+        Loops on failure (via _on_track_end -> retry -> _play_current_track)
+        until acquisition is exhausted, at which point a prompt is shown.
         """
         while True:
             if not self.active_session or not self.active_session.voice_client:
@@ -1578,304 +1493,160 @@ class Music(MusicCommandsMixin, BaseCog):
             if not track:
                 return
 
-            # Debug: trace who called this and with what index (guarded - extract_stack is expensive)
-            if self.logger.isEnabledFor(10):  # DEBUG
-                import traceback
-                caller = traceback.extract_stack()[-2]
-                self.logger.debug(
-                    f"[PlayTrack] Called from {caller.filename.split('/')[-1]}:{caller.lineno} "
-                    f"({caller.name}), index={self.current_index}, track={track.title[:30]}"
-                )
-
             if not self._player:
                 self.logger.error("[PlayTrack] No player available!")
                 return
 
-            # -----------------------------------------------------------
-            # Priority 1: Loop ONE cache (memory optimization)
-            # -----------------------------------------------------------
-            audio_source: Optional[str] = None
-            http_headers: Optional[Dict[str, str]] = None
-            prebuffered_source: Optional[Any] = None  # SeekableAudioSource
-            prebuffer_replay_url: Optional[str] = None
-            prebuffer_replay_headers: Optional[Dict[str, str]] = None
-            is_local_file = False
-            used_loop_replay_cache = False
+            # Check prefetch first, fall back to live acquisition.
+            source = self._consume_prefetch(track)
+            if source is None:
+                source = await self._acquire_source(track)
 
-            if self._playback.current_audio_track_url == track.url and self._playback.current_audio_url:
-                audio_source = self._playback.current_audio_url
-                http_headers = self._playback.current_audio_headers
-                used_loop_replay_cache = True
-                self.logger.info(f"[PlayTrack] Using loop-replay cache for: {track.title}")
-
-            # -----------------------------------------------------------
-            # Priority 2: Phase 12 prefetch buffer (with Phase 5 prebuffered source)
-            # -----------------------------------------------------------
-            if not audio_source and self._next_prepared:
-                if (self._next_prepared_track and
-                        self._next_prepared_track.video_id == track.video_id):
-
-                    if self._next_prepared.success:
-                        # Prefetch succeeded - use it
-                        if self._next_prepared.local_path:
-                            audio_source = self._next_prepared.local_path
-                            is_local_file = True
-                        elif self._next_prepared.prebuffered_source:
-                            # Phase 5: Use validated prebuffered source (instant playback)
-                            prebuffered_source = self._next_prepared.prebuffered_source
-                            # Keep URL/headers for loop ONE replay cache after handoff
-                            prebuffer_replay_url = self._next_prepared.url
-                            prebuffer_replay_headers = self._next_prepared.http_headers
-                            # Take ownership - don't let cleanup() kill it
-                            self._next_prepared.prebuffered_source = None
-                            buffered_secs = getattr(prebuffered_source, 'buffered_seconds', 0.0)
-                            self.logger.info(
-                                f"[PlayTrack] Using prebuffered source for: {track.title} "
-                                f"({buffered_secs:.1f}s ready)"
-                            )
-                        else:
-                            audio_source = self._next_prepared.url
-                            http_headers = self._next_prepared.http_headers
-                            self.logger.info(f"[PlayTrack] Using prefetched URL for: {track.title}")
-                        self._clear_prefetch_v2()
-
-                    elif self._next_prepared.is_auth_failure:
-                        # Prefetch failed with auth - need LIVE fetch (will go residential)
-                        self.logger.info(
-                            f"[PlayTrack] Prefetch auth-failed, calling LIVE fetch: {track.title}"
-                        )
-                        self._clear_prefetch_v2()
-                        # Fall through to LIVE fetch below
-
-            # -----------------------------------------------------------
-            # Priority 3: AudioFetcher with LIVE context (full retry)
-            # -----------------------------------------------------------
-            if not audio_source and prebuffered_source is None:
-                result = await self._audio_fetcher.fetch(track, FetchContext.LIVE)
-
-                if result.success:
-                    if result.local_path:
-                        audio_source = result.local_path
-                        is_local_file = True
-                    else:
-                        audio_source = result.url
-                        http_headers = result.http_headers
-
-                    # Note: Residential notification now happens BEFORE the attempt via callback
-                    # (see _on_residential_attempt), so we only need to track bandwidth cost here
-
-                    # Track bandwidth cost
-                    if result.residential_bytes > 0 and self.db_manager:
-                        await self.db_manager.increment_proxy_usage(result.residential_bytes)
-
-                    # Update thumbnail if we found one
-                    if result.thumbnail and not track.thumbnail:
-                        track.thumbnail = result.thumbnail
-                        track.thumbnail_is_square = result.thumbnail_is_square
-                else:
-                    # Fetch failed
-                    if result.is_unavailable:
-                        self.logger.info(f"Removing unavailable track: {track.title}")
-                        self._remove_track(self.current_index)
-                        if self.playlist:
-                            continue
-                        else:
-                            await self._handle_empty_playlist_after_removal()
-                    else:
-                        self.logger.warning(f"Could not get audio for {track.title}: {result.error}")
-                        self._advance_track()
-                        continue
-                    return
-
-            # -----------------------------------------------------------
-            # Play the track
-            # -----------------------------------------------------------
-            if audio_source is None and prebuffered_source is None:
-                self.logger.error("[PlayTrack] No audio source available - this shouldn't happen")
-                self._advance_track()
-                continue
-
-            await self._update_playing_presence(track)
-            self.track_started_at = time.time()
-            self._playback.paused_at_position = None
-
-            try:
-                vc = self.active_session.voice_client if self.active_session else None
-                if not self.active_session or not vc or not vc.is_connected():
-                    self.logger.debug("Session ended during track preparation, aborting playback.")
-                    # Clean up prebuffered source if we're not using it
-                    if prebuffered_source:
-                        prebuffered_source.cleanup()
-                    return
-
-                if prebuffered_source:
-                    # Phase 5: Use pre-validated source (instant playback)
-                    self._player.play(track, source=prebuffered_source)
-                    self.logger.debug(f"[Play] Dispatching track to ManagedPlayer (prebuffered): {track.title}")
-                else:
-                    # Traditional: play from URL
-                    self._player.play(
-                        track,
-                        audio_source,
-                        http_headers=http_headers if not is_local_file else None,
-                    )
-                    self.logger.debug(f"[Play] Dispatching track to ManagedPlayer: {track.title}" + (" (local)" if is_local_file else ""))
-
-                # Cache streaming URL for loop ONE replay
-                # (Don't cache prebuffered - those are one-shot validated sources)
-                if not is_local_file:
-                    if prebuffered_source and prebuffer_replay_url:
-                        self._playback.current_audio_url = prebuffer_replay_url
-                        self._playback.current_audio_track_url = track.url
-                        self._playback.current_audio_headers = prebuffer_replay_headers
-                        self.logger.debug(
-                            f"[PlayTrack] Stored replay cache URL from prebuffered handoff: {track.title}"
-                        )
-                    elif audio_source and not prebuffered_source:
-                        self._playback.current_audio_url = audio_source
-                        self._playback.current_audio_track_url = track.url
-                        self._playback.current_audio_headers = http_headers
-
-                # Start prefetching next track (Phase 12)
-                # Skip if using loop-replay cache - track isn't changing, so
-                # existing prefetch for next sequential track remains valid.
-                # This avoids wastefully re-fetching the currently playing track.
-                if not used_loop_replay_cache:
-                    # Clear old prefetch FIRST to avoid self-cancellation
-                    self._clear_prefetch_v2()
-                    self._prefetch_task = asyncio.create_task(self._prefetch_next_track())
-
-                # Successfully started playback, exit the loop
+            if source is None:
+                attempts = self._get_attempts(track.video_id) if track.video_id else None
+                is_unavailable = attempts.unavailable if attempts else False
+                await self._handle_track_failure(
+                    track,
+                    issue_kind=TrackIssueKind.UNAVAILABLE if is_unavailable else TrackIssueKind.TRANSIENT,
+                    timeout_action=TrackFailureAction.REMOVE if is_unavailable else TrackFailureAction.SKIP,
+                )
                 return
 
+            try:
+                await self._play_with_source(track, source)
+                return  # _on_track_end handles what comes next
             except discord.ClientException as e:
                 self.logger.debug(f"Playback aborted (likely disconnected): {e}")
-                # Clean up prebuffered source on error
-                if prebuffered_source:
-                    prebuffered_source.cleanup()
+                source.cleanup()
                 return
             except Exception as e:
                 self.logger.error(f"Error playing track: {e}", exc_info=True)
-                # Clean up prebuffered source on error
-                if prebuffered_source:
-                    prebuffered_source.cleanup()
-                # Try next track
+                source.cleanup()
+                if track.video_id:
+                    self._clear_attempts(track.video_id)
                 self._advance_track()
                 await asyncio.sleep(1)
                 continue
 
-    async def _play_with_result(self, result: AudioFetchResult) -> None:
-        """Play a track using an already-fetched AudioFetchResult.
-
-        Used by _on_track_end() when retrying - we already have a fresh
-        result from AudioFetcher.fetch(RETRY), no need to re-fetch.
-
-        Args:
-            result: The AudioFetchResult containing the audio URL to play.
-        """
+    async def _play_with_source(self, track: Track, source: PlayableSource) -> None:
+        """Hand a source to ManagedPlayer and start prefetching the next track."""
         if not self.active_session or not self._player:
-            return
-
-        track = self._get_current_track()
-        if not track:
-            return
-
-        # Determine what to play
-        if result.local_path:
-            audio_source = result.local_path
-            http_headers = None
-            is_local_file = True
-        elif result.url:
-            audio_source = result.url
-            http_headers = result.http_headers
-            is_local_file = False
-        else:
-            self.logger.error("[PlayWithResult] Result has no audio_url or local_path")
             return
 
         await self._update_playing_presence(track)
         self.track_started_at = time.time()
         self._playback.paused_at_position = None
 
+        # Take ownership of the prebuffered FFmpeg process (if any).
+        prebuffered = source.prebuffered
+        source.prebuffered = None
+
+        vc = self.active_session.voice_client if self.active_session else None
+        if not self.active_session or not vc or not vc.is_connected():
+            self.logger.debug("Session ended during track preparation, aborting playback.")
+            if prebuffered is not None:
+                prebuffered.cleanup()
+            return
+
         try:
-            vc = self.active_session.voice_client if self.active_session else None
-            if not self.active_session or not vc or not vc.is_connected():
-                self.logger.debug("Session ended during retry playback, aborting.")
+            if prebuffered is not None:
+                self._player.play(track, source=prebuffered)
+                self.logger.debug(f"[Play] Dispatching prebuffered: {track.title}")
+            elif source.local_path:
+                self._player.play(track, source.local_path)
+                self.logger.debug(f"[Play] Dispatching local: {track.title}")
+            elif source.url:
+                self._player.play(track, source.url, http_headers=source.http_headers)
+                self.logger.debug(f"[Play] Dispatching direct: {track.title}")
+            else:
+                raise ValueError("PlayableSource has no usable playback input")
+        except Exception:
+            if prebuffered is not None:
+                prebuffered.cleanup()
+            raise
+
+        # Start prefetching the next track.
+        self._clear_prefetch()
+        self._prefetch_task = asyncio.create_task(self._prefetch_next_track())
+
+    async def _apply_track_issue_action(self, track: Track, action: TrackFailureAction) -> None:
+        """Apply the user's skip/remove choice after a failure prompt."""
+        if track.video_id:
+            self._clear_attempts(track.video_id)
+
+        if action == TrackFailureAction.SKIP:
+            next_track = self._advance_track_after_skip()
+            if next_track:
+                await self._play_current_track()
                 return
 
-            self._player.play(
-                track,
-                audio_source,
-                http_headers=http_headers if not is_local_file else None,
+            self.logger.info("No alternate track available after skip - waiting for user action.")
+            await self._send_system_message(
+                "🎵 There's nothing else for me to play right now. "
+                "I'll wait here in case you add something else or change the queue."
             )
-            self.logger.info(f"Retry playing: {track.title}" + (" (local)" if is_local_file else ""))
 
-            # Cache streaming URL for loop ONE replay
-            if not is_local_file:
-                self._playback.current_audio_url = audio_source
-                self._playback.current_audio_track_url = track.url
-                self._playback.current_audio_headers = http_headers
+            if self.active_session:
+                self.active_session.waiting_for_users = True
+                if self.idle_timeout_task:
+                    self.idle_timeout_task.cancel()
+                self.idle_timeout_task = asyncio.create_task(
+                    self._playlist_end_timeout_loop()
+                )
+            return
 
-        except discord.ClientException as e:
-            self.logger.debug(f"Retry playback aborted (likely disconnected): {e}")
-        except Exception as e:
-            self.logger.error(f"Error during retry playback: {e}", exc_info=True)
-            # At this point we've already exhausted retries, so give up on this track
-            self._advance_track()
-            await asyncio.sleep(1)
+        # REMOVE
+        self._remove_track(self.current_index)
+        if self.playlist:
             await self._play_current_track()
+        else:
+            await self._handle_empty_playlist_after_removal()
 
-    async def _handle_track_failure(self, track: Track) -> None:
-        """Handle a track that failed to play after exhausting retries.
-
-        Shows an interactive view to users, letting them choose to skip or
-        remove the track. If no one responds within 60 seconds, auto-removes.
-
-        Args:
-            track: The track that failed to play.
-        """
+    async def _handle_track_failure(
+        self,
+        track: Track,
+        *,
+        issue_kind: TrackIssueKind = TrackIssueKind.TRANSIENT,
+        timeout_action: TrackFailureAction = TrackFailureAction.REMOVE,
+    ) -> None:
+        """Show an interactive skip/remove prompt for a failed track."""
         if not self.active_session:
             return
 
-        # Get origin channel for the interactive dialog
+        self.logger.info(
+            f"[Play] Prompting track issue for {track.title}: "
+            f"kind={issue_kind.value} | default={timeout_action.name}"
+        )
+
         origin = self.bot.get_channel(self.active_session.origin_channel_id)
         if not origin or not isinstance(origin, discord.abc.Messageable):
-            # Can't send interactive message, auto-skip
-            self.logger.warning("No origin channel for failure notification, auto-skipping")
-            self._advance_track()
-            await self._play_current_track()
+            self.logger.warning(
+                f"No origin channel for failure notification, auto-applying {timeout_action.name} for {track.title}"
+            )
+            await self._apply_track_issue_action(track, timeout_action)
             return
 
-        # Also notify voice channel if different (non-interactive, just informational)
+        # Notify voice channel if different from origin.
         if self.active_session.channel_id != self.active_session.origin_channel_id:
             vc_channel = self.bot.get_channel(self.active_session.channel_id)
             if vc_channel and isinstance(vc_channel, discord.abc.Messageable):
                 try:
                     await vc_channel.send(
-                        f"⚠️ **{track.title}** isn't available. "
-                        f"Check <#{self.active_session.origin_channel_id}> to choose what to do!"
+                        f"⚠️ Having trouble with **{track.title}**! "
+                        f"Head over to <#{self.active_session.origin_channel_id}> to let me know what to do~"
                     )
                 except discord.HTTPException as e:
                     self.logger.debug(f"Failed to send track failure notice to VC channel: {e}")
 
-        # Show interactive failure dialog in origin channel
-        action = await show_track_failed(origin, track.title, track.url)
+        action = await show_track_failed(
+            origin,
+            track.title,
+            track.url,
+            issue_kind=issue_kind,
+            timeout_action=timeout_action,
+        )
         self.logger.info(f"Track failure action: {action.name} for '{track.title}'")
-
-        if action == TrackFailureAction.SKIP:
-            # Skip to next track (keep in playlist for potential retry later)
-            self._audio_fetcher.reset()
-            self._advance_track()
-            await self._play_current_track()
-
-        else:  # REMOVE or TIMEOUT - both remove the track
-            # Remove from playlist and play next
-            self._audio_fetcher.reset()
-            self._remove_track(self.current_index)
-            if self.playlist:
-                await self._play_current_track()
-            else:
-                await self._handle_empty_playlist_after_removal()
+        await self._apply_track_issue_action(track, action)
 
     async def _handle_empty_playlist_after_removal(self) -> None:
         """Handle the case where playlist is empty after removing a failed track."""
@@ -1898,82 +1669,67 @@ class Music(MusicCommandsMixin, BaseCog):
             self._playlist_end_timeout_loop()
         )
 
-    def _on_player_track_end(self, error: Optional[Exception]) -> None:
+    def _on_player_track_end(self, report: PlaybackEndReport) -> None:
         """Callback from ManagedPlayer when track naturally ends or errors.
 
         This is the ONLY entry point for track-end handling. ManagedPlayer
         guarantees this is NOT called for intentional stops (skip, pause, etc.).
 
         Args:
-            error: Exception if playback failed, None if track ended normally.
-                   ManagedPlayer converts suspiciously fast ends to ConnectionError.
+            report: Typed playback report from ManagedPlayer.
         """
         if not self.active_session:
             return
 
-        # Dispatch to the main handler on the event loop with error flag
+        # ManagedPlayer already reduced the raw FFmpeg/session outcome into a
+        # typed report. Keep the thread-hop here minimal and let the async
+        # handler decide whether this track should retry, be removed, or fail.
+        # Dispatch to the main handler on the event loop.
         asyncio.run_coroutine_threadsafe(
-            self._on_track_end(needs_retry=error is not None),
+            self._on_track_end(report),
             self.bot.loop
         )
 
-    async def _on_track_end(self, needs_retry: bool = False) -> None:
-        """Handle track end - either retry or advance to next track.
-
-        Phase 12: Uses FetchContext.RETRY for FFmpeg failures. This tells
-        AudioFetcher to be aggressive (use residential if auth fails).
-
-        Args:
-            needs_retry: True if the track failed and should be retried.
-        """
+    async def _on_track_end(self, report: PlaybackEndReport) -> None:
+        """Handle track end using ``classify_failure`` from the acquisition mixin."""
         if not self.active_session:
             return
 
-        if needs_retry:
-            track = self._get_current_track()
-            if not track:
-                self._audio_fetcher.reset()
-                return
-
-            self.logger.info(f"[Retry] Track failed during FFmpeg playback: {track.title}")
-
-            # RETRY context: FFmpeg failed, get fresh URL (aggressive strategy)
-            result = await self._audio_fetcher.fetch(track, FetchContext.RETRY)
-
-            if result.success:
-                # Note: Residential notification now happens BEFORE the attempt via callback
-                # (see _on_residential_attempt), so we only need to track bandwidth cost here
-
-                # Track bandwidth cost
-                if result.residential_bytes > 0 and self.db_manager:
-                    await self.db_manager.increment_proxy_usage(result.residential_bytes)
-
-                # Play with the fresh URL
-                await self._play_with_result(result)
-                return
-
-            # Fetch failed after all retries
-            if result.is_unavailable:
-                self.logger.info(f"Track permanently unavailable: {track.title}")
-                self._remove_track(self.current_index)
-                if self.playlist:
-                    await self._play_current_track()
-                else:
-                    await self._handle_empty_playlist_after_removal()
-                return
-
-            # All retries exhausted - show interactive failure view
-            self.logger.warning(f"Track failed after all attempts: {track.title}")
-            await self._handle_track_failure(track)
+        track = self._get_current_track()
+        if not track:
             return
 
-        # Normal track end - clean up per-track state
-        self._residential_notified_this_track = False
-        track = self._get_current_track()
-        if track:
-            self.logger.info(f"[Play] Track finished: {track.title} — {track.artist}")
-        if track and track.video_id:
-            self._audio_fetcher.clear_state(track.video_id)
+        action, issue_kind = classify_failure(report)
+
+        if action == FailureAction.RETRY:
+            # Clean up broken residential files before retrying.
+            if track.video_id:
+                attempts = self._get_attempts(track.video_id)
+                if attempts.last_residential_path:
+                    self._delete_failed_residential_file(attempts.last_residential_path)
+                    attempts.last_residential_path = None
+
+            if report.ffmpeg.response_action == FFmpegResponseAction.BACKOFF_RETRY:
+                self.logger.info(f"[Retry] Backing off 2s before retrying {track.title}")
+                await asyncio.sleep(2.0)
+
+            await self._play_current_track()
+            return
+
+        if action in (FailureAction.PROMPT_SKIP, FailureAction.PROMPT_REMOVE):
+            timeout_action = (
+                TrackFailureAction.REMOVE if action == FailureAction.PROMPT_REMOVE
+                else TrackFailureAction.SKIP
+            )
+            await self._handle_track_failure(
+                track, issue_kind=issue_kind, timeout_action=timeout_action,
+            )
+            return
+
+        # Normal track end (FailureAction.DONE) - clean up per-track state.
+        if track.video_id:
+            self._clear_attempts(track.video_id)
+        self.logger.info(f"[Play] Track finished: {track.title} — {track.artist}")
 
         # Check session duration limit (8 hours)
         session_duration = time.time() - self.active_session.started_at
@@ -2029,6 +1785,7 @@ class Music(MusicCommandsMixin, BaseCog):
 
             # Create managed player for this session
             self._player = ManagedPlayer(vc, self._on_player_track_end)
+            self._player.set_repeat_one(self.loop_mode == LoopMode.ONE)
 
             self.logger.info(f"Started voice session in {channel.name} (guild={channel.guild.id}, channel={channel.id})")
 
@@ -2070,8 +1827,7 @@ class Music(MusicCommandsMixin, BaseCog):
             self.idle_timeout_task.cancel()
             self.idle_timeout_task = None
 
-        # Clear all audio URL caches
-        self._clear_audio_caches()
+        self._reset_playback_runtime_state()
 
         # Restore playlist state for idle mode
         await self._restore_idle_playlist()
@@ -2106,8 +1862,7 @@ class Music(MusicCommandsMixin, BaseCog):
             self.idle_timeout_task.cancel()
             self.idle_timeout_task = None
 
-        # Clear all audio URL caches
-        self._clear_audio_caches()
+        self._reset_playback_runtime_state()
 
         # Restore playlist state for idle mode
         await self._restore_idle_playlist()
@@ -2236,7 +1991,7 @@ class Music(MusicCommandsMixin, BaseCog):
     # Implementation notes:
     # - Set track_started_at to current time
     # - Stop and restart playback with same track
-    # - Could reuse cached audio URL (_current_audio_url)
+    # - Could reuse the current coordinator activation path with a forced restart
 
     # TODO: autoplay_nlp - Toggle autoplay/radio mode
     # Example triggers: "autoplay on", "radio mode", "keep playing"

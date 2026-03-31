@@ -26,6 +26,34 @@ except ImportError:
     _commands = None  # type: ignore[assignment]
     DISCORD_AVAILABLE = False
 
+# ==========================================================================
+# PLAYBACK CONSTRAINTS
+# ==========================================================================
+
+# Hard playback policy: individual tracks above 10 hours are rejected when a
+# user actually selects/adds them.
+MAX_ACCEPTABLE_TRACK_DURATION_SECONDS = 10 * 60 * 60
+
+# Paid residential playback policy: direct playback can still try longer
+# tracks, but the paid fallback refuses anything above 15 minutes.
+MAX_RESIDENTIAL_PLAYBACK_DURATION_SECONDS = 15 * 60
+
+
+def format_duration_hms(duration_seconds: int) -> str:
+    """Format a duration as H:MM:SS when possible.
+
+    Args:
+        duration_seconds: Duration in seconds.
+
+    Returns:
+        Duration string such as ``3:42`` or ``10:00:00``.
+    """
+    hours, remainder = divmod(max(duration_seconds, 0), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
 
 # ==========================================================================
 # VIDEO ID EXTRACTION (needed by Track.from_dict)
@@ -66,34 +94,61 @@ class AudioErrorType(Enum):
     """Error types parsed from FFmpeg stderr.
 
     Used by SeekableAudioSource.health to report why playback failed.
-    This enables smart retry logic: 403 means auth issue, 404 means
-    track removed, CONNECTION might be transient, etc.
-
-    TODO(Phase 3): These patterns are placeholders. Once we collect real
-    FFmpeg stderr output from failures, refine the parsing in
-    audio_source.py._parse_stderr_line() to match actual error formats.
+    This enables smart retry logic and direct mapping to playback actions.
     """
     NONE = "none"              # No error detected
     HTTP_403 = "http_403"      # Auth failure - URL expired or blocked
     HTTP_404 = "http_404"      # Track removed from YouTube
+    HTTP_410 = "http_410"      # Permanently gone
+    HTTP_416 = "http_416"      # Bad range / seek state
+    HTTP_429 = "http_429"      # Rate limiting
     HTTP_OTHER = "http_other"  # Other HTTP error (5xx, etc.)
     CONNECTION = "connection"  # Network failure (reset, refused, timeout)
+    TLS = "tls"                # TLS/socket-layer failure
     FORMAT = "format"          # Corrupt or incompatible stream
+    UNSUPPORTED_CODEC = "unsupported_codec"  # Codec unavailable
+    FILTER = "filter"          # Audio filter init failure
+    BROKEN_PIPE = "broken_pipe"  # Caller closed the output pipe
     TIMEOUT = "timeout"        # Prebuffer timeout (not currently used)
     UNKNOWN = "unknown"        # EOF with no clear error in stderr
 
 
-class FetchContext(Enum):
-    """Context for AudioFetcher.fetch() calls.
+class FFmpegResponseAction(Enum):
+    """Recovery action chosen from parsed FFmpeg output."""
 
-    Tells AudioFetcher how aggressive to be with retries:
-    - PREFETCH: Background preparation, conservative - stops at direct failure
-    - LIVE: Playing now, aggressive - full retry including residential
-    - RETRY: FFmpeg failed, need fresh URL or residential
+    NONE = "none"
+    IGNORE = "ignore"
+    SKIP_TRACK = "skip_track"
+    RETRY_SAME_URL = "retry_same_url"
+    REFRESH_URL = "refresh_url"
+    BACKOFF_RETRY = "backoff_retry"
+    REMOVE_TRACK = "remove_track"
+    FAIL_TRACK = "fail_track"
+
+
+class TrackIssuePromptPreference(Enum):
+    """User-facing default when playback needs intervention.
+
+    Many low-level failures collapse to one of three operator-visible outcomes:
+    ignore it, ask and prefer skip, or ask and prefer removal.
     """
-    PREFETCH = "prefetch"
-    LIVE = "live"
-    RETRY = "retry"
+
+    NONE = "none"
+    PREFER_SKIP = "prefer_skip"
+    PREFER_REMOVE = "prefer_remove"
+
+
+class TrackIssueKind(Enum):
+    """Coarse user-facing track issue categories.
+
+    UI layers use this to choose generic, non-technical wording for failure
+    prompts.  Kept deliberately broad -- the FFmpeg parser and the source
+    acquisition mixin collapse many low-level errors into one of these.
+    """
+
+    UNAVAILABLE = "unavailable"
+    TRANSIENT = "transient"
+    INTERNAL = "internal"
 
 
 class LoopMode(Enum):
@@ -141,29 +196,48 @@ class LoopMode(Enum):
 
 @dataclass
 class FFmpegHealth:
-    """Health status from an FFmpeg process.
+    """Reduced FFmpeg process state and recommended response.
 
     Populated by SeekableAudioSource as it reads stderr. Used to report
-    why playback failed (instead of guessing from elapsed time).
-
-    TODO(Phase 3): The error_type classification depends on patterns in
-    _parse_stderr_line(). Once we have real FFmpeg error output, refine
-    those patterns and this dataclass may need additional fields.
+    why playback failed and what the caller should do next.
     """
     error_type: 'AudioErrorType' = field(default_factory=lambda: AudioErrorType.NONE)
+    response_action: 'FFmpegResponseAction' = field(default_factory=lambda: FFmpegResponseAction.NONE)
+    prompt_preference: 'TrackIssuePromptPreference' = field(default_factory=lambda: TrackIssuePromptPreference.NONE)
     error_detail: Optional[str] = None  # Raw stderr line that triggered classification
+    summary: Optional[str] = None       # App-facing summary of what FFmpeg reported
     frames_read: int = 0                # Frames successfully read before error
     stderr_lines: list[str] = field(default_factory=list)  # All captured stderr
+    reconnect_count: int = 0
+    process_returncode: Optional[int] = None
+    saw_final_stats: bool = False
+    saw_normal_exit: bool = False
+    saw_end_of_file: bool = False
+    saw_broken_pipe: bool = False
+    used_heuristic: bool = False
 
     @property
     def is_healthy(self) -> bool:
         """True if no fatal error detected."""
-        return self.error_type == AudioErrorType.NONE
+        return self.response_action in (FFmpegResponseAction.NONE, FFmpegResponseAction.IGNORE)
 
     @property
     def has_error(self) -> bool:
         """True if a fatal error was detected."""
-        return self.error_type != AudioErrorType.NONE
+        return not self.is_healthy
+
+
+@dataclass
+class PlaybackEndReport:
+    """Typed result from ManagedPlayer when a track ends.
+
+    The cog uses ``classify_failure()`` from the source acquisition mixin to
+    interpret this report.  The report itself is just data -- no policy.
+    """
+
+    error: Optional[Exception]
+    ffmpeg: FFmpegHealth
+    elapsed: float
 
 
 # ==========================================================================
@@ -271,21 +345,12 @@ class ActiveSession:
 class PlaybackState:
     """Mutable state for track playback within a session.
 
-    Groups variables that track what's currently playing, timing info,
-    and pause state. Reset when session ends.
+    Groups the session-local playback state that the cog still owns.
     """
-    current_audio_url: Optional[str] = None  # Cached audio URL for current track
-    current_audio_track_url: Optional[str] = None  # YouTube URL this audio URL is for
-    current_audio_headers: Optional[Dict[str, str]] = None  # HTTP headers for current URL
-    track_started_timestamp: float = 0.0  # When FFmpeg started (for failure detection)
     paused_at_position: Optional[float] = None  # Seek position when paused, None if not paused
 
     def clear(self) -> None:
         """Reset all playback state."""
-        self.current_audio_url = None
-        self.current_audio_track_url = None
-        self.current_audio_headers = None
-        self.track_started_timestamp = 0.0
         self.paused_at_position = None
 
 

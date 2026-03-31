@@ -11,10 +11,15 @@ Dangerous outcomes for search:
 - Wrong track recommended (score_candidate gives high score to wrong track)
 """
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from utils.musicutils.search import (
     extract_video_id,
     is_relevant,
     dedupe_results,
+    search_query_mode,
     score_candidate,
     classify_version_label,
     OriginalMetadata,
@@ -225,6 +230,24 @@ class TestIrrelevantResultsAreRejected:
         """Even short queries need some real overlap."""
         result = make_result(title="Completely Different", artist="Other")
         assert is_relevant("song name", result) is False
+
+
+class TestDurationPolicySelectionBoundary:
+    """Overlong results can still be shown; rejection happens on selection/add."""
+
+    @pytest.mark.asyncio
+    async def test_query_mode_keeps_overlong_results_visible(self):
+        short_result = make_atv(video_id="short001", title="Normal Song", duration=180)
+        long_result = make_atv(video_id="long001", title="Normal Song 10 Hour Mix", duration=36001)
+
+        with patch('utils.musicutils.search.search_ytm', new=AsyncMock(return_value=[short_result, long_result])):
+            with patch('utils.musicutils.search.search_youtube', new=AsyncMock(return_value=[])):
+                with patch('utils.musicutils.search._backfill_missing_metadata', new=AsyncMock()):
+                    songs, videos, recommended_id = await search_query_mode('normal song')
+
+        assert songs == [short_result, long_result]
+        assert videos == []
+        assert recommended_id == short_result.video_id
 
 
 # ==========================================================================

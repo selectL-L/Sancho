@@ -41,8 +41,6 @@ import shutil
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar, TYPE_CHECKING
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
     from .music_data import Track
 
@@ -56,6 +54,8 @@ from .music_helpers import (
     get_residential_proxy_url,
 )
 from .music_auth import get_ytdlp_options
+
+logger = logging.getLogger(__name__)
 
 # Try to import yt_dlp for type checking the cast
 try:
@@ -1659,7 +1659,6 @@ class MusicCacheManager:
         self,
         track: 'Track',
         timeout: float = 180.0,
-        max_duration: int = 900  # 15 minutes max by default
     ) -> Tuple[bool, Optional[str], int, Optional[str]]:
         """Download a track via residential proxy for live playback.
 
@@ -1667,21 +1666,18 @@ class MusicCacheManager:
         YouTube's IP-based blocks. The file is saved to the residential
         cache as M4A for immediate streaming.
 
-        This is the AudioFetcher's last resort for live playback — not
-        part of the ambient pipeline. Output goes to residential/ with
-        a simple <video_id>.m4a filename (no metadata, no ambient index).
+        This is a pure mechanism -- the caller (SourceAcquisitionMixin) owns
+        spending policy decisions like duration limits. This method just
+        downloads what it's told.
 
         Args:
             track: Track to download.
             timeout: Maximum download time in seconds.
-            max_duration: Maximum track duration in seconds (default 15 min).
-                          Prevents downloading 10-hour meme videos over paid proxy.
 
         Returns:
             Tuple of (success, error_message, bytes_downloaded, cached_file_path).
 
         SAFEGUARDS:
-        - Duration limit prevents downloading absurdly long videos
         - Timeout prevents hanging downloads
         - Returns byte count for cost tracking
         - Does NOT retry internally (caller handles retries)
@@ -1695,16 +1691,6 @@ class MusicCacheManager:
 
         if not track.video_id:
             return False, "Track has no video ID", 0, None
-
-        # Duration safeguard - don't waste money on 10-hour videos
-        if track.duration > max_duration:
-            duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
-            max_str = f"{max_duration // 60}:{max_duration % 60:02d}"
-            self.logger.warning(
-                f"[Residential] Refusing to download '{track.title}' - "
-                f"duration {duration_str} exceeds limit {max_str}"
-            )
-            return False, f"Track too long ({duration_str} > {max_str} limit)", 0, None
 
         from typing import cast
 
