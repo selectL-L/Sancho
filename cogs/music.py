@@ -711,20 +711,18 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
     def _get_elapsed_seconds(self) -> float:
         """Gets the current playback position in seconds.
 
-        Uses the audio source's byte-offset position when a player is active.
-        This correctly resets to 0 when loop-one rewinds the archive cursor,
-        unlike wall-clock math which would keep climbing past the track end.
-
-        Falls back to wall-clock when no player is active (idle presence).
+        Always uses the audio source's byte-offset position.  This is the
+        single source of truth -- it resets correctly on loop-one rewind
+        and doesn't drift during pauses or network stalls.
 
         Returns:
-            Elapsed seconds into the current track.
+            Elapsed seconds into the current track, or 0.0 if no player.
         """
         if self._playback.paused_at_position is not None:
             return self._playback.paused_at_position
-        if self._player and self._player.is_playing:
+        if self._player:
             return self._player.position
-        return time.time() - self.track_started_at
+        return 0.0
 
     async def _send_system_message(
         self,
@@ -1397,10 +1395,11 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             # correct by the time the now-playing widget renders.
             await self._enrich_track_metadata(next_track)
 
-            self.logger.info(f"[Prefetch] Acquiring source for: {next_track.title}")
-            source = await self._acquire_source(next_track)
+            # Prefetch is direct-only.  If direct doesn't work, live play
+            # handles the residential escalation.  This prevents prefetch
+            # from spending money on tracks the user might never reach.
+            source = await self._acquire_source(next_track, prefetch=True)
             if not source:
-                self.logger.info(f"[Prefetch] No source for: {next_track.title}")
                 return
 
             # Thumbnail for instant now-playing display.
@@ -1428,7 +1427,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                     )
                 else:
                     audio_source.cleanup()
-                    source = None  # Will re-acquire at play time
+                    source = None
                     self.logger.info(f"[Prefetch] Prebuffer validation failed: {next_track.title}")
 
             self._prefetched_source = source
@@ -1787,7 +1786,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                     self._delete_failed_residential_file(attempts.last_residential_path)
                     attempts.last_residential_path = None
 
-            if report.ffmpeg.response_action == FFmpegResponseAction.BACKOFF_RETRY:
+            if report.ffmpeg.response_action == FFmpegResponseAction.RETRY_WITH_BACKOFF:
                 self.logger.info(f"[Retry] Backing off 2s before retrying {track.title}")
                 await asyncio.sleep(2.0)
 

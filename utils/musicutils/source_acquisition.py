@@ -169,18 +169,18 @@ def classify_failure(
         return FailureAction.DONE, TrackIssueKind.TRANSIENT
 
     if action in (
-        FFmpegResponseAction.REFRESH_URL,
+        FFmpegResponseAction.RETRY_NEW_URL,
         FFmpegResponseAction.RETRY_SAME_URL,
-        FFmpegResponseAction.BACKOFF_RETRY,
+        FFmpegResponseAction.RETRY_WITH_BACKOFF,
     ):
         return FailureAction.RETRY, TrackIssueKind.TRANSIENT
 
-    if action == FFmpegResponseAction.REMOVE_TRACK:
+    if action == FFmpegResponseAction.REMOVE:
         return FailureAction.PROMPT_REMOVE, TrackIssueKind.UNAVAILABLE
 
     if action in (
-        FFmpegResponseAction.SKIP_TRACK,
-        FFmpegResponseAction.FAIL_TRACK,
+        FFmpegResponseAction.SKIP,
+        FFmpegResponseAction.FAIL,
     ):
         return FailureAction.PROMPT_SKIP, TrackIssueKind.INTERNAL
 
@@ -212,20 +212,22 @@ class SourceAcquisitionMixin:
     # Public API
     # --------------------------------------------------------------------------
 
-    async def _acquire_source(self, track: Track) -> Optional[PlayableSource]:
+    async def _acquire_source(
+        self, track: Track, *, prefetch: bool = False,
+    ) -> Optional[PlayableSource]:
         """Walk the priority chain and return the first playable source.
+
+        Args:
+            track: Track to acquire a source for.
+            prefetch: If True, stop after direct attempts.  Never touches
+                residential.  The shared attempt counter still advances so
+                live play knows what was already tried.
 
         Priority:
         1. Ambient cache (high-quality local files from playlist downloads)
         2. Fresh streaming URL via yt-dlp (direct, then residential if needed)
-        3. Residential cache (lower-quality fallback files from previous downloads)
-        4. Full file download via residential proxy
-
-        Ambient files are always preferred over streaming because they're free
-        and already local.  Residential files are only used AFTER direct
-        streaming has been exhausted, because they're lower quality -- the
-        advantage of having them is that they're there if we need them, not
-        that they should be used first.
+        3. Residential cache (lower-quality fallback, live only)
+        4. Full file download via residential proxy (live only)
 
         Returns ``None`` when all options are exhausted.  The caller can
         inspect ``self._get_attempts(track.video_id).unavailable`` to choose
@@ -258,7 +260,24 @@ class SourceAcquisitionMixin:
                     http_headers=result.http_headers,
                 )
 
+        # Everything below here is the residential path.  Prefetch stops here.
+        if prefetch:
+            logger.info(
+                f"[Acquisition] Direct budget exhausted in prefetch, "
+                f"deferring to live play: {track.title}"
+            )
+            return None
+
         # ---- Priority 3: residential cache (lower quality fallback) ----------
+        # This is still the residential path -- notify the user so they're not
+        # staring at silence wondering why nothing is happening.
+        if not attempts.notified_residential:
+            attempts.notified_residential = True
+            await self._send_system_message(
+                f"\U0001f504 Hmm, having some trouble with **{track.title}**... "
+                f"Let me try another way!"
+            )
+
         residential_local = self.cache_manager.get_any_local_path(
             track.video_id, residential_allowed=True,
         )
@@ -276,16 +295,8 @@ class SourceAcquisitionMixin:
             attempts.unavailable = True
             return None
 
-        # ---- Priority 3: residential file download ---------------------------
-        if attempts.residential_downloads < MAX_RESIDENTIAL_DOWNLOADS:
-            # Notify the user BEFORE the download starts.
-            if not attempts.notified_residential:
-                attempts.notified_residential = True
-                await self._send_system_message(
-                    f"\U0001f504 Hmm, having some trouble with **{track.title}**... "
-                    f"Let me try another way!"
-                )
-
+        # ---- Priority 4: residential file download ---------------------------
+        while attempts.residential_downloads < MAX_RESIDENTIAL_DOWNLOADS:
             # Rate limit between paid download attempts.
             elapsed = time.time() - attempts.last_residential_time
             if elapsed < RESIDENTIAL_MIN_DELAY and attempts.last_residential_time > 0:

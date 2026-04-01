@@ -81,7 +81,7 @@ class TestMusicFFmpegHandling:
 
     @pytest.mark.asyncio
     async def test_retryable_report_triggers_play_current_track(self, music_cog, mock_voice_client):
-        """REFRESH_URL should cause _on_track_end to retry via _play_current_track."""
+        """RETRY_NEW_URL should cause _on_track_end to retry via _play_current_track."""
         track = create_track("Retry Me", "dQw4w9WgXcQ")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -95,7 +95,7 @@ class TestMusicFFmpegHandling:
             error=Exception("ffmpeg failed"),
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.HTTP_403,
-                response_action=FFmpegResponseAction.REFRESH_URL,
+                response_action=FFmpegResponseAction.RETRY_NEW_URL,
                 summary="The remote server rejected the current signed stream URL (HTTP 403).",
             ),
             elapsed=2.0,
@@ -108,7 +108,7 @@ class TestMusicFFmpegHandling:
 
     @pytest.mark.asyncio
     async def test_remove_track_report_prompts_user(self, music_cog, mock_voice_client):
-        """REMOVE_TRACK should show a prompt defaulting to REMOVE."""
+        """REMOVE should show a prompt defaulting to REMOVE."""
         track = create_track("Gone", "xvFZjo5PgG0")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -122,7 +122,7 @@ class TestMusicFFmpegHandling:
             error=None,
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.HTTP_404,
-                response_action=FFmpegResponseAction.REMOVE_TRACK,
+                response_action=FFmpegResponseAction.REMOVE,
                 prompt_preference=TrackIssuePromptPreference.PREFER_REMOVE,
                 summary="The remote stream no longer exists (HTTP 404).",
             ),
@@ -141,7 +141,7 @@ class TestMusicFFmpegHandling:
 
     @pytest.mark.asyncio
     async def test_fail_track_report_prompts_skip(self, music_cog, mock_voice_client):
-        """FAIL_TRACK should show a prompt defaulting to SKIP."""
+        """FAIL should show a prompt defaulting to SKIP."""
         track = create_track("Broken", "J---aiyznGQ")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -155,7 +155,7 @@ class TestMusicFFmpegHandling:
             error=None,
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.HTTP_416,
-                response_action=FFmpegResponseAction.FAIL_TRACK,
+                response_action=FFmpegResponseAction.FAIL,
                 prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
                 summary="FFmpeg requested an invalid byte range for the stream (HTTP 416).",
             ),
@@ -199,7 +199,7 @@ class TestMusicFFmpegHandling:
 
     @pytest.mark.asyncio
     async def test_unsupported_codec_prompts_skip(self, music_cog, mock_voice_client):
-        """SKIP_TRACK with UNSUPPORTED_CODEC should prompt SKIP with INTERNAL kind."""
+        """SKIP with UNSUPPORTED_CODEC should prompt SKIP with INTERNAL kind."""
         track = create_track("Odd Codec", "codectrack1")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -213,7 +213,7 @@ class TestMusicFFmpegHandling:
             error=None,
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.UNSUPPORTED_CODEC,
-                response_action=FFmpegResponseAction.SKIP_TRACK,
+                response_action=FFmpegResponseAction.SKIP,
                 prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
                 summary="FFmpeg could not find a supported codec for this track.",
             ),

@@ -118,12 +118,12 @@ class FFmpegResponseAction(Enum):
 
     NONE = "none"
     IGNORE = "ignore"
-    SKIP_TRACK = "skip_track"
+    SKIP = "skip"
     RETRY_SAME_URL = "retry_same_url"
-    REFRESH_URL = "refresh_url"
-    BACKOFF_RETRY = "backoff_retry"
-    REMOVE_TRACK = "remove_track"
-    FAIL_TRACK = "fail_track"
+    RETRY_NEW_URL = "retry_new_url"
+    RETRY_WITH_BACKOFF = "retry_with_backoff"
+    REMOVE = "remove"
+    FAIL = "fail"
 
 
 class TrackIssuePromptPreference(Enum):

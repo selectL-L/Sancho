@@ -463,7 +463,7 @@ class TestPlayerFailureReports:
         player._source.cleanup = MagicMock()
         health = FFmpegHealth()
         health.error_type = AudioErrorType.HTTP_403
-        health.response_action = FFmpegResponseAction.REFRESH_URL
+        health.response_action = FFmpegResponseAction.RETRY_NEW_URL
         health.summary = "The remote server rejected the current signed stream URL (HTTP 403)."
         health.error_detail = "[error] [https @ 0x1] HTTP error 403 Forbidden"
         health.stderr_lines = ["[error] [https @ 0x1] HTTP error 403 Forbidden"]
@@ -476,4 +476,4 @@ class TestPlayerFailureReports:
 
         assert callback_tracker.called is True
         assert callback_tracker.last_report.ffmpeg.error_type == AudioErrorType.HTTP_403
-        assert callback_tracker.last_report.ffmpeg.response_action == FFmpegResponseAction.REFRESH_URL
+        assert callback_tracker.last_report.ffmpeg.response_action == FFmpegResponseAction.RETRY_NEW_URL

@@ -430,7 +430,7 @@ class ManagedPlayer:
                 f"detail={ffmpeg_report.error_detail}"
             )
             if stderr_lines:
-                logger.info(
+                logger.debug(
                     f"[ManagedPlayer] FFmpeg stderr ({len(stderr_lines)} lines): "
                     f"{stderr_lines}"
                 )

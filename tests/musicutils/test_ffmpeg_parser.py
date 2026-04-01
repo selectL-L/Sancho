@@ -21,7 +21,7 @@ class TestFFmpegStderrParser:
         )
 
         assert report.error_type == AudioErrorType.HTTP_403
-        assert report.response_action == FFmpegResponseAction.REFRESH_URL
+        assert report.response_action == FFmpegResponseAction.RETRY_NEW_URL
         assert '403' in (report.summary or '')
 
     def test_http_404_maps_to_remove_preferred_prompt(self):
@@ -37,7 +37,7 @@ class TestFFmpegStderrParser:
         )
 
         assert report.error_type == AudioErrorType.HTTP_404
-        assert report.response_action == FFmpegResponseAction.REMOVE_TRACK
+        assert report.response_action == FFmpegResponseAction.REMOVE
         assert report.prompt_preference == TrackIssuePromptPreference.PREFER_REMOVE
 
     def test_http_416_maps_to_skip_preferred_prompt(self):
@@ -53,7 +53,7 @@ class TestFFmpegStderrParser:
         )
 
         assert report.error_type == AudioErrorType.HTTP_416
-        assert report.response_action == FFmpegResponseAction.FAIL_TRACK
+        assert report.response_action == FFmpegResponseAction.FAIL
         assert report.prompt_preference == TrackIssuePromptPreference.PREFER_SKIP
 
     def test_rate_limit_maps_to_backoff_retry(self):
@@ -69,7 +69,7 @@ class TestFFmpegStderrParser:
         )
 
         assert report.error_type == AudioErrorType.HTTP_429
-        assert report.response_action == FFmpegResponseAction.BACKOFF_RETRY
+        assert report.response_action == FFmpegResponseAction.RETRY_WITH_BACKOFF
 
     def test_final_stats_mark_normal_completion(self):
         parser = FFmpegStderrParser()
@@ -100,7 +100,7 @@ class TestFFmpegStderrParser:
         )
 
         assert report.error_type == AudioErrorType.UNKNOWN
-        assert report.response_action == FFmpegResponseAction.REFRESH_URL
+        assert report.response_action == FFmpegResponseAction.RETRY_NEW_URL
         assert report.used_heuristic is True
 
     def test_broken_pipe_is_ignored(self):
