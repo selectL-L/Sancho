@@ -654,7 +654,7 @@ class Skills(BaseCog):
                     await ctx.send(f"✅ Successfully updated your skill: **{skill_to_edit['name']}**.")
                     self.logger.info(f"User {ctx.author.id} updated skill '{skill_to_edit['name']}' (id={skill_to_edit['id']}): fields={list(updates.keys())}")
                 else:
-                    self.logger.warning(f"Update skill returned 0 rows for user {ctx.author.id}, skill id={skill_to_edit['id']} ('{skill_to_edit['name']}'). Fields attempted: {list(updates.keys())}.")
+                    self.logger.warning(f"Update skill returned 0 rows for user {ctx.author.id}, skill id={skill_to_edit['id']} ('{skill_to_edit['name']}'). Fields attempted: {list(updates.keys())}.")  # noqa: E501
                     await ctx.send("Something went wrong. I couldn't update that skill.")
             else:
                 await ctx.send("No changes were made.")
