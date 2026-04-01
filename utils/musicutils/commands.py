@@ -228,6 +228,8 @@ class MusicCommandsMixin:
     cache_manager: Any
     track_started_at: float
     idle_timeout_task: Any
+    _enrichment_task: Any
+    _enrichment_video_id: Any
     _playlist_modified_during_session: bool
 
     # These are defined by BaseCog - declared here for type hints
@@ -250,6 +252,7 @@ class MusicCommandsMixin:
     async def _start_session(self, channel: discord.VoiceChannel, ctx: commands.Context, join_message: Optional[str] = None) -> None: ...
     async def _end_session(self, reason: str = "Session ended.") -> None: ...
     async def _play_current_track(self) -> None: ...
+    async def _enrich_track_metadata(self, track: Track) -> None: ...
     async def _idle_timeout_loop(self) -> None: ...
     async def _fetch_url_info(self, url: str, force_playlist: bool = False) -> tuple[List[Track], Optional[str], Optional[str]]: ...
 
@@ -402,7 +405,7 @@ class MusicCommandsMixin:
                     await ctx.send(
                         "📋 **This is a normal Youtube Playlist!**\n"
                         "-# ⚠️ Music tracks from playlists use YouTube's metadata, which may have inaccurate "
-                        "thumbnails and artist info. For best results, add individual songs or use YouTube Music playlist."
+                        "thumbnails and artist info. For best results, add individual songs or use a YouTube Music playlist."
                     )
                 tracks, error, warning = await self._fetch_url_info(query)
                 if error:
@@ -476,6 +479,15 @@ class MusicCommandsMixin:
             self.playlist = tracks_to_add.copy()
             self.current_index = 0
             self._playlist_modified_during_session = True
+
+            # Start enrichment immediately so np has metadata even during
+            # voice connect + player setup.
+            first_track = self._get_current_track()
+            if first_track:
+                self._enrichment_video_id = first_track.video_id
+                self._enrichment_task = asyncio.create_task(
+                    self._enrich_track_metadata(first_track)
+                )
 
             try:
                 vc = await channel.connect()
@@ -1257,6 +1269,30 @@ class MusicCommandsMixin:
             await ctx.send("No track is loaded.")
             return
 
+        # If metadata enrichment is still running, show a loading message
+        # then upgrade it to the full now-playing widget once ready.
+        loading_msg: Optional[discord.Message] = None
+        if self._enrichment_task and not self._enrichment_task.done():
+            self.logger.info(f"[NowPlaying] Enrichment in flight for {track.title}, loading information...")
+            loading_msg = await ctx.send("Loading track information...")
+            try:
+                await asyncio.wait_for(self._enrichment_task, timeout=5.0)
+                self.logger.info(f"[NowPlaying] Enrichment finished, upgrading widget for {track.title}")
+            except asyncio.TimeoutError:
+                self.logger.info(f"[NowPlaying] Enrichment timed out, upgrading widget for {track.title} with available metadata")
+            except Exception as e:
+                self.logger.debug(f"[NowPlaying] Enrichment error for {track.title}: {e}")
+        else:
+            self.logger.info(f"[NowPlaying] Rendering for {track.title}, information already available")
+
+        # Re-fetch the current track after any awaits -- the track may have
+        # changed during enrichment wait (e.g. track ended mid-wait).
+        track = self._get_current_track()
+        if not track:
+            if loading_msg:
+                await loading_msg.delete()
+            return
+
         thumbnail_bytes = await get_thumbnail_bytes(track, self.cache_manager)
         files: List[discord.File] = []
         thumbnail_url: Optional[str] = None
@@ -1265,7 +1301,7 @@ class MusicCommandsMixin:
             files.append(discord.File(io.BytesIO(thumbnail_bytes), filename="thumbnail.jpg"))
             thumbnail_url = "attachment://thumbnail.jpg"
 
-        state = self.get_now_playing_state(thumbnail_url)
+        state = self.get_now_playing_state(thumbnail_url, track=track)
 
         view = NowPlayingView(
             state=state,
@@ -1276,7 +1312,20 @@ class MusicCommandsMixin:
             on_loop=self.cycle_loop_mode,
         )
 
-        if files:
+        if loading_msg:
+            # Upgrade the loading message to the full now-playing widget.
+            try:
+                if files:
+                    await loading_msg.edit(content=None, view=view, attachments=files)
+                else:
+                    await loading_msg.edit(content=None, view=view)
+            except discord.HTTPException:
+                # Edit failed (message deleted, etc.) -- send fresh.
+                if files:
+                    await ctx.send(view=view, files=files)
+                else:
+                    await ctx.send(view=view)
+        elif files:
             await ctx.send(view=view, files=files)
         else:
             await ctx.send(view=view)
@@ -1456,11 +1505,12 @@ class MusicCommandsMixin:
     # MusicPlayerProtocol Implementation
     # ==========================================================================
 
-    def get_now_playing_state(self, thumbnail_url: Optional[str] = None) -> 'NowPlayingState':
+    def get_now_playing_state(self, thumbnail_url: Optional[str] = None, track: Optional[Track] = None) -> 'NowPlayingState':
         """Build current now playing state for view construction."""
         from utils.views import NowPlayingState
 
-        track = self._get_current_track()
+        if track is None:
+            track = self._get_current_track()
 
         elapsed = int(self._get_elapsed_seconds())
         elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"

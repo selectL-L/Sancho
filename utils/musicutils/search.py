@@ -2609,18 +2609,18 @@ async def get_thumbnail_bytes(track: 'Track', cache_manager: Optional[Any] = Non
         if cached_path.endswith('.m4a'):
             thumbnail_data = extract_m4a_thumbnail(cached_path)
         if thumbnail_data:
-            logger.info(f"[Thumbnail] Using embedded thumbnail for {track.video_id}")
+            logger.info(f"[Thumbnail] Using embedded thumbnail for: {track.title}")
             return thumbnail_data
 
     # Priority 2: Use track's thumbnail URL (square only)
     if track.thumbnail and track.thumbnail_is_square:
-        logger.info(f"[Thumbnail] Using square thumbnail for {track.video_id}")
+        logger.info(f"[Thumbnail] Using square thumbnail for: {track.title}")
         return await fetch_thumbnail_bytes(track.thumbnail)
 
     # Priority 3: Construct clean YouTube URL for 16:9 thumbnails
     if track.video_id:
         fallback_url = f"https://img.youtube.com/vi/{track.video_id}/maxresdefault.jpg"
-        logger.info(f"[Thumbnail] Using 16:9 YouTube thumbnail for {track.video_id}")
+        logger.info(f"[Thumbnail] Using 16:9 YouTube thumbnail for: {track.title}")
         return await fetch_and_resize_thumbnail(fallback_url)
 
     logger.debug("[Thumbnail] No thumbnail source available")

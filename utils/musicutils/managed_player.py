@@ -405,7 +405,10 @@ class ManagedPlayer:
             )
         stderr_lines = ffmpeg_report.stderr_lines.copy()
 
-        # Clean up source
+        # Clean up source. discord.py's AudioPlayer.run() also calls
+        # cleanup() in its finally block, but we own the lifecycle --
+        # SeekableAudioSource.cleanup() is idempotent so the second call
+        # from discord.py is a no-op.
         if self._source:
             self._source.cleanup()
             self._source = None

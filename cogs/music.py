@@ -112,6 +112,8 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
 
         # Prefetch state (cog owns scheduling, mixin owns acquisition)
         self._prefetch_task: Optional[asyncio.Task[None]] = None
+        self._enrichment_task: Optional[asyncio.Task[None]] = None
+        self._enrichment_video_id: Optional[str] = None
         self._prefetched_source: Optional[PlayableSource] = None
         self._prefetched_track: Optional[Track] = None
         self._prefetched_thumbnail: Optional[bytes] = None
@@ -1391,6 +1393,10 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         self._prefetched_thumbnail = None
 
         try:
+            # Enrich metadata BEFORE acquisition so thumbnail and artist are
+            # correct by the time the now-playing widget renders.
+            await self._enrich_track_metadata(next_track)
+
             self.logger.info(f"[Prefetch] Acquiring source for: {next_track.title}")
             source = await self._acquire_source(next_track)
             if not source:
@@ -1511,6 +1517,20 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                 self.logger.error("[PlayTrack] No player available!")
                 return
 
+            # Fire enrichment immediately so np can await it while we acquire.
+            # Skip if an enrichment for this track is already in flight
+            # (e.g. _do_play already started one before _play_current_track ran).
+            already_enriching = (
+                self._enrichment_task
+                and not self._enrichment_task.done()
+                and self._enrichment_video_id == track.video_id
+            )
+            if not already_enriching:
+                self._enrichment_video_id = track.video_id
+                self._enrichment_task = asyncio.create_task(
+                    self._enrich_track_metadata(track)
+                )
+
             # Check prefetch first, fall back to live acquisition.
             source = self._consume_prefetch(track)
             if source is None:
@@ -1543,6 +1563,44 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                 self._advance_track()
                 await asyncio.sleep(1)
                 continue
+
+    async def _enrich_track_metadata(self, track: Track) -> None:
+        """Ensure a track has full YTM metadata (thumbnail, artist, etc.).
+
+        Playlist-imported tracks arrive with only flat extraction data.  This
+        calls ``_build_quick_result`` (the same YTM lookup the ambient pipeline
+        uses) to fill in square thumbnails, album info, version labels, and
+        corrected artist names.  Skipped if the track already has a square
+        thumbnail (meaning it was already enriched via search or ambient).
+        """
+        if track.thumbnail_is_square or not track.video_id:
+            return
+
+        from utils.musicutils.search import _build_quick_result
+
+        try:
+            result = await _build_quick_result(track.video_id)
+            if result.title == 'Unknown' and result.artist == 'Unknown':
+                return  # YTM doesn't know this track
+
+            if result.thumbnail_url and result.thumbnail_is_square:
+                track.thumbnail = result.thumbnail_url
+                track.thumbnail_is_square = True
+            if result.artist and result.artist != 'Unknown':
+                track.artist = result.artist
+            if result.album:
+                track.album = result.album
+            if result.video_type:
+                track.video_type = result.video_type
+                track.source = result.source
+            if result.version_label and result.version_label != 'Video':
+                track.version_label = result.version_label
+            if result.is_explicit is not None:
+                track.is_explicit = result.is_explicit
+
+            self.logger.info(f"[Metadata] Enriched: {track.title} (square={track.thumbnail_is_square})")
+        except Exception as e:
+            self.logger.debug(f"[Metadata] Enrichment failed for {track.title}: {e}")
 
     async def _play_with_source(self, track: Track, source: PlayableSource) -> None:
         """Hand a source to ManagedPlayer and start prefetching the next track."""

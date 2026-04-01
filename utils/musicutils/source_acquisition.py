@@ -35,7 +35,6 @@ This mixin provides::
     self._clear_attempts(video_id) -> None
     self._clear_all_attempts() -> None
     self._delete_failed_residential_file(path) -> None
-    self._apply_thumbnail(track, result) -> None
 
 Module-level (not on self)::
 
@@ -344,12 +343,6 @@ class SourceAcquisitionMixin:
         except OSError as exc:
             self.logger.debug(f"[Acquisition] Could not delete residential file: {exc}")
 
-    def _apply_thumbnail(self, track: Track, result: SourceResolutionResult) -> None:
-        """Update the mutable track object with any discovered thumbnail."""
-        if result.thumbnail and not track.thumbnail:
-            track.thumbnail = result.thumbnail
-            track.thumbnail_is_square = result.thumbnail_is_square
-
     # --------------------------------------------------------------------------
     # Internal: Stage 1 URL acquisition
     # --------------------------------------------------------------------------
@@ -371,7 +364,6 @@ class SourceAcquisitionMixin:
         """
         if not attempts.needs_residential_ytdlp:
             result = await resolve_track_source(track, use_residential_ytdlp=False)
-            self._apply_thumbnail(track, result)
             if result.has_source:
                 return result
             if result.unavailable:
@@ -385,7 +377,6 @@ class SourceAcquisitionMixin:
 
         # Residential yt-dlp.
         result = await resolve_track_source(track, use_residential_ytdlp=True)
-        self._apply_thumbnail(track, result)
         if result.has_source:
             return result
         if result.unavailable:

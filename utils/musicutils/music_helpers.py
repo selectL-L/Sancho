@@ -354,11 +354,7 @@ def extract_m4a_thumbnail(m4a_path: str) -> Optional[bytes]:
     return None
 
 
-# Thumbnail processing lives in search.py
-from .search import (  # noqa: E402
-    extract_best_thumbnail_from_info,
-    MUSIC_VIDEO_TYPE_ATV,
-)
+from .search import MUSIC_VIDEO_TYPE_ATV  # noqa: E402
 
 
 # ==========================================================================
@@ -381,7 +377,7 @@ async def get_audio_url(
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:
-        AudioUrlResult with url, availability status, thumbnail info, and headers.
+        AudioUrlResult with url, availability status, and headers.
     """
     if not yt_dlp:
         return AudioUrlResult(error="yt-dlp not available")
@@ -401,9 +397,6 @@ async def get_audio_url(
         if not info:
             logger.warning(f"No info returned for {track.title}")
             return AudioUrlResult(is_unavailable=True, error="No info returned")
-
-        # Extract best thumbnail - prefer square (for album art)
-        thumbnail_url, is_square = await extract_best_thumbnail_from_info(info)
 
         # Extract HTTP headers from info (needed for FFmpeg to fetch the URL)
         # yt-dlp stores these at the top level, formats may override
@@ -425,8 +418,6 @@ async def get_audio_url(
             logger.info(f"[Audio] Got audio-only URL for: {track.title}")
             return AudioUrlResult(
                 url=best.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=fmt_headers or None
             )
 
@@ -443,8 +434,6 @@ async def get_audio_url(
             fmt_headers = best.get('http_headers', http_headers)
             return AudioUrlResult(
                 url=best.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=fmt_headers or None
             )
 
@@ -453,16 +442,12 @@ async def get_audio_url(
             logger.info(f"[Audio] Using direct URL fallback for {track.title}")
             return AudioUrlResult(
                 url=info.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=http_headers or None
             )
 
         # No usable format found
         logger.warning(f"No playable format found for {track.title}")
         return AudioUrlResult(
-            thumbnail=thumbnail_url,
-            thumbnail_is_square=is_square,
             error="No playable format found"
         )
 
@@ -618,7 +603,7 @@ async def fetch_url_info(
         info = await asyncio.to_thread(extract)
 
         if not info:
-            return [], "Could not fetch video information. The URL may be invalid or the video unavailable.", None
+            return [], "Couldn't find anything from that URL!\nIt might be broken, private, or region-locked.", None
 
         tracks: List[Track] = []
         was_truncated = False

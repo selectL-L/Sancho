@@ -98,6 +98,7 @@ class SeekableAudioSource(discord.AudioSource):
         # Silence frame for paused state.
         self._silence = b'\x00' * FRAME_SIZE
 
+        self._cleaned_up = False
         self._stderr_thread: Optional[threading.Thread] = None
         self._stdout_thread: Optional[threading.Thread] = None
         self._stderr_lines: list[str] = []
@@ -542,9 +543,9 @@ class SeekableAudioSource(discord.AudioSource):
         target_bytes = int(target_seconds * PCM_BYTES_PER_SECOND)
         min_valid_bytes = int(min_valid_seconds * PCM_BYTES_PER_SECOND)
 
-        logger.debug(
-            f"[AudioSource] Prebuffering: target={target_seconds}s ({target_bytes} bytes), "
-            f"min_valid={min_valid_seconds}s ({min_valid_bytes} bytes)"
+        logger.info(
+            f"[AudioSource] Prebuffering: target={target_seconds:.0f}s, "
+            f"min_valid={min_valid_seconds:.0f}s"
         )
 
         with self._archive_condition:
@@ -555,8 +556,8 @@ class SeekableAudioSource(discord.AudioSource):
 
         buffered_seconds = buffered_bytes / PCM_BYTES_PER_SECOND
         is_valid = buffered_bytes >= min_valid_bytes
-        logger.info(
-            f"[AudioSource] Prebuffer complete: {buffered_seconds:.1f}s archived, valid={is_valid}"
+        logger.debug(
+            f"[AudioSource] Prebuffer finished: {buffered_seconds:.1f}s archived, valid={is_valid}"
         )
         return is_valid
 
@@ -572,7 +573,17 @@ class SeekableAudioSource(discord.AudioSource):
         return self._frames_read
 
     def cleanup(self) -> None:
-        """Clean up process and archive resources."""
+        """Clean up process and archive resources.
+
+        Idempotent — discord.py's AudioPlayer.run() calls cleanup() in its
+        own finally block after the after-callback fires, and our
+        ManagedPlayer also calls it when managing source transitions.  We
+        own the lifecycle; the guard just makes the second call a no-op.
+        """
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+
         # Build a short identifier for this source in logs.
         if self.source.startswith(('http://', 'https://')):
             source_label = f"stream:{self.source[:60]}..."

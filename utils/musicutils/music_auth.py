@@ -346,8 +346,6 @@ class SourceResolutionResult:
     has_source: bool
     direct_url: Optional[str] = None
     http_headers: Optional[Dict[str, str]] = None
-    thumbnail: Optional[str] = None
-    thumbnail_is_square: bool = False
     unavailable: bool = False
     is_auth_failure: bool = False
     summary: Optional[str] = None
@@ -390,8 +388,6 @@ async def resolve_track_source(
             has_source=True,
             direct_url=result.url,
             http_headers=result.http_headers,
-            thumbnail=result.thumbnail,
-            thumbnail_is_square=result.thumbnail_is_square,
             summary='Resolved a direct media source for playback.',
         )
 
@@ -402,8 +398,6 @@ async def resolve_track_source(
         has_source=False,
         unavailable=result.is_unavailable,
         is_auth_failure=is_auth,
-        thumbnail=result.thumbnail,
-        thumbnail_is_square=result.thumbnail_is_square,
         summary=summary,
     )
 

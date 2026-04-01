@@ -417,8 +417,6 @@ class AudioUrlResult:
     """
     url: Optional[str] = None  # Streamable audio URL
     is_unavailable: bool = False  # True if video is permanently unavailable (remove from playlist)
-    thumbnail: Optional[str] = None  # Best thumbnail URL found
-    thumbnail_is_square: bool = False  # True if thumbnail is already square
     http_headers: Optional[Dict[str, str]] = None  # Headers needed for FFmpeg
     error: Optional[str] = None  # Error message if fetch failed
 
