@@ -864,27 +864,22 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         self._playback.paused_at_position = None  # Clear pause state on track change
         return self._get_current_track()
 
-    def _advance_track_after_skip(self) -> Optional[Track]:
-        """Advance away from the current track for a temporary skip.
+    def _skip_to_different_track(self) -> Optional[Track]:
+        """Move to a different track.  Returns None if there isn't one.
 
-        Skip-for-now behavior should not immediately replay the same broken
-        track when loop ONE is active. If there is only one track in the
-        playlist, there is nowhere else to go, so the session waits for user
-        action instead of looping the same failure.
+        Used by both user skips and failure prompt skips.  Always advances
+        forward, overrides loop ONE, and refuses to land on the same track.
 
         Returns:
-            The next track to play, or None if there is no alternate track.
+            The next track, or None if the playlist has no other track.
         """
         if not self.playlist or len(self.playlist) == 1:
             return None
 
-        if self.loop_mode == LoopMode.ONE:
-            self.current_index = (self.current_index + 1) % len(self.playlist)
-            self.track_started_at = time.time()
-            self._playback.paused_at_position = None
-            return self._get_current_track()
-
-        return self._advance_track()
+        self.current_index = (self.current_index + 1) % len(self.playlist)
+        self.track_started_at = time.time()
+        self._playback.paused_at_position = None
+        return self._get_current_track()
 
     def _do_pause(self) -> bool:
         """Pauses playback via ManagedPlayer.
@@ -1381,6 +1376,13 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             self._clear_prefetch()
             return
 
+        # Don't prefetch the track that's already playing.  With a single-track
+        # playlist (or when next sequential wraps to the same track), prefetch
+        # would burn the direct budget on a track that's already in the player.
+        current = self._get_current_track()
+        if current and current.video_id == next_track.video_id:
+            return
+
         if (self._prefetched_track and
                 self._prefetched_track.video_id == next_track.video_id):
             return  # Already prepared
@@ -1648,7 +1650,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             self._clear_attempts(track.video_id)
 
         if action == TrackFailureAction.SKIP:
-            next_track = self._advance_track_after_skip()
+            next_track = self._skip_to_different_track()
             if next_track:
                 await self._play_current_track()
                 return

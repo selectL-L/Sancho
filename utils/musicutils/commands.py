@@ -245,6 +245,7 @@ class MusicCommandsMixin:
     def _move_track(self, from_index: int, to_index: int) -> Optional[Track]: ...
     def _swap_tracks(self, index_a: int, index_b: int) -> Optional[tuple[Track, Track]]: ...
     def _clear_attempts(self, video_id: str) -> None: ...
+    def _skip_to_different_track(self) -> Optional[Track]: ...
     def _refresh_prefetch_if_stale(self) -> None: ...
     def _do_pause(self) -> bool: ...
     async def _do_resume(self) -> bool: ...
@@ -789,10 +790,11 @@ class MusicCommandsMixin:
                 await self._play_current_track()
 
     async def _do_skip(self) -> bool:
-        """Skip to the next track, ignoring Loop ONE mode.
+        """Skip to a different track.
 
         Returns:
-            True if skip was initiated, False if not playing/no session.
+            True if skip was initiated, False if not playing/no session
+            or there's nothing to skip to.
         """
         if not self._player:
             return False
@@ -803,21 +805,14 @@ class MusicCommandsMixin:
         if not self.playlist:
             return False
 
-        # Clear attempt state for the track we're leaving -- it played fine,
-        # so its retry budget should be fresh if we come back to it.
+        # Clear attempt state for the track we're leaving.
         old_track = self._get_current_track()
         if old_track and old_track.video_id:
             self._clear_attempts(old_track.video_id)
 
-        self.current_index += 1
-        if self.current_index >= len(self.playlist):
-            if self.loop_mode == LoopMode.ALL:
-                self.current_index = 0
-            else:
-                self.current_index = 0
-
-        self.track_started_at = time.time()
-        self._playback.paused_at_position = None
+        next_track = self._skip_to_different_track()
+        if next_track is None:
+            return False
 
         self._player.stop()
         await self._play_current_track()
@@ -1180,13 +1175,16 @@ class MusicCommandsMixin:
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
             return
+        if not self._player or not (self._player.is_playing or self._player.is_paused):
+            await ctx.send("Nothing is playing right now.")
+            return
         current_track = self._get_current_track()
         if await self._do_skip():
             if current_track:
                 self.logger.info(f"[Play] Track skipped by user {ctx.author.id}: was playing {current_track.title}")
             await ctx.send("⏭️ Skipped!")
         else:
-            await ctx.send("Nothing is playing right now.")
+            await ctx.send("There's nothing else to skip to!")
 
     @music_cooldown
     @requires_voice

@@ -230,11 +230,11 @@ class TestMusicFFmpegHandling:
         assert await_args.kwargs['issue_kind'] == TrackIssueKind.INTERNAL
         assert await_args.kwargs['timeout_action'] == TrackFailureAction.SKIP
 
-    def test_advance_track_after_skip_returns_none_for_single_track(self, music_cog):
-        """Single-track playlist on loop ONE: skip should return None (no alternate)."""
+    def test_skip_to_different_track_returns_none_for_single_track(self, music_cog):
+        """Single-track playlist: skip should return None (no alternate)."""
         track = create_track("Lonely Track", "lonely001")
         music_cog.playlist = [track]
         music_cog.current_index = 0
         music_cog.loop_mode = LoopMode.ONE
 
-        assert music_cog._advance_track_after_skip() is None
+        assert music_cog._skip_to_different_track() is None
