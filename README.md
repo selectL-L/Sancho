@@ -1,4 +1,4 @@
-# Shiori (V0.14.42) - The "The Update that Changed the World" Update (Trust me, Batman aint got anything on us)
+# Shiori (V0.15.3) - Music. Reborn.
 
 **Format**: Major.Minor.Bugfix
 
