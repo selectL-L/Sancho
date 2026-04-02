@@ -710,20 +710,25 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         return self.playlist[self.current_index % len(self.playlist)]
 
     def _get_elapsed_seconds(self) -> float:
-        """Gets the current playback position in seconds.
+        """Gets the current elapsed time for display purposes.
 
-        Always uses the audio source's byte-offset position.  This is the
-        single source of truth -- it resets correctly on loop-one rewind
-        and doesn't drift during pauses or network stalls.
+        During playback: uses the audio source's byte-offset position.
+        This is the source of truth -- it resets correctly on loop-one
+        rewind and doesn't drift during pauses or network stalls.
+
+        During idle: uses wall clock (time since the presence loop last
+        cycled tracks).  Nothing is actually playing, but the NP widget
+        needs a moving timer to feel alive.
 
         Returns:
-            Elapsed seconds into the current track, or 0.0 if no player.
+            Elapsed seconds into the current track.
         """
         if self._playback.paused_at_position is not None:
             return self._playback.paused_at_position
         if self._player:
             return self._player.position
-        return 0.0
+        # Idle mode -- no player, use wall clock for presence cycling.
+        return time.time() - self.track_started_at
 
     async def _send_system_message(
         self,
