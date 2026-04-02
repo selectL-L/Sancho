@@ -1,4 +1,4 @@
-# Shiori (V0.15.3) - Music. Reborn.
+# Shiori (V0.16.1) - That last name was awful, this is the actual music update.
 
 **Format**: Major.Minor.Bugfix
 
