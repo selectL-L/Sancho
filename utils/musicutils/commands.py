@@ -311,6 +311,8 @@ class MusicCommandsMixin:
                     if channel and isinstance(channel, discord.VoiceChannel):
                         await ctx.send(f"I'll be in {channel.mention}! Join me there within 5 minutes.")
                         await self._start_session(channel, ctx)
+                        if not self.active_session:
+                            return  # Failed — _start_session handles error messaging
 
                         # Mark session as waiting and start 5-minute timeout
                         self.active_session.waiting_for_users = True
@@ -332,6 +334,7 @@ class MusicCommandsMixin:
         await ctx.send(self._get_listen_along_response())
 
         await self._start_session(channel, ctx)
+        # If this failed, _start_session handles error messaging.
 
     @staticmethod
     def _is_pure_playlist_url(url: str) -> bool:
@@ -373,9 +376,6 @@ class MusicCommandsMixin:
             ctx: The command context.
             query: URL or search query for the track(s).
         """
-        from .music_data import ActiveSession
-        from .managed_player import ManagedPlayer
-
         if not YTDLP_AVAILABLE:
             await ctx.send("Music playback isn't available - yt-dlp is not installed.")
             return
@@ -490,30 +490,14 @@ class MusicCommandsMixin:
                     self._enrich_track_metadata(first_track)
                 )
 
-            try:
-                vc = await channel.connect()
-                self.active_session = ActiveSession(
-                    guild_id=channel.guild.id,
-                    channel_id=channel.id,
-                    voice_client=vc,
-                    origin_channel_id=ctx.channel.id,
-                )
+            await self._start_session(channel, ctx)
+            if not self.active_session:
+                return  # Failed — _start_session handles error messaging
 
-                self._player = ManagedPlayer(vc, self._on_player_track_end)  # type: ignore[arg-type]
-                self._player.set_repeat_one(self.loop_mode == LoopMode.ONE)
-                await self._play_current_track()
-
-                if len(tracks_to_add) == 1:
-                    await ctx.send(f"🎵 Now playing **{tracks_to_add[0].title}** in {channel.mention}!")
-                else:
-                    await ctx.send(f"🎵 Now playing **{len(tracks_to_add)} tracks** in {channel.mention}!")
-
-            except discord.ClientException as e:
-                self.logger.error(f"Failed to connect to voice: {e}")
-                await ctx.send("I couldn't connect to the voice channel. Please try again.")
-            except Exception as e:
-                self.logger.error(f"Error starting session: {e}", exc_info=True)
-                await ctx.send("Something went wrong starting playback.")
+            if len(tracks_to_add) == 1:
+                await ctx.send(f"🎵 Now playing **{tracks_to_add[0].title}** in {channel.mention}!")
+            else:
+                await ctx.send(f"🎵 Now playing **{len(tracks_to_add)} tracks** in {channel.mention}!")
 
         else:
             # Already in session - append to playlist
@@ -1422,15 +1406,42 @@ class MusicCommandsMixin:
             await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
 
     @music_cooldown
-    @requires_voice
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
-        """NLP handler for leave/disconnect requests."""
+        """NLP handler for leave/disconnect requests.
+
+        Does NOT use @requires_voice because it needs to clean up ghost
+        voice connections where active_session is None but discord.py's
+        VoiceClient is still connected.
+        """
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
             return
-        self.logger.info(f"[Play] Leave requested by user {ctx.author.id}: disconnecting from voice")
-        await self._end_session("Disconnected by user request.")
-        await ctx.send("👋 Disconnected!")
+
+        # Normal case: active session exists, end it properly.
+        if self.active_session:
+            self.logger.info(f"[Play] Leave requested by user {ctx.author.id}: disconnecting from voice")
+            await self._end_session("Disconnected by user request.")
+            await ctx.send("👋 Disconnected!")
+            return
+
+        # Ghost case: no active session but discord.py still has a VC.
+        if not ctx.guild:
+            await ctx.send("I'm not in a voice channel right now!")
+            return
+
+        for vc in self.bot.voice_clients:
+            if vc.guild and vc.guild.id == ctx.guild.id:
+                self.logger.warning(
+                    f"[Session] Ghost voice client found in {vc.channel}, cleaning up."
+                )
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e:
+                    self.logger.debug(f"[Session] Ghost disconnect error: {e}")
+                await ctx.send("Oops!~ Forgot I was in there!")
+                return
+
+        await ctx.send("I'm not in a voice channel right now!")
 
     @music_cooldown
     @requires_voice

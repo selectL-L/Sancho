@@ -113,6 +113,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         # Prefetch state (cog owns scheduling, mixin owns acquisition)
         self._prefetch_task: Optional[asyncio.Task[None]] = None
         self._enrichment_task: Optional[asyncio.Task[None]] = None
+        self._reconnect_task: Optional[asyncio.Task[None]] = None
         self._enrichment_video_id: Optional[str] = None
         self._prefetched_source: Optional[PlayableSource] = None
         self._prefetched_track: Optional[Track] = None
@@ -1241,7 +1242,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                         self.logger.warning(
                             "Zombie voice session detected — VC no longer connected."
                         )
-                        await self._force_end_session("Voice connection lost (detected by presence loop).")
+                        await self._end_session("Voice connection lost (detected by presence loop).")
                         # Fall through to idle presence cycling
                     else:
                         await asyncio.sleep(5)
@@ -1848,6 +1849,11 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
     ) -> None:
         """Starts a new voice session.
 
+        Errors are handled internally -- if the connection fails, an
+        in-character error message is sent to the user and the method
+        returns without raising.  Callers should check
+        ``self.active_session`` after the call to know if it succeeded.
+
         Args:
             channel: The voice channel to join.
             ctx: The command context.
@@ -1875,81 +1881,98 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             await ctx.send(message)
 
         except discord.ClientException as e:
+            bot_name = self.bot.user.display_name if self.bot.user else "I"
             self.logger.error(f"Failed to connect to voice: {e}")
-            await ctx.send("I couldn't connect to the voice channel. Please try again.")
+            await ctx.send(f"{bot_name} is a little confused, can you contact her author?")
         except Exception as e:
             self.logger.error(f"Error starting session: {e}", exc_info=True)
             await ctx.send("Something went wrong starting playback.")
 
     async def _end_session(self, reason: str = "Session ended.") -> None:
-        """Ends the current voice session."""
-        if not self.active_session:
-            return
+        """End the current voice session.
 
-        vc = self.active_session.voice_client
+        Always follows the same sequence regardless of why we're leaving:
+        1. Stop the player (silence audio immediately)
+        2. Say goodbye (session is still alive, we know where to send)
+        3. Disconnect the voice client (leave the VC)
+        4. Clean up session state and restore idle
 
-        # Stop playback via managed player (no callback triggered)
-        if self._player:
-            self._player.stop()
-            self._player = None
-
-        # Notify users before disconnecting (while we still have session info)
-        await self._send_system_message(f"🎵 {reason}")
-
-        # Disconnect
-        await vc.disconnect()
-
-        self.active_session = None
-
-        # Cancel idle timeout if running
-        if self.idle_timeout_task:
-            self.idle_timeout_task.cancel()
-            self.idle_timeout_task = None
-
-        self._reset_playback_runtime_state()
-
-        # Restore playlist state for idle mode
-        await self._restore_idle_playlist()
-
-        # Reset modification flag for next session
-        self._playlist_modified_during_session = False
-
-        self.logger.info(f"Voice session ended: {reason}")
-
-    async def _force_end_session(self, reason: str = "Voice connection lost.") -> None:
-        """Force-cleanup a voice session whose VC is already dead.
-
-        Unlike _end_session(), this does NOT try to send messages or call
-        vc.disconnect() — the voice connection is already gone. This is
-        the cleanup path for network disconnects, bot kicks, etc.
-
-        Args:
-            reason: Log-only reason string (not sent to Discord).
+        Step 2 and 3 are best-effort -- if the VC is already dead or
+        Discord's API is down, we log and continue with cleanup.
         """
         if not self.active_session:
             return
 
-        # Stop playback via managed player (no callback triggered)
+        # 1. Stop playback (no callback triggered)
         if self._player:
             self._player.stop()
             self._player = None
 
+        # 2. Say goodbye while we still have session channel references
+        try:
+            await self._send_system_message(f"🎵 {reason}")
+        except Exception as e:
+            self.logger.debug(f"Could not send goodbye message: {e}")
+
+        # 3. Disconnect voice client.  force=True ensures discord.py's
+        #    auto-reconnect is stopped even if the connection is mid-reconnect.
+        vc = self.active_session.voice_client
+        if vc:
+            try:
+                await vc.disconnect(force=True)
+            except Exception as e:
+                self.logger.debug(f"Could not disconnect voice client: {e}")
+
+        # 4. Clean up session state
         self.active_session = None
 
-        # Cancel idle timeout if running
         if self.idle_timeout_task:
             self.idle_timeout_task.cancel()
             self.idle_timeout_task = None
 
         self._reset_playback_runtime_state()
 
-        # Restore playlist state for idle mode
         await self._restore_idle_playlist()
 
-        # Reset modification flag for next session
         self._playlist_modified_during_session = False
 
-        self.logger.info(f"Voice session force-ended: {reason}")
+        self.logger.info(f"[Session] Ended: {reason}")
+
+    async def _handle_voice_disconnect(self) -> None:
+        """Handle a voice disconnect with a grace period for reconnection.
+
+        Pauses playback and waits 5 seconds for discord.py's auto-reconnect.
+        If the connection recovers, resumes playback.  If not, ends the session.
+        """
+        if not self.active_session:
+            return
+
+        self.logger.warning("[Session] Voice connection dropped — pausing and waiting for reconnect...")
+
+        # Pause immediately to preserve position
+        if self._player and self._player.is_playing:
+            self._player.pause()
+
+        # Let users know what's happening
+        bot_name = self.bot.user.display_name if self.bot.user else "I"
+        try:
+            await self._send_system_message(
+                f"⚠️ {bot_name} is having a little difficulty, please wait!~"
+            )
+        except Exception:
+            pass  # Can't send -- connection might be too broken
+
+        await asyncio.sleep(5.0)
+
+        # Check if we reconnected during the wait
+        vc = self.active_session.voice_client if self.active_session else None
+        if vc and vc.is_connected():
+            self.logger.info("[Session] Voice reconnected, resuming playback.")
+            if self._player and self._player.is_paused:
+                self._player.resume()
+        else:
+            self.logger.warning("[Session] Voice did not reconnect, ending session.")
+            await self._end_session("Discord seems a little unstable today, I'll have to leave the deck for now!")
 
     async def _idle_timeout_loop(self) -> None:
         """Waits for users to join, disconnects if none do within timeout."""
@@ -2025,13 +2048,22 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         if not self.active_session:
             return
 
-        # Detect bot's own disconnection from voice
+        # Detect bot's own voice state changes
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
-                self.logger.warning(
-                    "Bot was disconnected from voice — cleaning up session."
+                # Guard: if we're already handling a reconnect attempt, ignore
+                # rapid-fire disconnect events.
+                if self._reconnect_task and not self._reconnect_task.done():
+                    self.logger.debug("[Session] Reconnect already in progress, ignoring duplicate disconnect.")
+                    return
+
+                self._reconnect_task = asyncio.create_task(
+                    self._handle_voice_disconnect()
                 )
-                await self._force_end_session("Bot disconnected from voice channel.")
+
+            elif not before.channel and after.channel and self.active_session:
+                self.logger.info(f"[Session] Bot rejoined voice: {after.channel.name}")
+
             return
 
         vc = self.active_session.voice_client
