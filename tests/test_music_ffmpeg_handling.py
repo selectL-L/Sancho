@@ -1,8 +1,8 @@
 """Focused tests for FFmpeg-driven music playback decisions.
 
 These tests verify the cog's behavior when ManagedPlayer reports playback
-failures via PlaybackEndReport.  The cog uses classify_failure() to decide
-what to do, then either retries or prompts the user.
+failures via PlaybackEndReport.  The parser assigns an FFmpegBucket, and
+the cog reacts to it — retrying, prompting the user, or advancing.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,13 +14,12 @@ from cogs.music import Music
 from utils.musicutils import (
     ActiveSession,
     AudioErrorType,
+    FFmpegBucket,
     FFmpegHealth,
-    FFmpegResponseAction,
     LoopMode,
     PlaybackEndReport,
     PlaybackState,
     TrackIssueKind,
-    TrackIssuePromptPreference,
     Track,
 )
 from utils.views import TrackFailureAction
@@ -77,11 +76,11 @@ def music_cog(mock_bot):
 
 
 class TestMusicFFmpegHandling:
-    """Tests for classify_failure-driven playback decisions in the Music cog."""
+    """Tests for bucket-driven playback decisions in the Music cog."""
 
     @pytest.mark.asyncio
-    async def test_retryable_report_triggers_play_current_track(self, music_cog, mock_voice_client):
-        """RETRY_NEW_URL should cause _on_track_end to retry via _play_current_track."""
+    async def test_retry_bucket_triggers_play_current_track(self, music_cog, mock_voice_client):
+        """RETRY bucket should cause _on_track_end to retry via _play_current_track."""
         track = create_track("Retry Me", "dQw4w9WgXcQ")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -95,7 +94,7 @@ class TestMusicFFmpegHandling:
             error=Exception("ffmpeg failed"),
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.HTTP_403,
-                response_action=FFmpegResponseAction.RETRY_NEW_URL,
+                bucket=FFmpegBucket.RETRY,
                 summary="The remote server rejected the current signed stream URL (HTTP 403).",
             ),
             elapsed=2.0,
@@ -107,9 +106,9 @@ class TestMusicFFmpegHandling:
         play_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_remove_track_report_prompts_user(self, music_cog, mock_voice_client):
-        """REMOVE should show a prompt defaulting to REMOVE."""
-        track = create_track("Gone", "xvFZjo5PgG0")
+    async def test_replay_bucket_triggers_play_current_track(self, music_cog, mock_voice_client):
+        """REPLAY bucket should also retry (same as RETRY for now)."""
+        track = create_track("Replay Me", "abc123def45")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
             guild_id=1,
@@ -121,27 +120,21 @@ class TestMusicFFmpegHandling:
         report = PlaybackEndReport(
             error=None,
             ffmpeg=FFmpegHealth(
-                error_type=AudioErrorType.HTTP_404,
-                response_action=FFmpegResponseAction.REMOVE,
-                prompt_preference=TrackIssuePromptPreference.PREFER_REMOVE,
-                summary="The remote stream no longer exists (HTTP 404).",
+                error_type=AudioErrorType.CONNECTION,
+                bucket=FFmpegBucket.REPLAY,
+                summary="FFmpeg lost the network connection while reading the stream.",
             ),
-            elapsed=12.0,
+            elapsed=10.0,
         )
 
-        with patch.object(music_cog, '_handle_track_failure', new=AsyncMock()) as failure_mock:
+        with patch.object(music_cog, '_play_current_track', new=AsyncMock()) as play_mock:
             await music_cog._on_track_end(report)
 
-        failure_mock.assert_awaited_once()
-        await_args = failure_mock.await_args
-        assert await_args is not None
-        assert await_args.args == (track,)
-        assert await_args.kwargs['issue_kind'] == TrackIssueKind.UNAVAILABLE
-        assert await_args.kwargs['timeout_action'] == TrackFailureAction.REMOVE
+        play_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_fail_track_report_prompts_skip(self, music_cog, mock_voice_client):
-        """FAIL should show a prompt defaulting to SKIP."""
+    async def test_skip_bucket_prompts_user(self, music_cog, mock_voice_client):
+        """SKIP bucket should show a prompt defaulting to SKIP."""
         track = create_track("Broken", "J---aiyznGQ")
         music_cog.playlist = [track]
         music_cog.active_session = ActiveSession(
@@ -155,8 +148,7 @@ class TestMusicFFmpegHandling:
             error=None,
             ffmpeg=FFmpegHealth(
                 error_type=AudioErrorType.HTTP_416,
-                response_action=FFmpegResponseAction.FAIL,
-                prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
+                bucket=FFmpegBucket.SKIP,
                 summary="FFmpeg requested an invalid byte range for the stream (HTTP 416).",
             ),
             elapsed=1.5,
@@ -169,8 +161,38 @@ class TestMusicFFmpegHandling:
         await_args = failure_mock.await_args
         assert await_args is not None
         assert await_args.args == (track,)
-        assert await_args.kwargs['issue_kind'] == TrackIssueKind.INTERNAL
         assert await_args.kwargs['timeout_action'] == TrackFailureAction.SKIP
+
+    @pytest.mark.asyncio
+    async def test_remove_bucket_prompts_user(self, music_cog, mock_voice_client):
+        """REMOVE bucket should show a prompt defaulting to REMOVE."""
+        track = create_track("Gone", "xvFZjo5PgG0")
+        music_cog.playlist = [track]
+        music_cog.active_session = ActiveSession(
+            guild_id=1,
+            channel_id=2,
+            voice_client=mock_voice_client,
+            origin_channel_id=3,
+        )
+
+        report = PlaybackEndReport(
+            error=None,
+            ffmpeg=FFmpegHealth(
+                bucket=FFmpegBucket.REMOVE,
+                summary="Test: track should be removed.",
+            ),
+            elapsed=12.0,
+        )
+
+        with patch.object(music_cog, '_handle_track_failure', new=AsyncMock()) as failure_mock:
+            await music_cog._on_track_end(report)
+
+        failure_mock.assert_awaited_once()
+        await_args = failure_mock.await_args
+        assert await_args is not None
+        assert await_args.args == (track,)
+        assert await_args.kwargs['issue_kind'] == TrackIssueKind.UNAVAILABLE
+        assert await_args.kwargs['timeout_action'] == TrackFailureAction.REMOVE
 
     @pytest.mark.asyncio
     async def test_acquire_returns_none_prompts_user(self, music_cog, mock_voice_client):
@@ -193,41 +215,7 @@ class TestMusicFFmpegHandling:
         await_args = failure_mock.await_args
         assert await_args is not None
         assert await_args.args == (track,)
-        # Default is TRANSIENT/SKIP when not unavailable
         assert await_args.kwargs['issue_kind'] == TrackIssueKind.TRANSIENT
-        assert await_args.kwargs['timeout_action'] == TrackFailureAction.SKIP
-
-    @pytest.mark.asyncio
-    async def test_unsupported_codec_prompts_skip(self, music_cog, mock_voice_client):
-        """SKIP with UNSUPPORTED_CODEC should prompt SKIP with INTERNAL kind."""
-        track = create_track("Odd Codec", "codectrack1")
-        music_cog.playlist = [track]
-        music_cog.active_session = ActiveSession(
-            guild_id=1,
-            channel_id=2,
-            voice_client=mock_voice_client,
-            origin_channel_id=3,
-        )
-
-        report = PlaybackEndReport(
-            error=None,
-            ffmpeg=FFmpegHealth(
-                error_type=AudioErrorType.UNSUPPORTED_CODEC,
-                response_action=FFmpegResponseAction.SKIP,
-                prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
-                summary="FFmpeg could not find a supported codec for this track.",
-            ),
-            elapsed=1.0,
-        )
-
-        with patch.object(music_cog, '_handle_track_failure', new=AsyncMock()) as failure_mock:
-            await music_cog._on_track_end(report)
-
-        failure_mock.assert_awaited_once()
-        await_args = failure_mock.await_args
-        assert await_args is not None
-        assert await_args.args == (track,)
-        assert await_args.kwargs['issue_kind'] == TrackIssueKind.INTERNAL
         assert await_args.kwargs['timeout_action'] == TrackFailureAction.SKIP
 
     def test_skip_to_different_track_returns_none_for_single_track(self, music_cog):

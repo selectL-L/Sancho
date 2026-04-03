@@ -91,51 +91,46 @@ def _extract_video_id(url: str) -> Optional[str]:
 
 
 class AudioErrorType(Enum):
-    """Error types parsed from FFmpeg stderr.
+    """Specific error parsed from FFmpeg stderr.
 
-    Used by SeekableAudioSource.health to report why playback failed.
-    This enables smart retry logic and direct mapping to playback actions.
+    These are diagnostic labels for logging and debugging.  The parser
+    uses them internally but the *cog* never switches on them — it only
+    reads the ``FFmpegBucket`` that the parser assigned.
     """
     NONE = "none"              # No error detected
     HTTP_403 = "http_403"      # Auth failure - URL expired or blocked
-    HTTP_404 = "http_404"      # Track removed from YouTube
-    HTTP_410 = "http_410"      # Permanently gone
+    HTTP_404 = "http_404"      # Resource not found on CDN
+    HTTP_410 = "http_410"      # Resource gone on CDN
     HTTP_416 = "http_416"      # Bad range / seek state
     HTTP_429 = "http_429"      # Rate limiting
     HTTP_OTHER = "http_other"  # Other HTTP error (5xx, etc.)
     CONNECTION = "connection"  # Network failure (reset, refused, timeout)
     TLS = "tls"                # TLS/socket-layer failure
     FORMAT = "format"          # Corrupt or incompatible stream
-    UNSUPPORTED_CODEC = "unsupported_codec"  # Codec unavailable
-    FILTER = "filter"          # Audio filter init failure
     BROKEN_PIPE = "broken_pipe"  # Caller closed the output pipe
-    TIMEOUT = "timeout"        # Prebuffer timeout (not currently used)
     UNKNOWN = "unknown"        # EOF with no clear error in stderr
 
 
-class FFmpegResponseAction(Enum):
-    """Recovery action chosen from parsed FFmpeg output."""
+class FFmpegBucket(Enum):
+    """Coarse action bucket assigned by the FFmpeg parser.
 
-    NONE = "none"
-    IGNORE = "ignore"
-    SKIP = "skip"
-    RETRY_SAME_URL = "retry_same_url"
-    RETRY_NEW_URL = "retry_new_url"
-    RETRY_WITH_BACKOFF = "retry_with_backoff"
-    REMOVE = "remove"
-    FAIL = "fail"
+    The parser collapses many specific stderr errors into one of these
+    buckets.  The cog reads the bucket and reacts accordingly — it never
+    needs to inspect the underlying ``AudioErrorType``.
 
-
-class TrackIssuePromptPreference(Enum):
-    """User-facing default when playback needs intervention.
-
-    Many low-level failures collapse to one of three operator-visible outcomes:
-    ignore it, ask and prefer skip, or ask and prefer removal.
+    DONE    — Playback finished normally (or was intentionally cancelled).
+    RETRY   — Get a fresh URL and try again.
+    REPLAY  — The URL is probably fine, replay it.
+              (Currently mapped to RETRY; future work will add same-URL replay.)
+    SKIP    — Something is wrong with this attempt, prompt user to skip.
+    REMOVE  — Track should be removed from the queue.
+              (Nothing currently maps here; exists so the cog is ready for it.)
     """
-
-    NONE = "none"
-    PREFER_SKIP = "prefer_skip"
-    PREFER_REMOVE = "prefer_remove"
+    DONE = "done"
+    RETRY = "retry"
+    REPLAY = "replay"
+    SKIP = "skip"
+    REMOVE = "remove"
 
 
 class TrackIssueKind(Enum):
@@ -196,14 +191,14 @@ class LoopMode(Enum):
 
 @dataclass
 class FFmpegHealth:
-    """Reduced FFmpeg process state and recommended response.
+    """Reduced FFmpeg process state and recommended action bucket.
 
-    Populated by SeekableAudioSource as it reads stderr. Used to report
-    why playback failed and what the caller should do next.
+    Populated by the FFmpegStderrParser as it reads stderr.  The ``bucket``
+    field is the only thing the cog needs to read; everything else is
+    diagnostic detail for logging.
     """
+    bucket: 'FFmpegBucket' = field(default_factory=lambda: FFmpegBucket.DONE)
     error_type: 'AudioErrorType' = field(default_factory=lambda: AudioErrorType.NONE)
-    response_action: 'FFmpegResponseAction' = field(default_factory=lambda: FFmpegResponseAction.NONE)
-    prompt_preference: 'TrackIssuePromptPreference' = field(default_factory=lambda: TrackIssuePromptPreference.NONE)
     error_detail: Optional[str] = None  # Raw stderr line that triggered classification
     summary: Optional[str] = None       # App-facing summary of what FFmpeg reported
     frames_read: int = 0                # Frames successfully read before error
@@ -218,12 +213,12 @@ class FFmpegHealth:
 
     @property
     def is_healthy(self) -> bool:
-        """True if no fatal error detected."""
-        return self.response_action in (FFmpegResponseAction.NONE, FFmpegResponseAction.IGNORE)
+        """True if playback completed normally."""
+        return self.bucket == FFmpegBucket.DONE
 
     @property
     def has_error(self) -> bool:
-        """True if a fatal error was detected."""
+        """True if a failure was detected."""
         return not self.is_healthy
 
 
@@ -231,8 +226,7 @@ class FFmpegHealth:
 class PlaybackEndReport:
     """Typed result from ManagedPlayer when a track ends.
 
-    The cog uses ``classify_failure()`` from the source acquisition mixin to
-    interpret this report.  The report itself is just data -- no policy.
+    The cog reads ``report.ffmpeg.bucket`` to decide what to do next.
     """
 
     error: Optional[Exception]

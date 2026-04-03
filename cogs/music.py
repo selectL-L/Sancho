@@ -48,7 +48,6 @@ from utils.musicutils import (
     YTDLP_AVAILABLE,
     ActiveSession,
     AmbienceState,
-    FFmpegResponseAction,
     LoopMode,
     ManagedPlayer,
     MusicCacheManager,
@@ -63,11 +62,10 @@ from utils.musicutils import (
     search_query_mode,
     search_url_mode,
 )
+from utils.musicutils.music_data import FFmpegBucket
 from utils.musicutils.source_acquisition import (
-    FailureAction,
     PlayableSource,
     SourceAcquisitionMixin,
-    classify_failure,
 )
 from utils.musicutils.search import get_thumbnail_bytes
 from utils.views import (
@@ -1772,7 +1770,7 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         )
 
     async def _on_track_end(self, report: PlaybackEndReport) -> None:
-        """Handle track end using ``classify_failure`` from the acquisition mixin."""
+        """Handle track end by reading the FFmpegBucket from the report."""
         if not self.active_session:
             return
 
@@ -1780,38 +1778,38 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         if not track:
             return
 
-        action, issue_kind = classify_failure(report)
+        bucket = report.ffmpeg.bucket
         self.logger.info(
             f"[Play] Track ended: {track.title} | "
-            f"action={action.name} | elapsed={report.elapsed:.1f}s"
+            f"bucket={bucket.name} | elapsed={report.elapsed:.1f}s"
         )
 
-        if action == FailureAction.RETRY:
-            # Clean up broken residential files before retrying.
-            if track.video_id:
-                attempts = self._get_attempts(track.video_id)
-                if attempts.last_residential_path:
-                    self._delete_failed_residential_file(attempts.last_residential_path)
-                    attempts.last_residential_path = None
+        match bucket:
+            case FFmpegBucket.RETRY | FFmpegBucket.REPLAY:
+                # REPLAY: URL is probably fine, play it again.
+                # TODO: wire up same-URL replay; for now both paths retry fresh.
+                if track.video_id:
+                    attempts = self._get_attempts(track.video_id)
+                    if attempts.last_residential_path:
+                        self._delete_failed_residential_file(attempts.last_residential_path)
+                        attempts.last_residential_path = None
 
-            if report.ffmpeg.response_action == FFmpegResponseAction.RETRY_WITH_BACKOFF:
-                self.logger.info(f"[Retry] Backing off 2s before retrying {track.title}")
-                await asyncio.sleep(2.0)
+                await self._play_current_track()
+                return
 
-            await self._play_current_track()
-            return
+            case FFmpegBucket.SKIP:
+                await self._handle_track_failure(
+                    track, issue_kind=TrackIssueKind.TRANSIENT, timeout_action=TrackFailureAction.SKIP,
+                )
+                return
 
-        if action in (FailureAction.PROMPT_SKIP, FailureAction.PROMPT_REMOVE):
-            timeout_action = (
-                TrackFailureAction.REMOVE if action == FailureAction.PROMPT_REMOVE
-                else TrackFailureAction.SKIP
-            )
-            await self._handle_track_failure(
-                track, issue_kind=issue_kind, timeout_action=timeout_action,
-            )
-            return
+            case FFmpegBucket.REMOVE:
+                await self._handle_track_failure(
+                    track, issue_kind=TrackIssueKind.UNAVAILABLE, timeout_action=TrackFailureAction.REMOVE,
+                )
+                return
 
-        # Normal track end (FailureAction.DONE) - clean up per-track state.
+        # Normal track end (FFmpegBucket.DONE) - clean up per-track state.
         if track.video_id:
             self._clear_attempts(track.video_id)
         self.logger.info(f"[Play] Track finished: {track.title} — {track.artist}")

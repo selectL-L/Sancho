@@ -21,9 +21,8 @@ from utils.musicutils.audio_source import SeekableAudioSource
 from utils.musicutils.music_cache import MusicCacheManager
 from utils.musicutils.music_data import (
     AudioErrorType,
+    FFmpegBucket,
     FFmpegHealth,
-    FFmpegResponseAction,
-    TrackIssuePromptPreference,
     TrackIssueKind,
     LoopMode,
     Track,
@@ -41,8 +40,6 @@ from utils.musicutils.source_acquisition import (
     SourceAcquisitionMixin,
     PlayableSource,
     TrackAttempts,
-    FailureAction,
-    classify_failure,
 )
 
 # Lyrics utilities
@@ -128,9 +125,8 @@ from utils.musicutils.music_auth import (
 __all__ = [
     # Data classes
     'AudioErrorType',
+    'FFmpegBucket',
     'FFmpegHealth',
-    'FFmpegResponseAction',
-    'TrackIssuePromptPreference',
     'TrackIssueKind',
     'LoopMode',
     'Track',
@@ -145,8 +141,6 @@ __all__ = [
     'SourceAcquisitionMixin',
     'PlayableSource',
     'TrackAttempts',
-    'FailureAction',
-    'classify_failure',
     # Lyrics
     'chunk_text',
     'GeniusScraper',

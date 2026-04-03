@@ -11,10 +11,9 @@ a priority chain (local cache -> direct URL -> residential yt-dlp URL ->
 residential file download) and returns a playable source or ``None``.
 
 The cog keeps the playback loop. It calls ``_acquire_source``, hands the
-result to ``ManagedPlayer``, and uses ``classify_failure`` to interpret what
-happens when FFmpeg dies. The mixin never touches Discord, the player, or
-the playlist -- it only knows how to get audio and how much it's allowed
-to spend doing so.
+result to ``ManagedPlayer``, and reads ``report.ffmpeg.bucket`` when FFmpeg
+dies. The mixin never touches Discord, the player, or the playlist -- it
+only knows how to get audio and how much it's allowed to spend doing so.
 
 Contract with host cog
 ----------------------
@@ -36,10 +35,9 @@ This mixin provides::
     self._clear_all_attempts() -> None
     self._delete_failed_residential_file(path) -> None
 
-Module-level (not on self)::
+Module-level data types::
 
-    classify_failure(report) -> tuple[FailureAction, TrackIssueKind]
-    TrackAttempts, FailureAction, PlayableSource  (data types)
+    TrackAttempts, PlayableSource
 """
 
 import asyncio
@@ -47,7 +45,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Any, Dict, Optional
 
 from utils.musicutils.music_auth import (
@@ -55,11 +52,8 @@ from utils.musicutils.music_auth import (
     resolve_track_source,
 )
 from utils.musicutils.music_data import (
-    FFmpegResponseAction,
     MAX_RESIDENTIAL_PLAYBACK_DURATION_SECONDS,
-    PlaybackEndReport,
     Track,
-    TrackIssueKind,
 )
 logger = logging.getLogger(__name__)
 
@@ -116,14 +110,6 @@ class TrackAttempts:
     last_residential_path: Optional[str] = None
 
 
-class FailureAction(Enum):
-    """What should the cog do after a playback failure?"""
-    RETRY = auto()
-    DONE = auto()
-    PROMPT_SKIP = auto()
-    PROMPT_REMOVE = auto()
-
-
 @dataclass
 class PlayableSource:
     """A concrete source that can be handed to ManagedPlayer."""
@@ -138,54 +124,6 @@ class PlayableSource:
         if self.prebuffered is not None:
             self.prebuffered.cleanup()
             self.prebuffered = None
-
-
-# ---------------------------------------------------------------------------
-# Pure failure classification
-# ---------------------------------------------------------------------------
-
-def classify_failure(
-    report: PlaybackEndReport,
-) -> tuple[FailureAction, TrackIssueKind]:
-    """Decide what the cog should do about a playback failure.
-
-    This is a pure function with no state and no side effects.
-    ``FFmpegStderrParser`` already classified what went wrong; this just
-    maps that classification to a cog-level action.
-
-    Args:
-        report: The typed report from ManagedPlayer.
-
-    Returns:
-        A ``(action, issue_kind)`` tuple.  ``issue_kind`` is only meaningful
-        when ``action`` is ``PROMPT_SKIP`` or ``PROMPT_REMOVE``.
-    """
-    action = report.ffmpeg.response_action
-
-    if action in (
-        FFmpegResponseAction.NONE,
-        FFmpegResponseAction.IGNORE,
-    ):
-        return FailureAction.DONE, TrackIssueKind.TRANSIENT
-
-    if action in (
-        FFmpegResponseAction.RETRY_NEW_URL,
-        FFmpegResponseAction.RETRY_SAME_URL,
-        FFmpegResponseAction.RETRY_WITH_BACKOFF,
-    ):
-        return FailureAction.RETRY, TrackIssueKind.TRANSIENT
-
-    if action == FFmpegResponseAction.REMOVE:
-        return FailureAction.PROMPT_REMOVE, TrackIssueKind.UNAVAILABLE
-
-    if action in (
-        FFmpegResponseAction.SKIP,
-        FFmpegResponseAction.FAIL,
-    ):
-        return FailureAction.PROMPT_SKIP, TrackIssueKind.INTERNAL
-
-    # Unknown action -- ask the user.
-    return FailureAction.PROMPT_SKIP, TrackIssueKind.TRANSIENT
 
 
 # ---------------------------------------------------------------------------

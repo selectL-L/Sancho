@@ -424,7 +424,7 @@ class ManagedPlayer:
                 f"[ManagedPlayer] Failure analysis | "
                 f"elapsed={elapsed:.1f}s | "
                 f"type={ffmpeg_report.error_type.value} | "
-                f"action={ffmpeg_report.response_action.value} | "
+                f"bucket={ffmpeg_report.bucket.value} | "
                 f"heuristic={ffmpeg_report.used_heuristic} | "
                 f"reconnects={ffmpeg_report.reconnect_count} | "
                 f"detail={ffmpeg_report.error_detail}"

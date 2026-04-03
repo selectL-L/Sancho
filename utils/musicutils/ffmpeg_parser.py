@@ -3,7 +3,7 @@
 import re
 from typing import Optional
 
-from utils.musicutils.music_data import AudioErrorType, FFmpegHealth, FFmpegResponseAction, TrackIssuePromptPreference
+from utils.musicutils.music_data import AudioErrorType, FFmpegBucket, FFmpegHealth
 
 
 RE_HTTP_STATUS = re.compile(r'(?:HTTP error|Server returned)\s+(\d{3})\s+(.+)', re.IGNORECASE)
@@ -34,26 +34,29 @@ TLS_PATTERNS = (
     'error in the pull function',
 )
 
-UNSUPPORTED_CODEC_PATTERNS = (
-    'could not find codec',
-    'unable to find a suitable codec',
-    'audio: none',
-)
-
 FORMAT_PATTERNS = (
     'moov atom not found',
     'invalid data found when processing input',
     'invalid stream',
 )
 
-FILTER_PATTERNS = (
-    'error initializing filter',
-    'filter failed',
-)
-
 
 class FFmpegStderrParser:
-    """Incrementally parses FFmpeg stderr into a structured report."""
+    """Incrementally parses FFmpeg stderr into a structured report.
+
+    Each stderr line is consumed and pattern-matched against known FFmpeg
+    errors.  The first match locks in a root cause (error_type) and an
+    action bucket.  ``finalize()`` applies heuristics when no pattern
+    matched.
+
+    The parser assigns one of five buckets:
+
+    - DONE   — Normal completion or intentional cancellation.
+    - RETRY  — Get a fresh URL and try again.
+    - REPLAY — URL is probably fine, play it again.
+    - SKIP   — Prompt user, default to skip.
+    - REMOVE — Prompt user, default to remove (nothing currently maps here).
+    """
 
     def __init__(self) -> None:
         self._report = FFmpegHealth()
@@ -79,9 +82,11 @@ class FFmpegStderrParser:
             self._report.summary = 'FFmpeg reconnected to the remote stream.'
 
         if RE_RECONNECT_FAILED.search(stripped):
+            # FFmpeg exhausted its own internal reconnects.  The URL is
+            # probably still valid — the network just died.
             self._set_root_cause(
                 AudioErrorType.CONNECTION,
-                FFmpegResponseAction.RETRY_NEW_URL,
+                FFmpegBucket.REPLAY,
                 'FFmpeg exhausted its reconnect attempts for the current stream.',
                 stripped,
             )
@@ -100,7 +105,7 @@ class FFmpegStderrParser:
             self._report.saw_broken_pipe = True
             self._set_root_cause(
                 AudioErrorType.BROKEN_PIPE,
-                FFmpegResponseAction.IGNORE,
+                FFmpegBucket.DONE,
                 'FFmpeg output pipe was closed by the caller.',
                 stripped,
             )
@@ -117,7 +122,7 @@ class FFmpegStderrParser:
         if any(pattern in lowered for pattern in CONNECTION_PATTERNS):
             self._set_root_cause(
                 AudioErrorType.CONNECTION,
-                FFmpegResponseAction.RETRY_SAME_URL,
+                FFmpegBucket.REPLAY,
                 'FFmpeg lost the network connection while reading the stream.',
                 stripped,
             )
@@ -126,36 +131,16 @@ class FFmpegStderrParser:
         if any(pattern in lowered for pattern in TLS_PATTERNS):
             self._set_root_cause(
                 AudioErrorType.TLS,
-                FFmpegResponseAction.RETRY_SAME_URL,
+                FFmpegBucket.REPLAY,
                 'FFmpeg hit a TLS or socket-layer read failure.',
                 stripped,
-            )
-            return
-
-        if any(pattern in lowered for pattern in UNSUPPORTED_CODEC_PATTERNS):
-            self._set_root_cause(
-                AudioErrorType.UNSUPPORTED_CODEC,
-                FFmpegResponseAction.SKIP,
-                'FFmpeg could not find a supported codec for this track.',
-                stripped,
-                prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
-            )
-            return
-
-        if any(pattern in lowered for pattern in FILTER_PATTERNS):
-            self._set_root_cause(
-                AudioErrorType.FILTER,
-                FFmpegResponseAction.SKIP,
-                'FFmpeg failed while initializing the audio filter chain.',
-                stripped,
-                prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
             )
             return
 
         if any(pattern in lowered for pattern in FORMAT_PATTERNS):
             self._set_root_cause(
                 AudioErrorType.FORMAT,
-                FFmpegResponseAction.RETRY_NEW_URL,
+                FFmpegBucket.RETRY,
                 'FFmpeg reported malformed or incomplete stream data.',
                 stripped,
             )
@@ -174,101 +159,81 @@ class FFmpegStderrParser:
         self._report.frames_read = frames_read
         self._report.process_returncode = process_returncode
 
-        if self._report.response_action == FFmpegResponseAction.NONE:
-            if context == 'prefetch':
-                self._apply_unknown_prefetch_failure()
-            elif explicit_error:
-                self._apply_unknown_playback_failure()
-            elif self._should_use_fast_fail_heuristic(elapsed, expected_duration):
-                self._report.used_heuristic = True
-                self._report.error_type = AudioErrorType.HTTP_403
-                self._report.response_action = FFmpegResponseAction.RETRY_NEW_URL
-                self._report.summary = (
-                    'Playback ended far too quickly for the track length; '
-                    'the signed stream URL likely went stale.'
-                )
-            elif self._looks_like_normal_completion(expected_duration, frames_read, process_returncode):
-                self._report.summary = 'FFmpeg finished streaming normally.'
-            else:
-                self._apply_unknown_terminal_failure()
+        if self._root_cause_locked:
+            return self._report
+
+        if context == 'prefetch':
+            self._apply_unknown_prefetch_failure()
+        elif explicit_error:
+            self._apply_unknown_playback_failure()
+        elif self._should_use_fast_fail_heuristic(elapsed, expected_duration):
+            self._report.used_heuristic = True
+            self._report.error_type = AudioErrorType.HTTP_403
+            self._report.bucket = FFmpegBucket.RETRY
+            self._report.summary = (
+                'Playback ended far too quickly for the track length; '
+                'the signed stream URL likely went stale.'
+            )
+        elif self._looks_like_normal_completion(expected_duration, frames_read, process_returncode):
+            self._report.summary = 'FFmpeg finished streaming normally.'
+        else:
+            self._apply_unknown_terminal_failure()
 
         return self._report
 
     def _handle_http_status(self, status_code: int, line: str) -> None:
-        if status_code == 403:
-            # yt-dlp already resolved the watch page into a playable media URL.
-            # A 403 here usually means that specific signed URL went stale or
-            # was rejected by the edge serving the bytes, not that the track is
-            # permanently gone from YouTube.
-            self._set_root_cause(
-                AudioErrorType.HTTP_403,
-                FFmpegResponseAction.RETRY_NEW_URL,
-                'The remote server rejected the current signed stream URL (HTTP 403).',
-                line,
-            )
-        elif status_code == 404:
-            # This is a failure on the resolved media URL, not necessarily on
-            # the YouTube watch page itself. Treat it as serious enough to skip
-            # for now, but not strong enough on its own to mutate the queue.
-            self._set_root_cause(
-                AudioErrorType.HTTP_404,
-                FFmpegResponseAction.REMOVE,
-                'The remote stream no longer exists (HTTP 404).',
-                line,
-                prompt_preference=TrackIssuePromptPreference.PREFER_REMOVE,
-            )
-        elif status_code == 410:
-            # Stronger than 404 on the media URL layer, but it is still FFmpeg
-            # talking to the extracted audio resource. We keep the track and
-            # surface the issue instead of assuming the queue entry is dead.
-            self._set_root_cause(
-                AudioErrorType.HTTP_410,
-                FFmpegResponseAction.REMOVE,
-                'The remote stream is permanently gone (HTTP 410).',
-                line,
-                prompt_preference=TrackIssuePromptPreference.PREFER_REMOVE,
-            )
-        elif status_code == 416:
-            # Requested Range Not Satisfiable usually points to a mismatch
-            # between FFmpeg's byte-range request and the current media object.
-            # This is a playback/pathology issue, not a strong unavailable
-            # signal, so it stays in the explicit failure bucket.
-            self._set_root_cause(
-                AudioErrorType.HTTP_416,
-                FFmpegResponseAction.FAIL,
-                'FFmpeg requested an invalid byte range for the stream (HTTP 416).',
-                line,
-                prompt_preference=TrackIssuePromptPreference.PREFER_SKIP,
-            )
-        elif status_code == 429:
-            self._set_root_cause(
-                AudioErrorType.HTTP_429,
-                FFmpegResponseAction.RETRY_WITH_BACKOFF,
-                'The remote server rate-limited the stream request (HTTP 429).',
-                line,
-            )
-        else:
-            self._set_root_cause(
-                AudioErrorType.HTTP_OTHER,
-                FFmpegResponseAction.RETRY_WITH_BACKOFF if 500 <= status_code < 600 else FFmpegResponseAction.RETRY_NEW_URL,
-                f'FFmpeg received HTTP {status_code} while reading the stream.',
-                line,
+        match status_code:
+            case 403:
+                self._set_root_cause(
+                    AudioErrorType.HTTP_403,
+                    FFmpegBucket.RETRY,
+                    'The remote server rejected the current signed stream URL (HTTP 403).',
+                    line,
+                )
+            case 404 | 410:
+                # CDN media URL, not the YouTube watch page.  The track
+                # itself is probably fine — yt-dlp will confirm if the
+                # watch page is actually dead during the retry.
+                self._set_root_cause(
+                    AudioErrorType.HTTP_404 if status_code == 404 else AudioErrorType.HTTP_410,
+                    FFmpegBucket.RETRY,
+                    f'The CDN stream returned HTTP {status_code}.',
+                    line,
+                )
+            case 416:
+                self._set_root_cause(
+                    AudioErrorType.HTTP_416,
+                    FFmpegBucket.SKIP,
+                    'FFmpeg requested an invalid byte range for the stream (HTTP 416).',
+                    line,
+                )
+            case 429:
+                self._set_root_cause(
+                    AudioErrorType.HTTP_429,
+                    FFmpegBucket.RETRY,
+                    'The remote server rate-limited the stream request (HTTP 429).',
+                    line,
+                )
+            case _:
+                self._set_root_cause(
+                    AudioErrorType.HTTP_OTHER,
+                    FFmpegBucket.RETRY,
+                    f'FFmpeg received HTTP {status_code} while reading the stream.',
+                    line,
             )
 
     def _set_root_cause(
         self,
         error_type: AudioErrorType,
-        response_action: FFmpegResponseAction,
+        bucket: FFmpegBucket,
         summary: str,
         detail: str,
-        prompt_preference: TrackIssuePromptPreference = TrackIssuePromptPreference.NONE,
     ) -> None:
         if self._root_cause_locked:
             return
 
         self._report.error_type = error_type
-        self._report.response_action = response_action
-        self._report.prompt_preference = prompt_preference
+        self._report.bucket = bucket
         self._report.summary = summary
         self._report.error_detail = detail
         self._root_cause_locked = True
@@ -276,7 +241,7 @@ class FFmpegStderrParser:
     def _apply_unknown_prefetch_failure(self) -> None:
         self._report.used_heuristic = True
         self._report.error_type = AudioErrorType.UNKNOWN
-        self._report.response_action = FFmpegResponseAction.RETRY_NEW_URL
+        self._report.bucket = FFmpegBucket.RETRY
         self._report.summary = (
             'FFmpeg stopped before the prefetched stream proved stable; '
             'a fresh URL should be fetched at play time.'
@@ -285,8 +250,7 @@ class FFmpegStderrParser:
     def _apply_unknown_playback_failure(self) -> None:
         self._report.used_heuristic = True
         self._report.error_type = AudioErrorType.UNKNOWN
-        self._report.response_action = FFmpegResponseAction.RETRY_NEW_URL
-        self._report.prompt_preference = TrackIssuePromptPreference.NONE
+        self._report.bucket = FFmpegBucket.RETRY
         self._report.summary = (
             'FFmpeg reported a playback failure without a recognized stderr signature; '
             'retrying with a fresh stream URL is the safest fallback.'
@@ -295,8 +259,7 @@ class FFmpegStderrParser:
     def _apply_unknown_terminal_failure(self) -> None:
         self._report.used_heuristic = True
         self._report.error_type = AudioErrorType.UNKNOWN
-        self._report.response_action = FFmpegResponseAction.FAIL
-        self._report.prompt_preference = TrackIssuePromptPreference.PREFER_SKIP
+        self._report.bucket = FFmpegBucket.SKIP
         self._report.summary = 'FFmpeg stopped unexpectedly without a recognizable error signature.'
 
     def _looks_like_normal_completion(
