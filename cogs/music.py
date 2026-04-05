@@ -108,6 +108,12 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         self._playback = PlaybackState()
         self._ambience = AmbienceState()
 
+        # Presence loop coordination.
+        # _presence_wake: "a track is about to play, start listening."
+        # _playback_confirmed: "player.play() succeeded."
+        self._presence_wake = asyncio.Event()
+        self._playback_confirmed = asyncio.Event()
+
         # Prefetch state (cog owns scheduling, mixin owns acquisition)
         self._prefetch_task: Optional[asyncio.Task[None]] = None
         self._enrichment_task: Optional[asyncio.Task[None]] = None
@@ -1238,18 +1244,56 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                 # --- Phase 2: Let ambience cycle mood/activity ---
                 maybe_cycle()
 
-                # --- Phase 3: Yield to playback if in VC ---
+                # --- Phase 3: Active session — wait for track changes ---
                 if self.active_session:
-                    vc = self.active_session.voice_client
-                    if not vc or not vc.is_connected():
-                        self.logger.warning(
-                            "Zombie voice session detected — VC no longer connected."
-                        )
-                        await self._end_session("Voice connection lost (detected by presence loop).")
-                        # Fall through to idle presence cycling
-                    else:
-                        await asyncio.sleep(5)
+                    # Wait until _play_current_track signals a track is about to play,
+                    # or _end_session unblocks us.
+                    await self._presence_wake.wait()
+                    self._presence_wake.clear()
+
+                    # Session may have ended while we were waiting.
+                    if not self.active_session:
                         continue
+
+                    # Listen for playback confirmation with a deadman timeout.
+                    # If _player.play() never fires within 15s, something has
+                    # silently died — treat it as a Discord/playback failure.
+                    try:
+                        await asyncio.wait_for(
+                            self._playback_confirmed.wait(), timeout=15.0,
+                        )
+                        self._playback_confirmed.clear()
+                    except asyncio.TimeoutError:
+                        self.logger.error(
+                            "[Presence] Playback never confirmed within 15s — "
+                            "treating as Discord failure."
+                        )
+                        await self._end_session(
+                            "Discord seems a little unstable today, "
+                            "I'll have to leave the deck for now!"
+                        )
+                        continue
+
+                    # Playback confirmed — update presence with the playing track.
+                    track = self._get_current_track()
+                    if track:
+                        await self._update_playing_presence(track)
+
+                    # Grace period before zombie check — gives teardown time to
+                    # complete if the session ends between now and the check.
+                    await asyncio.sleep(5)
+
+                    if self.active_session:
+                        vc = self.active_session.voice_client
+                        if not vc or not vc.is_connected():
+                            self.logger.warning(
+                                "Zombie voice session detected — VC no longer connected."
+                            )
+                            await self._end_session(
+                                "Voice connection lost (detected by presence loop)."
+                            )
+
+                    continue
 
                 # --- Phase 4: Try to acquire a playlist if we don't have one ---
                 if not self.playlist:
@@ -1554,6 +1598,9 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
                 return
 
             try:
+                # Wake presence loop so it's listening before playback starts.
+                self._playback_confirmed.clear()
+                self._presence_wake.set()
                 await self._play_with_source(track, source)
                 return  # _on_track_end handles what comes next
             except discord.ClientException as e:
@@ -1608,11 +1655,15 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             self.logger.debug(f"[Metadata] Enrichment failed for {track.title}: {e}")
 
     async def _play_with_source(self, track: Track, source: PlayableSource) -> None:
-        """Hand a source to ManagedPlayer and start prefetching the next track."""
+        """Hand a source to ManagedPlayer and start prefetching the next track.
+
+        On successful playback, sets ``_playback_confirmed`` so the presence
+        loop can update presence.  Presence is the loop's responsibility —
+        this method does not touch it.
+        """
         if not self.active_session or not self._player:
             return
 
-        await self._update_playing_presence(track)
         self.track_started_at = time.time()
         self._playback.paused_at_position = None
 
@@ -1643,6 +1694,9 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             if prebuffered is not None:
                 prebuffered.cleanup()
             raise
+
+        # Playback started — tell the presence loop.
+        self._playback_confirmed.set()
 
         # Start prefetching the next track.
         self._clear_prefetch()
@@ -1928,6 +1982,10 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
 
         # 4. Clean up session state
         self.active_session = None
+
+        # Unblock the presence loop so it transitions to idle cycling.
+        self._presence_wake.set()
+        self._playback_confirmed.set()
 
         if self.idle_timeout_task:
             self.idle_timeout_task.cancel()

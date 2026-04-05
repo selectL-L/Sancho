@@ -157,15 +157,16 @@ class SourceAcquisitionMixin:
 
         Args:
             track: Track to acquire a source for.
-            prefetch: If True, stop after direct attempts.  Never touches
-                residential.  The shared attempt counter still advances so
-                live play knows what was already tried.
+            prefetch: If True, stop after free options (ambient cache, direct
+                streaming, residential cache).  Never spends money on
+                residential downloads.  The shared attempt counter still
+                advances so live play knows what was already tried.
 
         Priority:
         1. Ambient cache (high-quality local files from playlist downloads)
         2. Fresh streaming URL via yt-dlp (direct, then residential if needed)
-        3. Residential cache (lower-quality fallback, live only)
-        4. Full file download via residential proxy (live only)
+        3. Residential cache (lower-quality local file, free)
+        4. Full file download via residential proxy (costs money, live only)
 
         Returns ``None`` when all options are exhausted.  The caller can
         inspect ``self._get_attempts(track.video_id).unavailable`` to choose
@@ -198,24 +199,7 @@ class SourceAcquisitionMixin:
                     http_headers=result.http_headers,
                 )
 
-        # Everything below here is the residential path.  Prefetch stops here.
-        if prefetch:
-            logger.info(
-                f"[Acquisition] Direct budget exhausted in prefetch, "
-                f"deferring to live play: {track.title}"
-            )
-            return None
-
-        # ---- Priority 3: residential cache (lower quality fallback) ----------
-        # This is still the residential path -- notify the user so they're not
-        # staring at silence wondering why nothing is happening.
-        if not attempts.notified_residential:
-            attempts.notified_residential = True
-            await self._send_system_message(
-                f"\U0001f504 Hmm, having some trouble with **{track.title}**... "
-                f"Let me try another way!"
-            )
-
+        # ---- Priority 3: residential cache (free local file) -----------------
         residential_local = self.cache_manager.get_any_local_path(
             track.video_id, residential_allowed=True,
         )
@@ -223,6 +207,22 @@ class SourceAcquisitionMixin:
             logger.info(f"[Acquisition] Residential cache hit: {track.title}")
             attempts.last_residential_path = residential_local
             return PlayableSource(local_path=residential_local)
+
+        # Everything below here spends money.  Prefetch stops here.
+        if prefetch:
+            logger.info(
+                f"[Acquisition] Free options exhausted in prefetch, "
+                f"deferring to live play: {track.title}"
+            )
+            return None
+
+        # Notify the user before we start spending on residential downloads.
+        if not attempts.notified_residential:
+            attempts.notified_residential = True
+            await self._send_system_message(
+                f"\U0001f504 Hmm, having some trouble with **{track.title}**... "
+                f"Let me try another way!"
+            )
 
         # ---- Duration policy gate (before spending money) --------------------
         if track.duration > MAX_RESIDENTIAL_PLAYBACK_DURATION_SECONDS:
