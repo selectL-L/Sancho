@@ -799,7 +799,7 @@ class MusicCommandsMixin:
             return False
 
         self._player.stop()
-        await self._play_current_track()
+        self.playback_task = asyncio.create_task(self._play_current_track())
         return True
 
     async def _do_lyrics(self, ctx: commands.Context, query: Optional[str] = None) -> None:

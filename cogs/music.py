@@ -1583,6 +1583,14 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
             # Check prefetch first, fall back to live acquisition.
             source = self._consume_prefetch(track)
             if source is None:
+                # If prefetch already burned the direct budget, there's no
+                # natural yt-dlp delay before the residential notification.
+                # Pause briefly so she looks like she's actually trying.
+                if track.video_id:
+                    attempts = self._get_attempts(track.video_id)
+                    if attempts.direct_plays >= 1:
+                        await asyncio.sleep(random.uniform(1.65, 3.24))
+
                 self.logger.info(f"[Play] Acquiring source for: {track.title}")
                 source = await self._acquire_source(track)
 
