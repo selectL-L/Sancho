@@ -5,19 +5,26 @@ discord.py's built-in ``FFmpegPCMAudio``. The important design points are:
 
 1. Seeking is owned by the source rather than the voice client.
 2. FFmpeg stderr is captured and parsed continuously for recovery decisions.
-3. The decoded PCM output is archived in memory while playback is happening.
+3. The decoded PCM is Opus-encoded by a background producer thread and
+   archived as pre-encoded packets for direct transmission.
 
-That archive is the key to the rebuilt loop-one behavior. Once FFmpeg has
-decoded the track into the archive, loop-one replay is just a read-cursor
-rewind inside the same source object. No fresh yt-dlp resolution, no new
-source construction, and no callback-driven playback restart are needed.
+By encoding Opus in the producer thread (decoupled from playback speed),
+the discord.py AudioPlayer's hot loop only has to send packets — no
+per-frame Opus encoding jitter feeding into its cumulative timing
+correction. Once a track is fully archived, loop-one replay is just a
+read-cursor rewind inside the same source object with zero encoding
+overhead. No fresh yt-dlp resolution, no new source construction, and
+no callback-driven playback restart are needed.
 """
 
+import ctypes
+import ctypes.util
 import dataclasses
 import io
 import os
 import logging
 import shlex
+import struct
 import subprocess
 import sys
 import threading
@@ -33,8 +40,12 @@ from utils.musicutils.music_helpers import FFMPEG_OPTIONS, get_ffmpeg_path, get_
 logger = logging.getLogger(__name__)
 
 # Discord voice uses 48kHz, 2 channels, 16-bit audio.
-# 20 ms of audio = 48_000 * 2 * 2 * 0.02 = 3840 bytes.
+# 20 ms of audio = 48_000 * 2 * 2 * 0.02 = 3840 bytes of PCM input per Opus frame.
 FRAME_SIZE = 3840
+
+# Standard Opus silence frame — same bytes discord.py's send_silence() uses
+# and what the Discord voice docs specify for data interpolation gaps.
+OPUS_SILENCE = b'\xf8\xff\xfe'
 
 
 def _shallow_copy_health(health: FFmpegHealth) -> FFmpegHealth:
@@ -50,25 +61,199 @@ def _shallow_copy_health(health: FFmpegHealth) -> FFmpegHealth:
     return snapshot
 FRAMES_PER_SECOND = 50
 PCM_BYTES_PER_SECOND = FRAME_SIZE * FRAMES_PER_SECOND
-ARCHIVE_READ_BLOCK_SIZE = FRAME_SIZE * 250  # 5 seconds of PCM per producer read.
+
+
+# ==========================================================================
+# Opus encoder — our own ctypes wrapper, independent of discord.py internals.
+#
+# We load the same libopus shared library that discord.py requires for voice
+# but talk to the C ABI directly. This insulates us from discord.py internal
+# changes while depending only on the stable Opus C API (RFC 6716, unchanged
+# since 2012).
+# ==========================================================================
+
+# Opus C API constants (from opus_defines.h)
+_OPUS_OK = 0
+_OPUS_APPLICATION_AUDIO = 2049
+_OPUS_SET_BITRATE = 4002
+_OPUS_SET_BANDWIDTH = 4008
+_OPUS_SET_FEC = 4012
+_OPUS_SET_PLP = 4014
+_OPUS_SET_SIGNAL = 4024
+_OPUS_BANDWIDTH_FULLBAND = 1105
+_OPUS_SIGNAL_AUTO = -1000
+
+_OPUS_SAMPLING_RATE = 48000
+_OPUS_CHANNELS = 2
+_OPUS_SAMPLES_PER_FRAME = 960  # 20ms at 48kHz
+
+_opus_lib: Optional[ctypes.CDLL] = None
+
+
+def _setup_opus_functions(lib: ctypes.CDLL) -> None:
+    """Configure ctypes argtypes/restype for the Opus C functions we call.
+
+    Only the functions used by ``_OpusEncoder`` are configured. The variadic
+    ``opus_encoder_ctl`` deliberately has no argtypes set — ctypes handles
+    additional arguments with default C type promotion.
+    """
+    c_int_p = ctypes.POINTER(ctypes.c_int)
+    c_int16_p = ctypes.POINTER(ctypes.c_int16)
+
+    lib.opus_encoder_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, c_int_p]
+    lib.opus_encoder_create.restype = ctypes.c_void_p
+
+    lib.opus_encode.argtypes = [ctypes.c_void_p, c_int16_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int32]
+    lib.opus_encode.restype = ctypes.c_int32
+
+    lib.opus_encoder_ctl.restype = ctypes.c_int32
+
+    lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
+    lib.opus_encoder_destroy.restype = None
+
+    lib.opus_strerror.argtypes = [ctypes.c_int]
+    lib.opus_strerror.restype = ctypes.c_char_p
+
+
+def _get_opus_lib() -> ctypes.CDLL:
+    """Load and cache our own handle to the libopus shared library.
+
+    The OS deduplicates shared library pages, so loading independently of
+    discord.py's handle costs only a lightweight Python CDLL wrapper — not
+    a second copy of libopus in memory. This avoids coupling to discord.py's
+    errcheck callbacks and argtypes that are set on its shared handle.
+
+    Discovery order:
+      1. System library via ``ctypes.util.find_library('opus')``
+      2. Windows: discord.py's bundled DLL path (same native file, separate
+         Python wrapper)
+
+    Raises:
+        RuntimeError: If libopus cannot be found anywhere.
+    """
+    global _opus_lib
+    if _opus_lib is not None:
+        return _opus_lib
+
+    # System library (works on Linux, macOS, sometimes Windows)
+    lib_name = ctypes.util.find_library('opus')
+    if lib_name:
+        try:
+            _opus_lib = ctypes.cdll.LoadLibrary(lib_name)
+            _setup_opus_functions(_opus_lib)
+            logger.info(f"[Opus] Loaded system libopus: {lib_name}")
+            return _opus_lib
+        except OSError:
+            pass
+
+    # Windows: discord.py bundles the DLL in its package directory
+    if sys.platform == 'win32':
+        try:
+            basedir = os.path.dirname(os.path.abspath(discord.__file__))
+            bitness = struct.calcsize('P') * 8
+            target = 'x64' if bitness > 32 else 'x86'
+            dll_path = os.path.join(basedir, 'bin', f'libopus-0.{target}.dll')
+            _opus_lib = ctypes.cdll.LoadLibrary(dll_path)
+            _setup_opus_functions(_opus_lib)
+            logger.info(f"[Opus] Loaded bundled libopus: {dll_path}")
+            return _opus_lib
+        except OSError:
+            pass
+
+    raise RuntimeError(
+        "Could not find libopus. Install it (apt install libopus0 / brew install opus) "
+        "or ensure discord.py's bundled copy is available."
+    )
+
+
+class _OpusEncoder:
+    """Minimal ctypes wrapper around libopus for producer-side Opus encoding.
+
+    Created per-producer-thread — one encoder per audio source spawn. Loads
+    its own ctypes CDLL handle independently of discord.py (the OS deduplicates
+    the native shared library pages; only the lightweight Python wrapper is new).
+
+    Parameters match discord.py's Encoder defaults to produce Opus packets
+    identical in format to what discord.py's AudioPlayer would have generated.
+    """
+
+    def __init__(self, *, bitrate_kbps: int = 128) -> None:
+        lib = _get_opus_lib()
+        self._lib = lib
+
+        err = ctypes.c_int()
+        self._state = lib.opus_encoder_create(
+            _OPUS_SAMPLING_RATE, _OPUS_CHANNELS,
+            _OPUS_APPLICATION_AUDIO, ctypes.byref(err),
+        )
+        if err.value != _OPUS_OK:
+            msg = lib.opus_strerror(err.value).decode('utf-8', errors='replace')
+            raise RuntimeError(f"opus_encoder_create failed ({err.value}): {msg}")
+
+        # Match discord.py's Encoder defaults exactly
+        lib.opus_encoder_ctl(self._state, _OPUS_SET_BITRATE, bitrate_kbps * 1024)
+        lib.opus_encoder_ctl(self._state, _OPUS_SET_FEC, 1)
+        lib.opus_encoder_ctl(self._state, _OPUS_SET_PLP, 15)  # 15% expected packet loss
+        lib.opus_encoder_ctl(self._state, _OPUS_SET_BANDWIDTH, _OPUS_BANDWIDTH_FULLBAND)
+        lib.opus_encoder_ctl(self._state, _OPUS_SET_SIGNAL, _OPUS_SIGNAL_AUTO)
+
+    def encode(self, pcm: bytes) -> bytes:
+        """Encode one 20ms PCM frame to an Opus packet.
+
+        Args:
+            pcm: Exactly ``FRAME_SIZE`` (3840) bytes of signed 16-bit LE
+                stereo PCM at 48kHz.
+
+        Returns:
+            Variable-size Opus packet (typically 80-320 bytes at 128kbps).
+
+        Raises:
+            RuntimeError: If the Opus encoder returns an error.
+        """
+        pcm_ptr = ctypes.cast(pcm, ctypes.POINTER(ctypes.c_int16))  # type: ignore[arg-type]  # ctypes accepts bytes at runtime
+        max_bytes = len(pcm)  # Conservative upper bound
+        out_buf = (ctypes.c_char * max_bytes)()
+
+        ret = self._lib.opus_encode(
+            self._state, pcm_ptr, _OPUS_SAMPLES_PER_FRAME,
+            out_buf, max_bytes,
+        )
+        if ret < 0:
+            msg = self._lib.opus_strerror(ret).decode('utf-8', errors='replace')
+            raise RuntimeError(f"opus_encode failed ({ret}): {msg}")
+
+        return bytes(out_buf[:ret])
+
+    def destroy(self) -> None:
+        """Explicitly release the encoder. Safe to call multiple times."""
+        if self._state is not None:
+            self._lib.opus_encoder_destroy(self._state)
+            self._state = None
+
+    def __del__(self) -> None:
+        self.destroy()
 
 
 class SeekableAudioSource(discord.AudioSource):
-    """FFmpeg-backed PCM source with seeking and in-memory archive replay.
+    """FFmpeg-backed Opus source with seeking and in-memory archive replay.
 
-    Unlike ``discord.FFmpegPCMAudio``, this source owns a producer/consumer
-    archive of decoded PCM:
+    Unlike ``discord.FFmpegPCMAudio``, this source decodes audio via FFmpeg,
+    Opus-encodes each 20ms frame in a background producer thread, and stores
+    the resulting packets in an in-memory archive:
 
-    - A background producer drains FFmpeg stdout into an in-memory PCM archive.
-    - `read()` serves 20 ms frames from that archive at Discord playback speed.
+    - A background producer drains FFmpeg stdout, applies volume, encodes
+      each PCM frame to Opus, and appends the packet to the archive.
+    - ``read()`` serves pre-encoded Opus packets from that archive — the
+      discord.py AudioPlayer sends them directly with no per-frame encoding.
 
-    This keeps the currently playing track replayable without any fresh source
-    acquisition. When loop one is enabled, the source simply rewinds its own
-    read cursor instead of returning EOF.
+    This eliminates Opus VBR encoding jitter from the real-time playback
+    loop, producing smoother timing at track starts. It also keeps the track
+    replayable without fresh source acquisition. When loop one is enabled,
+    the source simply rewinds its archive cursor instead of returning EOF.
 
-    The source still supports manual ``seek()`` by respawning FFmpeg from a new
-    starting position, but normal clean loop-one repetition never leaves this
-    source object.
+    The source still supports manual ``seek()`` by respawning FFmpeg from a
+    new starting position, but normal clean loop-one repetition never leaves
+    this source object.
     """
 
     def __init__(
@@ -95,8 +280,8 @@ class SeekableAudioSource(discord.AudioSource):
         self._start_position = start_position
         self._is_paused = False
 
-        # Silence frame for paused state.
-        self._silence = b'\x00' * FRAME_SIZE
+        # Opus silence frame for paused state and producer-not-ready gaps.
+        self._silence = OPUS_SILENCE
 
         self._cleaned_up = False
         self._stderr_thread: Optional[threading.Thread] = None
@@ -105,17 +290,16 @@ class SeekableAudioSource(discord.AudioSource):
         self._health: FFmpegHealth = FFmpegHealth()
         self._parser = FFmpegStderrParser()
 
-        # Archive state: producer appends PCM blocks, read() advances an
-        # independent play cursor through those archived blocks.
+        # Archive state: the producer thread Opus-encodes each 20ms PCM frame
+        # from FFmpeg and appends the resulting packet here. read() advances
+        # a simple frame index through the flat packet list.
         self._archive_condition = threading.Condition()
-        self._archive_chunks: list[bytes] = []
-        self._archive_total_bytes = 0
+        self._archive_packets: list[bytes] = []
+        self._archive_total_frames = 0
         self._archive_complete = False
-        self._play_chunk_index = 0
-        self._play_chunk_offset = 0
-        self._play_absolute_bytes = 0
+        self._play_frame_index = 0
         self._repeat_one_enabled = False
-        self._frames_read = 0  # Total frames read from FFmpeg into the archive.
+        self._frames_read = 0  # Total PCM frames consumed from FFmpeg.
 
         self._spawn_ffmpeg(start_position)
 
@@ -188,12 +372,10 @@ class SeekableAudioSource(discord.AudioSource):
         self._parser = FFmpegStderrParser()
 
         with self._archive_condition:
-            self._archive_chunks = []
-            self._archive_total_bytes = 0
+            self._archive_packets = []
+            self._archive_total_frames = 0
             self._archive_complete = False
-            self._play_chunk_index = 0
-            self._play_chunk_offset = 0
-            self._play_absolute_bytes = 0
+            self._play_frame_index = 0
             self._frames_read = 0
             self._archive_condition.notify_all()
 
@@ -269,13 +451,17 @@ class SeekableAudioSource(discord.AudioSource):
             logger.debug(f"[AudioSource] Stderr reader error: {exc}")
 
     def _stdout_reader_loop(self) -> None:
-        """Drain FFmpeg stdout into the in-memory PCM archive.
+        """Drain FFmpeg stdout, Opus-encode each frame, and archive the packets.
 
-        FFmpeg is allowed to run ahead of playback speed. The archive grows as
-        quickly as FFmpeg can decode, while Discord consumes 20 ms frames at
-        real-time speed through ``read()``. That lets short tracks finish fully
-        archiving during prefetch and lets longer tracks continue archiving in
-        the background while the first pass is already playing.
+        FFmpeg is allowed to run (and be encoded) ahead of playback speed.
+        The archive grows as quickly as FFmpeg + our encoder can produce,
+        while Discord consumes one Opus packet per 20ms through ``read()``.
+        Short tracks may finish archiving entirely during prefetch; longer
+        tracks archive in the background while the first pass is already
+        playing.
+
+        The Opus encoder is created and destroyed within this thread — it is
+        never shared across threads.
         """
         if not self._process or not self._process.stdout:
             with self._archive_condition:
@@ -283,116 +469,99 @@ class SeekableAudioSource(discord.AudioSource):
                 self._archive_condition.notify_all()
             return
 
+        encoder: Optional[_OpusEncoder] = None
         remainder = b''
 
         try:
+            encoder = _OpusEncoder()
+
             while True:
-                block = self._process.stdout.read(ARCHIVE_READ_BLOCK_SIZE)
+                # Read enough for exactly one PCM frame, prepending any
+                # leftover bytes from the previous iteration.
+                needed = FRAME_SIZE - len(remainder)
+                block = self._process.stdout.read(needed)
                 if not block:
                     break
 
                 combined = remainder + block
-                complete_bytes = len(combined) - (len(combined) % FRAME_SIZE)
-                if complete_bytes <= 0:
+                if len(combined) < FRAME_SIZE:
+                    # Partial frame — stash and read more.
                     remainder = combined
                     continue
 
-                archive_chunk = combined[:complete_bytes]
-                remainder = combined[complete_bytes:]
+                # Exactly one frame. Apply volume if non-unity, then encode.
+                pcm_frame = combined[:FRAME_SIZE]
+                remainder = combined[FRAME_SIZE:]
+
+                if self._volume != 1.0:
+                    pcm_frame = self._apply_volume(pcm_frame)
+
+                opus_packet = encoder.encode(pcm_frame)
 
                 with self._archive_condition:
-                    self._archive_chunks.append(archive_chunk)
-                    self._archive_total_bytes += len(archive_chunk)
-                    self._frames_read += len(archive_chunk) // FRAME_SIZE
+                    self._archive_packets.append(opus_packet)
+                    self._archive_total_frames += 1
+                    self._frames_read += 1
                     self._archive_condition.notify_all()
         except Exception as exc:
-            logger.warning(f"[AudioSource] Producer read error: {exc}")
+            logger.warning(f"[AudioSource] Producer error: {exc}", exc_info=True)
         finally:
+            if encoder is not None:
+                encoder.destroy()
             if remainder:
                 logger.debug(
-                    f"[AudioSource] Dropping trailing partial PCM block of {len(remainder)} bytes"
+                    f"[AudioSource] Dropping trailing partial PCM of {len(remainder)} bytes"
                 )
             with self._archive_condition:
                 self._archive_complete = True
                 self._archive_condition.notify_all()
 
     def read(self) -> bytes:
-        """Read the next 20 ms frame of audio data.
+        """Read the next pre-encoded Opus packet from the archive.
 
-        Called by discord.py's voice client about 50 times per second.
-
-        The read path serves frames from the in-memory archive, not directly
-        from FFmpeg stdout.  This gives us three important behaviors:
-
-        1. Prefetched audio can start instantly because frames are already in
-           memory.
-        2. Playback can keep going even if FFmpeg has already finished and the
-           URL would otherwise expire later.
-        3. Loop one can be seamless because the source can rewind its archive
-           cursor instead of returning EOF.
+        Called by discord.py's voice client about 50 times per second. Since
+        ``is_opus()`` returns ``True``, the AudioPlayer sends the returned
+        packet directly over UDP without per-frame Opus encoding — eliminating
+        encoding jitter from the playback timing loop.
 
         IMPORTANT: This method must NEVER block.  discord.py's voice sending
         thread calls read() on a tight 20 ms cadence.  If the archive hasn't
-        caught up yet (producer is still decoding), we return a silence frame
-        so the voice connection stays healthy.  The next call will try again.
+        caught up yet (producer is still encoding), we return an Opus silence
+        frame so the voice connection stays healthy.  The next call will try
+        again.
 
         Returns:
-            Exactly ``FRAME_SIZE`` bytes of PCM audio, or ``b''`` only when
-            the source has truly ended and loop one is disabled.
+            A pre-encoded Opus packet, or ``b''`` only when the source has
+            truly ended and loop one is disabled.
         """
         if self._is_paused:
             return self._silence
 
         with self._archive_condition:
-            # Fast path: archive has a full frame ready at the current cursor.
-            if self._play_absolute_bytes + FRAME_SIZE <= self._archive_total_bytes:
-                # Advance past any fully-consumed chunks.
-                while (
-                    self._play_chunk_index < len(self._archive_chunks)
-                    and self._play_chunk_offset >= len(self._archive_chunks[self._play_chunk_index])
-                ):
-                    self._play_chunk_index += 1
-                    self._play_chunk_offset = 0
-
-                if self._play_chunk_index >= len(self._archive_chunks):
-                    # Byte accounting says data exists but the chunk list
-                    # disagrees -- return silence and let the next call retry
-                    # rather than blocking the voice thread.
-                    return self._silence
-
-                chunk = self._archive_chunks[self._play_chunk_index]
-                data = chunk[self._play_chunk_offset:self._play_chunk_offset + FRAME_SIZE]
-                if len(data) != FRAME_SIZE:
-                    logger.warning(
-                        f"[AudioSource] Archive alignment error at chunk {self._play_chunk_index}"
-                    )
-                    return b''
-
-                self._play_chunk_offset += FRAME_SIZE
-                self._play_absolute_bytes += FRAME_SIZE
-
-                if self._volume != 1.0:
-                    return self._apply_volume(data)
-                return data
+            # Fast path: archive has a packet ready at the current cursor.
+            if self._play_frame_index < self._archive_total_frames:
+                packet = self._archive_packets[self._play_frame_index]
+                self._play_frame_index += 1
+                return packet
 
             # Archive is complete -- either loop or signal EOF.
             if self._archive_complete:
-                if self._repeat_one_enabled and self._archive_total_bytes >= FRAME_SIZE:
-                    self._play_chunk_index = 0
-                    self._play_chunk_offset = 0
-                    self._play_absolute_bytes = 0
+                if self._repeat_one_enabled and self._archive_total_frames > 0:
+                    self._play_frame_index = 0
                     # Recurse once to serve the first frame immediately.
                     # _archive_complete + data present guarantees no infinite loop.
                     return self.read()
                 return b''
 
-            # Producer is still decoding -- return silence so the voice
+            # Producer is still encoding -- return Opus silence so the voice
             # connection doesn't stall.  The next read() 20 ms from now will
-            # pick up the newly archived data.
+            # pick up the newly archived packet.
             return self._silence
 
     def _apply_volume(self, data: bytes) -> bytes:
-        """Apply volume scaling to PCM data.
+        """Apply volume scaling to a PCM frame before Opus encoding.
+
+        Called in the producer thread, not on the real-time playback path.
 
         Args:
             data: Raw PCM bytes (signed 16-bit little-endian).
@@ -419,7 +588,7 @@ class SeekableAudioSource(discord.AudioSource):
     def position(self) -> float:
         """Current playback position in seconds relative to the source start."""
         with self._archive_condition:
-            return self._start_position + (self._play_absolute_bytes / PCM_BYTES_PER_SECOND)
+            return self._start_position + (self._play_frame_index / FRAMES_PER_SECOND)
 
     @property
     def is_paused(self) -> bool:
@@ -465,16 +634,10 @@ class SeekableAudioSource(discord.AudioSource):
         if seconds <= 0:
             return True
 
-        rewind_bytes = round(seconds * PCM_BYTES_PER_SECOND)
+        rewind_frames = round(seconds * FRAMES_PER_SECOND)
 
         with self._archive_condition:
-            target_bytes = max(0, self._play_absolute_bytes - rewind_bytes)
-            target_bytes -= target_bytes % FRAME_SIZE
-
-            chunk_index, chunk_offset = self._locate_archive_offset_locked(target_bytes)
-            self._play_chunk_index = chunk_index
-            self._play_chunk_offset = chunk_offset
-            self._play_absolute_bytes = target_bytes
+            self._play_frame_index = max(0, self._play_frame_index - rewind_frames)
             self._archive_condition.notify_all()
             return True
 
@@ -495,23 +658,6 @@ class SeekableAudioSource(discord.AudioSource):
         self._spawn_ffmpeg(position)
         if was_paused:
             self.pause()
-
-    def _locate_archive_offset_locked(self, target_bytes: int) -> tuple[int, int]:
-        """Translate an absolute byte offset into chunk index + chunk offset.
-
-        The caller must already hold ``self._archive_condition``.
-        """
-        if target_bytes <= 0 or not self._archive_chunks:
-            return 0, 0
-
-        remaining = target_bytes
-        for chunk_index, chunk in enumerate(self._archive_chunks):
-            if remaining < len(chunk):
-                return chunk_index, remaining
-            remaining -= len(chunk)
-
-        last_index = len(self._archive_chunks) - 1
-        return last_index, len(self._archive_chunks[last_index])
 
     def prebuffer(self, target_seconds: float = 30.0, min_valid_seconds: float = 30.0) -> bool:
         """Wait until the archive reaches the requested lead buffer.
@@ -540,8 +686,8 @@ class SeekableAudioSource(discord.AudioSource):
             ``False`` if the archive completed or failed before reaching that
             minimum.
         """
-        target_bytes = int(target_seconds * PCM_BYTES_PER_SECOND)
-        min_valid_bytes = int(min_valid_seconds * PCM_BYTES_PER_SECOND)
+        target_frames = int(target_seconds * FRAMES_PER_SECOND)
+        min_valid_frames = int(min_valid_seconds * FRAMES_PER_SECOND)
 
         logger.info(
             f"[AudioSource] Prebuffering: target={target_seconds:.0f}s, "
@@ -549,13 +695,13 @@ class SeekableAudioSource(discord.AudioSource):
         )
 
         with self._archive_condition:
-            while self._archive_total_bytes < target_bytes and not self._archive_complete:
+            while self._archive_total_frames < target_frames and not self._archive_complete:
                 self._archive_condition.wait(timeout=0.05)
 
-            buffered_bytes = self._archive_total_bytes
+            buffered_frames = self._archive_total_frames
 
-        buffered_seconds = buffered_bytes / PCM_BYTES_PER_SECOND
-        is_valid = buffered_bytes >= min_valid_bytes
+        buffered_seconds = buffered_frames / FRAMES_PER_SECOND
+        is_valid = buffered_frames >= min_valid_frames
         logger.debug(
             f"[AudioSource] Prebuffer finished: {buffered_seconds:.1f}s archived, valid={is_valid}"
         )
@@ -563,9 +709,9 @@ class SeekableAudioSource(discord.AudioSource):
 
     @property
     def buffered_seconds(self) -> float:
-        """Seconds of PCM currently archived in memory."""
+        """Seconds of audio currently archived in memory."""
         with self._archive_condition:
-            return self._archive_total_bytes / PCM_BYTES_PER_SECOND
+            return self._archive_total_frames / FRAMES_PER_SECOND
 
     @property
     def frames_read(self) -> int:
@@ -591,20 +737,20 @@ class SeekableAudioSource(discord.AudioSource):
             source_label = f"local:{os.path.basename(self.source)}"
 
         with self._archive_condition:
-            archived_bytes = self._archive_total_bytes
+            archived_frames = self._archive_total_frames
 
-        if archived_bytes > 0:
-            mem_mb = archived_bytes / (1024 * 1024)
-            logger.info(f"[AudioSource] Releasing archive (~{mem_mb:.1f}MB) for {source_label}")
+        if archived_frames > 0:
+            # Estimate memory: Opus packets are much smaller than PCM.
+            # Rough estimate at 128kbps: ~320 bytes/packet average.
+            est_mb = (archived_frames * 320) / (1024 * 1024)
+            logger.info(f"[AudioSource] Releasing archive (~{est_mb:.1f}MB est) for {source_label}")
 
         self._cleanup_process()
 
         with self._archive_condition:
-            self._archive_chunks = []
-            self._archive_total_bytes = 0
-            self._play_chunk_index = 0
-            self._play_chunk_offset = 0
-            self._play_absolute_bytes = 0
+            self._archive_packets = []
+            self._archive_total_frames = 0
+            self._play_frame_index = 0
             self._archive_complete = True
             self._archive_condition.notify_all()
 
@@ -642,8 +788,12 @@ class SeekableAudioSource(discord.AudioSource):
         return self._snapshot_health()
 
     def is_opus(self) -> bool:
-        """Whether this source produces Opus packets (it doesn't)."""
-        return False
+        """Whether this source produces Opus packets.
+
+        Returns ``True`` — the producer thread pre-encodes all audio to Opus
+        so discord.py's AudioPlayer can skip its per-frame encoding step.
+        """
+        return True
 
     def _snapshot_health(self) -> FFmpegHealth:
         """Create a defensive copy of the current parser state."""
