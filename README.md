@@ -1,4 +1,4 @@
-# Shiori (V0.16.1) - That last name was awful, this is the actual music update.
+# Shiori (V0.17.0) - Doomsday appraoches.
 
 **Format**: Major.Minor.Bugfix
 
