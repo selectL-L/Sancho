@@ -853,13 +853,11 @@ class Fun(BaseCog):
         This runs in POST-READY phase after the bot is fully connected,
         ensuring the cache is populated before we check for active chains.
         """
-        self.logger.info("Starting Fun cog...")
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
         self._load_bod_quotes()
         await asyncio.sleep(2)
         await self._cleanup_bod_chains()
-        self.logger.info("Fun cog ready.")
 
     async def _cleanup_bod_chains(self) -> None:
         """Checks for any BOD chains that were active and notifies participants.
