@@ -93,9 +93,12 @@ _opus_lib: Optional[ctypes.CDLL] = None
 def _setup_opus_functions(lib: ctypes.CDLL) -> None:
     """Configure ctypes argtypes/restype for the Opus C functions we call.
 
-    Only the functions used by ``_OpusEncoder`` are configured. The variadic
-    ``opus_encoder_ctl`` deliberately has no argtypes set — ctypes handles
-    additional arguments with default C type promotion.
+    Only the functions used by ``_OpusEncoder`` are configured.
+
+    ``opus_encoder_ctl`` is variadic in C so we cannot set full argtypes.
+    Only restype is set here; callers MUST pass the encoder state as a
+    ``ctypes.c_void_p`` instance (not a bare int) so ctypes preserves
+    pointer width on 64-bit platforms. See ``_OpusEncoder.__init__``.
     """
     c_int_p = ctypes.POINTER(ctypes.c_int)
     c_int16_p = ctypes.POINTER(ctypes.c_int16)
@@ -182,13 +185,18 @@ class _OpusEncoder:
         self._lib = lib
 
         err = ctypes.c_int()
-        self._state = lib.opus_encoder_create(
+        # opus_encoder_create's restype is c_void_p, which ctypes returns as
+        # a plain Python int. We must wrap it back in c_void_p so that
+        # opus_encoder_ctl (variadic, no argtypes) receives a pointer-width
+        # value instead of trying to squeeze a 64-bit address into a C int.
+        raw_ptr = lib.opus_encoder_create(
             _OPUS_SAMPLING_RATE, _OPUS_CHANNELS,
             _OPUS_APPLICATION_AUDIO, ctypes.byref(err),
         )
         if err.value != _OPUS_OK:
             msg = lib.opus_strerror(err.value).decode('utf-8', errors='replace')
             raise RuntimeError(f"opus_encoder_create failed ({err.value}): {msg}")
+        self._state = ctypes.c_void_p(raw_ptr)
 
         # Match discord.py's Encoder defaults exactly
         lib.opus_encoder_ctl(self._state, _OPUS_SET_BITRATE, bitrate_kbps * 1024)

@@ -1,4 +1,4 @@
-# Shiori (V0.17.0) - Doomsday appraoches.
+# Shiori (V0.17.1) - Doomsday appraoches.
 
 **Format**: Major.Minor.Bugfix
 
@@ -25,7 +25,7 @@ Set reminders with natural language. She tries figures out the time from however
 *   **Natural Phrasing**: `remind me in 2 hours to check the laundry` or `remind me next tuesday to visit my nan`.
 *   **Recurring**: `remind me every weekday at 9am to standup` — daily, weekly, monthly, custom intervals.
 *   **Missed Recovery**: If the bot was down when a reminder was due, it gets delivered on startup.
-*   **Timezone Aware**: `set timezone` so she uses *your* local time, not the server's.
+*   **Timezone Aware**: `set timezone` so she uses *your* local time, not her time.
 
 ### 🖼️ File Tools
 Reply to a file with `convert` or `resize`. Handles images, audio, video, animated formats, and cross-category conversions like video-to-GIF.

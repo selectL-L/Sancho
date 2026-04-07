@@ -1131,16 +1131,22 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
         best_score = 0.0
 
         for i, track in enumerate(self.playlist):
-            title_lower = track.title.lower()
-            artist_lower = track.artist.lower()
+            title_lower = track.title.lower() if track.title else ''
+            artist_lower = track.artist.lower() if track.artist else ''
+
+            # Skip tracks with no searchable metadata (e.g. deleted videos)
+            if not title_lower and not artist_lower:
+                continue
 
             # Check for exact substring match (high confidence)
-            if query_lower in title_lower or query_lower in artist_lower:
+            if query_lower in title_lower or (artist_lower and query_lower in artist_lower):
                 # Prefer title matches over artist matches
                 if query_lower in title_lower:
                     score = len(query_lower) / len(title_lower) + 0.5
-                else:
+                elif artist_lower:
                     score = len(query_lower) / len(artist_lower) + 0.3
+                else:
+                    continue
 
                 if score > best_score:
                     best_score = score
@@ -1148,13 +1154,13 @@ class Music(SourceAcquisitionMixin, MusicCommandsMixin, BaseCog):
 
             # Check for word overlap
             query_words = set(query_lower.split())
-            title_words = set(title_lower.split())
-            artist_words = set(artist_lower.split())
+            title_words = set(title_lower.split()) if title_lower else set()
+            artist_words = set(artist_lower.split()) if artist_lower else set()
 
             title_overlap = len(query_words & title_words) / \
                 max(len(query_words), 1)
             artist_overlap = len(query_words & artist_words) / \
-                max(len(query_words), 1)
+                max(len(query_words), 1) if artist_words else 0.0
 
             overlap_score = max(title_overlap * 0.8, artist_overlap * 0.6)
             if overlap_score > best_score:

@@ -612,12 +612,25 @@ async def fetch_url_info(
         if info.get('_type') == 'playlist' or 'entries' in info:
             entries = info.get('entries', [])
 
-            # Check if playlist was truncated
+            # Check if playlist was truncated (before filtering)
             if playlist_limit and len(entries) >= playlist_limit:
                 was_truncated = True
 
+            # Titles yt-dlp uses for inaccessible videos
+            _DEAD_TITLES = {'[Deleted video]', '[Private video]', '[Unavailable video]'}
+
+            skipped = 0
             for entry in entries:
                 if not entry:  # Skip unavailable videos
+                    skipped += 1
+                    continue
+
+                title = entry.get('title', 'Unknown Title')
+
+                # Skip deleted/private videos — they have no usable metadata
+                # and can't be played, but yt-dlp still includes them in flat extraction
+                if title in _DEAD_TITLES:
+                    skipped += 1
                     continue
 
                 # Get video ID from entry or extract from URL
@@ -627,7 +640,7 @@ async def fetch_url_info(
                     video_id = extract_video_id(video_url)
 
                 track = Track(
-                    title=entry.get('title', 'Unknown Title'),
+                    title=title,
                     artist=entry.get('uploader', entry.get('channel', 'Unknown Artist')),
                     url=video_url,
                     duration=int(entry.get('duration', 180) or 180),
@@ -637,13 +650,21 @@ async def fetch_url_info(
                 )
                 tracks.append(track)
 
+            if skipped:
+                logger.info(f"[URL] Skipped {skipped} unavailable entries from playlist")
+
             if not tracks:
                 return [], "The playlist is empty or all videos are unavailable.", None
 
             logger.info(f"[URL] Fetched playlist with {len(tracks)} tracks")
 
-            # Return warning if playlist was truncated
+            # Don't report truncation if we only "lost" dead entries
             warning = None
+            if was_truncated and skipped and playlist_limit:
+                # yt-dlp counted dead entries against our limit, so we got fewer
+                # playable tracks than intended — don't blame the limit
+                was_truncated = len(tracks) >= playlist_limit
+
             if was_truncated:
                 if is_mix_playlist:
                     warning = (
@@ -720,8 +741,15 @@ async def fetch_playlist_metadata(
         tracks: List[Track] = []
         entries = info.get('entries', [])
 
+        # Titles yt-dlp uses for inaccessible videos
+        _DEAD_TITLES = {'[Deleted video]', '[Private video]', '[Unavailable video]'}
+
         for entry in entries:
             if not entry:  # Skip unavailable videos
+                continue
+
+            title = entry.get('title', 'Unknown Title')
+            if title in _DEAD_TITLES:
                 continue
 
             # Get video ID from entry or extract from URL

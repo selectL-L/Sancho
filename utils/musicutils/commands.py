@@ -1347,10 +1347,19 @@ class MusicCommandsMixin:
             position = int(match.group(1))
             await self._do_jump(ctx, position)
         else:
-            await ctx.send(
-                f"🎵 Currently on track **#{self.current_index + 1}** of {len(self.playlist)}.\n"
-                "Usage: `jump 5` to jump to track #5"
-            )
+            # Try name-based search
+            clean = re.sub(r'\b(jump|goto|go\s*to|to)\b', '', query, flags=re.IGNORECASE).strip()
+            if clean:
+                target_index = self._find_track_by_query(clean)
+                if target_index is not None:
+                    await self._do_jump(ctx, target_index + 1)
+                    return
+                await ctx.send(f"Couldn't find a track matching '{clean}'.")
+            else:
+                await ctx.send(
+                    f"🎵 Currently on track **#{self.current_index + 1}** of {len(self.playlist)}.\n"
+                    "Usage: `jump 5` or `jump snowfall`"
+                )
 
     @music_cooldown
     async def loop_nlp(self, ctx: commands.Context, query: str) -> None:
