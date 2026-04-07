@@ -195,6 +195,48 @@ _pending_system_shutdown: Optional[PendingSystemShutdown] = None
 # Shared Utilities
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _silent_marker_path() -> str:
+    """Returns the path to the silent restart marker file.
+
+    Returns:
+        Absolute path under APP_PATH.
+    """
+    return os.path.join(config.APP_PATH, "silent_restart.marker")
+
+
+def _write_silent_marker() -> None:
+    """Writes the silent restart marker so the next boot suppresses its startup message.
+
+    Called during shutdown when the reason is RESTART (plain SIGUSR1).
+    """
+    path = _silent_marker_path()
+    try:
+        with open(path, 'w') as f:
+            f.write('')
+        logging.info(f"Silent restart marker written to {path}")
+    except OSError as e:
+        logging.error(f"Failed to write silent restart marker: {e}", exc_info=True)
+
+
+def _consume_silent_marker() -> bool:
+    """Checks for and deletes the silent restart marker file.
+
+    Returns:
+        True if the marker existed and was successfully consumed.
+        False if the marker was absent or could not be deleted.
+    """
+    path = _silent_marker_path()
+    try:
+        os.remove(path)
+        logging.info("Silent restart marker consumed")
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logging.error(f"Failed to consume silent restart marker: {e}", exc_info=True)
+        return False
+
+
 def log_phase(phase: str) -> None:
     """Logs a phase separator with fold markers for Notepad++ collapsing.
 
@@ -523,7 +565,7 @@ def build_shutdown_context(
             logging.info("Shutdown context: SIGUSR1 with apt-daily-upgrade active → UPGRADE_RESTART")
         else:
             reason = ShutdownReason.RESTART
-            logging.info("Shutdown context: SIGUSR1 without apt-daily-upgrade → RESTART")
+            logging.info("Shutdown context: SIGUSR1 without apt-daily-upgrade → RESTART (silent)")
 
     elif _pending_system_shutdown is not None:
         # SIGTERM with D-Bus context — system is going down.
@@ -762,8 +804,15 @@ async def startup_handler(bot: "CoreBot") -> None:
     except Exception as e:
         logging.error(f"Failed to sync app commands: {e}")
 
-    # Send startup message
-    if config.SYSTEM_CHANNEL_ID:
+    # Check for silent restart marker — if present, suppress the startup message
+    _silent_boot = _consume_silent_marker()
+    if _silent_boot:
+        logging.info("Silent restart detected — startup message suppressed")
+
+    # Send startup message (skipped on silent restart)
+    if _silent_boot:
+        pass  # Already logged above
+    elif config.SYSTEM_CHANNEL_ID:
         try:
             channel = bot.get_channel(config.SYSTEM_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
@@ -803,6 +852,28 @@ async def startup_handler(bot: "CoreBot") -> None:
         await bot.resource_tracker.start()
         logging.info(f"[ResourceTracker] Started ({config.RESOURCE_TRACK_INTERVAL} min interval)")
 
+    # Safety-net: verify the silent restart marker was consumed.
+    # If something crashed between marker write and primary consume, this catches it.
+    async def _marker_safety_check() -> None:
+        await asyncio.sleep(300)  # 5 minutes
+        marker_path = _silent_marker_path()
+        if not os.path.exists(marker_path):
+            logging.debug("Marker safety check: clean (no stale marker)")
+            return
+        # Marker still on disk — attempt to consume it
+        result = _consume_silent_marker()
+        if result:
+            logging.warning("Stale silent restart marker consumed by safety check — primary consume may have failed")
+        else:
+            # _consume_silent_marker logged its own error with exc_info,
+            # but the marker file still exists — escalate
+            logging.error(
+                f"Silent restart marker exists at {marker_path} but could not be consumed "
+                "— check file permissions"
+            )
+
+    asyncio.create_task(_marker_safety_check())  # noqa: RUF006
+
 
 async def shutdown_handler(
     sig: signal.Signals,
@@ -838,16 +909,22 @@ async def shutdown_handler(
     context = build_shutdown_context(sig, reason)
     logging.info(f"Shutdown reason: {context.reason.value}")
 
+    # Silent restart: suppress goodbye message and write marker for next boot
+    silent = context.reason == ShutdownReason.RESTART
+    if silent:
+        _write_silent_marker()
+
     # Concurrent shutdown work: cog teardown + messaging run in parallel.
     # The bot is still connected during all of this — no risk of the Discord
     # connection dying before messages are sent.
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_teardown_cogs_ordered(bot, context))
-        tg.create_task(_send_goodbye_message(bot, context))
+        if not silent:
+            tg.create_task(_send_goodbye_message(bot, context))
         if context.reason in _OWNER_NOTIFY_REASONS:
             tg.create_task(_send_owner_notification(bot, context))
 
-    logging.info("Teardown tasks complete (cogs unloaded, goodbye sent)")
+    logging.info("Teardown tasks complete (cogs unloaded%s)" % (", goodbye suppressed (silent restart)" if silent else ", goodbye sent"))
 
     # Stop resource tracker (after cogs, uses their timing data)
     if hasattr(bot, 'resource_tracker') and bot.resource_tracker:
