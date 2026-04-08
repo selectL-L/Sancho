@@ -1798,45 +1798,49 @@ class Starboard(BaseCog):
             sb_msg_id = entry.get('starboard_message_id')
 
             if result.status == VerifyStatus.UNWORTHY:
-                # Demote to unworthy visual
-                if sb_msg_id:
-                    try:
-                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
-                        channel_id = entry.get('original_channel_id')
-                        ch = self.bot.get_channel(channel_id) if channel_id else None
-                        if isinstance(ch, MessageableGuildChannel) and original_id:
-                            try:
-                                original_msg = await ch.fetch_message(original_id)
-                                await self._edit_to_unworthy(
-                                    sb_msg, original_msg, entry.get('star_count', 0), starboard_emoji
-                                )
-                            except discord.NotFound:
-                                self.logger.info(f"Original {original_id} gone during unworthy demotion.")
-                            except discord.HTTPException as e:
-                                self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}", exc_info=True)
-                    except discord.NotFound:
-                        self.logger.info(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
-                    except discord.HTTPException as e:
-                        self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}", exc_info=True)
+                if entry.get('is_unworthy') == 1:
+                    # Already visually demoted — skip Discord edits, just sync DB
+                    pass
+                else:
+                    # Newly unworthy — demote visually (rate-limited)
+                    if sb_msg_id:
+                        try:
+                            sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, sb_msg_id)
+                            channel_id = entry.get('original_channel_id')
+                            ch = self.bot.get_channel(channel_id) if channel_id else None
+                            if isinstance(ch, MessageableGuildChannel) and original_id:
+                                try:
+                                    original_msg = await self._run_rate_limited(ch.fetch_message, original_id)
+                                    await self._edit_to_unworthy(
+                                        sb_msg, original_msg, entry.get('star_count', 0), starboard_emoji
+                                    )
+                                except discord.NotFound:
+                                    self.logger.info(f"Original {original_id} gone during unworthy demotion.")
+                                except discord.HTTPException as e:
+                                    self.logger.error(f"Failed to fetch original {original_id} for demotion: {e}", exc_info=True)
+                        except discord.NotFound:
+                            self.logger.info(f"Starboard message {sb_msg_id} gone during unworthy demotion.")
+                        except discord.HTTPException as e:
+                            self.logger.error(f"Failed to fetch starboard message {sb_msg_id} for demotion: {e}", exc_info=True)
 
-                # Edit reply context to placeholder if present
-                reply_id = entry.get('starboard_reply_id')
-                if reply_id:
-                    await self._edit_reply_to_placeholder(starboard_channel, reply_id)
+                    # Edit reply context to placeholder if present
+                    reply_id = entry.get('starboard_reply_id')
+                    if reply_id:
+                        await self._edit_reply_to_placeholder(starboard_channel, reply_id)
 
-                entry['is_unworthy'] = 1
-                result.needs_db_update = True
+                    entry['is_unworthy'] = 1
+                    result.needs_db_update = True
 
             elif result.status == VerifyStatus.HEALTHY and entry.get('is_unworthy') == 1:
-                # Re-promote — threshold lowered or stars added since last check
+                # Re-promote — threshold lowered or stars added since last check (rate-limited)
                 if sb_msg_id:
                     try:
-                        sb_msg = await starboard_channel.fetch_message(sb_msg_id)
+                        sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, sb_msg_id)
                         channel_id = entry.get('original_channel_id')
                         ch = self.bot.get_channel(channel_id) if channel_id else None
                         if isinstance(ch, MessageableGuildChannel) and original_id:
                             try:
-                                original_msg = await ch.fetch_message(original_id)
+                                original_msg = await self._run_rate_limited(ch.fetch_message, original_id)
                                 await self._restore_from_unworthy(
                                     sb_msg, original_msg, entry.get('star_count', 0),
                                     starboard_emoji, starboard_channel,
@@ -1883,23 +1887,23 @@ class Starboard(BaseCog):
             entry = result.entry
             original_id = entry.get('original_message_id', 0)
 
-            # Delete starboard message from Discord
+            # Delete starboard message from Discord (rate-limited)
             sb_msg_id = entry.get('starboard_message_id')
             if sb_msg_id:
                 try:
-                    sb_msg = await starboard_channel.fetch_message(sb_msg_id)
-                    await sb_msg.delete()
+                    sb_msg = await self._run_rate_limited(starboard_channel.fetch_message, sb_msg_id)
+                    await self._run_rate_limited(sb_msg.delete)
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
                     self.logger.error(f"Failed to delete starboard message {sb_msg_id} for banned entry: {e}", exc_info=True)
 
-            # Delete reply context message from Discord
+            # Delete reply context message from Discord (rate-limited)
             reply_id = entry.get('starboard_reply_id')
             if reply_id:
                 try:
-                    reply_msg = await starboard_channel.fetch_message(reply_id)
-                    await reply_msg.delete()
+                    reply_msg = await self._run_rate_limited(starboard_channel.fetch_message, reply_id)
+                    await self._run_rate_limited(reply_msg.delete)
                 except discord.NotFound:
                     pass
                 except discord.HTTPException as e:
