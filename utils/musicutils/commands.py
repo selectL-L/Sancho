@@ -152,6 +152,42 @@ def music_cooldown(func: NlpHandler) -> NlpHandler:
     return wrapper
 
 
+def check_voice_match(
+    author: discord.abc.User,
+    channel_id: int,
+    owner_ids: set[int],
+) -> tuple[bool, Optional[str]]:
+    """Check whether a user is in the same voice channel as the bot.
+
+    Shared logic used by the @requires_voice decorator, inline NLP checks,
+    and NowPlayingView button guards. Any change to VC authorization policy
+    should be made here so all call sites stay consistent.
+
+    Args:
+        author: The Discord user to check (Member with .voice, or User).
+        channel_id: The voice channel ID the bot is currently in.
+        owner_ids: Set of bot owner IDs (bypasses the check).
+
+    Returns:
+        Tuple of (passed, error_message). If passed is True, error_message
+        is None. If passed is False, error_message is a user-facing string.
+    """
+    # Check 1: Bot owners bypass VC check (debugging)
+    if author.id in owner_ids:
+        return True, None
+
+    # Check 2: Is user in a voice channel?
+    author_voice = getattr(author, 'voice', None)
+    if not author_voice or not author_voice.channel:
+        return False, "You need to be in the voice channel to control playback!"
+
+    # Check 3: Is user in the SAME channel as the bot?
+    if author_voice.channel.id != channel_id:
+        return False, "You need to be in the voice channel to control playback!"
+
+    return True, None
+
+
 def requires_voice(func: NlpHandler) -> NlpHandler:
     """Decorator for NLP handlers that require the user to be in VC with the bot.
 
@@ -160,7 +196,8 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
     2. User is bot owner (bypass for debugging) OR
     3. User is in the same voice channel as the bot
 
-    Sends appropriate error message and returns early if check fails.
+    Delegates the actual VC comparison to check_voice_match() so the logic
+    is shared with inline checks and view guards.
 
     Usage:
         @requires_voice
@@ -175,22 +212,12 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
             await ctx.send("I'm not playing music right now!")
             return
 
-        # Check 2: Bot owners bypass VC check (debugging)
-        if ctx.author.id in self.bot.owner_ids:
-            await func(self, ctx, query)
-            return
-
-        # Check 3: Is user in a voice channel?
-        author_voice = getattr(ctx.author, 'voice', None)
-        if not author_voice or not author_voice.channel:
-            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: not in a voice channel")
-            await ctx.send("You need to be in the voice channel to control playback!")
-            return
-
-        # Check 4: Is user in the SAME channel as the bot?
-        if author_voice.channel.id != self.active_session.channel_id:
-            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: in different channel")
-            await ctx.send("You need to be in the voice channel to control playback!")
+        passed, error_msg = check_voice_match(
+            ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+        )
+        if not passed:
+            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: {error_msg}")
+            await ctx.send(error_msg)
             return
 
         await func(self, ctx, query)
@@ -503,6 +530,15 @@ class MusicCommandsMixin:
             # Already in session - append to playlist
             if ctx.guild and self.active_session.guild_id != ctx.guild.id:
                 await ctx.send("I'm currently playing in another server!")
+                return
+
+            # VC check: queuing into an active session requires being in the channel
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on queue: {error_msg}")
+                await ctx.send(error_msg)
                 return
 
             moved_tracks: List[Track] = []
@@ -1214,13 +1250,21 @@ class MusicCommandsMixin:
         song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
 
         if not song_query:
-            # Treat as resume
+            # Treat as resume — requires VC since it controls playback state
             if not self.active_session:
                 await ctx.send("I'm not in a voice channel! Type 'listen along' to start.")
                 return
 
             if ctx.guild and self.active_session.guild_id != ctx.guild.id:
                 await ctx.send("I'm not playing music in this server!")
+                return
+
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on resume: {error_msg}")
+                await ctx.send(error_msg)
                 return
 
             if self._player and self._player.is_playing:
@@ -1292,6 +1336,8 @@ class MusicCommandsMixin:
             on_skip=self.skip_track,
             on_shuffle=self.shuffle_playlist,
             on_loop=self.cycle_loop_mode,
+            voice_channel_id=self.active_session.channel_id if self.active_session else None,
+            bot_owner_ids=self.bot.owner_ids,
         )
 
         if loading_msg:
@@ -1418,9 +1464,9 @@ class MusicCommandsMixin:
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for leave/disconnect requests.
 
-        Does NOT use @requires_voice because it needs to clean up ghost
-        voice connections where active_session is None but discord.py's
-        VoiceClient is still connected.
+        Does NOT use @requires_voice because the ghost cleanup path needs
+        to work without an active session. The normal path has an inline
+        VC check via check_voice_match() instead.
         """
         if not self._cog_is_ready:
             await self._not_ready_response(ctx)
@@ -1428,12 +1474,21 @@ class MusicCommandsMixin:
 
         # Normal case: active session exists, end it properly.
         if self.active_session:
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on leave: {error_msg}")
+                await ctx.send(error_msg)
+                return
+
             self.logger.info(f"[Play] Leave requested by user {ctx.author.id}: disconnecting from voice")
             await self._end_session("Disconnected by user request.")
             await ctx.send("👋 Disconnected!")
             return
 
         # Ghost case: no active session but discord.py still has a VC.
+        # Permissive — anyone can clean up a ghost since it's a bug state.
         if not ctx.guild:
             await ctx.send("I'm not in a voice channel right now!")
             return

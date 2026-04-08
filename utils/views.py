@@ -378,6 +378,8 @@ class NowPlayingView(ui.LayoutView):
         on_shuffle: Optional[ShuffleAction] = None,
         on_loop: Optional[LoopAction] = None,
         timeout: float = 300.0,
+        voice_channel_id: Optional[int] = None,
+        bot_owner_ids: Optional[set[int]] = None,
     ):
         """Initialize the now playing view.
 
@@ -391,6 +393,9 @@ class NowPlayingView(ui.LayoutView):
             on_shuffle: Action callback for shuffle button.
             on_loop: Action callback for loop mode toggle.
             timeout: View timeout in seconds.
+            voice_channel_id: The bot's current voice channel ID. When set,
+                button interactions are restricted to users in this channel.
+            bot_owner_ids: Bot owner IDs that bypass the VC check.
         """
         super().__init__(timeout=timeout)
         self.state = state
@@ -400,6 +405,8 @@ class NowPlayingView(ui.LayoutView):
         self._on_shuffle = on_shuffle
         self._on_loop = on_loop
         self._thumbnail_url = state.thumbnail_url
+        self._voice_channel_id = voice_channel_id
+        self._bot_owner_ids = bot_owner_ids or set()
 
         self._build_ui()
 
@@ -498,6 +505,35 @@ class NowPlayingView(ui.LayoutView):
 
         self.add_item(container)
 
+    async def _check_voice(self, interaction: discord.Interaction) -> bool:
+        """Check whether the interacting user is in the bot's voice channel.
+
+        This is the view-layer counterpart to check_voice_match() in
+        musicutils/commands.py. The authoritative VC-check logic lives in
+        that shared helper; this method exists because the view owns its
+        buttons and should gate access at the interaction boundary before
+        any callback fires. Both implementations share the same policy:
+        owner bypass, then same-channel check.
+
+        Args:
+            interaction: The button interaction to validate.
+
+        Returns:
+            True if the user may proceed, False if rejected (ephemeral
+            message already sent).
+        """
+        if self._voice_channel_id is None:
+            return True  # No VC restriction configured
+
+        from utils.musicutils.commands import check_voice_match
+        passed, error_msg = check_voice_match(
+            interaction.user, self._voice_channel_id, self._bot_owner_ids,
+        )
+        if not passed:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+            return False
+        return True
+
     async def _refresh_and_edit(self, interaction: discord.Interaction, new_files: Optional[List[discord.File]] = None) -> None:
         """Refresh state, rebuild UI, and edit the message.
 
@@ -515,12 +551,16 @@ class NowPlayingView(ui.LayoutView):
 
     async def _handle_play_pause(self, interaction: discord.Interaction) -> None:
         """Handle play/pause button click."""
+        if not await self._check_voice(interaction):
+            return
         if self._on_play_pause:
             await self._on_play_pause()
         await self._refresh_and_edit(interaction)
 
     async def _handle_skip(self, interaction: discord.Interaction) -> None:
         """Handle skip button click."""
+        if not await self._check_voice(interaction):
+            return
         if not self._on_skip:
             await interaction.response.send_message("Skip not available.", ephemeral=True)
             return
@@ -540,6 +580,8 @@ class NowPlayingView(ui.LayoutView):
 
     async def _handle_shuffle(self, interaction: discord.Interaction) -> None:
         """Handle shuffle button click."""
+        if not await self._check_voice(interaction):
+            return
         if self._on_shuffle:
             await self._on_shuffle()
             await interaction.response.send_message("🔀 Playlist shuffled!", ephemeral=True)
@@ -548,6 +590,8 @@ class NowPlayingView(ui.LayoutView):
 
     async def _handle_loop(self, interaction: discord.Interaction) -> None:
         """Handle loop button click."""
+        if not await self._check_voice(interaction):
+            return
         if self._on_loop:
             await self._on_loop()
         await self._refresh_and_edit(interaction)
@@ -604,7 +648,12 @@ class MusicPlayerProtocol(Protocol):
         ...
 
 
-async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -> None:
+async def show_now_playing(
+    ctx: commands.Context,
+    player: MusicPlayerProtocol,
+    voice_channel_id: Optional[int] = None,
+    bot_owner_ids: Optional[set[int]] = None,
+) -> None:
     """Display an interactive now playing widget.
 
     This is the preferred API for showing the now playing view. It handles
@@ -614,6 +663,9 @@ async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -
     Args:
         ctx: The command context.
         player: Object implementing MusicPlayerProtocol (typically the Music cog).
+        voice_channel_id: The bot's current voice channel ID. When set,
+            button interactions are restricted to users in this channel.
+        bot_owner_ids: Bot owner IDs that bypass the VC check.
     """
     # Fetch thumbnail
     thumbnail_bytes = await player.get_current_thumbnail()
@@ -648,6 +700,8 @@ async def show_now_playing(ctx: commands.Context, player: MusicPlayerProtocol) -
         on_skip=do_skip,
         on_shuffle=do_shuffle,
         on_loop=do_loop,
+        voice_channel_id=voice_channel_id,
+        bot_owner_ids=bot_owner_ids,
     )
 
     if files:
