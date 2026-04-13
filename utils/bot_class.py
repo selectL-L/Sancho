@@ -9,8 +9,6 @@ This class is the central hub of the bot's functionality. It is responsible for:
 - Encapsulating bot-specific configuration and helper methods.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re
@@ -25,6 +23,19 @@ from discord.ext import commands
 import config
 from utils.extensions import discover_cogs
 from utils.lifecycle import startup_handler
+
+# Module-level logger for bot infrastructure
+logger = logging.getLogger(__name__)
+
+
+class SlashUnsupportedError(Exception):
+    """Raised when an NLP handler accesses context that slash commands cannot provide.
+
+    The adapter's stub objects raise this when handlers try to access attributes
+    like message.reference or message.attachments, which structurally don't exist
+    on slash interactions. ``dispatch_nlp`` catches this and sends a user-facing
+    message explaining the limitation.
+    """
 
 # Import the type hint for the database manager, but only for type checking
 # to avoid circular imports at runtime.
@@ -47,6 +58,7 @@ class CoreBot(commands.Bot):
         intents = discord.Intents.default()
         intents.messages = True
         intents.message_content = True
+        intents.members = True  # Required for guild.get_member() to work from cache
 
         # Call super().__init__ with all configuration handled internally.
         # We pass `owner_ids` to prevent auto-fetching application info.
@@ -67,13 +79,97 @@ class CoreBot(commands.Bot):
         self.start_time: float = time.time()
         self._dynamic_nlp_groups: list[list[tuple[tuple[str, ...], str, str]]] = []
 
+        # Visibility control - determines Discord presence status
+        # Maps string names to discord.Status enum values
+        self._visibility_map = {
+            'online': discord.Status.online,
+            'idle': discord.Status.idle,
+            'dnd': discord.Status.dnd,
+            'invisible': discord.Status.invisible,
+        }
+        self._current_visibility: discord.Status = self._visibility_map.get(
+            config.DEFAULT_VISIBILITY, discord.Status.online
+        )
+
+    # =========================================================================
+    # VISIBILITY CONTROL
+    # =========================================================================
+
+    @property
+    def current_visibility(self) -> discord.Status:
+        """The current visibility status for the bot."""
+        return self._current_visibility
+
+    @property
+    def is_visible(self) -> bool:
+        """Whether the bot is currently visible (not invisible)."""
+        return self._current_visibility != discord.Status.invisible
+
+    async def set_visibility(self, status: str) -> bool:
+        """Set the bot's visibility status.
+
+        Args:
+            status: One of 'online', 'idle', 'dnd', 'invisible'.
+
+        Returns:
+            True if the status was changed, False if invalid status.
+        """
+        if status not in self._visibility_map:
+            return False
+
+        self._current_visibility = self._visibility_map[status]
+        logger.info(f"Visibility changed to: {status}")
+
+        # Apply the new visibility immediately
+        # If invisible, clear activity; otherwise preserve current activity
+        if self._current_visibility == discord.Status.invisible:
+            await self.change_presence(status=self._current_visibility, activity=None)
+        else:
+            # Re-apply current activity with new status
+            # This triggers the presence loop to update if needed
+            await self.change_presence(status=self._current_visibility)
+
+        return True
+
+    async def change_presence_safe(
+        self,
+        *,
+        activity: Optional[discord.BaseActivity] = discord.utils.MISSING,
+        status: Optional[discord.Status] = None,
+    ) -> None:
+        """Change presence respecting the current visibility setting.
+
+        Use this instead of `change_presence` when the bot should NOT
+        override an invisible status (e.g., music presence cycling).
+
+        Args:
+            activity: The activity to set. Use None to clear.
+            status: The status to set. If None, uses current visibility.
+        """
+        # If bot is invisible, skip presence updates entirely
+        if self._current_visibility == discord.Status.invisible:
+            logger.debug("Presence update suppressed (bot is invisible)")
+            return
+
+        # Use current visibility if no status specified
+        effective_status = status if status is not None else self._current_visibility
+
+        if activity is discord.utils.MISSING:
+            await self.change_presence(status=effective_status)
+        else:
+            await self.change_presence(activity=activity, status=effective_status)
+
     @runtime_checkable
     class ContextLike(Protocol):
         """A Protocol describing the minimal Context-like object required by NLP handlers."""
         author: Any
         guild: Any
         channel: Any
+        prefix: str
+        message: Any
         async def send(self, *args, **kwargs) -> Any: ...
+        async def reply(self, *args, **kwargs) -> Any: ...
+        def typing(self) -> Any: ...
 
     async def dispatch_nlp(self, ctx: "CoreBot.ContextLike", query: str) -> None:
         """Dispatch a natural-language `query` using the NLP dispatcher logic.
@@ -90,6 +186,7 @@ class CoreBot(commands.Bot):
             q_lower = query.lower()
             handler = self.find_nlp_handler(q_lower)
             if not handler:
+                logger.info(f"Slash NLP query: '{query}' → no match")
                 return
 
             _cog, method, _method_name = handler
@@ -99,9 +196,19 @@ class CoreBot(commands.Bot):
                 assert method is not None
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, lambda: method(ctx, query=query))
+        except SlashUnsupportedError as e:
+            logger.info(f"Slash NLP hit unsupported feature: {e}")
+            try:
+                await ctx.send(
+                    f"\u26a0\ufe0f This feature requires context that slash commands can't provide "
+                    f"({e}). Please use a prefix command instead!"
+                )
+            except Exception:
+                pass
         except Exception:
             try:
-                logging.getLogger(__name__).exception("Error dispatching NLP query")
+                logger.exception("Error dispatching NLP query")
+                await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
             except Exception:
                 pass
 
@@ -146,12 +253,12 @@ class CoreBot(commands.Bot):
 
         cog = self.get_cog(cog_name)
         if not cog:
-            logging.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
+            logger.error(f"NLP dispatcher: Winning cog '{cog_name}' is not loaded.")
             return None
 
         method = getattr(cog, method_name, None)
         if not method:
-            logging.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' not found.")
+            logger.error(f"NLP dispatcher: Winning method '{method_name}' in '{cog_name}' not found.")
             return None
 
         return cog, method, method_name
@@ -168,6 +275,7 @@ class CoreBot(commands.Bot):
                 (keyword_patterns, cog_name, method_name).
         """
         self._dynamic_nlp_groups.append(entries)
+        logger.info(f"[NLP] Dynamic group registered ({len(entries)} entries)")
 
     def register_nlp_command(self) -> None:
         """Registers the /nlp slash command if not already registered.
@@ -180,10 +288,14 @@ class CoreBot(commands.Bot):
 
         async def _nlp_app(interaction: discord.Interaction, query: str):
             # Log command usage similar to how prefix-based NLP does it.
-            logging.info(f"slash NLP query from '{interaction.user}': '{query}'")
+            logger.info(f"slash NLP query from '{interaction.user}': '{query}'")
             try:
                 # Immediately acknowledge the slash command with an ephemeral message, prevents persistent "thinking" state.
-                await interaction.response.send_message("Forwarding query to NLP...", ephemeral=True)
+                await interaction.response.send_message(
+                    "Forwarding query to NLP... "
+                    "(Note: `/nlp` is not fully supported — some features may require a prefix command.)",
+                    ephemeral=True
+                )
             except Exception:
                 # If sending the ephemeral message fails, try to defer as a fallback.
                 try:
@@ -192,20 +304,75 @@ class CoreBot(commands.Bot):
                     pass
 
             ctx_adapter = CoreBot.InteractionContextAdapter(self, interaction)
-            # Run the NLP dispatcher; no need to await in a special way —
-            # the user already received the ephemeral message.
             await self.dispatch_nlp(ctx_adapter, query)
 
         cmd = app_commands.Command(name='nlp', description='Forward a natural-language query to the NLP dispatcher', callback=_nlp_app)
         self.tree.add_command(cmd)
-        logging.info("Registered /nlp application command")
+        logger.info("Registered /nlp application command")
+
+    class _StubMessage:
+        """A proxy object standing in for `ctx.message` in slash interactions.
+
+        Slash commands don't produce a `discord.Message`, so attributes like
+        ``reference``, ``attachments``, and ``mentions`` are structurally
+        unavailable. Accessing them raises `SlashUnsupportedError`, which
+        ``dispatch_nlp`` catches and converts into a user-facing message.
+        """
+
+        def _raise(self, attr: str):
+            """Raises `SlashUnsupportedError` for the given attribute.
+
+            Args:
+                attr: The attribute name that was accessed.
+
+            Raises:
+                SlashUnsupportedError: Always.
+            """
+            raise SlashUnsupportedError(f"message.{attr}")
+
+        @property
+        def reference(self):
+            """Raises — slash commands have no reply reference."""
+            self._raise("reference")
+
+        @property
+        def attachments(self) -> list:
+            """Raises — slash commands have no attachments."""
+            self._raise("attachments")
+
+        @property
+        def mentions(self) -> list:
+            """Raises — slash commands have no parsed mentions list."""
+            self._raise("mentions")
+
+        def __getattr__(self, name: str):
+            """Catch-all for any other attribute access on the stub.
+
+            Args:
+                name: The attribute being accessed.
+
+            Raises:
+                SlashUnsupportedError: Always.
+            """
+            self._raise(name)
+
+    class _NoOpTyping:
+        """A no-op async context manager standing in for `ctx.typing()`."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
 
     class InteractionContextAdapter:
-        """A thin adapter that exposes the subset of `commands.Context` used by NLP handlers.
+        """Adapter that exposes a `commands.Context`-like interface backed by a `discord.Interaction`.
 
-        Backed by a `discord.Interaction`. Many NLP handlers expect `ctx.author`,
-        `ctx.guild`, `ctx.channel`, and `await ctx.send(...)`. This adapter
-        provides those attributes and maps `send` to the interaction response/followup.
+        Provides the attributes NLP handlers commonly access: ``author``, ``guild``,
+        ``channel``, ``prefix``, ``send()``, ``reply()``, ``typing()``, and a stub
+        ``message``. Attributes that slash commands structurally cannot provide
+        (e.g. ``message.reference``) raise `SlashUnsupportedError` on access so the
+        dispatcher can inform the user.
         """
 
         def __init__(self, bot: "CoreBot", interaction: discord.Interaction):
@@ -221,6 +388,19 @@ class CoreBot(commands.Bot):
             self.guild = interaction.guild
             # `interaction.channel` can be None in some contexts; keep reference
             self.channel = interaction.channel
+            self.prefix: str = config.BOT_PREFIX[0] if config.BOT_PREFIX else ". "
+            self.message = CoreBot._StubMessage()
+
+        def typing(self):
+            """Returns a no-op async context manager.
+
+            Slash interactions don't benefit from typing indicators since the
+            user already received the ephemeral acknowledgement.
+
+            Returns:
+                _NoOpTyping: A no-op context manager.
+            """
+            return CoreBot._NoOpTyping()
 
         async def _send_to_channel(self, *args, **kwargs):
             """Helper to attempt sending via the channel if possible.
@@ -268,6 +448,15 @@ class CoreBot(commands.Bot):
                 except Exception:
                     return None
 
+        async def reply(self, *args, **kwargs):
+            """Maps ``ctx.reply()`` to ``send()``.
+
+            Slash interactions don't have a message to reply to, so this
+            simply delegates to ``send()``. The reply-threading visual is
+            lost but the content still reaches the channel.
+            """
+            return await self.send(*args, **kwargs)
+
     async def on_ready(self):
         """Called when the bot is ready; triggers the startup handler."""
         await startup_handler(self)
@@ -299,7 +488,7 @@ class CoreBot(commands.Bot):
 
         # Handle permission errors gracefully. `NotOwner` is a subclass of `CheckFailure`.
         if isinstance(error, commands.CheckFailure):
-            logging.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
+            logger.warning(f"User '{ctx.author}' failed check for command '{ctx.command}': {error}")
             # Send a silent or ephemeral message if possible, or just a simple public one.
             try:
                 await ctx.send("Sorry, you don't have permission to use this command!", delete_after=8)
@@ -308,13 +497,13 @@ class CoreBot(commands.Bot):
             return
 
         # For all other errors, log the full traceback for debugging purposes.
-        logging.error(f"Unhandled error in command '{ctx.command}'", exc_info=error)
+        logger.error(f"Unhandled error in command '{ctx.command}'", exc_info=error)
 
         # Notify the user that a generic, unexpected error occurred.
         try:
             await ctx.send("Sorry, an unexpected error occurred. The issue has been logged. Please contact my author!")
         except discord.HTTPException:
-            logging.error(f"Failed to send error message to channel {ctx.channel.id}")
+            logger.error(f"Failed to send error message to channel {ctx.channel.id}")
 
     async def on_message(self, message: discord.Message) -> None:
         """The main event handler for processing all incoming messages.
@@ -330,15 +519,18 @@ class CoreBot(commands.Bot):
 
         # If in developer mode, only respond to owners.
         if config.DEV_MODE and message.author.id not in config.OWNER_IDS:
+            logger.info(f"[DEV_MODE] Ignoring message from non-owner {message.author} ({message.author.id})")
             return
 
-        # First, allow `discord.py` to process the message to see if it's a
+        # Get context once and reuse it for both command processing and NLP check.
+        ctx = await self.get_context(message)
+
+        # Allow `discord.py` to process the message to see if it's a
         # standard, decorator-based command (like `.ping`).
-        await self.process_commands(message)
+        await self.invoke(ctx)
 
         # If the message was a standard command, we don't need to process it for NLP.
         # `ctx.valid` will be True if a valid command was found and invoked.
-        ctx = await self.get_context(message)
         if ctx.valid:
             return
 
@@ -359,14 +551,14 @@ class CoreBot(commands.Bot):
             return
 
         query_lower = query.lower()
-        logging.info(f"prefix NLP query from '{message.author}': '{query}'")
-
         # Use the NLP matcher to find the handler.
         handler = self.find_nlp_handler(query_lower)
         if not handler:
+            logger.info(f"prefix NLP query from '{message.author}': '{query}' → no match")
             return
 
         cog, method, method_name = handler
+        logger.info(f"prefix NLP query from '{message.author}': '{query}' → {cog.__class__.__name__}.{method_name}")
         try:
             if asyncio.iscoroutinefunction(method):
                 await method(ctx, query=query)
@@ -375,7 +567,7 @@ class CoreBot(commands.Bot):
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, lambda: method(ctx, query=query))
         except Exception as e:
-            logging.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
+            logger.error(f"Error in NLP command '{cog.__class__.__name__}.{method_name}': {e}", exc_info=True)
             await ctx.send("Sorry, an internal error occurred. The issue has been logged.")
 
     def _get_case_insensitive_prefix(self, bot: "CoreBot", message: discord.Message) -> list[str]:
@@ -396,8 +588,8 @@ class CoreBot(commands.Bot):
         matching_prefixes = [p for p in config.BOT_PREFIX if content_lower.startswith(p.lower())]
 
         if matching_prefixes:
-            # Sort by length descending to handle overlapping prefixes (e.g., '!' and '!!')
-            matching_prefixes.sort(key=len, reverse=True)
+            # BOT_PREFIX is already sorted by length descending in config.py,
+            # so the first match from the filtered list is the longest.
             longest_match = matching_prefixes[0]
             # Return the slice of the original message that corresponds to the prefix length.
             return [message.content[:len(longest_match)]]
@@ -414,27 +606,27 @@ class CoreBot(commands.Bot):
         if self.console_task and not self.console_task.done():
             self.console_task.cancel()
 
-        logging.info("Closing bot connection...")
+        logger.info("Closing bot connection...")
         await super().close()
-        logging.info("Connection closed.")
+        logger.info("Connection closed.")
 
     async def reload_all_cogs(self):
         """Asynchronously discovers and reloads all cogs.
 
         Handles new, removed, and updated extensions.
         """
-        logging.info("Starting cog reload process...")
+        logger.info("Starting cog reload process...")
 
-        # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.math'})
+        # Get the set of currently loaded extension names (e.g., {'cogs.fun', 'cogs.calc'})
         loaded_cogs = set(self.extensions.keys())
-        logging.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
+        logger.info(f"Currently loaded cogs: {loaded_cogs or 'None'}")
 
         # Discover the cogs currently present in the filesystem.
         try:
             discovered_cogs = set(discover_cogs(config.COGS_PATH))
-            logging.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
+            logger.info(f"Discovered cogs in filesystem: {discovered_cogs or 'None'}")
         except Exception as e:
-            logging.error(f"Failed to discover cogs: {e}", exc_info=True)
+            logger.error(f"Failed to discover cogs: {e}", exc_info=True)
             return
 
         # --- Determine which cogs to load, unload, and reload ---
@@ -446,38 +638,44 @@ class CoreBot(commands.Bot):
         for extension in cogs_to_unload:
             try:
                 await self.unload_extension(extension)
-                logging.info(f"Successfully unloaded removed extension: {extension}")
+                logger.info(f"Successfully unloaded removed extension: {extension}")
             except Exception:
-                logging.error(f'Failed to unload extension {extension}.', exc_info=True)
+                logger.error(f'Failed to unload extension {extension}.', exc_info=True)
 
         # Load new cogs that have been added.
         for extension in cogs_to_load:
             try:
                 await self.load_extension(extension)
-                logging.info(f"Successfully loaded new extension: {extension}")
+                logger.info(f"Successfully loaded new extension: {extension}")
             except Exception:
-                logging.error(f'Failed to load new extension {extension}.', exc_info=True)
+                logger.error(f'Failed to load new extension {extension}.', exc_info=True)
 
         # Reload existing cogs to apply any changes.
         for extension in cogs_to_reload:
             try:
                 await self.reload_extension(extension)
-                logging.info(f"Successfully reloaded extension: {extension}")
+                logger.info(f"Successfully reloaded extension: {extension}")
             except Exception:
-                logging.error(f'Failed to reload extension {extension}.', exc_info=True)
+                logger.error(f'Failed to reload extension {extension}.', exc_info=True)
 
-        logging.info("Finished reloading cogs.")
+        logger.info("Finished reloading cogs.")
 
     async def ready_all_cogs(self) -> None:
-        """Calls cog_ready() on all loaded cogs.
+        """Calls cog_ready() on all loaded cogs and marks them as ready.
 
         This should be called after the bot is fully connected and ready,
         allowing cogs to start their background tasks and recovery operations.
+        Sets _cog_is_ready = True on each cog after its cog_ready() succeeds.
+        If cog_ready() raises, the cog stays not-ready.
         """
         for cog in self.cogs.values():
             cog_ready_method = getattr(cog, 'cog_ready', None)
             if cog_ready_method is not None:
                 try:
                     await cog_ready_method()
+                    # Mark the cog as ready after successful initialization
+                    if hasattr(cog, '_cog_is_ready'):
+                        cog._cog_is_ready = True  # type: ignore[union-attr]
                 except Exception as e:
-                    logging.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)
+                    logger.error(f"Error in {cog.__class__.__name__}.cog_ready(): {e}", exc_info=True)
+                    logger.warning(f"{cog.__class__.__name__} will remain not-ready — NLP commands for this cog will be rejected")

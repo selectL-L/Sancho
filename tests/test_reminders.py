@@ -39,6 +39,7 @@ def mock_bot():
 def reminders_cog(mock_bot):
     """Create a Reminders cog instance with mocked bot."""
     cog = Reminders(mock_bot)
+    cog._cog_is_ready = True
     return cog
 
 

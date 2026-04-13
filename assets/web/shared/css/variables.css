@@ -1,0 +1,141 @@
+/*
+ * variables.css - CSS Custom Properties & Reset
+ * Shared across all shells (desktop & mobile)
+ */
+
+/* ========== SCALING ========== */
+html {
+  font-size: clamp(12px, 0.75vw, 28px);
+}
+
+/* ========== CSS VARIABLES ========== */
+:root {
+  /* Theme color (set dynamically from API) */
+  --theme-r: 147;
+  --theme-g: 51;
+  --theme-b: 234;
+
+  /* Grid dimensions - Desktop */
+  --cell-height: 2rem;
+  --cell-width: 9.75rem;
+  --time-label-width: 4rem;
+  --header-row-height: 3.5rem;
+
+  /* Sidebar */
+  --sidebar-width: 20rem;
+
+  /* Spacing */
+  --unit-gap: 1rem;
+  --page-padding: 1.25rem;
+  --card-radius: 1rem;
+
+  /* Computed grid width */
+  --grid-width: calc(var(--time-label-width) + (var(--cell-width) * 7));
+
+  /* Heatmap tiers */
+  --heatmap-available: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.70);
+}
+
+/* ========== DARK MODE ========== */
+.dark {
+  --bg-page: #08080a;
+  --bg-card: #111114;
+  --bg-card-elevated: #1a1a1e;
+  --bg-input: #1e1e22;
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #63636b;
+
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-subtle: rgba(255, 255, 255, 0.05);
+
+  /* Heatmap intensity levels (for multi-user view) */
+  --heatmap-1: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.18);
+  --heatmap-2: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.32);
+  --heatmap-3: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.46);
+  --heatmap-4: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.60);
+  --heatmap-5: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.76);
+  --heatmap-6: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.92);
+
+  --glass-bg: rgba(17, 17, 20, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --overlay-bg: rgba(8, 8, 10, 0.92);
+
+  --shadow-soft: 0 0.5rem 2rem rgba(0, 0, 0, 0.5);
+
+  /* Danger colors */
+  --danger-bg: rgba(239, 68, 68, 0.12);
+  --danger-border: rgba(239, 68, 68, 0.25);
+  --danger-text: #fca5a5;
+  --danger-hover-bg: rgba(239, 68, 68, 0.20);
+}
+
+/* ========== LIGHT MODE ========== */
+.light {
+  --bg-page: #f5f5f7;
+  --bg-card: #ffffff;
+  --bg-card-elevated: #ffffff;
+  --bg-input: #ececef;
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #a1a1aa;
+
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --border-default: rgba(0, 0, 0, 0.10);
+  --border-subtle: rgba(0, 0, 0, 0.05);
+
+  /* Heatmap intensity levels (for multi-user view) */
+  --heatmap-1: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15);
+  --heatmap-2: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.28);
+  --heatmap-3: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.42);
+  --heatmap-4: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.56);
+  --heatmap-5: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.72);
+  --heatmap-6: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.88);
+
+  --glass-bg: rgba(255, 255, 255, 0.9);
+  --glass-border: rgba(0, 0, 0, 0.08);
+  --overlay-bg: rgba(255, 255, 255, 0.92);
+
+  --shadow-soft: 0 0.5rem 2rem rgba(0, 0, 0, 0.1);
+
+  /* Danger colors */
+  --danger-bg: rgba(239, 68, 68, 0.08);
+  --danger-border: rgba(239, 68, 68, 0.20);
+  --danger-text: #dc2626;
+  --danger-hover-bg: rgba(239, 68, 68, 0.15);
+}
+
+/* ========== RESET ========== */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ========== UTILITY CLASSES ========== */
+.hidden {
+  display: none !important;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

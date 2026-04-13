@@ -1,220 +1,285 @@
-# Shiori (V0.9.25 - The Repo Update)
+# Sancho (V0.17.1) - Doomsday appraoches.
 
-**A Discord bot designed to be more reasonable.**
+**Format**: Major.Minor.Bugfix
 
-Shiori is built on the simple premise interacting with her should feel natural. Rather than forcing you to memorize rigid command structures like most other bots, or using slash commands, Shiori attempts to interpret your *intent*.
+**A Discord bot built around natural language instead of command syntax.**
 
-If you ask her to "roll me a d20", she understands. If you ask her to "please roll a d20 for me?", she understands that too, hopefully.
+Most Discord bots force you to memorize rigid command structures — `/play`, `!roll 2d20`. Sancho is built on the premise that interaction should feel natural. Ask her to "roll me a d20" and she understands. Ask her to "please roll a d20 for me?" and she understands that too. The entire bot is designed around this: regex-based intent matching as the primary interface, with slash commands and prefix commands as secondary citizens that route through the same system.
 
 ## Features
 
 ### 🎲 Math & Dice
-There's a robust dice engine capable of handling complex notations and complex arithemtic questions.
-*   **Standard Rolling**: `roll 2d20kh1 + 5` (Roll two d20s, keep the highest, add 5).
-*   **Limbus Coin Flips**: A dedicated binary outcome generator for Limbus Company rolls.
-*   **Calculator**: Evaluate mathematical expressions directly in chat.
+Dice engine with its own lexer/parser, and a math evaluator that walks the AST directly (no `eval()`).
+*   **Dice Notation**: `roll 2d20kh1 + 5` — roll two d20s, keep the highest, add 5. Supports exploding dice, advantage/disadvantage, and value clamping.
+*   **Calculator**: Trig, logarithms, and physical constants (`pi`, `e`, speed of light, Avogadro's number).
+*   **Limbus Coin Flips**: Simulator for Limbus Company's SP-weighted coin probability.
 
-### ⚔️ Skills Database
-The Skills system acts as a macro manager, allowing you to save complex dice notations (with descriptions!) as named "Skills".
-*   **Save**: Simply type `save skill` to enter an interactive setup wizard.
-*   **Cast**: Use `cast Fireball` to execute the saved macro instantly.
-*   **Manage**: List, edit, or delete your skills with natural language commands like `show my skills` or `delete Fireball`.
+### ⚔️ Skills
+Save dice formulas as named skills so you don't have to type them out every time.
+*   **Save**: `save skill` walks you through setup — name, aliases, formula (validated so people can't roll 999d999), type, and description.
+*   **Cast**: `cast Fireball +2` runs the saved formula with modifiers appended.
+*   **Manage**: `show my skills`, `delete Fireball`, `edit Fireball`.
 
 ### ⏰ Reminders
-Set reminders using natural language without worrying about strict syntax.
+Set reminders with natural language. She tries figures out the time from however you phrase it.
 *   **Natural Phrasing**: `remind me in 2 hours to check the laundry` or `remind me next tuesday to visit my nan`.
-*   **Timezone Aware**: Use `set timezone` to ensure Shiori knows *your* "8 PM", not the server's.
-*(Though it is very important to understand that reminders changes very often, it's the most complex function)*
+*   **Recurring**: `remind me every weekday at 9am to standup` — daily, weekly, monthly, custom intervals.
+*   **Missed Recovery**: If the bot was down when a reminder was due, it gets delivered on startup.
+*   **Timezone Aware**: `set timezone` so she uses *your* local time, not her time.
 
-### 🖼️ Image Tools
-Useful utilities for modifying images without opening Photoshop.
-*   **Resize**: Reply to an image with `resize` to scale it.
-*   **Convert**: Reply with `convert` to change formats (e.g., PNG to JPG).
+### 🖼️ File Tools
+Reply to a file with `convert` or `resize`. Handles images, audio, video, animated formats, and cross-category conversions like video-to-GIF.
+*   **Convert**: Shows a settings panel for quality, bitrate, resolution, and codec options before converting.
+*   **Resize**: Reply with `resize` to scale images.
+*   **Avatar/Banner**: Fetch any user's avatar or banner at full resolution.
+*   **Formats**: Static images, animated images (GIF/WebP/APNG), audio, and video. PIL for images, FFmpeg for everything else.
 
 ### ⭐ Starboard
-She can even automatically aggregates the best content in your server.
-*   **Thresholds**: Messages with enough specific reactions (e.g., 5 ⭐) are reposted to a designated starboard channel.
-*   **Smart Context**: The repost includes a link to the original message and preserves the context of the conversation.
+Messages with enough stars get reposted to a highlight channel. Unlike most starboards, this one maintains itself.
+*   **Self-Repair**: Star counts, channel drift, and failure flags are fixed inline on every reaction event. A background audit runs every 12 hours against live Discord state.
+*   **Tombstoning**: If the original message gets deleted, the starboard entry is edited in-place rather than removed — it keeps its position in the timeline.
+*   **Remake**: Recreate the entire starboard in starred order from the database.
+*   **Deep Crawl**: Scan a server's history for missed starboard-worthy content. Progress persists to database, so crawls survive restarts.
 
-### 🎰 Misc & Fun
-*   **Magic 8-Ball**: Ask a question, get an answer.
-*   **BOD (Boundary of Death)**: A probability game for the risk-takers.
-*   **Sanitize**: A utility to post the YouTube sanitization guide (don't ask).
+### 📅 Availability Schedule
+Weekly availability tracker with a web UI inspired by [Timeful](https://en.wikipedia.org/wiki/Timeful). Set your free times on a heatmap grid, check others' through Discord.
+*   **Web UI**: Heatmap grid with drag-to-paint editing, glow on popular slots, desktop and mobile layouts. Authenticated via Discord OAuth2.
+*   **NLP Queries**: `when is @user free`, `who's free Saturday afternoon` — most people just ask in chat rather than visiting the site.
+*   **Privacy**: Per-guild visibility and user blocking. Your schedule in one server doesn't leak to another.
+*   **Cross-Timezone**: Slot comparisons convert between timezones automatically.
 
-### 🎵 Music (Ambient Presence)
-The bot appears to "listen" to music via its Discord status, cycling through a configured YouTube playlist.
-*   **Listen Along**: Ask the bot to join your voice channel and it will play the music it's "listening to".
-*   **Player Controls**: Skip tracks, view the queue, toggle shuffle, see what's playing.
-*   **Global Session**: The bot can only be in one voice channel at a time across all servers.
-*   **Idle Timeout**: If no one joins within 5 minutes, the bot returns to idle mode.
+### 🎵 Music
+The bot idles by "listening" to music — cycling through playlists in its Discord status. Ask her to join voice and she plays what she's been listening to.
+*   **Listen Along**: Joins your voice channel and plays from the current mood's playlist, with loudness normalization across tracks.
+*   **Search**: YouTube and YouTube Music. Japanese, Chinese, and Korean titles get transliterated for cross-language matching.
+*   **Player Controls**: Skip, queue, shuffle, loop, jump, now-playing with a Components V2 player (thumbnail, progress bar, controls).
+*   **Global Session**: A current restriction is the bot can only be in one voice channel at a time across all servers.
+*   **Lyrics**: Multi-provider (Genius, LRCLIB) with artist filtering and pagination.
 
-## The Architecture: A "Hybrid" System
+### 🎰 Fun & Misc
+*   **Magic 8-Ball**: Ask a question, get a hopefully accurate answer.
+*   **BOD (Boundary of Death)**: It's yujin from library of ruina guys. She's real. She *can* hurt you!
+*   **Extensible**: Adding a new simple command is a single dataclass declaration. It auto-wires into NLP.
 
-Shiori is distinct from standard `discord.py` bots because of her **Hybrid Command Dispatcher**.
+## What Architecture Makes Sancho Different
 
-### 1. The Brain: NLP Dispatcher
-Traditional bots wait for a specific string (e.g., `!ping`). Shiori understands normal language. (Mostly)
-*   **Interceptor**: The bot intercepts messages before being sent to the usual command dispatcher.
-*   **Analysis**: It scans the content against a registry of regex patterns defined in `config.py`.
-*   **Intent**: If a pattern matches (e.g., `r'\broll\b'`), it routes the message to the appropriate handler, regardless of surrounding "fluff" words.
+### NLP-First Interaction
 
-### 2. The Backbone: Modular Configuration
-Because regex patterns can get complex, the bot centralizes them in `config.py`. This allows developers to tweak the "vocabulary" of the bot without diving into deep logic code.
-*   **`config.NLP_COMMANDS`**: The central registry where patterns are mapped to Cog functions.
-*   **Priority System**: The dispatcher intelligently resolves conflicts if a sentence matches multiple commands.
+Sancho doesn't bolt natural language onto a command framework — the command framework bolts onto natural language. The primary dispatcher is a regex pattern registry (`config.NLP_COMMANDS`) that maps intent patterns to cog methods. Priority is resolved in two stages: first match within a group wins, then the group whose pattern matched earliest in the user's input wins across groups.
 
-## Pre-built Binaries (No Python Required)
+Slash commands exist, but the `/nlp` command literally forwards its argument through the same dispatcher. Standard prefix commands are checked first and used for edge cases where regex matching would be too ambiguous, but the expectation is that most users interact through natural language.
 
-If you don't have Python installed or prefer a standalone executable, you can download the latest build from our GitHub Actions:
+Cogs can register additional patterns at runtime via `bot.register_nlp_group()` without touching the central config — the Fun cog does this to auto-export its declarative command registry.
 
-1.  Go to the **Actions** tab in this repository.
-2.  Click on the latest workflow run (usually named "Build Application").
-3.  Scroll down to the **Artifacts** section at the bottom.
-4.  Download the **Shiori** zip file for your platform (Windows/Linux/macOS).
+### The Interaction Shim
 
-*Note: You will still need to download the `assests` folder and configure `info.env` in the folder where you extract the executable.*
+The challenge with NLP-first design is that handlers need to work from prefix messages *and* slash commands without two code paths that drift. Sancho solves this with a `ContextLike` protocol and an `InteractionContextAdapter` that wraps `discord.Interaction` to look like `commands.Context`.
 
-**If you want to be able to modify the code and run it yourself, you can continue reading, otherwise this is all you need to know.**
+Handlers accept `ctx: ContextLike` and call `ctx.send()` — whether the original trigger was a prefix message, NLP match, or slash command is invisible to the handler. For slash-specific limitations (no `message.reference`, no `message.attachments`), a `_StubMessage` proxy raises `SlashUnsupportedError` with a user-friendly message suggesting the prefix alternative.
+
+This means every NLP handler is written once and works from all three invocation methods with zero adaptation.
+
+### Music Metadata Resolution
+
+When a user pastes a YouTube URL, it could be a fan cover, a dance routine from a mix playlist, a slowed+reverb edit, or a legitimate music video. The music system's job is to figure out *what song this actually is* and find the canonical Audio Track Version (ATV) in YouTube Music's catalog.
+
+The pipeline:
+
+1. **Catalog mismatch detection** — YTM's structured metadata (`videoDetails`) is compared against the raw YouTube title (`microformat`). If YTM claims the video is a "Slowed + Reverb" version but the raw title is just "Dior," the system detects the mismatch and falls back to the raw title for search.
+
+2. **CJK artist extraction from video tags** — Tags are scored 0.0–1.0 for likelihood of being an artist name. Agency names (ホロライブ, nijisanji), format markers (MV, lyrics), and song title duplicates are penalized. VocaloidP patterns (みきとP) are boosted. High-confidence CJK names generate additional search queries paired with the song title.
+
+3. **Multi-query cross-script search** — All queries hit YTM and YouTube in parallel. Results from Japanese, Chinese, and Korean titles are transliterated to romanized forms (pykakasi, pypinyin, korean-romanizer) for cross-script comparison.
+
+4. **Tiered garbage filtering** — Results are evaluated with word overlap expanded across scripts and character-level similarity. Strong overlap passes immediately; partial overlap needs similarity confirmation; no overlap at all requires very high similarity. Cross-script results get a lower threshold because transliteration is inherently lossy.
+
+5. **Sliding-scale star scoring** — Each ATV candidate is scored against the original. Title matching uses containment, word overlap, and similarity across all script representations. Artist confidence uses text similarity as a base with an ID-match bonus. Higher artist confidence lowers the required title threshold — and a perfect title match auto-passes regardless of artist. The top candidate gets a star recommendation in the selection UI.
+
+### Ambient Personality Engine
+
+The bot maintains internal mood and activity state that colors every interaction. Four moods (relaxing, productive, social, out and about) each contain activities (studying, drinking boba, gaming, etc.) with hand-crafted personality responses.
+
+This isn't cosmetic. The mood determines which music playlists cycle in the bot's status. Activities carry per-cog response overrides — interrupting the bot while it's "studying" gets a different tone than while it's "drinking boba." The help command's greeting changes. The ambience data lives in `ambience.toml` (gitignored, hot-reloaded on file change) while the mood/activity structure lives in Python.
+
+The music system coordinates via a pub/sub handshake: ambience decides to switch playlists, publishes the change, the music cog picks it up on its next cycle and confirms. The result is a bot that feels like a person who happens to be listening to music, not a music bot with a status message.
+
+### Self-Healing Starboard
+
+Most starboard implementations post a message when a threshold is hit and never look back. Sancho's starboard actively maintains data integrity through two paths.
+
+The **hot path** fires on every reaction event and inline-fixes star counts, channel drift, and failure flags with zero additional API calls beyond what the reaction handler already needs. The **cold path** runs a full verification audit every 12 hours, checking each database entry against live Discord state. Entries follow a lifecycle: healthy → flagged (first failure) → tombstoned (second failure, edited in-place to preserve position) → or recovered if the original reappears.
+
+The remake engine can destructively recreate the entire starboard in starred order from the database. The crawl engine scans server history with resumable checkpoints persisted to the database — a crawl interrupted by a restart picks up exactly where it left off.
+
+### Proactive Ambient Music Caching
+
+Rather than fetching audio URLs on demand for ambient cycling, the bot proactively downloads every track from every configured playlist on startup and on a 24-hour cycle, building a local library of M4A files with embedded metadata and cover art.
+
+The in-memory index uses an MVCC-style concurrency protocol: reads take deep-copy snapshots, writes go through a synchronous-only mutation function under lock, and serialization copies again before handing to a writer thread. No method holds a direct reference to the index across an await point.
+
+When playlists change, dropped tracks aren't deleted — they're moved to an orphan directory with a 90-day TTL. If the track reappears (playlist curator re-added it), it's un-orphaned. Audio fetching uses a multi-level cascade with context-aware strategies — speculative prefetch stays conservative, while live user playback is willing to try harder.
+
+### Full-Stack Availability Platform
+
+The schedule system is a complete web application running in-process with the bot — FastAPI on Uvicorn sharing the event loop, no IPC needed. Users authenticate via Discord OAuth2 (server-side sessions, no tokens in cookies), set their weekly availability on a Timeful-inspired heatmap grid, and control per-guild visibility with opt-in toggles and bidirectional user blocking.
+
+The web UI has dedicated desktop and mobile layouts with shared JS modules. The heatmap renders 672 cells (7 days × 96 quarter-hour slots) with intensity-based coloring and a canvas glow layer highlighting popular times. Editing uses Bresenham line interpolation for drag-painting to prevent skipped cells during fast mouse movement.
+
+But most users never open the web UI to *check* availability — they type `who's free Saturday afternoon` in Discord and get an instant answer. The NLP handlers parse time expressions, convert between users' timezones, compute slot intersections for group queries, and format results as readable time ranges.
 
 ## Getting Started
 
-*If you're here for information on ***creating*** standalone executables, please refer to [BUILD.md](BUILD.md) instead.*
+### Pre-built Binaries (No Python Required)
 
-### Prerequisites
-*   Python 3.11+
-*   A Discord Bot Token
-*   A Name (Not a requirement, but highly recommended)
-*   **FFmpeg** (required for music playback - see below)
+If you don't need to modify the code, you can grab a pre-built executable instead of setting up Python:
 
-#### FFmpeg Installation
+1.  Go to the **Actions** tab in this repository.
+2.  Click on the latest successful workflow run.
+3.  Scroll down to the **Artifacts** section at the bottom of the page.
+4.  Download the **Sancho** zip for your platform.
 
-The music cog requires FFmpeg to be installed and available in your system PATH:
+Extract it, place the `assets/` folder and `info.env` alongside the executable. FFmpeg is bundled. Skip to step 3 under Installation to configure `info.env`.
 
-*   **Windows**: `winget install ffmpeg` or download from [ffmpeg.org](https://ffmpeg.org/download.html)
-*   **Linux**: `sudo apt install ffmpeg` (Debian/Ubuntu) or `sudo dnf install ffmpeg` (Fedora)
-*   **macOS**: `brew install ffmpeg`
+**If you want to run from source or modify the code, continue below.**
 
-*Note: Pre-built executables may include FFmpeg bundled, so end-users don't need to install it separately.*
+### Requirements
 
-#### Ambience System (Optional)
-
-The bot has an optional "ambience" system that gives it personality - it cycles through moods, activities, and can play music from your playlists. To set this up:
-
-1.  Copy `assets/ambience.toml.example` to `assets/ambience.toml`
-2.  Customize the interests and playlists with your own preferences
-3.  The file hot-reloads on changes - no restart needed!
-
-**What's in `ambience.toml`:**
-
-| Section | Purpose |
-|---------|---------|
-| `[config]` | Timing settings (mood cycle frequency, music weight) |
-| `[interests.*]` | Personality data (favorite books, games, snacks, etc.) used for flavor text |
-| `[playlists]` | YouTube playlist URLs organized by mood (cozy, energetic, sleepy, etc.) |
-| `[playlists.descriptions]` | Short descriptions for each playlist mood |
-
-The mood/activity *structure* (what moods exist, what activities belong to each) is defined in `utils/ambience.py`. The TOML file only contains the *content* - your personal preferences and playlists.
-
-To disable ambience output while keeping internal mood cycling, set `AMBIENCE_ENABLED=False` in `info.env`.
+*   **Python 3.14+**
+*   **FFmpeg** accessible globally via PATH (pre-built executables bundle this)
+*   **[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)** — PO token server for YouTube authentication
 
 ### Installation
 
 1.  **Clone the repository**
     ```bash
-    git clone https://github.com/selectL-L/Shiori.git
-    cd Shiori
+    git clone https://github.com/selectL-L/Sancho.git
+    cd Sancho
     ```
 
-2.  **Run once to generate config**
-    Run the bot.
-    ```bash
-    python main.py
-    ```
-    It will detect the missing configuration, then generate a `info.env` template, and exit.
-
-3.  **Configure `info.env`**
-    Open the newly created `info.env` file and set your credentials:
-    ```ini
-    DISCORD_TOKEN=your_token_here
-    BOT_PREFIX=your_prefix_here
-    BOT_NAME=your_bot_name_here (you CAN leave it as NoName, but again, we recommend setting a name)
-    OWNER_ID=your_id_here
-    ```
-
-4.  **Install Dependencies**
+2.  **Install dependencies**
     ```bash
     pip install -r requirements.txt
     ```
 
-5.  **Launch**
+3.  **Run once to generate config**
+    ```bash
+    python main.py
+    ```
+    The bot detects the missing configuration, generates an `info.env` template with documented fields, and exits.
+
+4.  **Configure `info.env`**
+    Open the generated file and set at minimum:
+    ```ini
+    DISCORD_TOKEN=your_token_here
+    BOT_PREFIX=your_prefix_here
+    OWNER_ID=your_discord_id_here (TECHNICALLY optional, but not really.)
+    ```
+    The file is self-documenting — each field has inline comments explaining its purpose.
+
+5.  **Set up ambience**
+    ```bash
+    cp assets/ambience.toml.example assets/ambience.toml
+    ```
+    Edit `ambience.toml` with your own playlists and personality content. The bot requires this file to run. The structure:
+
+    | Section | Purpose |
+    |---------|---------|
+    | `[config]` | Timing settings (mood cycle frequency, music weight) |
+    | `[interests.*]` | Personality data (books, games, snacks, etc.) used for flavor text |
+    | `[playlists]` | YouTube playlist URLs organized by mood (cozy, energetic, sleepy, etc.) |
+    | `[playlists.descriptions]` | Short descriptions for each playlist mood |
+
+    This file hot-reloads on changes — no restart needed.
+
+6.  **Launch**
     ```bash
     python main.py
     ```
 
+*For building standalone executables, see [BUILD.md](BUILD.md). For database schema documentation, see [database.md](database.md).*
+
 ## Developer Guide
 
-We welcome contributions! Please follow these guidelines to keep the project healthy.
+### Key Deviations from Standard discord.py
+
+**Three-phase cog lifecycle.** Standard discord.py has `cog_load()` and `cog_unload()`. Sancho adds `cog_ready()`, called once after the bot is connected and ready. Background tasks, network calls, and recovery operations go in `cog_ready()`, **not** `cog_load()`. The reconnect guard (`_has_initialized`) prevents duplicate calls on Discord reconnects.
+
+**Dual schema locations.** Database schema exists in two places — `utils/database.py` (runtime) and `migrate_db.py` (migrations). You **must** update both when making schema changes. See [database.md](database.md) for table documentation.
+
+**Path system.** Never use `__file__` or relative paths. Use `config.APP_PATH` (runtime files), `config.ASSETS_PATH` (static assets), or `config.INTERNAL_PATH` (bundled code). This ensures PyInstaller compatibility.
+
+**Soft restart.** The `restart` control command purges all `utils.*`, `cogs.*`, and `config` modules from `sys.modules` and re-imports them — code changes take effect without process restart. The console reader thread and log file persist across restarts.
+
+### Adding NLP Commands
+
+Register patterns in `config.NLP_COMMANDS` (static) or call `bot.register_nlp_group()` (dynamic):
+
+```python
+# In config.py — ((regex_patterns), 'CogName', 'method_name')
+((r'\b8\s?-?ball\b',), 'Fun', 'eight_ball'),
+```
+
+Handler signature:
+```python
+async def eight_ball(self, ctx: ContextLike, query: str) -> None:
+    await ctx.send("Result here")
+```
+
+`ctx.send()` works transparently for prefix, NLP, and slash invocations. If your handler needs message-specific context (`ctx.message.reference`, `ctx.message.attachments`), it only works from prefix/NLP — slash will raise `SlashUnsupportedError` with a user-facing suggestion.
+
+### UI Patterns
+
+All reusable UI components live in `utils/views.py`. Use these instead of building ad-hoc views:
+
+| Function | Purpose |
+|----------|---------|
+| `get_selection()` | Generic selection — users pick via button *or* by typing |
+| `launch_modal()` | Launches a modal from text commands (sends a button bridge first) |
+| `show_now_playing()` | Components V2 music player with thumbnail and controls |
+| `show_track_failed()` | Skip/Remove buttons on track failure |
+| `show_dashboard()` | Multi-category paginated view with export |
+| `show_status()` | Multi-page bot health dashboard |
+| `show_conversion()` | File conversion settings with per-format dropdowns |
+
+Views handle their own cleanup (disable buttons on timeout, update on selection). Cogs don't manage view lifecycle beyond the initial send.
 
 ### Runtime Control
 
-Shiori can be controlled at runtime without using Discord commands. This is **by design** and can be used for server administration, automated scripts, or when you simply prefer managing the bot externally.
+The bot accepts `exit`, `restart`, `reload`, and `status` commands via console input (local development) or TCP socket (headless/production).
 
-#### Available Commands
+| Command | Effect |
+|---------|--------|
+| `reload` | Hot-reload all cogs without disconnecting |
+| `restart` | Full soft restart (module purge + re-import) |
+| `exit` | Graceful shutdown with state save |
+| `status` | Returns running state (TCP only) |
 
-| Command | Description |
-|---------|-------------|
-| `reload` | Hot-reload all cogs without restarting the process |
-| `restart` | Full restart without manually re-running `python main.py` |
-| `exit` | Graceful shutdown (saves state, closes DB connections) |
-| `status` | Returns the bot's current running state (TCP only) |
+**Console** — just type into the terminal running `python main.py`.
 
-#### Method 1: Console (Local Development)
-
-When running `python main.py` directly in a terminal, you can type commands into the console:
-
-```
-reload
-```
-
-This is ideal for local development where you have direct terminal access.
-
-#### Method 2: TCP Socket (Remote / Headless)
-
-For production deployments (e.g., systemd services, Docker containers), the console isn't accessible. Instead, enable the TCP control socket by setting `CONTROL_PORT` in your `info.env`:
-
-```ini
-CONTROL_PORT=9999
-```
-
-The server binds to `127.0.0.1` only—it cannot be accessed from outside the machine.
-
-**Sending commands:**
+**TCP** — set `CONTROL_PORT` in `info.env` (binds to `127.0.0.1` only for safety):
 
 ```bash
-# Linux (using netcat)
+# Linux
 echo "reload" | nc localhost 9999
-echo "restart" | nc localhost 9999
-echo "status" | nc localhost 9999
 
 # Windows (PowerShell)
 "reload" | ncat localhost 9999
 ```
 
-**Response format:** Commands return `OK: <message>` on success or `ERROR: <message>` on failure, making it easy to script around.
+Commands return `OK: <message>` on success or `ERROR: <message>` on failure.
 
-### Critical Differences
+### Code Quality
 
-> [!WARNING]
-> **Database Schema Management**
-> Shiori maintains **two** definitions of the database schema. You must update **BOTH** when making changes:
-> 1.  `utils/database.py`: Used for runtime validation and fresh installs.
-> 2.  `migrate_db.py`: Used for migrating existing data to a new schema.
+The project use **Ruff** for linting and **pylance** for type-checking (configured in `pyproject.toml` and `pyrightconfig.json` — bugs, security, and async rules, never style enforcement, though we try to adher to pep8). Google-style docstrings and type hints are expected on all functions. All cogs inherit from `utils.base_cog.BaseCog` which provides `self.logger`. Async only in cogs — no `requests`, no `time.sleep()` discord heartbeats MUST be sent, so no event can be blocking.
 
-### UI Patterns
-*   **Hybrid Selection**: Use `utils.views.get_selection`. It allows users to pick an option via Button *or* by typing the answer.
-*   **Modals**: Use `utils.views.launch_modal`. This wrapper allows text-based commands to "launch" modals (by sending a button first), unifying the behavior with slash commands.
+Match existing formatting patterns in each file rather than imposing a style. Discord.py has dynamic attributes that cause false positives — use `# noqa` when you're certain code is correct.
 
-### Code Style
-*   **Docstrings**: **Google Style** is mandatory for all functions/classes.
-*   **Type Hinting**: Required for all arguments and returns.
-*   **Base Class**: All new Cogs must inherit from `utils.base_cog.BaseCog`.
+### DEV_MODE
+
+Set `DEV_MODE=True` in `info.env` to enable debug-level logging and restrict slash command sync to `DEV_GUILD` (so you're not waiting for global sync during development). This is the main toggle for local development.
+
+### Web UI Development
+
+Set `DEV_MODE=True` and `WEB_MOCK_DATA=True` in `info.env` to develop the web UI without a live Discord connection. Mock data provides 15 fake users with varied availability patterns. You'll need to create `utils/web/mock_data.py` yourself (gitignored) — check imports in `utils/web/routes.py` for the expected function signatures.
+
+The web frontend lives in `assets/web/` with shared modules in `web-core/` and shared styles in `web-css/`. Desktop and mobile are separate HTML files with device detection at the routing layer. When rendering user-controlled content, use `escapeHtml()` from `web-core/utils.js`.

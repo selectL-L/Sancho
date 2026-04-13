@@ -6,31 +6,43 @@ music-related utilities that were previously scattered across utils/.
 Modules:
     music_data: Pure data classes (Track, LoopMode, etc.)
     lyrics: Lyrics scrapers and text utilities
-    music_auth: YouTube authentication and retry orchestration
+    music_auth: YouTube authentication and source resolution helpers
     music_cache: File operations and cache management
     music_helpers: yt-dlp wrappers, thumbnails, FFmpeg utilities
     audio_source: SeekableAudioSource for FFmpeg playback
     managed_player: High-level ManagedPlayer abstraction
+    source_acquisition: Source acquisition mixin (spending policy)
 """
 
-# Data structures (Phase 2)
+# Core components
 from utils.musicutils.commands import MusicCommandsMixin
 from utils.musicutils.managed_player import ManagedPlayer, PlayerState, TrackInfo
 from utils.musicutils.audio_source import SeekableAudioSource
 from utils.musicutils.music_cache import MusicCacheManager
 from utils.musicutils.music_data import (
-    FetchContext,
+    AudioErrorType,
+    FFmpegBucket,
+    FFmpegHealth,
+    TrackIssueKind,
     LoopMode,
     Track,
     LyricsResult,
     ActiveSession,
+    PlaybackEndReport,
     PlaybackState,
     AmbienceState,
     DownloadResult,
     AudioUrlResult,
 )
 
-# Lyrics utilities (Phase 3)
+# Source acquisition mixin
+from utils.musicutils.source_acquisition import (
+    SourceAcquisitionMixin,
+    PlayableSource,
+    TrackAttempts,
+)
+
+# Lyrics utilities
 from utils.musicutils.lyrics import (
     chunk_text,
     GeniusScraper,
@@ -38,7 +50,7 @@ from utils.musicutils.lyrics import (
     LyricalNonsenseScraper,
 )
 
-# yt-dlp wrappers, thumbnails, FFmpeg (Phase 4)
+# yt-dlp wrappers, thumbnails, FFmpeg
 from utils.musicutils.music_helpers import (
     # Availability flags
     YTDLP_AVAILABLE,
@@ -47,6 +59,7 @@ from utils.musicutils.music_helpers import (
     FFMPEG_OPTIONS,
     FFMPEG_BEFORE_OPTIONS,
     get_ffmpeg_path,
+    get_ffmpeg_stderr_loglevel,
     # Residential proxy
     get_residential_proxy_url,
     # yt-dlp base options
@@ -58,20 +71,20 @@ from utils.musicutils.music_helpers import (
     # Video ID
     extract_video_id,
     # Thumbnails
-    extract_mp3_thumbnail,
+    extract_m4a_thumbnail,
     # yt-dlp wrappers
     get_audio_url,
-    search_youtube,
     detect_mix_in_url,
     fetch_url_info,
     fetch_playlist_metadata,
-    # MP3 download
+    # Download utilities
     sanitize_filename,
-    download_track_as_mp3,
-    get_track_info_for_download,
+    download_track_as_m4a,
+    # Ambient filename generation
+    generate_ambient_filename,
 )
 
-# Thumbnail functions are now in search.py
+# Thumbnail and search functions
 from utils.musicutils.search import (
     fetch_thumbnail_bytes,
     resize_thumbnail_bytes,
@@ -93,27 +106,41 @@ from utils.musicutils.search import (
     is_atv,
     # YouTube search
     search_youtube as search_youtube_results,
-    search_youtube_legacy,
     # Unified search
     search_query_mode,
     search_url_mode,
-    # Scoring/filtering
-    score_atv_match,
+    # Filtering
     is_relevant,
     dedupe_results,
 )
 
+# YouTube auth and source-resolution helpers
+from utils.musicutils.music_auth import (
+    YouTubeAuthStatus,
+    get_youtube_auth_status,
+    detect_youtube_auth,
+    get_ytdlp_options,
+)
+
 __all__ = [
     # Data classes
-    'FetchContext',
+    'AudioErrorType',
+    'FFmpegBucket',
+    'FFmpegHealth',
+    'TrackIssueKind',
     'LoopMode',
     'Track',
     'LyricsResult',
     'ActiveSession',
+    'PlaybackEndReport',
     'PlaybackState',
     'AmbienceState',
     'DownloadResult',
     'AudioUrlResult',
+    # Source acquisition
+    'SourceAcquisitionMixin',
+    'PlayableSource',
+    'TrackAttempts',
     # Lyrics
     'chunk_text',
     'GeniusScraper',
@@ -126,6 +153,7 @@ __all__ = [
     'FFMPEG_OPTIONS',
     'FFMPEG_BEFORE_OPTIONS',
     'get_ffmpeg_path',
+    'get_ffmpeg_stderr_loglevel',
     # Residential proxy
     'get_residential_proxy_url',
     # yt-dlp base options
@@ -141,76 +169,36 @@ __all__ = [
     'resize_thumbnail_bytes',
     'fetch_and_resize_thumbnail',
     'extract_best_thumbnail_from_info',
-    'extract_mp3_thumbnail',
+    'extract_m4a_thumbnail',
     'get_thumbnail_bytes',
     # yt-dlp wrappers
     'get_audio_url',
-    'search_youtube',
     'detect_mix_in_url',
     'fetch_url_info',
     'fetch_playlist_metadata',
-    # MP3 download
+    # Download utilities
     'sanitize_filename',
-    'download_track_as_mp3',
-    'get_track_info_for_download',
-]
-
-# YouTube auth and retry orchestration (Phase 5 + Phase 12)
-from utils.musicutils.music_auth import (
-    YouTubeAuthStatus,
-    get_youtube_auth_status,
-    get_ytdlp_options,
-    AudioFetcher,
-    AudioFetchResult,
-    TrackFetchState,
-)
-
-__all__ += [
+    'download_track_as_m4a',
+    'generate_ambient_filename',
     # Auth
     'YouTubeAuthStatus',
     'get_youtube_auth_status',
+    'detect_youtube_auth',
     'get_ytdlp_options',
-    'AudioFetcher',
-    'AudioFetchResult',
-    'TrackFetchState',
-]
-
-# Cache management (Phase 6)
-
-__all__ += [
+    # Cache management
     'MusicCacheManager',
-]
-
-# Audio source (Phase 7)
-
-__all__ += [
+    # Audio source
     'SeekableAudioSource',
-]
-
-# Managed player (Phase 7)
-
-__all__ += [
+    # Managed player
     'ManagedPlayer',
     'PlayerState',
     'TrackInfo',
-]
-
-# Command handlers mixin (Phase 8 - NLP handler extraction)
-
-__all__ += [
+    # Command handlers mixin
     'MusicCommandsMixin',
-]
-
-# Search & metadata (YTM integration)
-
-__all__ += [
-    # Search availability
+    # Search & metadata
     'YTMUSIC_AVAILABLE',
-    # Constants
     'THUMBNAIL_WIDTH',
-    # Search data
     'SearchResult',
-    # Search functions
     'search_extract_video_id',
     'resize_ytm_thumbnail',
     'search_ytm',
@@ -219,8 +207,6 @@ __all__ += [
     'search_youtube_results',
     'search_query_mode',
     'search_url_mode',
-    'search_youtube_legacy',
-    'score_atv_match',
     'is_relevant',
     'dedupe_results',
 ]

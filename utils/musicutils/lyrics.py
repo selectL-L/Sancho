@@ -4,8 +4,6 @@ Contains scrapers for Genius, LRCLIB, and LyricalNonsense,
 plus text chunking utilities for display.
 """
 
-from __future__ import annotations
-
 import asyncio
 import html
 import logging
@@ -197,7 +195,7 @@ class LyricalNonsenseScraper:
                         break
 
         except Exception as e:
-            logger.debug(f"Genius page scrape failed for {result.url}: {e}")
+            logger.debug(f"LyricalNonsense page scrape failed for {result.url}: {e}")
 
         return result
 

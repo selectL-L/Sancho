@@ -1,0 +1,683 @@
+/*
+ * desktop.css - Desktop-Specific Layout & Components
+ * For desktop shells only (web-index.html, web-settings.html)
+ */
+
+/* ========== PAGE STRUCTURE ========== */
+.page {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: var(--page-padding);
+  gap: var(--page-padding);
+}
+
+/* ========== PAGE HEADER ========== */
+.page-header {
+  width: calc(var(--grid-width) + var(--unit-gap) + var(--sidebar-width));
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.page-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.page-header-title h1 {
+  font-size: 1.5rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.page-header-title .bot-credit {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.page-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+/* ========== GUILD SELECTOR ========== */
+.guild-selector {
+  position: relative;
+}
+
+.guild-selector-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 0.625rem;
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  cursor: pointer;
+  transition: all 200ms ease;
+}
+
+.guild-selector-btn:hover {
+  background: var(--bg-card-elevated);
+  border-color: var(--border-strong);
+}
+
+.guild-icon {
+  width: 1.375rem;
+  height: 1.375rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.guild-selector-btn > span {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.guild-selector-btn > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  color: var(--text-muted);
+  transition: transform 200ms ease;
+}
+
+.guild-selector.open .guild-selector-btn > svg {
+  transform: rotate(180deg);
+}
+
+.guild-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-soft);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-0.5rem);
+  transition: all 180ms ease;
+  z-index: 100;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.guild-selector.open .guild-dropdown {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.guild-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.guild-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.light .guild-option:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.guild-option.selected {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12);
+}
+
+/* ========== MAIN UNIT ========== */
+.main-unit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.unit-inner {
+  display: flex;
+  gap: var(--unit-gap);
+  height: 100%;
+}
+
+/* ========== GRID CARD ========== */
+.grid-card {
+  width: var(--grid-width);
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ========== GRID HEADER ROW ========== */
+.grid-header {
+  display: grid;
+  grid-template-columns: var(--time-label-width) repeat(7, var(--cell-width));
+  flex-shrink: 0;
+}
+
+.header-cell {
+  height: var(--header-row-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 2px solid var(--border-strong);
+}
+
+.header-cell.time-corner {
+  justify-content: flex-end;
+  padding-right: 0.5rem;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.header-cell.day-header {
+  flex-direction: column;
+  border-left: 1px solid var(--border-strong);
+}
+
+.header-cell.day-header:last-child {
+  border-right: 1px solid var(--border-strong);
+}
+
+.header-cell .today-tag {
+  font-size: 0.5625rem;
+  font-weight: 600;
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  height: 0.875rem;
+}
+
+.header-cell .day-name {
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.header-cell .day-date {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-top: 0.125rem;
+}
+
+/* ========== GRID SCROLL CONTAINER ========== */
+.grid-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.grid-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+#glow-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ========== GRID BODY ========== */
+.grid-body {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--time-label-width) repeat(7, var(--cell-width));
+}
+
+/* ========== TIME LABELS ========== */
+.time-label {
+  height: var(--cell-height);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 0.625rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: transparent;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  position: relative;
+}
+
+.time-label.hour {
+  color: var(--text-secondary);
+}
+
+/* Hour marker line - exclude first (12AM) since header provides that edge */
+.time-label.hour:not(:first-child)::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border-default);
+}
+
+/* ========== GRID CELLS ========== */
+.grid-cell {
+  height: var(--cell-height);
+  border-left: 1px solid var(--border-strong);
+  background: var(--cell-bg, transparent);
+  cursor: pointer;
+  position: relative;
+  transition: filter 150ms ease;
+}
+
+.grid-cell:nth-child(8n) {
+  border-right: 1px solid var(--border-strong);
+}
+
+.grid-cell:hover {
+  filter: brightness(1.3);
+  z-index: 5;
+}
+
+.grid-cell.locked {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.8);
+  z-index: 6;
+}
+
+.light .grid-cell.locked {
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.5);
+}
+
+/* Hour start rows */
+.grid-cell.hour-start {
+  border-top: 1px solid var(--border-default);
+}
+
+/* Half hour rows */
+.grid-cell.half-hour {
+  border-top: 1px dashed var(--border-subtle);
+}
+
+/* Last row - strong bottom border */
+.grid-body .grid-cell:nth-last-child(-n+7) {
+  border-bottom: 2px solid var(--border-strong);
+}
+
+/* ========== HEATMAP INTENSITY ========== */
+/* Subtle borders for filled cells (Timeful-style) */
+.grid-cell.filled {
+  border-left-color: rgba(255, 255, 255, 0.1);
+}
+.grid-cell.filled:nth-child(8n) {
+  border-right-color: rgba(255, 255, 255, 0.1);
+}
+.grid-cell.filled.hour-start {
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+.grid-cell.filled.half-hour {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+.light .grid-cell.filled {
+  border-left-color: rgba(0, 0, 0, 0.08);
+}
+.light .grid-cell.filled:nth-child(8n) {
+  border-right-color: rgba(0, 0, 0, 0.08);
+}
+.light .grid-cell.filled.hour-start {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+.light .grid-cell.filled.half-hour {
+  border-top-color: rgba(0, 0, 0, 0.05);
+}
+
+/* Cell states for settings/editing */
+.grid-cell.available {
+  --cell-bg: var(--heatmap-available);
+}
+
+.grid-cell.unavailable {
+  --cell-bg: transparent;
+}
+
+/* Current time indicator */
+.time-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #ef4444;
+  box-shadow: 0 0 0.5rem rgba(239, 68, 68, 0.6);
+  z-index: 15;
+  pointer-events: none;
+}
+
+.time-indicator::before {
+  content: 'Now';
+  position: absolute;
+  top: -0.875rem;
+  left: 0.25rem;
+  font-size: 0.5625rem;
+  color: #ef4444;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ========== LEGEND ========== */
+.legend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.legend span {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.legend-gradient {
+  width: 8rem;
+  height: 0.625rem;
+  border-radius: 0.3125rem;
+  background: linear-gradient(to right,
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15),
+    rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.92)
+  );
+}
+
+.legend-best {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: 0.75rem;
+}
+
+.legend-best-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0.1875rem;
+  background: var(--heatmap-5);
+  box-shadow: 0 0 0.5rem 0.125rem rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+}
+
+/* ========== GRID FOOTER (Settings) ========== */
+.grid-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.grid-footer-tip {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.grid-footer-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ========== SIDEBAR ========== */
+.sidebar {
+  width: var(--sidebar-width);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Sidebar cards */
+.sidebar-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  border-radius: 0.875rem;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-card.flex-1 {
+  flex: 1;
+}
+
+.sidebar-card.available {
+  flex: 0.4;
+}
+
+.sidebar-card.everyone {
+  flex: 0.6;
+}
+
+.sidebar-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+  flex-shrink: 0;
+}
+
+.sidebar-card-header h3 {
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.sidebar-card-header .count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.sidebar-card-subtitle {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  flex-shrink: 0;
+}
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+  width: 0.25rem;
+}
+
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 0.125rem;
+}
+
+.light .sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* ========== PERSON ROWS (Index) ========== */
+.person-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: all 180ms ease;
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.person-row.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.person-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.light .person-row:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.person-row.selected {
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.15);
+}
+
+.person-row .avatar {
+  width: 1.625rem;
+  height: 1.625rem;
+  font-size: 0.5625rem;
+}
+
+.person-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.person-name {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.person-meta {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ========== SIDEBAR PLACEHOLDER TEXT ========== */
+.sidebar-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 1rem;
+  color: var(--text-secondary);
+  padding: 1rem;
+  line-height: 1.4;
+}
+
+.sidebar-placeholder .viewing-name {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.6);
+}
+
+/* ========== LIST ITEMS (Settings) ========== */
+.list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  transition: background 150ms ease;
+}
+
+.list-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.light .list-item:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.list-item-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.list-item-icon {
+  width: 1.625rem;
+  height: 1.625rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-input);
+  font-size: 0.5625rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.list-item-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.list-item-name {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list-empty {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  padding: 0.5rem 0;
+  text-align: center;
+}
+
+/* ========== VISIBILITY TOGGLES ========== */
+/* Hide mobile-only elements on desktop */
+.mobile-only {
+  display: none;
+}
+
+/* Hide mobile-specific controls on desktop */
+.mobile-tz-badge,
+.mobile-zoom-controls,
+.mobile-drawer {
+  display: none;
+}

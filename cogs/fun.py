@@ -14,9 +14,7 @@ import re
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import discord
@@ -25,6 +23,45 @@ from discord.ext import commands
 import config
 from utils.base_cog import BaseCog
 from utils.bot_class import CoreBot
+
+
+# =============================================================================
+# COG CALL TYPES
+# =============================================================================
+
+
+@dataclass
+class CogCallResult:
+    """Complete, ready-to-post result from a delegated cog method.
+
+    Target method does ALL processing and returns this.
+    Fun dispatcher just posts it verbatim.
+
+    Attributes:
+        content: Text message to send.
+        file: File attachment to send.
+        embed: Embed to send.
+    """
+
+    content: Optional[str] = None
+    file: Optional[discord.File] = None
+    embed: Optional[discord.Embed] = None
+
+
+class CogCallError(Exception):
+    """Base exception for cog_call failures."""
+
+
+class CogCallNoInput(CogCallError):
+    """No valid input provided (no attachment, no reply, no URL)."""
+
+
+class CogCallInvalidInput(CogCallError):
+    """Input was provided but couldn't be processed (wrong format, too large, etc.)."""
+
+
+class CogCallProcessingFailed(CogCallError):
+    """Processing started but failed (ffmpeg error, API timeout, etc.)."""
 
 
 # =============================================================================
@@ -46,7 +83,9 @@ class FunCommand:
         content: Literal value - text string OR image filename in ASSETS_PATH.
         file: Read lines from this text file in ASSETS_PATH.
         attr: Read items from self.{attr} at runtime.
-        image_cog: Call ImageCog.{method}(ctx, query) to get image bytes.
+        cog_call: Tuple of (CogName, method_name) to delegate processing.
+        cog_call_errors: Dict mapping exception types to error messages.
+            Keys: 'no_input', 'invalid_input', 'processing_failed', 'unavailable'
         random: If True and source has multiple items, pick randomly.
         require_query: If True, user must provide text after trigger.
         query_error: Message shown when require_query=True but query is empty.
@@ -63,7 +102,8 @@ class FunCommand:
     content: Optional[str] = None
     file: Optional[str] = None
     attr: Optional[str] = None
-    image_cog: Optional[str] = None
+    cog_call: Optional[Tuple[str, str]] = None
+    cog_call_errors: Optional[Dict[str, str]] = None
 
     # Behavior modifiers
     random: bool = True
@@ -86,7 +126,7 @@ FUN_COMMANDS: List[FunCommand] = [
     # Static text
     FunCommand(
         'issues', (r'\bissues?\b',),
-        content='My issues page is [here](https://github.com/selectL-L/Sancho/issues) '  # Note, fix this to point towards Shiori's repo at some point.
+        content='My issues page is [here](https://github.com/selectL-L/Marine-Bug-Tracker) '
                 'please write your suggestions and issues over there!'),
 
     # Random from file
@@ -97,7 +137,7 @@ FUN_COMMANDS: List[FunCommand] = [
         query_error="I cannot intuit from nothing!",
         error_msg="I seem to have lost my magic 8-ball..."),
 
-    # Random quote from BOD fate system (treasure hunt - shows ONE quote)
+    # Random quote from BOD system (treasure hunt - shows ONE quote)
     FunCommand(
         'yujin_quotes', (r'\byujin\s*quotes?\b',),
         attr='bod_quote_display',
@@ -121,6 +161,14 @@ class Fun(BaseCog):
     Complex commands (BOD, leaderboard) are implemented as regular methods.
     """
 
+    BOD_CHAIN_DIALOGUE = [
+        "First…", "Second…", "Third…", "Fourth…", "Fifth…",
+        "Sixth…", "Seventh…", "Eighth…", "Ninth…", "Tenth…",
+        "Eleventh…", "Twelfth…", "Thirteenth…", "Fourteenth…", "Fifteenth…",
+        "Sixteenth…", "Seventeenth…", "Eighteenth…", "Nineteenth…",
+        "Twentieth, and final… Be not afraid."
+    ]
+
     def __init__(self, bot: CoreBot):
         """Initializes the Fun cog.
 
@@ -128,17 +176,16 @@ class Fun(BaseCog):
             bot (CoreBot): The bot instance.
         """
         super().__init__(bot)
+        assert bot.db_manager is not None
+        self.db_manager = bot.db_manager
         self.bod_timeout_tasks: Dict[int, asyncio.Task] = {}
         self.has_cleaned_up_chains = False
-        # BOD Fate System
-        self.bod_quote_triggers: Dict[int, List[Dict[str, Any]]] = {}
         self.bod_quote_display: List[str] = []
-        self._load_bod_quotes()
 
     def _load_bod_quotes(self) -> None:
-        """Load BOD quote triggers from TOML file.
+        """Load BOD quotes from TOML file.
 
-        Populates self.bod_quote_triggers and self.bod_quote_display.
+        Populates self.bod_quote_display.
         Logs warning if file is missing or malformed.
         """
         quotes_path = os.path.join(config.ASSETS_PATH, 'bod_quotes.toml')
@@ -149,21 +196,11 @@ class Fun(BaseCog):
             # Load display quotes
             self.bod_quote_display = data.get('quotes', {}).get('list', [])
 
-            # Load triggers - convert string keys to int
-            raw_triggers = data.get('triggers', {})
-            self.bod_quote_triggers = {}
-            for chain_pos, trigger_list in raw_triggers.items():
-                try:
-                    chain_int = int(chain_pos)
-                    self.bod_quote_triggers[chain_int] = trigger_list
-                except ValueError:
-                    self.logger.warning(f"Invalid chain position '{chain_pos}' in bod_quotes.toml - skipping")
-
-            self.logger.info(f"Loaded {len(self.bod_quote_display)} BOD quotes and {len(self.bod_quote_triggers)} trigger positions.")
+            self.logger.info(f"Loaded {len(self.bod_quote_display)} BOD quotes.")
         except FileNotFoundError:
-            self.logger.warning("bod_quotes.toml not found. BOD fate triggers will be disabled.")
+            self.logger.warning("bod_quotes.toml not found. BOD quotes will be disabled.")
         except tomllib.TOMLDecodeError as e:
-            self.logger.error(f"Failed to parse bod_quotes.toml: {e}")
+            self.logger.error(f"Failed to parse bod_quotes.toml: {e}", exc_info=True)
         except Exception as e:
             self.logger.error(f"Unexpected error loading bod_quotes.toml: {e}", exc_info=True)
 
@@ -193,6 +230,9 @@ class Fun(BaseCog):
         cmd = _FUN_COMMAND_LOOKUP.get(name)
         if cmd is not None:
             async def handler(ctx: commands.Context, query: str) -> None:
+                if not self._cog_is_ready:
+                    await self._not_ready_response(ctx)
+                    return
                 await self._dispatch_fun_command(cmd, ctx, query)
             return handler
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
@@ -213,6 +253,11 @@ class Fun(BaseCog):
             ctx: The command context.
             query: The user's full query string.
         """
+        # Route cog_call commands to dedicated handler
+        if cmd.cog_call is not None:
+            await self._handle_cog_call(cmd, ctx)
+            return
+
         # Check query requirement
         if cmd.require_query:
             pattern = '|'.join(cmd.patterns)
@@ -233,21 +278,15 @@ class Fun(BaseCog):
 
             # Send output
             if cmd.is_image:
-                if cmd.image_cog:
-                    # item is already processed bytes from ImageCog
-                    await ctx.reply(file=discord.File(BytesIO(item), filename=f"{cmd.name}.png"))
-                else:
-                    # item is filename in ASSETS_PATH
-                    path = os.path.join(config.ASSETS_PATH, item)
-                    await ctx.reply(file=discord.File(path))
+                # item is filename in ASSETS_PATH
+                path = os.path.join(config.ASSETS_PATH, item)
+                await ctx.reply(file=discord.File(path))
             else:
                 await ctx.reply(item)
 
-            self.logger.info(f"Fun command '{cmd.name}' used by {ctx.author}")
-
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             await ctx.reply(cmd.error_msg)
-            self.logger.error(f"Asset missing for fun command '{cmd.name}'")
+            self.logger.error(f"Asset missing for fun command '{cmd.name}' (user {ctx.author.id}): {e}", exc_info=True)
         except Exception as e:
             await ctx.reply(cmd.error_msg)
             self.logger.error(f"Error in fun command '{cmd.name}': {e}", exc_info=True)
@@ -267,179 +306,115 @@ class Fun(BaseCog):
             return [cmd.content]
 
         elif cmd.file is not None:
-            # Read lines from file
+            # Read lines from file (offloaded — open() is blocking I/O)
             path = os.path.join(config.ASSETS_PATH, cmd.file)
-            with open(path, 'r', encoding='utf-8') as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return lines
+
+            def _read_lines() -> List[str]:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return [line.strip() for line in f if line.strip()]
+
+            return await asyncio.to_thread(_read_lines)
 
         elif cmd.attr is not None:
             # Read from runtime attribute
             return getattr(self, cmd.attr, [])
 
-        elif cmd.image_cog is not None:
-            # Call ImageCog method - returns bytes
-            image_cog = self.bot.get_cog('ImageCog')
-            if not image_cog:
-                self.logger.warning(f"ImageCog not available for '{cmd.name}'")
-                return []
-            method = getattr(image_cog, cmd.image_cog, None)
-            if not method:
-                self.logger.error(f"ImageCog has no method '{cmd.image_cog}'")
-                return []
-            # Note: For image_cog, we'd need to pass ctx/query and await
-            # This is a placeholder - actual implementation depends on ImageCog API
-            return []
-
         return []
 
     # ==========================================================================
-    # BOD Fate System Helpers
+    # Cog Call Dispatcher
     # ==========================================================================
 
-    async def _get_previous_message(
+    async def _resolve_cog_call_input(
         self,
-        channel: discord.TextChannel,
-        user: Union[discord.User, discord.Member],
-        before: discord.Message
-    ) -> Optional[str]:
-        """Get user's most recent message in channel before BOD command.
+        ctx: commands.Context
+    ) -> Optional[discord.Attachment]:
+        """Resolve input for cog_call: prefer direct attachment over reply.
 
-        Only considers messages from the last 10 minutes.
+        Priority:
+        1. Direct attachment on the command message
+        2. Attachment on replied-to message
+        3. None (target method should raise CogCallNoInput)
 
         Args:
-            channel: The channel to search.
-            user: The user whose message to find.
-            before: The BOD command message (search before this).
+            ctx: The command context.
 
         Returns:
-            Message content if found within 10 minutes, None otherwise.
+            The resolved attachment, or None if no attachment found.
         """
-        ten_minutes_ago = datetime.now(timezone.utc) - __import__('datetime').timedelta(minutes=10)
+        # 1. Direct attachment
+        if ctx.message.attachments:
+            return ctx.message.attachments[0]
 
-        try:
-            async for message in channel.history(limit=50, before=before):
-                if message.author.id == user.id:
-                    if message.created_at < ten_minutes_ago:
-                        # Message is too old
-                        return None
-                    return message.content
-        except discord.Forbidden:
-            self.logger.warning(f"Missing permissions to read history in channel {channel.id}")
-        except Exception as e:
-            self.logger.error(f"Error fetching previous message: {e}")
+        # 2. Replied-to message
+        if ctx.message.reference and ctx.message.reference.resolved:
+            ref_msg = ctx.message.reference.resolved
+            if isinstance(ref_msg, discord.Message) and ref_msg.attachments:
+                return ref_msg.attachments[0]
 
         return None
 
-    async def _evaluate_quote_trigger(
+    async def _handle_cog_call(
         self,
-        user_id: int,
-        channel: discord.TextChannel,
-        before_message: discord.Message,
-        current_chain: int
+        cmd: FunCommand,
+        ctx: commands.Context
     ) -> None:
-        """Check if user's previous message triggers quote fate.
+        """Execute a cog_call command by delegating to another cog's method.
 
-        If a match is found, adds fate to user's bank via database.
+        Resolves input, calls the target method, and posts the result.
+        Maps CogCallError subclasses to user-friendly error messages.
 
         Args:
-            user_id: The Discord user ID.
-            channel: The channel context.
-            before_message: The BOD command message.
-            current_chain: User's current chain position.
+            cmd: The FunCommand definition with cog_call set.
+            ctx: The command context.
         """
-        # Get triggers for this chain position
-        triggers = self.bod_quote_triggers.get(current_chain, [])
-        if not triggers:
+        assert cmd.cog_call is not None  # Guaranteed by caller
+        cog_name, method_name = cmd.cog_call
+        errors = cmd.cog_call_errors or {}
+
+        # Get cog and method
+        cog = self.bot.get_cog(cog_name)
+        if not cog:
+            await ctx.reply(errors.get('unavailable', cmd.error_msg))
+            self.logger.warning(f"Cog '{cog_name}' not available for cog_call '{cmd.name}'")
             return
 
-        # Get user's previous message
-        previous_content = await self._get_previous_message(
-            channel,
-            before_message.author,
-            before_message
-        )
-        if not previous_content:
+        method = getattr(cog, method_name, None)
+        if not method:
+            await ctx.reply(errors.get('unavailable', cmd.error_msg))
+            self.logger.error(f"Cog '{cog_name}' has no method '{method_name}'")
             return
 
-        # Check against triggers
-        for trigger in triggers:
-            pattern = trigger.get('pattern', '')
-            tier = trigger.get('tier', 'LUCKY')
-            count = trigger.get('count', 1)
+        # Resolve input
+        attachment = await self._resolve_cog_call_input(ctx)
 
-            try:
-                if re.search(pattern, previous_content, re.IGNORECASE):
-                    db_manager = self.bot.db_manager
-                    if db_manager:
-                        await db_manager.add_bod_fate(user_id, tier, count)
-                        self.logger.info(
-                            f"BOD fate triggered for user {user_id}: {tier} x{count} "
-                            f"(chain {current_chain}, pattern '{pattern}')"
-                        )
-                    return  # Only first match counts
-            except re.error as e:
-                self.logger.warning(f"Invalid regex pattern in bod_quotes.toml: '{pattern}' - {e}")
+        try:
+            result: CogCallResult = await method(attachment)
 
-    async def _consume_fate_and_get_tier(self, user_id: int) -> str:
-        """Consume fate from bank, returning the tier used.
+            # Build reply kwargs - only include non-None values
+            reply_kwargs: Dict[str, Any] = {}
+            if result.content is not None:
+                reply_kwargs['content'] = result.content
+            if result.file is not None:
+                reply_kwargs['file'] = result.file
+            if result.embed is not None:
+                reply_kwargs['embed'] = result.embed
 
-        Checks tiers in order: GUARANTEED > BLESSED > LUCKY > NORMAL.
+            await ctx.reply(**reply_kwargs)
 
-        Args:
-            user_id: The Discord user ID.
+        except CogCallNoInput:
+            await ctx.reply(errors.get('no_input', "You need to provide something to process!"))
+        except CogCallInvalidInput:
+            await ctx.reply(errors.get('invalid_input', "I can't process that type of input."))
+        except CogCallProcessingFailed:
+            await ctx.reply(errors.get('processing_failed', "Something went wrong during processing."))
+        except Exception as e:
+            await ctx.reply(cmd.error_msg)
+            self.logger.error(f"Unexpected error in cog_call '{cmd.name}': {e}", exc_info=True)
 
-        Returns:
-            Tier string: 'GUARANTEED', 'BLESSED', 'LUCKY', or 'NORMAL'.
-        """
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            return "NORMAL"
-
-        # Check in priority order
-        for tier in ('GUARANTEED', 'BLESSED', 'LUCKY'):
-            if await db_manager.consume_bod_fate(user_id, tier):
-                self.logger.info(f"Consumed {tier} fate for user {user_id}")
-                return tier
-
-        return "NORMAL"
-
-    def _fate_roll(self, tier: str) -> int:
-        """Roll 1d4 with modified probability based on tier.
-
-        Args:
-            tier: One of 'GUARANTEED', 'BLESSED', 'LUCKY', 'NORMAL'.
-
-        Returns:
-            Roll result 1-4.
-        """
-        if tier == "GUARANTEED":
-            return 4
-        elif tier == "BLESSED":
-            # 75% chance of success
-            return 4 if random.random() < 0.75 else random.randint(1, 3)
-        elif tier == "LUCKY":
-            # 50% chance of success
-            return 4 if random.random() < 0.50 else random.randint(1, 3)
-        else:
-            # NORMAL - standard 25% chance
-            return random.randint(1, 4)
-
-    def _get_fate_flavor(self, tier: str) -> str:
-        """Get flavor text prefix for a fate tier.
-
-        Args:
-            tier: The fate tier that was consumed.
-
-        Returns:
-            Flavor text string, or empty string for NORMAL.
-        """
-        flavors = {
-            'LUCKY': "✨ *Favoured by fate...* ",
-            'BLESSED': "🌟 *Fabled by fate...* ",
-            'GUARANTEED': "⚡ *Divine intervention...* ",
-        }
-        return flavors.get(tier, "")
+    # ==========================================================================
+    # BOD Helpers
+    # ==========================================================================
 
     async def _resolve_user_display_name(self, user_id: int, guild: Optional[discord.Guild] = None) -> str:
         """Resolve a user ID to a display name with exponential backoff for API calls.
@@ -519,12 +494,7 @@ class Fun(BaseCog):
         try:
             await asyncio.sleep(20 * 60)
 
-            db_manager = self.bot.db_manager
-            if not db_manager:
-                self.logger.error(f"BOD session timeout: DatabaseManager not found for user {user_id}.")
-                return
-
-            player_data = await db_manager.get_bod_player(user_id)
+            player_data = await self.db_manager.get_bod_player(user_id)
             current_chain = player_data.get('current_chain', 0)
 
             # If the user is no longer in a chain, their session ended naturally (by failing a roll).
@@ -536,15 +506,16 @@ class Fun(BaseCog):
             channel = self.bot.get_channel(channel_id)
 
             reply_message = f"Your 20-minute `bod` session has ended. Your final chain was {current_chain}."
-            user_best = await db_manager.get_user_bod_best(user_id)
+            user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                self.logger.info(f"BOD session timeout: new personal best for user {user_id} with chain {current_chain}.")
                 reply_message += "\n**Congratulations! You set a new personal best!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
 
             # Reset chain, start the 12-hour cooldown from now.
-            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
+            await self.db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             if channel and isinstance(channel, discord.TextChannel):
                 await channel.send(f"<@{user_id}>, {reply_message}")
@@ -562,7 +533,6 @@ class Fun(BaseCog):
             # Always remove the task from the tracking dictionary upon completion or cancellation.
             if user_id in self.bod_timeout_tasks:
                 self.bod_timeout_tasks.pop(user_id, None)
-                self.logger.info(f"Removed BOD task for user {user_id} from tracking.")
 
     @commands.hybrid_command(name='allquotes', description='Show all Yujin quotes (admin only)')
     @commands.is_owner()
@@ -614,7 +584,7 @@ class Fun(BaseCog):
                 embed.add_field(name=field_name, value=chunk, inline=False)
 
         await ctx.reply(embed=embed)
-        self.logger.info(f"All Yujin quotes displayed for admin {ctx.author}.")
+        self.logger.info(f"All Yujin quotes displayed for admin {ctx.author.id}.")
 
     async def bod(self, ctx: commands.Context, query: str) -> None:
         """A special command that rolls a 1d4.
@@ -623,32 +593,16 @@ class Fun(BaseCog):
         This command has a 12-hour cooldown. Once off cooldown, the user has a
         20-minute session to build their chain.
 
-        The Fate System can modify roll probabilities:
-        - LUCKY: 50% chance of rolling 4
-        - BLESSED: 75% chance of rolling 4
-        - GUARANTEED: 100% chance of rolling 4
-
         Args:
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
         """
-        BOD_CHAIN_DIALOGUE = [
-            "First…", "Second…", "Third…", "Fourth…", "Fifth…",
-            "Sixth…", "Seventh…", "Eighth…", "Ninth…", "Tenth…",
-            "Eleventh…", "Twelfth…", "Thirteenth…", "Fourteenth…", "Fifteenth…",
-            "Sixteenth…", "Seventeenth…", "Eighteenth…", "Nineteenth…",
-            "Twentieth, and final… Be not afraid."
-        ]
-
-        user_id = ctx.author.id
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            await ctx.reply("The database is not available at the moment. Please try again later.")
-            self.logger.error("DatabaseManager not found in bot instance.")
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
             return
-
+        user_id = ctx.author.id
         # Check cooldowns.
-        player_data = await db_manager.get_bod_player(user_id)
+        player_data = await self.db_manager.get_bod_player(user_id)
         last_used = player_data.get('last_used_timestamp', 0)
         current_chain = player_data.get('current_chain', 0)
         current_time = time.time()
@@ -656,7 +610,7 @@ class Fun(BaseCog):
 
         # Main cooldown (12 hours), only applies if the user is not in an active chain.
         # An active chain means they are within their 20-minute session.
-        if current_chain == 0 and time_since_last_use < 12 * 60 * 60 and not (config.DEV_MODE and await self.bot.is_owner(ctx.author)):
+        if current_chain == 0 and time_since_last_use < 12 * 60 * 60:
             remaining_time = (12 * 60 * 60) - time_since_last_use
             hours, remainder = divmod(remaining_time, 3600)
             minutes, _ = divmod(remainder, 60)
@@ -669,36 +623,22 @@ class Fun(BaseCog):
             self.bod_timeout_tasks[user_id] = task
             self.logger.info(f"BOD session started for user {user_id}. Creating timeout task.")
 
-        # Evaluate quote triggers BEFORE rolling (adds to fate bank if matched)
-        if isinstance(ctx.channel, discord.TextChannel):
-            await self._evaluate_quote_trigger(user_id, ctx.channel, ctx.message, current_chain)
-
         try:
-            # Consume fate and determine roll tier
-            fate_tier = await self._consume_fate_and_get_tier(user_id)
-
-            # Owner gets guaranteed success until chain 21 for testing purposes, only in DEV_MODE.
-            if config.DEV_MODE and await self.bot.is_owner(ctx.author) and current_chain < 21:
-                roll_result = 4
-                fate_tier = "NORMAL"  # Don't show fate flavor for dev bypass
-            else:
-                roll_result = self._fate_roll(fate_tier)
+            roll_result = random.randint(1, 4)
 
             if roll_result == 4:
                 # Successful roll, continue the chain
                 new_chain = current_chain + 1
+                self.logger.info(f"BOD roll success for user {user_id}: roll=4, chain={new_chain}.")
                 # Update timestamp, chain, and the last channel used.
-                await db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
+                await self.db_manager.update_bod_player(user_id, int(current_time), new_chain, ctx.channel.id)
 
-                dialogue = (BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(BOD_CHAIN_DIALOGUE)
+                dialogue = (self.BOD_CHAIN_DIALOGUE[new_chain - 1] if new_chain <= len(self.BOD_CHAIN_DIALOGUE)
                             else f"You've reached an unheard of chain of {new_chain}! The angels sing your name.")
-
-                # Add fate flavor if consumed fate tier was used
-                fate_flavor = self._get_fate_flavor(fate_tier)
 
                 file_path = os.path.join(config.ASSETS_PATH, 'bod_complete.jpg')
                 await ctx.reply(
-                    f"{fate_flavor}You rolled a 4! **{dialogue}** Your chain is now {new_chain}. Roll again!",
+                    f"You rolled a 4! **{dialogue}** Your chain is now {new_chain}. Roll again!",
                     file=discord.File(file_path)
                 )
             else:
@@ -713,9 +653,9 @@ class Fun(BaseCog):
                     reply_message = f"You rolled a {roll_result}. Your chain of {current_chain} was broken."
                     self.logger.info(f"BOD chain for user {user_id} broken with a roll of {roll_result}. Final chain: {current_chain}.")
 
-                    user_best = await db_manager.get_user_bod_best(user_id)
+                    user_best = await self.db_manager.get_user_bod_best(user_id)
                     if current_chain > user_best:
-                        await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                        await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
                         reply_message += f"\n**Congratulations! You set a new personal best with a chain of {current_chain}! Yujin would be proud!**"
                     else:
                         reply_message += f"\nYour personal best is {user_best}. Yujin is now heading to sleep!"
@@ -724,7 +664,7 @@ class Fun(BaseCog):
                     self.logger.info(f"BOD chain for user {user_id} failed at chain 0 with a roll of {roll_result}.")
 
                 # Reset chain and start the 12-hour cooldown from now.
-                await db_manager.update_bod_player(user_id, int(current_time), 0, ctx.channel.id)
+                await self.db_manager.update_bod_player(user_id, int(current_time), 0, ctx.channel.id)
                 await ctx.reply(reply_message, file=discord.File(file_path))
 
         except FileNotFoundError as e:
@@ -742,6 +682,7 @@ class Fun(BaseCog):
         """
         # On a reload, give the unload of the old cog a moment to finish its cleanup.
         # On a cold start, this just adds a small safety buffer.
+        self._load_bod_quotes()
         await asyncio.sleep(2)
         await self._cleanup_bod_chains()
 
@@ -754,12 +695,7 @@ class Fun(BaseCog):
             return
 
         self.logger.info("Performing one-time check for active BOD chains after restart/reload.")
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            self.logger.error("Cannot perform BOD chain cleanup: DatabaseManager not found.")
-            return
-
-        active_chains = await db_manager.get_all_active_bod_chains()
+        active_chains = await self.db_manager.get_all_active_bod_chains()
 
         if not active_chains:
             self.logger.info("No active BOD chains found to clean up.")
@@ -774,7 +710,7 @@ class Fun(BaseCog):
             current_chain = chain_data['current_chain']
 
             # Reset the user's chain in the database first.
-            await db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
+            await self.db_manager.update_bod_player(user_id, int(time.time()), 0, channel_id)
 
             channel = self.bot.get_channel(channel_id)
             if not channel or not isinstance(channel, discord.TextChannel):
@@ -783,9 +719,10 @@ class Fun(BaseCog):
 
             reply_message = f"It looks like I had to restart or reload, which has unfortunately broken your chain of {current_chain}."
 
-            user_best = await db_manager.get_user_bod_best(user_id)
+            user_best = await self.db_manager.get_user_bod_best(user_id)
             if current_chain > user_best:
-                await db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                await self.db_manager.update_bod_leaderboard(user_id, current_chain, int(time.time()))
+                self.logger.info(f"BOD restart cleanup: new personal best for user {user_id} with chain {current_chain}.")
                 reply_message += "\n**However, you set a new personal best! Congratulations!**"
             else:
                 reply_message += f" Your personal best remains {user_best}."
@@ -808,13 +745,10 @@ class Fun(BaseCog):
             ctx (commands.Context): The command context.
             query (str): The user's query (unused).
         """
-        db_manager = self.bot.db_manager
-        if not db_manager:
-            await ctx.reply("The database is not available at the moment. Please try again later.")
-            self.logger.error("DatabaseManager not found in bot instance.")
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
             return
-
-        leaderboard_data = await db_manager.get_bod_leaderboard()
+        leaderboard_data = await self.db_manager.get_bod_leaderboard()
 
         if not leaderboard_data:
             await ctx.reply("The BOD leaderboard is currently empty. Be the first to set a score!")
@@ -864,7 +798,6 @@ class Fun(BaseCog):
                     break
 
         await ctx.reply(embed=embed)
-        self.logger.info(f"BOD leaderboard viewed by {ctx.author}.")
 
 
 async def setup(bot: CoreBot) -> None:

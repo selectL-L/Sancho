@@ -133,6 +133,11 @@ class Math(BaseCog):
         """
         super().__init__(bot)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # DEPRECATED — This method is no longer dispatched by NLP.
+    # The Limbus cog (cogs/limbus.py) handles limbus rolls now.
+    # Remove this method once the Limbus cog is verified working.
+    # ═══════════════════════════════════════════════════════════════════
     async def limbus_roll_nlp(self, ctx: commands.Context, *, query: str) -> None:
         """Handles Limbus Company-style rolls using a sequential parser.
 
@@ -250,14 +255,13 @@ class Math(BaseCog):
                 f"{description}"
             )
             await ctx.send(response)
-            self.logger.info(f"Limbus roll by {ctx.author}. Result: {final_result}")
 
         except asyncio.TimeoutError:
             await ctx.send("You took too long to answer, so I cancelled the roll.")
         except (ValueError, TypeError) as e:
             await ctx.send(f"Invalid input: {e}. Please enter a valid number.")
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred: {e}")
+            await ctx.send("An unexpected error occurred. The issue has been logged.")
             self.logger.error(f"Error during limbus roll for {ctx.author}: {e}", exc_info=True)
 
     async def send_calc_help(self, ctx: commands.Context) -> None:
@@ -380,7 +384,10 @@ class Math(BaseCog):
                 return
 
             # Format result, removing trailing zeros.
-            if result == int(result):
+            if math.isinf(result) or math.isnan(result):
+                await ctx.send("That calculation overflowed into an invalid result (infinity/NaN). Please use smaller numbers.")
+                return
+            elif result == int(result):
                 result_display = str(int(result))
             else:
                 result_display = f"{result:.15f}".rstrip('0').rstrip('.')
@@ -418,9 +425,11 @@ class Math(BaseCog):
             raise ValueError("Cannot roll with both advantage and disadvantage.")
 
         # Extract SP (default 50) - must happen BEFORE lexing to avoid NUMBER+MODULO confusion.
+        # After the digits, at most one non-whitespace character is allowed before a boundary.
+        # "with 80", "at 75%", "with 8% chance" all pass; "with 2d20" does not.
         sp = 50
         sp_explicit = False
-        sp_match = re.search(r'\b(at|with)\s+(\d+)\s*[%]?', work_query)
+        sp_match = re.search(r'\b(at|with)\s+(\d+)\S?(?=\s|$)', work_query)
         if sp_match:
             sp = int(sp_match.group(2))
             sp_explicit = True
@@ -450,7 +459,9 @@ class Math(BaseCog):
         context_suffix = f" ({', '.join(context_parts)})" if context_parts else ""
 
         # --- 4. Format Result ---
-        if result == int(result):
+        if math.isinf(result) or math.isnan(result):
+            raise ValueError("That roll overflowed into an invalid result (infinity/NaN). Please use smaller numbers.")
+        elif result == int(result):
             result_display = str(int(result))
         else:
             result_display = f"{result:.2f}"
@@ -495,19 +506,19 @@ class Math(BaseCog):
 
 
 class DiceToken:
-    DICE = 'DICE'
-    COIN = 'COIN'
-    CLAMP = 'CLAMP'
-    NUMBER = 'NUMBER'
-    PLUS = 'PLUS'
-    MINUS = 'MINUS'
-    MULTIPLY = 'MULTIPLY'
-    DIVIDE = 'DIVIDE'
-    POWER = 'POWER'
-    MODULO = 'MODULO'
-    LPAREN = 'LPAREN'
-    RPAREN = 'RPAREN'
-    EOF = 'EOF'
+    DICE: str = 'DICE'
+    COIN: str = 'COIN'
+    CLAMP: str = 'CLAMP'
+    NUMBER: str = 'NUMBER'
+    PLUS: str = 'PLUS'
+    MINUS: str = 'MINUS'
+    MULTIPLY: str = 'MULTIPLY'
+    DIVIDE: str = 'DIVIDE'
+    POWER: str = 'POWER'
+    MODULO: str = 'MODULO'
+    LPAREN: str = 'LPAREN'
+    RPAREN: str = 'RPAREN'
+    EOF: str = 'EOF'
 
     def __init__(self, type_: str, value: Any, raw: str = "", normalized: str = ""):
         self.type = type_
@@ -530,7 +541,7 @@ class DiceLexer:
         # Regex patterns - Order DOES matter here
         patterns = [
             (DiceToken.DICE, r'(\d+)?d(\d+)(?:kh|kl)?(?:\d+)?!?'),
-            (DiceToken.COIN, r'(\d*)c'),
+            (DiceToken.COIN, r'(\d+)c\b'),
             (DiceToken.CLAMP, r'(?:mn\d+|mx\d+)+'),
             (DiceToken.NUMBER, r'\d+(?:\.\d+)?'),
             (DiceToken.POWER, r'\*\*|\^'),
@@ -560,7 +571,7 @@ class DiceLexer:
                     normalized = self._normalize_dice(value)
                     self.tokens.append(DiceToken(kind, value, value, normalized))
                 elif kind == DiceToken.COIN:
-                    # Normalize coin notation: c -> 1c
+                    # Normalize coin notation (count is always explicit)
                     normalized = self._normalize_coin(value)
                     self.tokens.append(DiceToken(kind, value, value, normalized))
                 else:
@@ -580,11 +591,11 @@ class DiceLexer:
         return f"{num_dice}d{num_sides}{keep_part}{exploding}"
 
     def _normalize_coin(self, coin_str: str) -> str:
-        """Normalize coin notation (c -> 1c)."""
-        match = re.match(r'(\d*)c', coin_str, re.IGNORECASE)
+        """Normalize coin notation (e.g. 3c -> 3c)."""
+        match = re.match(r'(\d+)c', coin_str, re.IGNORECASE)
         if not match:
             return coin_str.lower()
-        num_coins = match.group(1) or '1'
+        num_coins = match.group(1)
         return f"{num_coins}c"
 
     def get_expression(self) -> str:
@@ -615,10 +626,10 @@ class DiceParser:
         self.advantage = advantage
         self.disadvantage = disadvantage
         self.sp = sp
-        self.breakdown = []
+        self.breakdown: List[str] = []
         self.current_token = self.lexer.next()
 
-    def eat(self, token_type: str):
+    def eat(self, token_type: str) -> None:
         if self.current_token.type == token_type:
             self.current_token = self.lexer.next()
         else:

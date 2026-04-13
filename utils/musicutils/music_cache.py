@@ -2,33 +2,44 @@
 
 Provides proactive caching system that:
 - Refreshes ALL playlists from ambience.toml on startup and every 24 hours
-- Downloads tracks in background
+- Resolves per-track metadata via YTM + yt-dlp with provenance tracking
+- Downloads tracks as M4A with embedded metadata and thumbnails
 - Manages orphaned tracks with 90-day TTL
 - Handles residential proxy fallback for blocked tracks
 
+Architecture: Snapshot + Mutation protocol
+────────────────────────────────────────────
+All access to the in-memory index (_ambient_cache) goes through three primitives:
+
+    _snapshot()  — deep copy for safe reads (no lock needed)
+    _mutate(fn)  — lock + apply fn + save for atomic writes
+    _save_ambient() — deep-copy-then-thread disk writer
+
+Invariant: No method holds a direct reference to _ambient_cache across an
+await point. Long operations build local dicts, then commit with a single
+_mutate() at the end. Concurrent readers see either the old state or the
+fully-committed new state — never a partial intermediate.
+
 File Structure:
     cache/music/
-        playlist.json      # YouTube metadata for all playlists
-        manifest.json      # Download registry + orphan tracking
+        ambient.json       # Unified index: playlists + tracks + provenance
+        tracks/            # Flat folder of human-readable M4A files
+            Artist - Title [video_id].m4a
         orphaned/          # 90-day holding area for removed tracks
-            <video_id>.mp3
-        playlists/
-            <playlist_hash>/  # 12-char MD5 of playlist URL
-                <video_id>.mp3
+            Artist - Title [video_id].m4a
         residential/       # Permanent cache for proxy-downloaded tracks
             <video_id>.mp3
 """
 
-from __future__ import annotations
-
 import asyncio
-import hashlib
+import copy
+import glob
 import json
 import logging
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .music_data import Track
@@ -37,12 +48,14 @@ from .music_data import Track
 from .music_helpers import (
     MUTAGEN_AVAILABLE,
     YTDLP_AVAILABLE,
-    download_track_as_mp3,
-    extract_video_id,
+    download_track_as_m4a,
     fetch_playlist_metadata,
+    generate_ambient_filename,
     get_residential_proxy_url,
 )
 from .music_auth import get_ytdlp_options
+
+logger = logging.getLogger(__name__)
 
 # Try to import yt_dlp for type checking the cast
 try:
@@ -50,60 +63,86 @@ try:
 except ImportError:
     yt_dlp = None  # type: ignore[assignment]
 
+T = TypeVar('T')
+
 
 class MusicCacheManager:
     """Proactive music cache manager for ambient playlists.
 
     This class handles:
     - Automatic refresh of all playlists from ambience.toml
-    - Background downloading of tracks
+    - Per-track metadata resolution via YTM + yt-dlp with provenance
+    - Background downloading of tracks as M4A with embedded metadata
     - Orphan management with 90-day TTL
     - Cache miss handling with immediate refresh
 
-    File schemas:
-        playlist.json: YouTube metadata for all tracked playlists
-        manifest.json: Download state and orphan tracking
+    All index access uses the snapshot/mutate protocol to prevent
+    concurrent readers from seeing half-finished mutations.
+
+    File schema:
+        ambient.json: Unified index with playlists, tracks, and provenance
     """
 
-    PLAYLIST_SCHEMA_VERSION = 1
-    MANIFEST_SCHEMA_VERSION = 1
+    # =========================================================================
+    # 1.1 — CLASS CONSTANTS
+    # =========================================================================
+
+    AMBIENT_SCHEMA_VERSION = 2
     ORPHAN_TTL_DAYS = 90
     REFRESH_INTERVAL_HOURS = 24
+    RESOLVE_DELAY_SECONDS = 0.75  # Rate-limit delay between YTM lookups
+    THUMBNAIL_CACHE_MAX = 150  # Max in-memory thumbnail entries
 
-    def __init__(self, cache_root: str, logger: logging.Logger):
+    # =========================================================================
+    # 1.2 — __init__
+    # =========================================================================
+
+    def __init__(
+        self,
+        cache_root: str,
+        on_track_unavailable: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+    ):
         """Initialize the music cache manager.
 
         Args:
             cache_root: Path to cache/music/ directory.
-            logger: Logger instance for messages.
+            on_track_unavailable: Async callback fired when a track is marked
+                unavailable after all download methods fail. Signature:
+                async def callback(title: str, artist: str, url: str) -> None
         """
         self.cache_root = cache_root
         self.logger = logger
+        self._on_track_unavailable = on_track_unavailable
 
         # Paths
-        self.playlists_path = os.path.join(cache_root, "playlists")
+        self.tracks_path = os.path.join(cache_root, "tracks")
         self.orphaned_path = os.path.join(cache_root, "orphaned")
         self.residential_path = os.path.join(cache_root, "residential")
-        self.playlist_file = os.path.join(cache_root, "playlist.json")
-        self.manifest_file = os.path.join(cache_root, "manifest.json")
+        self.ambient_file = os.path.join(cache_root, "ambient.json")
 
-        # In-memory caches (lazy-loaded)
-        self._playlist_cache: Optional[Dict[str, Any]] = None
-        self._manifest: Optional[Dict[str, Any]] = None
+        # In-memory cache (lazy-loaded)
+        self._ambient_cache: Optional[Dict[str, Any]] = None
+
+        # Guards both in-memory mutation AND disk writes.
+        # Must NOT be held during network calls.
+        self._ambient_lock = asyncio.Lock()
 
         # Background tasks
         self._refresh_task: Optional[asyncio.Task[None]] = None
         self._download_task: Optional[asyncio.Task[None]] = None
-        self._download_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._download_queue: asyncio.Queue[str] = asyncio.Queue()  # video_id strings
+        self._queued_ids: Set[str] = set()  # Dedup tracking for download queue
+        self._missing_invalidation_tasks: Set[asyncio.Task[None]] = set()
 
-        # Lock for manifest writes
-        self._manifest_lock = asyncio.Lock()
+        # In-memory thumbnail cache: video_id -> PNG bytes
+        # Populated during resolution, consumed during download
+        self._thumbnail_cache: Dict[str, bytes] = {}
 
         # Flag to signal download worker to stop
         self._shutdown = False
 
     # =========================================================================
-    # INITIALIZATION
+    # 1.3 — LIFECYCLE
     # =========================================================================
 
     async def initialize(self) -> None:
@@ -113,144 +152,293 @@ class MusicCacheManager:
         Does NOT hit YouTube - that happens in refresh_all_playlists().
         """
         self._ensure_directories()
-        self._load_playlist_cache()
-        self._load_manifest()
+        self._load_ambient()
         self.logger.info("[CacheManager] Initialized")
 
     def _ensure_directories(self) -> None:
         """Creates cache directories if they don't exist."""
         os.makedirs(self.cache_root, exist_ok=True)
-        os.makedirs(self.playlists_path, exist_ok=True)
+        os.makedirs(self.tracks_path, exist_ok=True)
         os.makedirs(self.orphaned_path, exist_ok=True)
         os.makedirs(self.residential_path, exist_ok=True)
 
-    # =========================================================================
-    # PLAYLIST.JSON - YouTube Metadata
-    # =========================================================================
+    async def shutdown(self) -> None:
+        """Gracefully shuts down background tasks."""
+        self._shutdown = True
 
-    def _load_playlist_cache(self) -> Dict[str, Any]:
-        """Loads playlist.json or returns empty structure."""
-        if self._playlist_cache is not None:
-            return self._playlist_cache
-
-        if os.path.exists(self.playlist_file):
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
             try:
-                with open(self.playlist_file, 'r', encoding='utf-8') as f:
-                    self._playlist_cache = json.load(f)
-                    if self._playlist_cache is not None:
-                        return self._playlist_cache
-            except (json.JSONDecodeError, IOError) as e:
-                self.logger.warning(f"[CacheManager] playlist.json corrupted: {e}")
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
 
-        self._playlist_cache = {
-            'version': self.PLAYLIST_SCHEMA_VERSION,
-            'last_refresh': 0,
-            'playlists': {}
-        }
-        return self._playlist_cache
-
-    def _save_playlist_cache(self) -> None:
-        """Saves playlist.json to disk."""
-        if self._playlist_cache is None:
-            return
-        try:
-            # Write to temp file first, then rename (atomic on most systems)
-            temp_file = self.playlist_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(self._playlist_cache, f, indent=2, ensure_ascii=False)
-            shutil.move(temp_file, self.playlist_file)
-        except IOError as e:
-            self.logger.error(f"[CacheManager] Failed to save playlist.json: {e}")
-
-    # =========================================================================
-    # MANIFEST.JSON - Download Registry
-    # =========================================================================
-
-    def _load_manifest(self) -> Dict[str, Any]:
-        """Loads manifest.json or returns empty structure."""
-        if self._manifest is not None:
-            return self._manifest
-
-        if os.path.exists(self.manifest_file):
+        if self._download_task and not self._download_task.done():
+            self._download_task.cancel()
             try:
-                with open(self.manifest_file, 'r', encoding='utf-8') as f:
-                    self._manifest = json.load(f)
-                    if self._manifest is not None:
-                        return self._manifest
-            except (json.JSONDecodeError, IOError) as e:
-                self.logger.warning(f"[CacheManager] manifest.json corrupted: {e}")
+                await self._download_task
+            except asyncio.CancelledError:
+                pass
 
-        self._manifest = {
-            'version': self.MANIFEST_SCHEMA_VERSION,
-            'files': {},
-            'orphaned': {}
-        }
-        return self._manifest
-
-    async def _save_manifest(self) -> None:
-        """Saves manifest.json to disk (with lock, non-blocking)."""
-        async with self._manifest_lock:
-            if self._manifest is None:
-                return
-            # Use to_thread to avoid blocking the event loop
-            await asyncio.to_thread(self._write_manifest_to_disk)
-
-    def _write_manifest_to_disk(self) -> None:
-        """Sync helper for _save_manifest. Writes manifest atomically.
-
-        Note: Only call from _save_manifest (via to_thread) to ensure lock protection.
-        """
-        if self._manifest is None:
-            return
-        try:
-            temp_file = self.manifest_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(self._manifest, f, indent=2, ensure_ascii=False)
-            shutil.move(temp_file, self.manifest_file)
-        except IOError as e:
-            self.logger.error(f"[CacheManager] Failed to save manifest.json: {e}")
+        self.logger.info("[CacheManager] Shutdown complete")
 
     # =========================================================================
-    # URL UTILITIES
+    # 1.4 — INDEX I/O (core primitives — everything else depends on these)
+    #
+    # Helpers first: _empty_ambient, _load_ambient, _write_ambient_to_disk
+    # Then primitives: _snapshot, _mutate, _save_ambient
     # =========================================================================
 
     @staticmethod
-    def _url_to_hash(url: str) -> str:
-        """Returns 12-char MD5 hash of URL for folder naming.
+    def _empty_ambient() -> Dict[str, Any]:
+        """Create a blank ambient index skeleton."""
+        return {
+            'version': MusicCacheManager.AMBIENT_SCHEMA_VERSION,
+            'last_refresh': 0,
+            'playlists': {},
+            'tracks': {},
+        }
 
-        Args:
-            url: Playlist URL.
-
-        Returns:
-            12-character hex string.
-        """
-        return hashlib.md5(url.encode()).hexdigest()[:12]  # noqa: S324
-
-    def _get_playlist_folder(self, playlist_url: str) -> str:
-        """Gets the folder path for a playlist.
-
-        Args:
-            playlist_url: YouTube playlist URL.
+    def _load_ambient(self) -> Dict[str, Any]:
+        """Lazy-load ambient.json from disk into _ambient_cache.
 
         Returns:
-            Absolute path to the playlist's cache folder.
+            The ambient cache dict (the live reference — only use via
+            _snapshot() or inside _mutate() callbacks).
         """
-        folder_hash = self._url_to_hash(playlist_url)
-        return os.path.join(self.playlists_path, folder_hash)
+        if self._ambient_cache is not None:
+            return self._ambient_cache
+
+        if os.path.exists(self.ambient_file):
+            try:
+                with open(self.ambient_file, 'r', encoding='utf-8') as f:
+                    self._ambient_cache = json.load(f)
+                    if self._ambient_cache is not None:
+                        return self._ambient_cache
+            except (json.JSONDecodeError, IOError) as e:
+                self.logger.warning(f"[CacheManager] ambient.json corrupted: {e}")
+
+        self._ambient_cache = self._empty_ambient()
+        return self._ambient_cache
+
+    def _write_ambient_to_disk(self, data: Dict[str, Any]) -> None:
+        """Sync helper: writes a pre-copied snapshot to disk atomically.
+
+        Uses os.replace() which is atomic on both POSIX and Windows
+        (unlike shutil.move which falls back to copy+delete on Windows).
+
+        Args:
+            data: A deep-copied snapshot of the ambient cache.
+                  Must NOT be the live _ambient_cache reference.
+        """
+        try:
+            temp_file = self.ambient_file + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_file, self.ambient_file)
+        except IOError as e:
+            self.logger.error(f"[CacheManager] Failed to save ambient.json: {e}")
+
+    def _snapshot(self) -> Dict[str, Any]:
+        """Return a deep copy of the current ambient cache state.
+
+        Callers get an immutable-in-practice snapshot that will never change
+        under them, regardless of concurrent mutations by other coroutines.
+
+        Cost: ~0.5ms for a typical 500-track index. Negligible vs network I/O.
+        """
+        ambient = self._load_ambient()
+        return copy.deepcopy(ambient)
+
+    async def _mutate(self, fn: Callable[[Dict[str, Any]], T]) -> T:
+        """Acquire lock, apply fn to _ambient_cache, save, return fn's result.
+
+        fn receives the live dict reference. fn MUST be synchronous and fast
+        (dict operations only, no I/O, no awaits). The lock protects both
+        the mutation and the subsequent disk write.
+
+        Args:
+            fn: A synchronous callable that mutates the ambient dict and
+                optionally returns a value.
+
+        Returns:
+            Whatever fn returns.
+        """
+        async with self._ambient_lock:
+            ambient = self._load_ambient()
+            result = fn(ambient)
+            await self._save_ambient()
+            return result
+
+    async def _save_ambient(self) -> None:
+        """Atomic write of ambient.json to disk.
+
+        Must be called while holding _ambient_lock.
+
+        Deep-copies the dict before handing to the writer thread, preventing
+        the json.dump traversal race where the thread iterates the dict while
+        the event loop mutates it.
+        """
+        if self._ambient_cache is None:
+            return
+        snapshot = copy.deepcopy(self._ambient_cache)
+        await asyncio.to_thread(self._write_ambient_to_disk, snapshot)
 
     # =========================================================================
-    # PLAYLIST MANAGEMENT
+    # 1.5 — SHARED HELPERS (used across multiple later sections)
+    #
+    # This section contains ONLY helpers. No public methods.
+    # =========================================================================
+
+    def _entry_to_track(self, video_id: str, entry: Dict[str, Any]) -> Track:
+        """Convert an ambient.json track entry to a Track dataclass.
+
+        Single source of truth for cache-entry → Track conversion.
+        Used by get_cached_tracks() and any future callers.
+
+        Args:
+            video_id: YouTube video ID.
+            entry: Track entry dict from ambient.json.
+
+        Returns:
+            A Track dataclass instance.
+        """
+        return Track(
+            title=entry.get('title', 'Unknown'),
+            artist=entry.get('artist', 'Unknown'),
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            duration=entry.get('duration', 0),
+            thumbnail=entry.get('thumbnail_url'),
+            thumbnail_is_square=entry.get('thumbnail_is_square', False),
+            video_id=video_id,
+            album=entry.get('album'),
+            source=entry.get('source', 'youtube'),
+            is_explicit=entry.get('is_explicit'),
+            version_label=entry.get('version_label', 'Video'),
+            view_count=entry.get('view_count'),
+            video_type=entry.get('video_type'),
+        )
+
+    def _move_file_safe(self, src: str, dst: str) -> bool:
+        """Move a file from src to dst, handling Windows locking issues.
+
+        Uses copy+delete instead of rename to avoid Windows failures when
+        source files have open handles (e.g., FFmpeg playing the file).
+
+        Returns True on success, False on failure (logged).
+        If dst already exists, removes src instead of duplicating.
+
+        Args:
+            src: Source file path.
+            dst: Destination file path.
+
+        Returns:
+            True if the operation succeeded (file is at dst), False otherwise.
+        """
+        if not os.path.exists(src):
+            return False
+        try:
+            if os.path.exists(dst):
+                os.remove(src)  # Already at destination
+            else:
+                shutil.copy2(src, dst)
+                os.remove(src)
+            return True
+        except OSError as e:
+            self.logger.warning(f"[CacheManager] File move failed {src} -> {dst}: {e}")
+            return False
+
+    @staticmethod
+    def _is_entry_downloadable(entry: Dict[str, Any]) -> bool:
+        """Whether a track entry is eligible for download.
+
+        Returns False if orphaned, unavailable, or missing filename.
+        """
+        if entry.get('orphan') is not None:
+            return False
+        if entry.get('unavailable'):
+            return False
+        if not entry.get('filename'):
+            return False
+        return True
+
+    @staticmethod
+    def _collect_active_video_ids(ambient: Dict[str, Any]) -> Set[str]:
+        """Union of all track_ids across all playlists.
+
+        Args:
+            ambient: The ambient cache dict (snapshot or live).
+
+        Returns:
+            Set of video IDs that appear in at least one playlist.
+        """
+        ids: Set[str] = set()
+        for playlist_data in ambient.get('playlists', {}).values():
+            ids.update(playlist_data.get('track_ids', []))
+        return ids
+
+    @staticmethod
+    def _build_old_membership(ambient: Dict[str, Any]) -> Dict[str, str]:
+        """Build video_id -> playlist_url mapping from current playlists.
+
+        Used before a refresh to track which playlist each track belonged to,
+        so orphan records can include the original playlist reference.
+
+        Args:
+            ambient: The ambient cache dict (snapshot or live).
+
+        Returns:
+            Dict mapping video_id to the playlist URL it belongs to.
+            Last-write-wins for tracks in multiple playlists.
+        """
+        membership: Dict[str, str] = {}
+        for url, playlist_data in ambient.get('playlists', {}).items():
+            for vid in playlist_data.get('track_ids', []):
+                membership[vid] = url
+        return membership
+
+    @staticmethod
+    def _compute_download_cost(file_size: int) -> float:
+        """Compute estimated residential proxy cost for a file.
+
+        Args:
+            file_size: File size in bytes.
+
+        Returns:
+            Estimated cost in dollars.
+        """
+        import config
+        cost_per_gb = getattr(config, 'RESIDENTIAL_PROXY_COST_PER_GB', 4.0)
+        return (file_size / (1024 ** 3)) * cost_per_gb
+
+    # =========================================================================
+    # 1.6 — PLAYLIST SOURCE
     # =========================================================================
 
     def get_all_playlist_urls(self) -> List[str]:
         """Extracts all unique playlist URLs from ambience.toml.
 
+        Reads the TOML file directly to avoid coupling with the ambience module.
+
         Returns:
             List of unique playlist URLs.
         """
-        from utils.ambience import _load_toml
+        import tomllib
+        from pathlib import Path
+        import config
 
-        toml_data = _load_toml()
+        toml_path = Path(config.ASSETS_PATH) / "ambience.toml"
+        if not toml_path.exists():
+            self.logger.warning("[CacheManager] ambience.toml not found at %s", toml_path)
+            return []
+
+        try:
+            with open(toml_path, "rb") as f:
+                toml_data = tomllib.load(f)
+        except Exception as e:
+            self.logger.error("[CacheManager] Failed to parse ambience.toml: %s", e)
+            return []
+
         playlists_section = toml_data.get('playlists', {})
 
         urls: Set[str] = set()
@@ -259,55 +447,80 @@ class MusicCacheManager:
                 continue  # Skip the descriptions sub-table
             if isinstance(value, list):
                 urls.update(value)
+            elif isinstance(value, str):
+                self.logger.warning("[CacheManager] playlists.%s is a string, not a list — skipping", key)
 
         return list(urls)
 
-    async def refresh_all_playlists(self) -> Dict[str, List[Track]]:
-        """Fetches ALL playlist URLs from ambience.toml and updates cache.
+    # =========================================================================
+    # 1.7 — CACHE READS
+    #
+    # Helpers first: _find_residential_file, _schedule_missing_invalidation,
+    #                _invalidate_missing_download
+    # Then public: get_cached_tracks, get_any_local_path
+    # =========================================================================
 
-        This hits YouTube for each playlist. Run in background after startup.
+    def _find_residential_file(self, video_id: str) -> Optional[str]:
+        """Find a cached residential download for a video ID.
+
+        Checks for any file named <video_id>.* in the residential directory.
+        Format doesn't matter — if the video ID matches, it's a hit.
+
+        Args:
+            video_id: YouTube video ID.
 
         Returns:
-            Dict mapping playlist URLs to their track lists.
+            Path to cached residential file if exists, None otherwise.
         """
-        urls = self.get_all_playlist_urls()
-        if not urls:
-            self.logger.warning("[CacheManager] No playlist URLs found in ambience.toml")
-            return {}
+        pattern = os.path.join(self.residential_path, f"{video_id}.*")
+        matches = glob.glob(pattern)
+        return matches[0] if matches else None
 
-        self.logger.info(f"[CacheManager] Refreshing {len(urls)} playlists from YouTube...")
+    def _schedule_missing_invalidation(self, video_id: str) -> None:
+        """Best-effort invalidation for a missing cached file.
 
-        results: Dict[str, List[Track]] = {}
-        playlist_cache = self._load_playlist_cache()
+        Fires an async task to clear downloaded_at and re-queue the track.
 
-        for url in urls:
-            try:
-                tracks = await fetch_playlist_metadata(url, self.logger)
-                if tracks:
-                    results[url] = tracks
+        Args:
+            video_id: YouTube video ID.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.logger.debug(
+                f"[CacheManager] No running loop to invalidate missing file for {video_id}"
+            )
+            return
 
-                    # Update playlist.json
-                    folder_hash = self._url_to_hash(url)
-                    playlist_cache['playlists'][url] = {
-                        'display_name': f"Playlist ({len(tracks)} tracks)",
-                        'folder_hash': folder_hash,
-                        'tracks': [t.to_dict() for t in tracks]
-                    }
-                    self.logger.debug(f"[CacheManager] Fetched {len(tracks)} tracks from {url[:50]}...")
-                else:
-                    self.logger.warning(f"[CacheManager] No tracks from {url[:50]}...")
-            except Exception as e:
-                self.logger.error(f"[CacheManager] Failed to fetch {url[:50]}: {e}")
+        task = loop.create_task(self._invalidate_missing_download(video_id))
+        self._missing_invalidation_tasks.add(task)
+        task.add_done_callback(self._missing_invalidation_tasks.discard)
 
-        playlist_cache['last_refresh'] = time.time()
-        self._playlist_cache = playlist_cache
-        self._save_playlist_cache()
+    async def _invalidate_missing_download(self, video_id: str) -> None:
+        """Marks a missing download as not downloaded and re-queues it.
 
-        self.logger.info(f"[CacheManager] Refresh complete: {len(results)} playlists updated")
-        return results
+        Args:
+            video_id: YouTube video ID.
+        """
+        def clear_downloaded(ambient: Dict[str, Any]) -> bool:
+            entry = ambient.get('tracks', {}).get(video_id)
+            if not entry or entry.get('downloaded_at') is None:
+                return False
+            entry['downloaded_at'] = None
+            return True
+
+        was_cleared = await self._mutate(clear_downloaded)
+        if was_cleared:
+            self.logger.info(f"[CacheManager] Re-queued missing download: {video_id} (file not found on disk)")
+            await self._enqueue_download(video_id)
 
     def get_cached_tracks(self, playlist_url: str) -> List[Track]:
         """Returns tracks from cache without hitting YouTube.
+
+        Reads track_ids from ambient.json playlists section, then looks up
+        each track in the tracks section and converts to Track objects.
+
+        Uses _snapshot() for a consistent point-in-time view.
 
         Args:
             playlist_url: YouTube playlist URL.
@@ -315,178 +528,314 @@ class MusicCacheManager:
         Returns:
             List of Track objects, or empty list if not cached.
         """
-        playlist_cache = self._load_playlist_cache()
-        playlist_data = playlist_cache.get('playlists', {}).get(playlist_url)
+        snap = self._snapshot()
+        playlist_data = snap.get('playlists', {}).get(playlist_url)
 
         if not playlist_data:
             return []
 
-        tracks = []
-        for track_data in playlist_data.get('tracks', []):
-            track = Track.from_dict(track_data)
-            tracks.append(track)
+        tracks_section = snap.get('tracks', {})
+        tracks: List[Track] = []
+
+        for video_id in playlist_data.get('track_ids', []):
+            entry = tracks_section.get(video_id)
+            if not entry:
+                continue
+
+            # Skip tracks marked as unavailable
+            if entry.get('unavailable'):
+                continue
+
+            tracks.append(self._entry_to_track(video_id, entry))
 
         return tracks
 
-    # =========================================================================
-    # DOWNLOAD MANAGEMENT
-    # =========================================================================
-
-    def get_local_path(self, video_id: str, playlist_url: str) -> Optional[str]:
-        """Returns local file path if track is downloaded.
-
-        Args:
-            video_id: YouTube video ID.
-            playlist_url: Playlist URL to check.
-
-        Returns:
-            Absolute path to MP3 if exists, None otherwise.
-        """
-        folder_hash = self._url_to_hash(playlist_url)
-        file_path = os.path.join(self.playlists_path, folder_hash, f"{video_id}.mp3")
-
-        if os.path.exists(file_path):
-            return file_path
-
-        # Check orphaned folder as fallback
-        orphan_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-        if os.path.exists(orphan_path):
-            return orphan_path
-
-        return None
-
-    def get_any_local_path(self, video_id: str) -> Optional[str]:
+    def get_any_local_path(self, video_id: str, residential_allowed: bool = False) -> Optional[str]:
         """Finds any existing copy of a track across all locations.
 
+        Uses _snapshot() for a consistent point-in-time view of the index,
+        then does filesystem checks against the snapshot's filename.
+
         Args:
             video_id: YouTube video ID.
+            residential_allowed: Whether to check residential cache.
 
         Returns:
-            Path to existing MP3 file, or None.
+            Path to existing cached file, or None.
         """
-        # Check orphaned first
-        orphan_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-        if os.path.exists(orphan_path):
-            return orphan_path
+        # Check tracks/ via ambient.json filename
+        snap = self._snapshot()
+        entry = snap.get('tracks', {}).get(video_id)
 
-        # Check all playlist folders
-        manifest = self._load_manifest()
-        file_info = manifest.get('files', {}).get(video_id)
-        if file_info:
-            for location in file_info.get('locations', []):
-                file_path = os.path.join(self.playlists_path, location, f"{video_id}.mp3")
+        if entry:
+            filename = entry.get('filename')
+            if filename:
+                file_path = os.path.join(self.tracks_path, filename)
                 if os.path.exists(file_path):
                     return file_path
+                if entry.get('downloaded_at') is not None:
+                    self.logger.warning(
+                        f"[CacheManager] Missing cached file for {video_id}: {filename}"
+                    )
+                    self._schedule_missing_invalidation(video_id)
+
+                orphaned_path = os.path.join(self.orphaned_path, filename)
+                if os.path.exists(orphaned_path):
+                    return orphaned_path
+
+        # Check orphaned/ by video_id as fallback
+        pattern = os.path.join(self.orphaned_path, f"*[[]{video_id}[]]*")
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+
+        if residential_allowed:
+            # Check residential cache (any format)
+            residential_path = self._find_residential_file(video_id)
+            if residential_path:
+                return residential_path
 
         return None
 
-    async def download_track(
-        self,
-        track: Track,
-        playlist_url: str
-    ) -> Optional[str]:
-        """Downloads a single track to the playlist folder.
+    # =========================================================================
+    # 1.8 — METADATA RESOLUTION
+    # =========================================================================
 
-        Checks for existing copies (orphaned or other playlists) first.
-        If direct download fails with 403/IP-block, retries via residential
-        proxy (ambient tracks deserve resilient downloading).
+    async def _resolve_track_metadata(self, video_id: str, url: str) -> Dict[str, Any]:
+        """Resolve full metadata for a single track via YTM + yt-dlp.
+
+        Calls _build_quick_result for YTM data, then fills gaps from yt-dlp.
+        Records per-field provenance (_source suffixes).
 
         Args:
-            track: Track to download.
-            playlist_url: Target playlist URL.
+            video_id: YouTube video ID.
+            url: Full YouTube URL.
 
         Returns:
-            Local path on success, None on failure.
+            An ambient.json track entry dict with all fields and provenance.
         """
-        if not track.video_id:
-            self.logger.warning(f"[CacheManager] Track has no video_id: {track.title}")
-            return None
+        from .search import (
+            _build_quick_result,
+            fetch_and_resize_thumbnail,
+            MUSIC_VIDEO_TYPE_ATV,
+        )
 
-        folder_hash = self._url_to_hash(playlist_url)
-        folder_path = os.path.join(self.playlists_path, folder_hash)
-        os.makedirs(folder_path, exist_ok=True)
+        entry: Dict[str, Any] = {
+            'video_id': video_id,
+            'url': url,
+        }
 
-        target_path = os.path.join(folder_path, f"{track.video_id}.mp3")
-
-        # Already exists in target?
-        if os.path.exists(target_path):
-            return target_path
-
-        # Check for existing copy elsewhere
-        existing_path = self.get_any_local_path(track.video_id)
-        if existing_path:
-            try:
-                shutil.copy2(existing_path, target_path)
-                await self._register_download(track.video_id, folder_hash)
-                self.logger.info(f"[CacheManager] Copied {track.video_id} from existing location")
-                return target_path
-            except IOError as e:
-                self.logger.warning(f"[CacheManager] Copy failed: {e}")
-
-        # Download fresh
-        if not YTDLP_AVAILABLE or not MUTAGEN_AVAILABLE:
-            return None
-
+        # ------------------------------------------------------------------
+        # Step 1: YTM lookup via _build_quick_result
+        # ------------------------------------------------------------------
+        ytm_data: Dict[str, Any] = {}
         try:
-            result = await download_track_as_mp3(
-                url=track.url,
-                output_dir=folder_path,
-                logger=self.logger,
-                custom_title=track.title,
-                custom_artist=track.artist,
-                embed_thumbnail=True
-            )
-
-            if result.success and result.file_path:
-                # Rename to video_id.mp3
-                final_path = target_path
-                if result.file_path != final_path:
-                    if os.path.exists(final_path):
-                        os.remove(final_path)
-                    os.rename(result.file_path, final_path)
-
-                await self._register_download(track.video_id, folder_hash)
-                self.logger.info(f"[CacheManager] Downloaded: {track.title}")
-                return final_path
-
-            # Check if this looks like a 403/IP-block error
-            error_msg = (result.error_message or '').lower()
-            is_ip_block = any(ind in error_msg for ind in ['403', 'forbidden', 'sign in', 'age-restricted'])
-
-            if is_ip_block:
-                self.logger.info(f"[CacheManager] Direct download blocked, trying residential: {track.title}")
-                residential_result = await self._download_track_via_residential(
-                    track=track,
-                    target_path=target_path,
-                    folder_hash=folder_hash
-                )
-                if residential_result:
-                    return residential_result
-
-            self.logger.warning(f"[CacheManager] Download failed: {track.title} - {result.error_message}")
-            return None
-
+            result = await _build_quick_result(video_id)
+            if (
+                result.title == 'Unknown'
+                and result.artist == 'Unknown'
+                and not result.thumbnail_url
+            ):
+                raise ValueError("YTM metadata unavailable")
+            ytm_data = {
+                'title': result.title if result.title != 'Unknown' else None,
+                'artist': result.artist if result.artist != 'Unknown' else None,
+                'album': result.album,
+                'duration': result.duration_seconds if result.duration_seconds else None,
+                'is_explicit': result.is_explicit,
+                'thumbnail_url': result.thumbnail_url,
+                'thumbnail_is_square': result.thumbnail_is_square,
+                'video_type': result.video_type,
+                'source': result.source,
+                'version_label': result.version_label,
+                'view_count': result.view_count,
+            }
         except Exception as e:
-            self.logger.error(f"[CacheManager] Download error: {e}")
-            return None
+            self.logger.debug(f"[CacheManager] YTM lookup failed for {video_id}: {e}")
 
-    async def _download_track_via_residential(
+        # ------------------------------------------------------------------
+        # Step 2: yt-dlp gap-fill for missing fields
+        # Only used for title/artist/duration when YTM can't provide them.
+        # ------------------------------------------------------------------
+        ytdlp_data: Dict[str, Any] = {}
+        needs_ytdlp = (
+            ytm_data.get('title') is None
+            or ytm_data.get('artist') is None
+            or ytm_data.get('duration') is None
+        )
+
+        if needs_ytdlp and YTDLP_AVAILABLE:
+            try:
+                import yt_dlp
+                from typing import cast
+                ydl_opts = get_ytdlp_options({
+                    'quiet': True,
+                    'no_warnings': True,
+                    'noplaylist': True,
+                })
+                info = await asyncio.to_thread(
+                    lambda: yt_dlp.YoutubeDL(cast(Any, ydl_opts)).extract_info(url, download=False)  # type: ignore[union-attr]
+                )
+                if info:
+                    ytdlp_data = {
+                        'title': info.get('title'),
+                        'artist': info.get('uploader') or info.get('channel'),
+                        'duration': int(info.get('duration', 0) or 0),
+                    }
+            except Exception as e:
+                self.logger.debug(f"[CacheManager] yt-dlp extract_info failed for {video_id}: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 3: Per-field merge with provenance
+        # ------------------------------------------------------------------
+        provenance_fields = ['title', 'artist', 'album', 'duration', 'is_explicit']
+        for field in provenance_fields:
+            ytm_val = ytm_data.get(field)
+            ytdlp_val = ytdlp_data.get(field)
+            if ytm_val is not None:
+                entry[field] = ytm_val
+                entry[f'{field}_source'] = 'ytm'
+            elif ytdlp_val is not None:
+                entry[field] = ytdlp_val
+                entry[f'{field}_source'] = 'ytdlp'
+            else:
+                entry[field] = None
+                entry[f'{field}_source'] = None
+
+        # Fallback defaults for required display fields
+        if entry.get('title') is None:
+            entry['title'] = 'Unknown'
+        if entry.get('artist') is None:
+            entry['artist'] = 'Unknown'
+        if entry.get('duration') is None:
+            entry['duration'] = 0
+
+        # Non-provenance fields (don't need _source tracking)
+        entry['video_type'] = ytm_data.get('video_type')
+        entry['source'] = ytm_data.get('source', 'youtube')
+        entry['version_label'] = ytm_data.get('version_label', 'Video')
+        entry['view_count'] = ytm_data.get('view_count')
+
+        # ------------------------------------------------------------------
+        # Step 4: Thumbnail fetch and resize
+        # ------------------------------------------------------------------
+        thumb_url = ytm_data.get('thumbnail_url')
+        entry['thumbnail_url'] = thumb_url
+        entry['thumbnail_is_square'] = ytm_data.get('thumbnail_is_square', False)
+        entry['thumbnail_source'] = 'ytm' if ytm_data.get('thumbnail_url') else None
+
+        if thumb_url and len(self._thumbnail_cache) < self.THUMBNAIL_CACHE_MAX:
+            try:
+                thumb_bytes = await fetch_and_resize_thumbnail(thumb_url)
+                if thumb_bytes:
+                    self._thumbnail_cache[video_id] = thumb_bytes
+            except Exception as e:
+                self.logger.debug(f"[CacheManager] Thumbnail fetch failed for {video_id}: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 5: Filename generation
+        # ------------------------------------------------------------------
+        video_type = entry.get('video_type') or ''
+        artist_for_name = entry['artist'] if video_type == MUSIC_VIDEO_TYPE_ATV else None
+
+        filename, was_modified, original = generate_ambient_filename(
+            title=entry['title'],
+            video_id=video_id,
+            video_type=video_type,
+            artist=artist_for_name,
+        )
+        entry['filename'] = filename
+        entry['filename_modified'] = was_modified
+        entry['filename_original'] = original
+
+        # ------------------------------------------------------------------
+        # Step 6: Timestamps
+        # ------------------------------------------------------------------
+        entry['resolved_at'] = time.time()
+        entry['downloaded_at'] = None  # Set by download worker
+        entry['orphan'] = None  # Set by reconciliation
+        entry['unavailable'] = None  # Set by download worker on permanent failure
+
+        self.logger.debug(
+            f"[CacheManager] Resolved {video_id}: "
+            f"title='{entry['title']}' artist='{entry['artist']}' "
+            f"type={entry.get('video_type')}"
+        )
+
+        return entry
+
+    # =========================================================================
+    # 1.9 — TRACK DOWNLOAD
+    #
+    # Helpers first: _mark_track_unavailable, _download_ambient_residential
+    # Then public: download_track
+    # =========================================================================
+
+    async def _mark_track_unavailable(
         self,
-        track: Track,
-        target_path: str,
-        folder_hash: str
-    ) -> Optional[str]:
-        """Downloads a track via residential proxy with ambient-quality settings.
+        video_id: str,
+        title: str,
+        artist: str,
+        url: str,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Mark a track as unavailable after all download methods fail.
 
-        This is used as a fallback for ambient downloads when direct download
-        fails due to IP blocking. Unlike download_residential() which saves to
-        the residential cache at 192kbps, this saves to the proper ambient
-        location with full 320kbps quality and metadata.
+        Sets the ``unavailable`` field in ambient.json so the track is
+        excluded from playlist loading and future download queues.
+        Fires the ``on_track_unavailable`` callback to notify the owner.
 
         Args:
-            track: Track to download.
-            target_path: Final destination path (playlists/<hash>/<video_id>.mp3).
-            folder_hash: Playlist folder hash for manifest registration.
+            video_id: YouTube video ID.
+            title: Track title (for logging/callback).
+            artist: Track artist (for logging/callback).
+            url: Track URL (for callback).
+            error_message: Error string from the last download attempt.
+        """
+        def mark(ambient: Dict[str, Any]) -> None:
+            entry = ambient.get('tracks', {}).get(video_id)
+            if entry:
+                entry['unavailable'] = {
+                    'marked_at': time.time(),
+                    'reason': error_message or 'Download failed',
+                }
+
+        await self._mutate(mark)
+
+        self.logger.warning(
+            f"[CacheManager] Marked unavailable: '{title}' by {artist} ({video_id}) "
+            f"- {error_message}"
+        )
+
+        # Notify owner via callback
+        if self._on_track_unavailable:
+            try:
+                await self._on_track_unavailable(title, artist, url)
+            except Exception as e:
+                self.logger.debug(f"[CacheManager] Unavailable callback error: {e}")
+
+    async def _download_ambient_residential(
+        self,
+        video_id: str,
+        entry_snap: Dict[str, Any],
+        target_path: str,
+        thumbnail_bytes: Optional[bytes] = None,
+    ) -> Optional[str]:
+        """Ambient pipeline's residential fallback — downloads to tracks/.
+
+        Called when the ambient background download gets a 403/IP-block.
+        Produces a full-quality M4A identical to a direct ambient download,
+        just routed through the residential proxy.
+
+        Unlike download_live_residential() which serves live playback
+        at 192kbps to residential/, this writes 320kbps with full metadata
+        to tracks/ — it's ambient's retry path, not a separate cache.
+
+        Args:
+            video_id: YouTube video ID.
+            entry_snap: Track entry snapshot (read-only, from _snapshot).
+            target_path: Final destination path in tracks/.
+            thumbnail_bytes: Pre-fetched PNG thumbnail bytes, or None.
 
         Returns:
             Path to downloaded file on success, None on failure.
@@ -496,79 +845,234 @@ class MusicCacheManager:
             self.logger.info("[CacheManager] Residential proxy not configured, cannot retry")
             return None
 
-        if not track.video_id:
+        url = entry_snap.get('url', f"https://www.youtube.com/watch?v={video_id}")
+        filename = entry_snap.get('filename')
+        if not filename:
             return None
 
-        output_dir = os.path.dirname(target_path)
+        self.logger.info(f"[CacheManager] Retrying via residential proxy: {entry_snap.get('title')}")
 
-        self.logger.info(f"[CacheManager] Retrying via residential proxy: {track.title}")
-
-        # Reuse download_track_as_mp3 with proxy - same 320kbps quality, full metadata
-        result = await download_track_as_mp3(
-            url=track.url,
-            output_dir=output_dir,
-            logger=self.logger,
-            custom_title=track.title,
-            custom_artist=track.artist,
-            embed_thumbnail=True,
-            proxy=proxy_url
+        result = await download_track_as_m4a(
+            url=url,
+            output_dir=self.tracks_path,
+            custom_title=entry_snap.get('title'),
+            custom_artist=entry_snap.get('artist'),
+            custom_album=entry_snap.get('album'),
+            is_explicit=entry_snap.get('is_explicit'),
+            thumbnail_bytes=thumbnail_bytes,
+            target_filename=filename,
+            proxy=proxy_url,
+            ydl_opts=get_ytdlp_options(),
         )
 
-        if not result.success:
+        if not result.success or not result.file_path:
             error_msg = (result.error_message or '').lower()
             if '403' in error_msg:
-                self.logger.warning(f"[CacheManager] 403 even via residential: {track.title}")
+                self.logger.warning(f"[CacheManager] 403 even via residential: {entry_snap.get('title')}")
             else:
                 self.logger.warning(f"[CacheManager] Residential download failed: {result.error_message}")
             return None
 
-        if not result.file_path:
-            return None
-
-        # Rename to video_id.mp3 (download_track_as_mp3 uses "Artist - Title.mp3" format)
-        if result.file_path != target_path:
-            if os.path.exists(target_path):
-                os.remove(target_path)
-            os.rename(result.file_path, target_path)
-
-        # Log cost estimate
-        import config
-        file_size = os.path.getsize(target_path)
-        cost_per_gb = getattr(config, 'RESIDENTIAL_PROXY_COST_PER_GB', 4.0)
-        cost = (file_size / (1024 ** 3)) * cost_per_gb
+        # Log cost estimate (os.path.getsize is blocking I/O)
+        file_size = await asyncio.to_thread(os.path.getsize, result.file_path)
+        cost = self._compute_download_cost(file_size)
         self.logger.info(
-            f"[CacheManager] Downloaded via residential: {track.title} - "
+            f"[CacheManager] Downloaded via residential: {entry_snap.get('title')} - "
             f"{file_size / (1024*1024):.2f} MB (~${cost:.4f})"
         )
 
-        await self._register_download(track.video_id, folder_hash)
-        return target_path
+        # Mark as downloaded
+        def mark_downloaded(ambient: Dict[str, Any]) -> None:
+            entry = ambient.get('tracks', {}).get(video_id)
+            if entry:
+                entry['downloaded_at'] = time.time()
 
-    async def _register_download(self, video_id: str, folder_hash: str) -> None:
-        """Registers a downloaded file in the manifest.
+        await self._mutate(mark_downloaded)
+
+        return result.file_path
+
+    async def download_track(self, video_id: str) -> Optional[str]:
+        """Downloads a single track to the tracks/ folder.
+
+        Looks up metadata from ambient.json, checks for existing copies,
+        downloads as M4A with embedded metadata and thumbnail. Falls back
+        to residential proxy on 403/IP-block.
+
+        Uses _snapshot() for reads, _mutate() for state updates.
+
+        Args:
+            video_id: Video ID to download.
+
+        Returns:
+            Local path on success, None on failure.
+        """
+        snap = self._snapshot()
+        entry_snap = snap.get('tracks', {}).get(video_id)
+
+        if not entry_snap:
+            self.logger.warning(f"[CacheManager] No track entry for {video_id}")
+            return None
+
+        filename = entry_snap.get('filename')
+        if not filename:
+            self.logger.warning(f"[CacheManager] No filename for {video_id}")
+            return None
+
+        target_path = os.path.join(self.tracks_path, filename)
+
+        # Already exists?
+        if await asyncio.to_thread(os.path.exists, target_path):
+            return target_path
+
+        # Check for existing copy elsewhere (orphaned, etc.)
+        existing_path = await asyncio.to_thread(
+            self.get_any_local_path, video_id, False
+        )
+        if existing_path and existing_path != target_path:
+            residential_root = os.path.abspath(self.residential_path)
+            existing_abs = os.path.abspath(existing_path)
+            if os.path.commonpath([existing_abs, residential_root]) == residential_root:
+                self.logger.info(
+                    f"[CacheManager] Skipping residential cache promotion for {video_id}"
+                )
+            else:
+                try:
+                    await asyncio.to_thread(shutil.copy2, existing_path, target_path)
+
+                    # Mark as downloaded AND clear orphan flag (bug fix #10)
+                    def mark_copied(ambient: Dict[str, Any]) -> None:
+                        entry = ambient.get('tracks', {}).get(video_id)
+                        if entry:
+                            entry['downloaded_at'] = time.time()
+                            entry['orphan'] = None  # Clear orphan if copying from orphaned/
+
+                    await self._mutate(mark_copied)
+                    self.logger.info(f"[CacheManager] Copied {video_id} from existing location")
+                    return target_path
+                except IOError as e:
+                    self.logger.warning(f"[CacheManager] Copy failed: {e}")
+
+        # Download fresh
+        if not YTDLP_AVAILABLE or not MUTAGEN_AVAILABLE:
+            return None
+
+        url = entry_snap.get('url', f"https://www.youtube.com/watch?v={video_id}")
+
+        # Get thumbnail bytes (from cache or re-fetch)
+        thumb_bytes = self._thumbnail_cache.pop(video_id, None)
+        if thumb_bytes is None and entry_snap.get('thumbnail_url'):
+            try:
+                from .search import fetch_and_resize_thumbnail
+                thumb_bytes = await fetch_and_resize_thumbnail(entry_snap['thumbnail_url'])
+            except Exception as e:
+                self.logger.debug(f"[CacheManager] Thumbnail re-fetch failed for {video_id}: {e}")
+
+        try:
+            result = await download_track_as_m4a(
+                url=url,
+                output_dir=self.tracks_path,
+                custom_title=entry_snap.get('title'),
+                custom_artist=entry_snap.get('artist'),
+                custom_album=entry_snap.get('album'),
+                is_explicit=entry_snap.get('is_explicit'),
+                thumbnail_bytes=thumb_bytes,
+                target_filename=filename,
+                ydl_opts=get_ytdlp_options(),
+            )
+
+            if result.success and result.file_path:
+                def mark_downloaded(ambient: Dict[str, Any]) -> None:
+                    entry = ambient.get('tracks', {}).get(video_id)
+                    if entry:
+                        entry['downloaded_at'] = time.time()
+
+                await self._mutate(mark_downloaded)
+                file_size = os.path.getsize(result.file_path) if result.file_path else 0
+                self.logger.info(
+                    f"[CacheManager] Downloaded: {entry_snap.get('title')} "
+                    f"({file_size // 1024} KB) → {os.path.basename(result.file_path) if result.file_path else 'unknown'}"
+                )
+                return result.file_path
+
+            # Check for 403/IP-block
+            error_msg = (result.error_message or '').lower()
+            is_ip_block = any(ind in error_msg for ind in ['403', 'forbidden', 'sign in', 'age-restricted'])
+
+            if is_ip_block:
+                self.logger.info(f"[CacheManager] Direct download blocked, trying residential: {entry_snap.get('title')}")
+                residential_result = await self._download_ambient_residential(
+                    video_id=video_id,
+                    entry_snap=entry_snap,
+                    target_path=target_path,
+                    thumbnail_bytes=thumb_bytes,
+                )
+                if residential_result:
+                    return residential_result
+
+            # Both direct and residential failed (or non-IP error) — mark unavailable
+            await self._mark_track_unavailable(
+                video_id,
+                entry_snap.get('title', 'Unknown'),
+                entry_snap.get('artist', 'Unknown'),
+                entry_snap.get('url', url),
+                result.error_message,
+            )
+            return None
+
+        except Exception as e:
+            self.logger.error(f"[CacheManager] Download error: {e}")
+            return None
+
+    # =========================================================================
+    # 1.10 — DOWNLOAD QUEUE & WORKER
+    #
+    # Helper first: _enqueue_download
+    # Then public: queue_missing_downloads, start_background_downloads,
+    #              _download_worker
+    # =========================================================================
+
+    async def _enqueue_download(self, video_id: str) -> bool:
+        """Enqueue a video_id for download, with deduplication.
+
+        Single point of entry for the download queue. Prevents the same
+        video_id from being queued multiple times.
 
         Args:
             video_id: YouTube video ID.
-            folder_hash: Playlist folder hash.
+
+        Returns:
+            True if actually enqueued, False if already pending.
         """
-        manifest = self._load_manifest()
+        if video_id in self._queued_ids:
+            return False
+        self._queued_ids.add(video_id)
+        await self._download_queue.put(video_id)
+        return True
 
-        if video_id not in manifest['files']:
-            manifest['files'][video_id] = {
-                'locations': [],
-                'downloaded_at': time.time()
-            }
+    async def queue_missing_downloads(self) -> int:
+        """Queues all tracks that need downloading.
 
-        locations = manifest['files'][video_id]['locations']
-        if folder_hash not in locations:
-            locations.append(folder_hash)
+        Walks ambient.json tracks — queues any where downloaded_at is None
+        or the file doesn't exist on disk.
 
-        # Remove from orphaned if present
-        if video_id in manifest.get('orphaned', {}):
-            del manifest['orphaned'][video_id]
+        Returns:
+            Number of tracks queued.
+        """
+        snap = self._snapshot()
+        queued = 0
 
-        self._manifest = manifest
-        await self._save_manifest()
+        for video_id, entry in snap.get('tracks', {}).items():
+            if not self._is_entry_downloadable(entry):
+                continue
+
+            filename = entry.get('filename')
+            file_path = os.path.join(self.tracks_path, filename)
+            if not await asyncio.to_thread(os.path.exists, file_path):
+                if await self._enqueue_download(video_id):
+                    queued += 1
+
+        self.logger.info(f"[CacheManager] Queued {queued} tracks for download")
+        return queued
 
     async def start_background_downloads(self) -> None:
         """Starts background download worker.
@@ -582,69 +1086,23 @@ class MusicCacheManager:
         self._download_task = asyncio.create_task(self._download_worker())
         self.logger.info("[CacheManager] Background download worker started")
 
-    async def queue_missing_downloads(self) -> int:
-        """Queues all tracks that need downloading.
-
-        Returns:
-            Number of tracks queued.
-        """
-        playlist_cache = self._load_playlist_cache()
-        queued = 0
-
-        for playlist_url, data in playlist_cache.get('playlists', {}).items():
-            folder_hash = data.get('folder_hash', self._url_to_hash(playlist_url))
-
-            for track_data in data.get('tracks', []):
-                video_id = track_data.get('video_id')
-                if not video_id:
-                    # Try to extract from URL
-                    video_id = extract_video_id(track_data.get('url', ''))
-                    if not video_id:
-                        continue
-
-                # Check if already downloaded for this playlist
-                target_path = os.path.join(self.playlists_path, folder_hash, f"{video_id}.mp3")
-                if not os.path.exists(target_path):
-                    await self._download_queue.put((playlist_url, video_id))
-                    queued += 1
-
-        self.logger.info(f"[CacheManager] Queued {queued} tracks for download")
-        return queued
-
     async def _download_worker(self) -> None:
         """Background worker that processes download queue."""
         while not self._shutdown:
             try:
-                # Wait for item with timeout to allow shutdown check
                 try:
-                    playlist_url, video_id = await asyncio.wait_for(
+                    video_id = await asyncio.wait_for(
                         self._download_queue.get(),
                         timeout=5.0
                     )
                 except TimeoutError:
                     continue
 
-                # Find track data
-                playlist_cache = self._load_playlist_cache()
-                playlist_data = playlist_cache.get('playlists', {}).get(playlist_url)
-                if not playlist_data:
-                    continue
+                # Remove from dedup tracking
+                self._queued_ids.discard(video_id)
 
-                track_data = None
-                for t in playlist_data.get('tracks', []):
-                    tid = t.get('video_id') or extract_video_id(t.get('url', ''))
-                    if tid == video_id:
-                        track_data = t
-                        break
-
-                if not track_data:
-                    continue
-
-                track = Track.from_dict(track_data)
-                if not track.video_id:
-                    track.video_id = video_id
-
-                await self.download_track(track, playlist_url)
+                self.logger.info(f"[CacheManager] Starting download: {video_id}")
+                await self.download_track(video_id)
 
                 # Rate limit: small delay between downloads
                 await asyncio.sleep(1.0)
@@ -658,160 +1116,286 @@ class MusicCacheManager:
         self.logger.info("[CacheManager] Download worker stopped")
 
     # =========================================================================
-    # ORPHAN MANAGEMENT
+    # 1.11 — REFRESH
     # =========================================================================
 
-    async def reconcile_downloads(self, new_playlists: Dict[str, List[Track]]) -> None:
-        """Compares manifest against new playlist data.
+    async def refresh_all_playlists(self) -> Tuple[Dict[str, List[Track]], Dict[str, str]]:
+        """Fetches ALL playlist URLs from ambience.toml and updates cache.
+
+        For each playlist, fetches video IDs via yt-dlp, then resolves
+        per-track metadata via YTM + yt-dlp with provenance tracking.
+
+        All network I/O produces LOCAL data structures. The shared cache is
+        untouched until a single _mutate() call at the end merges everything
+        atomically. Concurrent readers see either the old state or the
+        fully-committed new state — never a partial intermediate.
+
+        Returns:
+            Tuple of (results dict mapping playlist URLs to track lists,
+            old_membership dict mapping video_id to playlist_url from
+            before the refresh).
+        """
+        urls = self.get_all_playlist_urls()
+        if not urls:
+            self.logger.warning("[CacheManager] No playlist URLs found in ambience.toml")
+            return {}, {}
+
+        self.logger.info(f"[CacheManager] Refreshing {len(urls)} playlists from YouTube...")
+
+        # --- SNAPSHOT: Read current state ---
+        current = self._snapshot()
+        old_membership = self._build_old_membership(current)
+        existing_tracks = current.get('tracks', {})
+
+        # --- Phase 1: Fetch playlist structures (network I/O, LOCAL dicts) ---
+        results: Dict[str, List[Track]] = {}
+        new_playlists: Dict[str, Dict[str, Any]] = {}  # url -> {display_name, track_ids}
+        all_new_video_ids: Set[str] = set()
+
+        for url in urls:
+            try:
+                tracks = await fetch_playlist_metadata(url)
+                if tracks:
+                    results[url] = tracks
+                    track_ids = [t.video_id for t in tracks if t.video_id]
+
+                    new_playlists[url] = {
+                        'display_name': f"Playlist ({len(tracks)} tracks)",
+                        'track_ids': track_ids,
+                    }
+
+                    # Identify video IDs not yet in tracks section
+                    for vid in track_ids:
+                        if vid not in existing_tracks:
+                            all_new_video_ids.add(vid)
+
+                    self.logger.debug(f"[CacheManager] Fetched {len(tracks)} tracks from {url[:50]}...")
+                else:
+                    self.logger.warning(f"[CacheManager] No tracks from {url[:50]}...")
+            except Exception as e:
+                self.logger.error(f"[CacheManager] Failed to fetch {url[:50]}: {e}")
+
+        # --- Phase 2: Resolve metadata for new tracks (network I/O, LOCAL dict) ---
+        new_track_entries: Dict[str, Dict[str, Any]] = {}
+        if all_new_video_ids:
+            self.logger.info(f"[CacheManager] Resolving metadata for {len(all_new_video_ids)} new tracks...")
+            for video_id in all_new_video_ids:
+                try:
+                    entry = await self._resolve_track_metadata(
+                        video_id, f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    new_track_entries[video_id] = entry
+                except Exception as e:
+                    self.logger.error(f"[CacheManager] Failed to resolve {video_id}: {e}")
+
+                # Rate-limit between YTM lookups
+                await asyncio.sleep(self.RESOLVE_DELAY_SECONDS)
+
+        # --- Phase 3: Re-resolve existing tracks with gaps (network I/O, LOCAL dict) ---
+        re_resolved: Dict[str, Dict[str, Any]] = {}
+        existing_with_gaps = [
+            vid for vid, entry in existing_tracks.items()
+            if vid not in all_new_video_ids and entry.get('title') == 'Unknown'
+        ]
+        if existing_with_gaps:
+            self.logger.info(f"[CacheManager] Re-resolving {len(existing_with_gaps)} tracks with gaps...")
+            for video_id in existing_with_gaps[:20]:  # Cap at 20 per refresh
+                try:
+                    entry = await self._resolve_track_metadata(
+                        video_id, f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    re_resolved[video_id] = entry
+                except Exception as e:
+                    self.logger.debug(f"[CacheManager] Re-resolve failed for {video_id}: {e}")
+                await asyncio.sleep(self.RESOLVE_DELAY_SECONDS)
+
+        # --- COMMIT: Single locked mutation merges everything ---
+        def apply_refresh(ambient: Dict[str, Any]) -> None:
+            # Merge playlists
+            ambient['playlists'].update(new_playlists)
+            # Merge new track entries
+            ambient['tracks'].update(new_track_entries)
+            # Merge re-resolved entries
+            ambient['tracks'].update(re_resolved)
+            # Reset unavailable flags for active tracks
+            active_ids = MusicCacheManager._collect_active_video_ids(ambient)
+            for vid in active_ids:
+                track_entry = ambient.get('tracks', {}).get(vid)
+                if track_entry and track_entry.get('unavailable'):
+                    track_entry['unavailable'] = None
+            ambient['last_refresh'] = time.time()
+
+        await self._mutate(apply_refresh)
+
+        # Prune stale thumbnail cache entries (only keep newly resolved)
+        stale_thumb_ids = set(self._thumbnail_cache.keys()) - all_new_video_ids
+        for vid in stale_thumb_ids:
+            self._thumbnail_cache.pop(vid, None)
+
+        self.logger.info(f"[CacheManager] Refresh complete: {len(results)} playlists updated")
+        return results, old_membership
+
+    async def handle_cache_miss(self, playlist_url: str) -> List[Track]:
+        """Handles cache miss by triggering immediate refresh.
+
+        Cancels current timer, refreshes the specific playlist, reconciles
+        orphans, and restarts the timer.
+
+        Args:
+            playlist_url: Playlist URL that had cache miss.
+
+        Returns:
+            Fresh track list.
+        """
+        self.logger.info(f"[CacheManager] Cache miss for {playlist_url[:50]}...")
+
+        # Cancel existing timer
+        self.cancel_refresh_timer()
+
+        tracks = await fetch_playlist_metadata(playlist_url)
+        if tracks:
+            track_ids = [t.video_id for t in tracks if t.video_id]
+            new_playlist_data = {
+                'display_name': f"Playlist ({len(tracks)} tracks)",
+                'track_ids': track_ids,
+            }
+
+            # Snapshot current state for membership tracking
+            current = self._snapshot()
+            old_membership = self._build_old_membership(current)
+
+            # Resolve metadata for new tracks (LOCAL dict)
+            new_entries: Dict[str, Dict[str, Any]] = {}
+            for video_id in track_ids:
+                if video_id not in current.get('tracks', {}):
+                    try:
+                        entry = await self._resolve_track_metadata(
+                            video_id, f"https://www.youtube.com/watch?v={video_id}"
+                        )
+                        new_entries[video_id] = entry
+                    except Exception as e:
+                        self.logger.debug(f"[CacheManager] Resolve failed for {video_id}: {e}")
+                    await asyncio.sleep(self.RESOLVE_DELAY_SECONDS)
+
+            # Single commit
+            def apply_miss(ambient: Dict[str, Any]) -> None:
+                ambient['playlists'][playlist_url] = new_playlist_data
+                ambient['tracks'].update(new_entries)
+                ambient['last_refresh'] = time.time()
+
+            await self._mutate(apply_miss)
+
+            # Reconcile orphans (bug fix #7 — previously missing)
+            await self.reconcile_downloads({playlist_url: tracks}, old_membership)
+
+        # Restart timer
+        self.start_refresh_timer()
+
+        return tracks
+
+    # =========================================================================
+    # 1.12 — ORPHAN MANAGEMENT
+    # =========================================================================
+
+    async def reconcile_downloads(self, new_playlists: Dict[str, List[Track]],
+                                    old_membership: Optional[Dict[str, str]] = None) -> None:
+        """Compares ambient.json against new playlist data.
 
         Handles:
-        - Tracks removed from playlists → orphan
-        - Tracks that returned → unorphan
-        - Tracks in multiple playlists → keep all copies
+        - Tracks removed from all playlists -> orphan
+        - Tracks that returned -> unorphan
+
+        Uses snapshot for computation, file moves for I/O, then a single
+        _mutate() to update the index. File move results are checked BEFORE
+        updating index entries, so the index always reflects disk reality.
 
         Args:
             new_playlists: Dict of {playlist_url: [Track, ...]} from refresh.
+            old_membership: Pre-refresh map of video_id -> playlist_url.
+                If None, original_playlist info won't be available.
         """
-        manifest = self._load_manifest()
+        snap = self._snapshot()
 
-        # Build set of all video IDs currently in any playlist
-        current_video_ids: Dict[str, Set[str]] = {}  # video_id -> set of playlist hashes
-        for playlist_url, tracks in new_playlists.items():
-            folder_hash = self._url_to_hash(playlist_url)
-            for track in tracks:
-                if track.video_id:
-                    if track.video_id not in current_video_ids:
-                        current_video_ids[track.video_id] = set()
-                    current_video_ids[track.video_id].add(folder_hash)
+        # Build set of all active video IDs
+        active_ids = self._collect_active_video_ids(snap)
 
-        # Check each downloaded file
-        files_to_orphan: List[tuple[str, str]] = []  # (video_id, from_hash)
-        files_to_delete: List[str] = []  # full paths
+        # Phase 1: Identify actions needed (pure computation on snapshot)
+        to_orphan: List[str] = []
+        to_unorphan: List[str] = []
 
-        for video_id, file_info in list(manifest.get('files', {}).items()):
-            locations = file_info.get('locations', [])
-            new_locations = []
+        for video_id, entry in snap.get('tracks', {}).items():
+            is_active = video_id in active_ids
+            is_orphaned = entry.get('orphan') is not None
 
-            for folder_hash in locations:
-                file_path = os.path.join(self.playlists_path, folder_hash, f"{video_id}.mp3")
+            if not is_active and not is_orphaned:
+                to_orphan.append(video_id)
+            elif is_active and is_orphaned:
+                to_unorphan.append(video_id)
 
-                # Skip if file doesn't actually exist on disk
-                if not os.path.exists(file_path):
-                    self.logger.debug(f"[CacheManager] File missing from manifest: {video_id} in {folder_hash}")
-                    continue
-
-                if video_id in current_video_ids and folder_hash in current_video_ids[video_id]:
-                    # Still in this playlist
-                    new_locations.append(folder_hash)
-                else:
-                    # Removed from this playlist
-                    if video_id in current_video_ids:
-                        # Still in another playlist - just delete this copy
-                        files_to_delete.append(file_path)
-                    else:
-                        # Not in any playlist - orphan this copy
-                        files_to_orphan.append((video_id, folder_hash))
-
-            # Update locations
-            if new_locations:
-                manifest['files'][video_id]['locations'] = new_locations
-            elif video_id not in current_video_ids:
-                # Completely removed - will be orphaned
-                pass
-
-        # Process orphans
-        for video_id, from_hash in files_to_orphan:
-            self._orphan_track(video_id, from_hash, manifest)
-
-        # Delete extra copies
-        for file_path in files_to_delete:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    self.logger.debug(f"[CacheManager] Deleted extra copy: {file_path}")
-            except IOError as e:
-                self.logger.warning(f"[CacheManager] Could not delete {file_path}: {e}")
-
-        # Check for tracks that returned from orphaned state
-        for video_id, playlist_hashes in current_video_ids.items():
-            if video_id in manifest.get('orphaned', {}):
-                # Track returned! Unorphan it
-                for target_hash in playlist_hashes:
-                    self._unorphan_track(video_id, target_hash, manifest)
-                break  # Only unorphan once, copies will be made as needed
-
-        self._manifest = manifest
-        await self._save_manifest()
-        self.logger.info("[CacheManager] Reconciliation complete")
-
-    def _orphan_track(self, video_id: str, from_hash: str, manifest: Dict[str, Any]) -> None:
-        """Moves a track to orphaned folder.
-
-        Args:
-            video_id: YouTube video ID.
-            from_hash: Playlist folder hash to move from.
-            manifest: Manifest dict (modified in place).
-        """
-        source_path = os.path.join(self.playlists_path, from_hash, f"{video_id}.mp3")
-        target_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-
-        if not os.path.exists(source_path):
-            return
-
-        try:
-            # Move file
-            if os.path.exists(target_path):
-                os.remove(source_path)  # Already orphaned, just delete
+        # Phase 2: File moves (no lock needed, filesystem operations)
+        # Track results so we only update index when moves succeed
+        # Offload to thread — _move_file_safe does shutil.copy2 + os.remove
+        orphan_move_ok: Dict[str, bool] = {}
+        for video_id in to_orphan:
+            entry = snap['tracks'][video_id]
+            filename = entry.get('filename')
+            if filename:
+                src = os.path.join(self.tracks_path, filename)
+                dst = os.path.join(self.orphaned_path, filename)
+                orphan_move_ok[video_id] = await asyncio.to_thread(
+                    self._move_file_safe, src, dst
+                )
             else:
-                shutil.move(source_path, target_path)
+                orphan_move_ok[video_id] = True  # No file to move, just mark
 
-            # Update manifest
-            if video_id in manifest.get('files', {}):
-                del manifest['files'][video_id]
+        unorphan_move_ok: Dict[str, bool] = {}
+        for video_id in to_unorphan:
+            entry = snap['tracks'][video_id]
+            filename = entry.get('filename')
+            if filename:
+                src = os.path.join(self.orphaned_path, filename)
+                dst = os.path.join(self.tracks_path, filename)
+                unorphan_move_ok[video_id] = await asyncio.to_thread(
+                    self._move_file_safe, src, dst
+                )
+            else:
+                unorphan_move_ok[video_id] = False
 
-            manifest.setdefault('orphaned', {})[video_id] = {
-                'orphaned_at': time.time(),
-                'original_playlist': from_hash
-            }
+        # Phase 3: Single atomic mutation
+        def apply_reconciliation(ambient: Dict[str, Any]) -> None:
+            for video_id in to_orphan:
+                entry = ambient.get('tracks', {}).get(video_id)
+                if not entry:
+                    continue
+                # Only mark as orphaned if file move succeeded or wasn't needed
+                # (bug fix #6 — previously set flag even when move failed)
+                if orphan_move_ok.get(video_id, False):
+                    entry['orphan'] = {
+                        'orphaned_at': time.time(),
+                        'original_playlist': old_membership.get(video_id) if old_membership else None,
+                    }
 
-            self.logger.info(f"[CacheManager] Orphaned: {video_id}")
+            for video_id in to_unorphan:
+                entry = ambient.get('tracks', {}).get(video_id)
+                if not entry:
+                    continue
+                entry['orphan'] = None
+                if unorphan_move_ok.get(video_id, False):
+                    entry['downloaded_at'] = time.time()
+                else:
+                    # File not in orphaned either — needs re-download
+                    entry['downloaded_at'] = None
 
-        except IOError as e:
-            self.logger.warning(f"[CacheManager] Could not orphan {video_id}: {e}")
+        if to_orphan or to_unorphan:
+            await self._mutate(apply_reconciliation)
 
-    def _unorphan_track(self, video_id: str, to_hash: str, manifest: Dict[str, Any]) -> None:
-        """Moves a track from orphaned back to a playlist folder.
-
-        Args:
-            video_id: YouTube video ID.
-            to_hash: Target playlist folder hash.
-            manifest: Manifest dict (modified in place).
-        """
-        source_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-        target_folder = os.path.join(self.playlists_path, to_hash)
-        target_path = os.path.join(target_folder, f"{video_id}.mp3")
-
-        if not os.path.exists(source_path):
-            return
-
-        try:
-            os.makedirs(target_folder, exist_ok=True)
-            shutil.copy2(source_path, target_path)
-            os.remove(source_path)
-
-            # Update manifest
-            if video_id in manifest.get('orphaned', {}):
-                del manifest['orphaned'][video_id]
-
-            manifest.setdefault('files', {})[video_id] = {
-                'locations': [to_hash],
-                'downloaded_at': time.time()
-            }
-
-            self.logger.info(f"[CacheManager] Unorphaned: {video_id}")
-
-        except IOError as e:
-            self.logger.warning(f"[CacheManager] Could not unorphan {video_id}: {e}")
+        if to_orphan or to_unorphan:
+            self.logger.info(
+                f"[CacheManager] Reconciliation: {len(to_orphan)} orphaned, "
+                f"{len(to_unorphan)} unorphaned"
+            )
+        else:
+            self.logger.debug("[CacheManager] Reconciliation: no changes")
 
     async def cleanup_expired_orphans(self) -> int:
         """Deletes orphaned files older than 90 days.
@@ -819,27 +1403,54 @@ class MusicCacheManager:
         Returns:
             Number of files deleted.
         """
-        manifest = self._load_manifest()
+        snap = self._snapshot()
         now = time.time()
         ttl_seconds = self.ORPHAN_TTL_DAYS * 24 * 3600
-        deleted = 0
 
-        for video_id, orphan_info in list(manifest.get('orphaned', {}).items()):
+        # Phase 1: Identify expired orphans from snapshot
+        expired_ids: List[str] = []
+        for video_id, entry in snap.get('tracks', {}).items():
+            orphan_info = entry.get('orphan')
+            if not orphan_info:
+                continue
+
             orphaned_at = orphan_info.get('orphaned_at', 0)
             if now - orphaned_at > ttl_seconds:
-                file_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    del manifest['orphaned'][video_id]
+                expired_ids.append(video_id)
+
+        if not expired_ids:
+            return 0
+
+        # Phase 2: Delete files (offloaded — os.path.exists + os.remove are blocking)
+        def _delete_expired_files() -> None:
+            for vid in expired_ids:
+                e = snap['tracks'][vid]
+                fn = e.get('filename')
+                if fn:
+                    fp = os.path.join(self.orphaned_path, fn)
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except IOError as err:
+                        self.logger.warning(f"[CacheManager] Could not delete orphan {vid}: {err}")
+
+        await asyncio.to_thread(_delete_expired_files)
+
+        for video_id in expired_ids:
+            self.logger.debug(f"[CacheManager] Expired orphan deleted: {video_id}")
+
+        # Phase 3: Single mutation to remove entries
+        def remove_expired(ambient: Dict[str, Any]) -> int:
+            deleted = 0
+            for video_id in expired_ids:
+                if video_id in ambient.get('tracks', {}):
+                    del ambient['tracks'][video_id]
                     deleted += 1
-                    self.logger.debug(f"[CacheManager] Expired orphan deleted: {video_id}")
-                except IOError as e:
-                    self.logger.warning(f"[CacheManager] Could not delete orphan {video_id}: {e}")
+            return deleted
+
+        deleted = await self._mutate(remove_expired)
 
         if deleted > 0:
-            self._manifest = manifest
-            await self._save_manifest()
             self.logger.info(f"[CacheManager] Cleaned up {deleted} expired orphans")
 
         return deleted
@@ -850,26 +1461,48 @@ class MusicCacheManager:
         Returns:
             Number of files deleted.
         """
-        manifest = self._load_manifest()
-        deleted = 0
+        snap = self._snapshot()
 
-        for video_id in list(manifest.get('orphaned', {}).keys()):
-            file_path = os.path.join(self.orphaned_path, f"{video_id}.mp3")
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                del manifest['orphaned'][video_id]
-                deleted += 1
-            except IOError as e:
-                self.logger.warning(f"[CacheManager] Could not delete orphan {video_id}: {e}")
+        # Phase 1: Identify all orphaned entries
+        orphaned_ids: List[str] = []
+        for video_id, entry in snap.get('tracks', {}).items():
+            if entry.get('orphan') is not None:
+                orphaned_ids.append(video_id)
 
-        self._manifest = manifest
-        await self._save_manifest()
+        if not orphaned_ids:
+            return 0
+
+        # Phase 2: Delete files (offloaded — os.path.exists + os.remove are blocking)
+        def _delete_orphan_files() -> None:
+            for vid in orphaned_ids:
+                e = snap['tracks'][vid]
+                fn = e.get('filename')
+                if fn:
+                    fp = os.path.join(self.orphaned_path, fn)
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except IOError as err:
+                        self.logger.warning(f"[CacheManager] Could not delete orphan {vid}: {err}")
+
+        await asyncio.to_thread(_delete_orphan_files)
+
+        # Phase 3: Single mutation
+        def remove_all_orphans(ambient: Dict[str, Any]) -> int:
+            deleted = 0
+            for video_id in orphaned_ids:
+                if video_id in ambient.get('tracks', {}):
+                    del ambient['tracks'][video_id]
+                    deleted += 1
+            return deleted
+
+        deleted = await self._mutate(remove_all_orphans)
+
         self.logger.info(f"[CacheManager] Cleared {deleted} orphaned files")
         return deleted
 
     # =========================================================================
-    # SCHEDULED REFRESH
+    # 1.13 — TIMER CONTROL
     # =========================================================================
 
     def start_refresh_timer(self) -> None:
@@ -893,10 +1526,11 @@ class MusicCacheManager:
                 await asyncio.sleep(self.REFRESH_INTERVAL_HOURS * 3600)
 
                 self.logger.info("[CacheManager] Scheduled refresh starting...")
-                playlists = await self.refresh_all_playlists()
-                await self.reconcile_downloads(playlists)
+                playlists, old_membership = await self.refresh_all_playlists()
+                await self.reconcile_downloads(playlists, old_membership)
                 await self.cleanup_expired_orphans()
                 await self.queue_missing_downloads()
+                self.logger.info("[CacheManager] Playlist refresh complete")
 
             except asyncio.CancelledError:
                 break
@@ -905,162 +1539,148 @@ class MusicCacheManager:
                 await asyncio.sleep(300)  # Wait 5 min on error
 
     # =========================================================================
-    # CACHE MISS HANDLING
-    # =========================================================================
-
-    async def handle_cache_miss(self, playlist_url: str) -> List[Track]:
-        """Handles cache miss by triggering immediate refresh.
-
-        Cancels current timer, refreshes, restarts timer.
-
-        Args:
-            playlist_url: Playlist URL that had cache miss.
-
-        Returns:
-            Fresh track list.
-        """
-        self.logger.info(f"[CacheManager] Cache miss for {playlist_url[:50]}...")
-
-        # Cancel existing timer
-        self.cancel_refresh_timer()
-
-        # Refresh just this playlist
-        tracks = await fetch_playlist_metadata(playlist_url, self.logger)
-        if tracks:
-            playlist_cache = self._load_playlist_cache()
-            folder_hash = self._url_to_hash(playlist_url)
-            playlist_cache['playlists'][playlist_url] = {
-                'display_name': f"Playlist ({len(tracks)} tracks)",
-                'folder_hash': folder_hash,
-                'tracks': [t.to_dict() for t in tracks]
-            }
-            playlist_cache['last_refresh'] = time.time()
-            self._playlist_cache = playlist_cache
-            self._save_playlist_cache()
-
-        # Restart timer
-        self.start_refresh_timer()
-
-        return tracks
-
-    # =========================================================================
-    # STATISTICS
+    # 1.14 — STATISTICS
     # =========================================================================
 
     def get_stats(self) -> Dict[str, Any]:
         """Returns cache statistics.
 
-        Returns:
-            Dict with cache statistics.
-        """
-        playlist_cache = self._load_playlist_cache()
+        Uses _snapshot() for a consistent view of the index.
 
-        # Count files and calculate size
+        Returns:
+            Dict with cache statistics including provenance breakdown.
+        """
+        snap = self._snapshot()
+
+        # Count files and calculate size from tracks/
         total_size = 0
         downloaded_count = 0
 
-        for folder_hash in os.listdir(self.playlists_path) if os.path.exists(self.playlists_path) else []:
-            folder_path = os.path.join(self.playlists_path, folder_hash)
-            if os.path.isdir(folder_path):
-                for filename in os.listdir(folder_path):
-                    if filename.endswith('.mp3'):
-                        downloaded_count += 1
-                        total_size += os.path.getsize(os.path.join(folder_path, filename))
+        if os.path.exists(self.tracks_path):
+            for filename in os.listdir(self.tracks_path):
+                if filename.endswith('.m4a'):
+                    downloaded_count += 1
+                    total_size += os.path.getsize(os.path.join(self.tracks_path, filename))
 
         # Count orphaned
         orphaned_count = 0
         orphaned_size = 0
         if os.path.exists(self.orphaned_path):
             for filename in os.listdir(self.orphaned_path):
-                if filename.endswith('.mp3'):
+                if filename.endswith('.m4a'):
                     orphaned_count += 1
                     orphaned_size += os.path.getsize(os.path.join(self.orphaned_path, filename))
 
         # Count total tracks across all playlists
         total_tracks = 0
-        for data in playlist_cache.get('playlists', {}).values():
-            total_tracks += len(data.get('tracks', []))
+        for data in snap.get('playlists', {}).values():
+            total_tracks += len(data.get('track_ids', []))
 
-        last_refresh = playlist_cache.get('last_refresh', 0)
+        # Provenance stats from tracks section
+        tracks_section = snap.get('tracks', {})
+        provenance_fields = ['title_source', 'artist_source', 'album_source',
+                             'duration_source', 'is_explicit_source']
+        ytm_resolved = 0
+        ytdlp_fallback = 0
+        unresolved = 0
+        filenames_modified = 0
+        pending_downloads = 0
+
+        for entry in tracks_section.values():
+            if entry.get('orphan') is not None:
+                continue  # Don't count orphans in provenance stats
+
+            # Count provenance
+            sources = [entry.get(f) for f in provenance_fields]
+            non_null_sources = [s for s in sources if s is not None]
+            if non_null_sources and all(s == 'ytm' for s in non_null_sources):
+                ytm_resolved += 1
+            elif any(s == 'ytdlp' for s in sources):
+                ytdlp_fallback += 1
+            elif any(s is None for s in sources):
+                unresolved += 1
+
+            if entry.get('filename_modified'):
+                filenames_modified += 1
+
+            if entry.get('downloaded_at') is None:
+                pending_downloads += 1
+
+        last_refresh = snap.get('last_refresh', 0)
 
         return {
-            'total_playlists': len(playlist_cache.get('playlists', {})),
+            'total_playlists': len(snap.get('playlists', {})),
             'total_tracks': total_tracks,
             'downloaded_tracks': downloaded_count,
             'orphaned_tracks': orphaned_count,
             'size_mb': total_size / (1024 * 1024),
             'orphaned_size_mb': orphaned_size / (1024 * 1024),
             'last_refresh': last_refresh,
-            'last_refresh_ago': time.time() - last_refresh if last_refresh else None
+            'last_refresh_ago': time.time() - last_refresh if last_refresh else None,
+            # Provenance stats
+            'ytm_resolved_count': ytm_resolved,
+            'ytdlp_fallback_count': ytdlp_fallback,
+            'unresolved_count': unresolved,
+            'filenames_modified_count': filenames_modified,
+            'pending_download_count': pending_downloads,
+        }
+
+    def get_residential_stats(self) -> Dict[str, Any]:
+        """Returns residential cache statistics.
+
+        Pure filesystem scan — no ambient index needed.
+
+        Returns:
+            Dict with file count, total size, and estimated cost.
+        """
+        file_count = 0
+        total_size = 0
+
+        if os.path.exists(self.residential_path):
+            for filename in os.listdir(self.residential_path):
+                file_path = os.path.join(self.residential_path, filename)
+                if os.path.isfile(file_path):
+                    file_count += 1
+                    total_size += os.path.getsize(file_path)
+
+        estimated_cost = self._compute_download_cost(total_size)
+
+        return {
+            'file_count': file_count,
+            'size_mb': total_size / (1024 * 1024),
+            'estimated_cost': estimated_cost
         }
 
     # =========================================================================
-    # RESIDENTIAL PROXY CACHE
+    # 1.15 — LIVE RESIDENTIAL DOWNLOAD
     # =========================================================================
-    # Tracks downloaded via residential proxy are cached here permanently.
-    # NO TTL - these files cost real money ($4/GB) and if a track needs
-    # residential proxy once, it will likely need it forever (datacenter IP blocked).
-    # Only manual clear should remove these files.
 
-    def get_residential_path(self, video_id: str) -> str:
-        """Get the cache path for a residentially-downloaded track.
-
-        Args:
-            video_id: YouTube video ID.
-
-        Returns:
-            Absolute path to the MP3 file location.
-        """
-        return os.path.join(self.residential_path, f"{video_id}.mp3")
-
-    def check_residential(self, video_id: str) -> Optional[str]:
-        """Check if a track exists in the residential cache.
-
-        Args:
-            video_id: YouTube video ID.
-
-        Returns:
-            Path to cached MP3 file if exists, None otherwise.
-        """
-        # Check for MP3 (our target format)
-        mp3_path = os.path.join(self.residential_path, f"{video_id}.mp3")
-        if os.path.exists(mp3_path):
-            return mp3_path
-
-        # Also check legacy formats in case old files exist
-        for ext in ['.webm', '.opus', '.m4a', '.ogg']:
-            path = os.path.join(self.residential_path, f"{video_id}{ext}")
-            if os.path.exists(path):
-                return path
-        return None
-
-    async def download_residential(
+    async def download_live_residential(
         self,
         track: 'Track',
         timeout: float = 180.0,
-        max_duration: int = 900  # 15 minutes max by default
     ) -> Tuple[bool, Optional[str], int, Optional[str]]:
-        """Download a track via residential proxy and cache it as MP3.
+        """Download a track via residential proxy for live playback.
 
         Downloads the full audio file through a residential proxy to bypass
-        YouTube's IP-based blocks. The file is converted to MP3 and saved
-        to the residential cache permanently.
+        YouTube's IP-based blocks. The file is saved to the residential
+        cache as M4A for immediate streaming.
+
+        This is a pure mechanism -- the caller (SourceAcquisitionMixin) owns
+        spending policy decisions like duration limits. This method just
+        downloads what it's told.
 
         Args:
             track: Track to download.
             timeout: Maximum download time in seconds.
-            max_duration: Maximum track duration in seconds (default 15 min).
-                          Prevents downloading 10-hour meme videos over paid proxy.
 
         Returns:
             Tuple of (success, error_message, bytes_downloaded, cached_file_path).
 
         SAFEGUARDS:
-        - Duration limit prevents downloading absurdly long videos
         - Timeout prevents hanging downloads
         - Returns byte count for cost tracking
         - Does NOT retry internally (caller handles retries)
-        - Converts to MP3 for consistency with ambient cache
         """
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
@@ -1072,29 +1692,19 @@ class MusicCacheManager:
         if not track.video_id:
             return False, "Track has no video ID", 0, None
 
-        # Duration safeguard - don't waste money on 10-hour videos
-        if track.duration > max_duration:
-            duration_str = f"{track.duration // 60}:{track.duration % 60:02d}"
-            max_str = f"{max_duration // 60}:{max_duration % 60:02d}"
-            self.logger.warning(
-                f"[Residential] Refusing to download '{track.title}' - "
-                f"duration {duration_str} exceeds limit {max_str}"
-            )
-            return False, f"Track too long ({duration_str} > {max_str} limit)", 0, None
-
-        import config
         from typing import cast
 
-        # Output path (without extension - yt-dlp will add it, then postprocessor changes to .mp3)
+        # Output path (without extension - yt-dlp adds it, postprocessor converts to .m4a)
         output_base = os.path.join(self.residential_path, track.video_id)
 
-        # Build yt-dlp options with MP3 conversion (like ambient downloads)
+        # Build yt-dlp options with M4A conversion (same container as ambient)
         ydl_opts = get_ytdlp_options({
             'proxy': proxy_url,
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_base + '.%(ext)s',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
+                'preferredcodec': 'm4a',
                 'preferredquality': '192',  # 192kbps is fine for streaming, saves bandwidth
             }],
             'quiet': True,
@@ -1108,19 +1718,20 @@ class MusicCacheManager:
 
             def do_download() -> Dict[str, Any]:
                 with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                    return ydl.extract_info(track.url, download=True)  # type: ignore
+                    return ydl.extract_info(track.url, download=True)  # type: ignore[return-value]
 
             await asyncio.wait_for(
                 asyncio.to_thread(do_download),
                 timeout=timeout
             )
 
-            # Find the downloaded file (should be .mp3 after postprocessing)
-            cached_path = self.check_residential(track.video_id)
+            # Find the downloaded file (filesystem checks offloaded to thread)
+            cached_path = await asyncio.to_thread(
+                self._find_residential_file, track.video_id
+            )
             if cached_path:
-                file_size = os.path.getsize(cached_path)
-                cost_per_gb = getattr(config, 'RESIDENTIAL_PROXY_COST_PER_GB', 4.0)
-                cost = (file_size / (1024 ** 3)) * cost_per_gb
+                file_size = await asyncio.to_thread(os.path.getsize, cached_path)
+                cost = self._compute_download_cost(file_size)
                 self.logger.info(
                     f"[Residential] Downloaded '{track.title}' - "
                     f"{file_size / (1024*1024):.2f} MB (~${cost:.4f})"
@@ -1140,53 +1751,3 @@ class MusicCacheManager:
             else:
                 self.logger.error(f"[Residential] Error downloading {track.title}: {e}")
             return False, error_msg, 0, None
-
-    def get_residential_stats(self) -> Dict[str, Any]:
-        """Returns residential cache statistics.
-
-        Returns:
-            Dict with file count, total size, and estimated cost.
-        """
-        file_count = 0
-        total_size = 0
-
-        if os.path.exists(self.residential_path):
-            for filename in os.listdir(self.residential_path):
-                file_path = os.path.join(self.residential_path, filename)
-                if os.path.isfile(file_path):
-                    file_count += 1
-                    total_size += os.path.getsize(file_path)
-
-        import config
-        cost_per_gb = getattr(config, 'RESIDENTIAL_PROXY_COST_PER_GB', 4.0)
-        estimated_cost = (total_size / (1024 ** 3)) * cost_per_gb
-
-        return {
-            'file_count': file_count,
-            'size_mb': total_size / (1024 * 1024),
-            'estimated_cost': estimated_cost
-        }
-
-    # =========================================================================
-    # SHUTDOWN
-    # =========================================================================
-
-    async def shutdown(self) -> None:
-        """Gracefully shuts down background tasks."""
-        self._shutdown = True
-
-        if self._refresh_task and not self._refresh_task.done():
-            self._refresh_task.cancel()
-            try:
-                await self._refresh_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._download_task and not self._download_task.done():
-            self._download_task.cancel()
-            try:
-                await self._download_task
-            except asyncio.CancelledError:
-                pass
-
-        self.logger.info("[CacheManager] Shutdown complete")

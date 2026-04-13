@@ -54,8 +54,6 @@ These are the cost of file splitting, not overhead - they'd exist as wrapper
 signatures anyway if we used plain functions.
 """
 
-from __future__ import annotations
-
 import asyncio
 import functools
 import io
@@ -76,17 +74,20 @@ import discord
 from discord.ext import commands
 
 from .lyrics import chunk_text
-from .music_data import LoopMode, LyricsResult, Track
+from .music_data import (
+    LoopMode,
+    LyricsResult,
+    Track,
+    MAX_ACCEPTABLE_TRACK_DURATION_SECONDS,
+    format_duration_hms,
+)
 from .music_helpers import (
     YTDLP_AVAILABLE,
     detect_mix_in_url,
 )
 from .search import (
-    YTMUSIC_AVAILABLE,
     SearchResult,
-    extract_video_id,
     get_thumbnail_bytes,
-    is_atv,
 )
 
 from utils.views import get_track_selection
@@ -140,7 +141,8 @@ def music_cooldown(func: NlpHandler) -> NlpHandler:
         if command_name in user_cooldowns:
             elapsed = now - user_cooldowns[command_name]
             if elapsed < MUSIC_COMMAND_COOLDOWN:
-                # Still on cooldown - silently ignore
+                remaining = MUSIC_COMMAND_COOLDOWN - elapsed
+                self.logger.info(f"[Music] Cooldown active for user {user_id}: {remaining:.1f}s remaining")
                 return
 
         # Update last invocation time and proceed
@@ -148,6 +150,42 @@ def music_cooldown(func: NlpHandler) -> NlpHandler:
         await func(self, ctx, query)
 
     return wrapper
+
+
+def check_voice_match(
+    author: discord.abc.User,
+    channel_id: int,
+    owner_ids: set[int],
+) -> tuple[bool, Optional[str]]:
+    """Check whether a user is in the same voice channel as the bot.
+
+    Shared logic used by the @requires_voice decorator, inline NLP checks,
+    and NowPlayingView button guards. Any change to VC authorization policy
+    should be made here so all call sites stay consistent.
+
+    Args:
+        author: The Discord user to check (Member with .voice, or User).
+        channel_id: The voice channel ID the bot is currently in.
+        owner_ids: Set of bot owner IDs (bypasses the check).
+
+    Returns:
+        Tuple of (passed, error_message). If passed is True, error_message
+        is None. If passed is False, error_message is a user-facing string.
+    """
+    # Check 1: Bot owners bypass VC check (debugging)
+    if author.id in owner_ids:
+        return True, None
+
+    # Check 2: Is user in a voice channel?
+    author_voice = getattr(author, 'voice', None)
+    if not author_voice or not author_voice.channel:
+        return False, "You need to be in the voice channel to control playback!"
+
+    # Check 3: Is user in the SAME channel as the bot?
+    if author_voice.channel.id != channel_id:
+        return False, "You need to be in the voice channel to control playback!"
+
+    return True, None
 
 
 def requires_voice(func: NlpHandler) -> NlpHandler:
@@ -158,7 +196,8 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
     2. User is bot owner (bypass for debugging) OR
     3. User is in the same voice channel as the bot
 
-    Sends appropriate error message and returns early if check fails.
+    Delegates the actual VC comparison to check_voice_match() so the logic
+    is shared with inline checks and view guards.
 
     Usage:
         @requires_voice
@@ -173,20 +212,12 @@ def requires_voice(func: NlpHandler) -> NlpHandler:
             await ctx.send("I'm not playing music right now!")
             return
 
-        # Check 2: Bot owners bypass VC check (debugging)
-        if ctx.author.id in self.bot.owner_ids:
-            await func(self, ctx, query)
-            return
-
-        # Check 3: Is user in a voice channel?
-        author_voice = getattr(ctx.author, 'voice', None)
-        if not author_voice or not author_voice.channel:
-            await ctx.send("You need to be in the voice channel to control playback!")
-            return
-
-        # Check 4: Is user in the SAME channel as the bot?
-        if author_voice.channel.id != self.active_session.channel_id:
-            await ctx.send("You need to be in the voice channel to control playback!")
+        passed, error_msg = check_voice_match(
+            ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+        )
+        if not passed:
+            self.logger.info(f"[Music] Voice check failed for user {ctx.author.id}: {error_msg}")
+            await ctx.send(error_msg)
             return
 
         await func(self, ctx, query)
@@ -224,7 +255,13 @@ class MusicCommandsMixin:
     cache_manager: Any
     track_started_at: float
     idle_timeout_task: Any
+    _enrichment_task: Any
+    _enrichment_video_id: Any
     _playlist_modified_during_session: bool
+
+    # These are defined by BaseCog - declared here for type hints
+    _cog_is_ready: bool
+    async def _not_ready_response(self, ctx: commands.Context) -> None: ...
 
     # Methods from Music cog that handlers depend on
     def _get_current_track(self) -> Optional[Track]: ...
@@ -234,7 +271,8 @@ class MusicCommandsMixin:
     def _remove_track(self, index: int) -> None: ...
     def _move_track(self, from_index: int, to_index: int) -> Optional[Track]: ...
     def _swap_tracks(self, index_a: int, index_b: int) -> Optional[tuple[Track, Track]]: ...
-    def _clear_current_track_cache(self) -> None: ...
+    def _clear_attempts(self, video_id: str) -> None: ...
+    def _skip_to_different_track(self) -> Optional[Track]: ...
     def _refresh_prefetch_if_stale(self) -> None: ...
     def _do_pause(self) -> bool: ...
     async def _do_resume(self) -> bool: ...
@@ -242,8 +280,8 @@ class MusicCommandsMixin:
     async def _start_session(self, channel: discord.VoiceChannel, ctx: commands.Context, join_message: Optional[str] = None) -> None: ...
     async def _end_session(self, reason: str = "Session ended.") -> None: ...
     async def _play_current_track(self) -> None: ...
+    async def _enrich_track_metadata(self, track: Track) -> None: ...
     async def _idle_timeout_loop(self) -> None: ...
-    async def _search_youtube(self, query: str, max_results: int = 5) -> List[Track]: ...
     async def _fetch_url_info(self, url: str, force_playlist: bool = False) -> tuple[List[Track], Optional[str], Optional[str]]: ...
 
     # YTM integration methods
@@ -300,9 +338,11 @@ class MusicCommandsMixin:
                     if channel and isinstance(channel, discord.VoiceChannel):
                         await ctx.send(f"I'll be in {channel.mention}! Join me there within 5 minutes.")
                         await self._start_session(channel, ctx)
+                        if not self.active_session:
+                            return  # Failed — _start_session handles error messaging
 
                         # Mark session as waiting and start 5-minute timeout
-                        self.active_session.waiting_for_users = True  # type: ignore
+                        self.active_session.waiting_for_users = True
                         self.idle_timeout_task = self.bot.loop.create_task(
                             self._idle_timeout_loop()
                         )
@@ -321,6 +361,7 @@ class MusicCommandsMixin:
         await ctx.send(self._get_listen_along_response())
 
         await self._start_session(channel, ctx)
+        # If this failed, _start_session handles error messaging.
 
     @staticmethod
     def _is_pure_playlist_url(url: str) -> bool:
@@ -362,9 +403,6 @@ class MusicCommandsMixin:
             ctx: The command context.
             query: URL or search query for the track(s).
         """
-        from .music_data import ActiveSession
-        from .managed_player import ManagedPlayer
-
         if not YTDLP_AVAILABLE:
             await ctx.send("Music playback isn't available - yt-dlp is not installed.")
             return
@@ -395,7 +433,7 @@ class MusicCommandsMixin:
                     await ctx.send(
                         "📋 **This is a normal Youtube Playlist!**\n"
                         "-# ⚠️ Music tracks from playlists use YouTube's metadata, which may have inaccurate "
-                        "thumbnails and artist info. For best results, add individual songs or use YouTube Music playlist."
+                        "thumbnails and artist info. For best results, add individual songs or use a YouTube Music playlist."
                     )
                 tracks, error, warning = await self._fetch_url_info(query)
                 if error:
@@ -407,6 +445,7 @@ class MusicCommandsMixin:
 
             else:
                 # Regular URL (single video, possibly from a playlist) - use YTM flow
+                self.logger.info(f"[URL Mode] Direct URL play by user {ctx.author.id}: {query}")
                 tracks_to_add = await self._do_play_url_with_ytm(ctx, query)
 
         else:
@@ -417,9 +456,25 @@ class MusicCommandsMixin:
             # Error messages already sent by helper methods
             return
 
-        if not tracks_to_add:
-            await ctx.send("No tracks to add.")
-            return
+        overlong_tracks = [
+            track for track in tracks_to_add
+            if track.duration > MAX_ACCEPTABLE_TRACK_DURATION_SECONDS
+        ]
+        if overlong_tracks:
+            if len(tracks_to_add) == 1:
+                await self._send_too_long_track_rejection(ctx, overlong_tracks[0])
+                return
+
+            tracks_to_add = [
+                track for track in tracks_to_add
+                if track.duration <= MAX_ACCEPTABLE_TRACK_DURATION_SECONDS
+            ]
+            await ctx.send(
+                f"⚠️ Skipping {len(overlong_tracks)} tracks longer than "
+                f"{format_duration_hms(MAX_ACCEPTABLE_TRACK_DURATION_SECONDS)}."
+            )
+            if not tracks_to_add:
+                return
 
         # Queue size limit
         MAX_QUEUE_SIZE = 2000
@@ -453,34 +508,37 @@ class MusicCommandsMixin:
             self.current_index = 0
             self._playlist_modified_during_session = True
 
-            try:
-                vc = await channel.connect()
-                self.active_session = ActiveSession(
-                    guild_id=channel.guild.id,
-                    channel_id=channel.id,
-                    voice_client=vc,
-                    origin_channel_id=ctx.channel.id,
+            # Start enrichment immediately so np has metadata even during
+            # voice connect + player setup.
+            first_track = self._get_current_track()
+            if first_track:
+                self._enrichment_video_id = first_track.video_id
+                self._enrichment_task = asyncio.create_task(
+                    self._enrich_track_metadata(first_track)
                 )
 
-                self._player = ManagedPlayer(vc, self._on_player_track_end)  # type: ignore
-                await self._play_current_track()
+            await self._start_session(channel, ctx)
+            if not self.active_session:
+                return  # Failed — _start_session handles error messaging
 
-                if len(tracks_to_add) == 1:
-                    await ctx.send(f"🎵 Now playing **{tracks_to_add[0].title}** in {channel.mention}!")
-                else:
-                    await ctx.send(f"🎵 Now playing **{len(tracks_to_add)} tracks** in {channel.mention}!")
-
-            except discord.ClientException as e:
-                self.logger.error(f"Failed to connect to voice: {e}")
-                await ctx.send("I couldn't connect to the voice channel. Please try again.")
-            except Exception as e:
-                self.logger.error(f"Error starting session: {e}", exc_info=True)
-                await ctx.send("Something went wrong starting playback.")
+            if len(tracks_to_add) == 1:
+                await ctx.send(f"🎵 Now playing **{tracks_to_add[0].title}** in {channel.mention}!")
+            else:
+                await ctx.send(f"🎵 Now playing **{len(tracks_to_add)} tracks** in {channel.mention}!")
 
         else:
             # Already in session - append to playlist
             if ctx.guild and self.active_session.guild_id != ctx.guild.id:
                 await ctx.send("I'm currently playing in another server!")
+                return
+
+            # VC check: queuing into an active session requires being in the channel
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on queue: {error_msg}")
+                await ctx.send(error_msg)
                 return
 
             moved_tracks: List[Track] = []
@@ -525,8 +583,9 @@ class MusicCommandsMixin:
     ) -> List[Track]:
         """Handle URL-based play with YTM metadata enhancement.
 
-        If YTM is available and the video is already an ATV (Art Track Video),
-        plays directly. Otherwise, searches for better versions and shows selection.
+        Delegates to search.py for all metadata handling. If the video is already
+        an ATV, search_url_mode returns it with proper metadata and empty alternatives.
+        Otherwise, shows selection UI with alternatives.
 
         Args:
             ctx: The command context.
@@ -535,76 +594,33 @@ class MusicCommandsMixin:
         Returns:
             List of tracks to add (empty if user cancelled or error).
         """
-        from .search import get_ytm_metadata
-
-        video_id = extract_video_id(url)
-        if not video_id:
-            # Not a valid YouTube URL - fall back to yt-dlp
-            await ctx.send("🔍 Fetching track info...")
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
-
         await ctx.send("🔍 Checking for best version...")
 
-        # Check if YTM is available and try to get metadata
-        if YTMUSIC_AVAILABLE:
-            metadata = await get_ytm_metadata(video_id)
-            if metadata and is_atv(metadata):
-                # Already an ATV - play directly without selection
-                self.logger.debug(f"URL {video_id} is already an ATV, playing directly")
-                tracks, error, warning = await self._fetch_url_info(url)
-                if error:
-                    await ctx.send(f"❌ {error}")
-                    return []
-                if warning:
-                    await ctx.send(warning)
-                return tracks
-
-        # Search for alternatives via YTM
+        # search.py handles ALL metadata - YTM lookups, yt-dlp searches, everything
         try:
-            original, songs, videos, recommended_id = await self._search_with_ytm(video_id, is_url=True)
+            original, songs, videos, recommended_id = await self._search_with_ytm(url, is_url=True)
+        except ValueError as e:
+            # Invalid URL format - not a YouTube URL
+            self.logger.warning(f"Invalid URL format: {e}")
+            await ctx.send("❌ That doesn't look like a valid YouTube URL.")
+            return []
         except Exception as e:
-            self.logger.warning(f"YTM search failed for URL, falling back: {e}")
-            # Fall back to direct fetch with friendly message
-            await ctx.send("-# Had a little trouble finding alternatives, but I've got your track!")
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
+            self.logger.warning(f"YTM search failed for URL: {e}")
+            await ctx.send("❌ Couldn't fetch track info. The video may be unavailable.")
+            return []
 
-        # If no alternatives found, play the original
-        all_results = songs + videos
-        if not all_results:
-            tracks, error, warning = await self._fetch_url_info(url)
-            if error:
-                await ctx.send(f"❌ {error}")
-                return []
-            if warning:
-                await ctx.send(warning)
-            return tracks
+        # In URL mode, search_url_mode guarantees original is non-None
+        assert original is not None, "search_url_mode should always return original for URL mode"
 
-        # Convert results to tracks, keeping original as user_track
-        user_track = original.to_track() if original else None
+        # If no alternatives, play original directly (handles ATVs and no-match cases)
+        if not songs and not videos:
+            return [original.to_track()]
 
-        # NOTE: We do NOT exclude original_video_id from YTM results.
-        # If the same video appears as an ATV in YTM, that's valuable - it has
-        # better metadata (square thumbnail, clean title). User can choose between
-        # their URL (slot 0) or the YTM version (slot 1) even if same video_id.
-        # We only exclude from YouTube results to avoid showing the exact same thing twice.
+        # Show selection UI
+        user_track = original.to_track()
         ytm_tracks = [r.to_track() for r in songs]
-        yt_tracks = [r.to_track() for r in videos if r.video_id != (original.video_id if original else None)]
-
-        if not ytm_tracks and not yt_tracks and user_track:
-            # Only the original URL, no alternatives
-            return [user_track]
+        # Exclude original from yt results to avoid duplicate
+        yt_tracks = [r.to_track() for r in videos if r.video_id != original.video_id]
 
         # Show selection UI
         selected = await get_track_selection(
@@ -617,8 +633,7 @@ class MusicCommandsMixin:
         )
 
         if not selected:
-            await ctx.send("Selection timed out. Call me again when you're ready!")
-            return []
+            return []  # View already showed cancel/timeout message
 
         # Log the selection
         self.logger.info(
@@ -636,7 +651,6 @@ class MusicCommandsMixin:
         """Handle search-based play with YTM integration.
 
         Searches both YTM and YouTube, deduplicates, and shows selection UI.
-        Falls back to legacy search if YTM is unavailable.
 
         Args:
             ctx: The command context.
@@ -645,90 +659,60 @@ class MusicCommandsMixin:
         Returns:
             List of tracks to add (empty if user cancelled or error).
         """
-        from utils.views import get_selection
-
         await ctx.send(f"🔍 Searching for: **{query}**")
 
-        # Try YTM-enhanced search first
-        if YTMUSIC_AVAILABLE:
-            try:
-                _, songs, videos, _ = await self._search_with_ytm(query, is_url=False)
+        try:
+            _, songs, videos, _ = await self._search_with_ytm(query, is_url=False)
+        except Exception as e:
+            self.logger.error(f"Search failed for query '{query}': {e}", exc_info=True)
+            await ctx.send("❌ Search failed. Please try again!")
+            return []
 
-                if songs or videos:
-                    # Convert results to tracks
-                    ytm_tracks = [r.to_track() for r in songs]
-                    yt_tracks = [r.to_track() for r in videos]
-
-                    total = len(ytm_tracks) + len(yt_tracks)
-                    if total == 1:
-                        return ytm_tracks if ytm_tracks else yt_tracks
-
-                    # Show selection UI
-                    selected = await get_track_selection(
-                        ctx,
-                        ytm_tracks=ytm_tracks,
-                        yt_tracks=yt_tracks,
-                        timeout=30.0,
-                    )
-
-                    if not selected:
-                        await ctx.send("Selection timed out. Call me again when you're ready!")
-                        return []
-
-                    # Log the selection
-                    self.logger.info(
-                        f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
-                        f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
-                    )
-
-                    return [selected]
-
-            except Exception as e:
-                self.logger.warning(f"YTM search failed, falling back to legacy: {e}")
-                await ctx.send("-# Had a little trouble with YouTube Music, showing regular results instead!")
-
-        # Fallback to legacy YouTube search
-        results = await self._search_youtube(query, max_results=5)
-        if not results:
+        if not songs and not videos:
             await ctx.send("No results found. Try a different search term!")
             return []
 
-        if len(results) == 1:
-            return results
+        # Convert results to tracks
+        ytm_tracks = [r.to_track() for r in songs]
+        yt_tracks = [r.to_track() for r in videos]
 
-        # Legacy selection UI
-        embed = discord.Embed(
-            title="🎵 Select a Track",
-            description="Choose the track you want to play:",
-            color=discord.Color.blue()
+        total = len(ytm_tracks) + len(yt_tracks)
+        if total == 1:
+            return ytm_tracks if ytm_tracks else yt_tracks
+
+        # Show selection UI
+        selected = await get_track_selection(
+            ctx,
+            ytm_tracks=ytm_tracks,
+            yt_tracks=yt_tracks,
+            timeout=30.0,
         )
 
-        options = {}
-        for i, track in enumerate(results, 1):
-            duration_str = f"{int(track.duration) // 60}:{int(track.duration) % 60:02d}"
-            embed.add_field(
-                name=f"{i}. {track.title}",
-                value=f"by {track.artist} • {duration_str}",
-                inline=False
-            )
-            options[str(i)] = str(i)
+        if not selected:
+            return []  # View already showed cancel/timeout message
 
-        selection = await get_selection(ctx, embed, options, timeout=30.0)
+        # Log the selection
+        self.logger.info(
+            f"[Play] User selected: '{selected.title}' ({selected.video_id}) | "
+            f"source={selected.source}, square_thumb={selected.thumbnail_is_square}"
+        )
 
-        if not selection:
-            await ctx.send("Selection timed out. Call me again when you're ready!")
-            return []
+        return [selected]
 
-        try:
-            selected_idx = int(selection) - 1
-            if 0 <= selected_idx < len(results):
-                return [results[selected_idx]]
-            else:
-                await ctx.send("Invalid selection.")
-                return []
-        except ValueError:
-            await ctx.send("Invalid selection.")
-            return []
+    async def _send_too_long_track_rejection(self, ctx: commands.Context, track: Track) -> None:
+        """Reject tracks above the hard playback duration cap with the easter egg UX."""
+        are_you_serious_gif_url = "https://tenor.com/yZeB.gif"
+        duration_text = format_duration_hms(track.duration)
+        limit_text = format_duration_hms(MAX_ACCEPTABLE_TRACK_DURATION_SECONDS)
+        self.logger.info(
+            f"[Duration Policy] Rejecting overlong track for user {ctx.author.id}: "
+            f"{track.title} ({duration_text})"
+        )
+        await ctx.send(are_you_serious_gif_url)
+        await ctx.send(
+            f"**{track.title}** is {duration_text} long! "
+            f"I can't play anything over {limit_text}, sorry~"
+        )
 
     async def _do_queue(self, ctx: commands.Context) -> None:
         """Internal implementation for queue display.
@@ -806,9 +790,13 @@ class MusicCommandsMixin:
             await ctx.send(f"❌ Invalid position. Please choose a number between 1 and {len(self.playlist)}.")
             return
 
+        # Clear attempt state for the track we're leaving.
+        old_track = self._get_current_track()
+        if old_track and old_track.video_id:
+            self._clear_attempts(old_track.video_id)
+
         self.current_index = index
         self.track_started_at = time.time()
-        self._clear_current_track_cache()
 
         track = self._get_current_track()
 
@@ -822,10 +810,11 @@ class MusicCommandsMixin:
                 await self._play_current_track()
 
     async def _do_skip(self) -> bool:
-        """Skip to the next track, ignoring Loop ONE mode.
+        """Skip to a different track.
 
         Returns:
-            True if skip was initiated, False if not playing/no session.
+            True if skip was initiated, False if not playing/no session
+            or there's nothing to skip to.
         """
         if not self._player:
             return False
@@ -836,19 +825,17 @@ class MusicCommandsMixin:
         if not self.playlist:
             return False
 
-        self.current_index += 1
-        if self.current_index >= len(self.playlist):
-            if self.loop_mode == LoopMode.ALL:
-                self.current_index = 0
-            else:
-                self.current_index = 0
+        # Clear attempt state for the track we're leaving.
+        old_track = self._get_current_track()
+        if old_track and old_track.video_id:
+            self._clear_attempts(old_track.video_id)
 
-        self.track_started_at = time.time()
-        self._playback.paused_at_position = None
-        self._clear_current_track_cache()
+        next_track = self._skip_to_different_track()
+        if next_track is None:
+            return False
 
         self._player.stop()
-        await self._play_current_track()
+        self.playback_task = asyncio.create_task(self._play_current_track())
         return True
 
     async def _do_lyrics(self, ctx: commands.Context, query: Optional[str] = None) -> None:
@@ -900,6 +887,7 @@ class MusicCommandsMixin:
                 all_results = filtered
 
         if not all_results:
+            self.logger.info(f"[Lyrics] No lyrics found for user {ctx.author.id}: query='{query}'")
             if searching_msg:
                 try:
                     await searching_msg.edit(
@@ -971,6 +959,10 @@ class MusicCommandsMixin:
             await ctx.send(f"❌ Couldn't retrieve lyrics from {selected.source}. Try another source.")
             return
 
+        self.logger.info(
+            f"[Lyrics] Found lyrics for user {ctx.author.id}: "
+            f"{selected.title} — {selected.artist} (via {selected.source})"
+        )
         pages: List[discord.Embed] = []
         lyrics_chunks = chunk_text(selected.lyrics_text, 1200)
 
@@ -1044,6 +1036,7 @@ class MusicCommandsMixin:
         is_current = (target_index == self.current_index)
 
         self._remove_track(target_index)
+        self.logger.info(f"[Play] Track removed by user {ctx.author.id}: {track.title} (position {target_index + 1})")
         await ctx.send(f"🗑️ Removed **{track.title}** from the playlist.")
 
         if is_current and self._player:
@@ -1168,6 +1161,7 @@ class MusicCommandsMixin:
             result = self._swap_tracks(from_index, to_index)
             if result:
                 track_a, track_b = result
+                self.logger.info(f"[Play] Track swapped by user {ctx.author.id}: position {from_index + 1} ↔ {to_index + 1}")
                 await ctx.send(
                     f"🔄 Swapped **{track_a.title}** (#{from_index + 1}) "
                     f"with **{track_b.title}** (#{to_index + 1})."
@@ -1177,6 +1171,7 @@ class MusicCommandsMixin:
         else:
             track = self._move_track(from_index, to_index)
             if track:
+                self.logger.info(f"[Play] Track moved by user {ctx.author.id}: position {from_index + 1} → {to_index + 1}")
                 await ctx.send(f"📋 Moved **{track.title}** to position {to_index + 1}.")
             else:
                 await ctx.send("Something went wrong moving that track.")
@@ -1188,21 +1183,36 @@ class MusicCommandsMixin:
     @music_cooldown
     async def listen_along_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for listen along requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         await self._do_listen_along(ctx)
 
     @music_cooldown
     @requires_voice
     async def skip_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for skip requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
+        if not self._player or not (self._player.is_playing or self._player.is_paused):
+            await ctx.send("Nothing is playing right now.")
+            return
+        current_track = self._get_current_track()
         if await self._do_skip():
+            if current_track:
+                self.logger.info(f"[Play] Track skipped by user {ctx.author.id}: was playing {current_track.title}")
             await ctx.send("⏭️ Skipped!")
         else:
-            await ctx.send("Nothing is playing right now.")
+            await ctx.send("There's nothing else to skip to!")
 
     @music_cooldown
     @requires_voice
     async def pause_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for pause requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if self._player and self._player.is_paused:
             await ctx.send("Already paused! Type 'resume' to continue!")
             return
@@ -1216,6 +1226,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def resume_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for resume requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if self._player and self._player.is_playing:
             await ctx.send("Already playing!")
             return
@@ -1231,16 +1244,27 @@ class MusicCommandsMixin:
     @music_cooldown
     async def play_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for play/queue requests with a song/URL."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         song_query = re.sub(r'^\s*(play|queue)\s+', '', query, flags=re.IGNORECASE).strip()
 
         if not song_query:
-            # Treat as resume
+            # Treat as resume — requires VC since it controls playback state
             if not self.active_session:
                 await ctx.send("I'm not in a voice channel! Type 'listen along' to start.")
                 return
 
             if ctx.guild and self.active_session.guild_id != ctx.guild.id:
                 await ctx.send("I'm not playing music in this server!")
+                return
+
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on resume: {error_msg}")
+                await ctx.send(error_msg)
                 return
 
             if self._player and self._player.is_playing:
@@ -1261,11 +1285,38 @@ class MusicCommandsMixin:
     @music_cooldown
     async def now_playing_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for now playing requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         from utils.views import NowPlayingView
 
         track = self._get_current_track()
         if not track:
             await ctx.send("No track is loaded.")
+            return
+
+        # If metadata enrichment is still running, show a loading message
+        # then upgrade it to the full now-playing widget once ready.
+        loading_msg: Optional[discord.Message] = None
+        if self._enrichment_task and not self._enrichment_task.done():
+            self.logger.info(f"[NowPlaying] Enrichment in flight for {track.title}, loading information...")
+            loading_msg = await ctx.send("Loading track information...")
+            try:
+                await asyncio.wait_for(self._enrichment_task, timeout=5.0)
+                self.logger.info(f"[NowPlaying] Enrichment finished, upgrading widget for {track.title}")
+            except asyncio.TimeoutError:
+                self.logger.info(f"[NowPlaying] Enrichment timed out, upgrading widget for {track.title} with available metadata")
+            except Exception as e:
+                self.logger.debug(f"[NowPlaying] Enrichment error for {track.title}: {e}")
+        else:
+            self.logger.info(f"[NowPlaying] Rendering for {track.title}, information already available")
+
+        # Re-fetch the current track after any awaits -- the track may have
+        # changed during enrichment wait (e.g. track ended mid-wait).
+        track = self._get_current_track()
+        if not track:
+            if loading_msg:
+                await loading_msg.delete()
             return
 
         thumbnail_bytes = await get_thumbnail_bytes(track, self.cache_manager)
@@ -1276,7 +1327,7 @@ class MusicCommandsMixin:
             files.append(discord.File(io.BytesIO(thumbnail_bytes), filename="thumbnail.jpg"))
             thumbnail_url = "attachment://thumbnail.jpg"
 
-        state = self.get_now_playing_state(thumbnail_url)
+        state = self.get_now_playing_state(thumbnail_url, track=track)
 
         view = NowPlayingView(
             state=state,
@@ -1285,9 +1336,24 @@ class MusicCommandsMixin:
             on_skip=self.skip_track,
             on_shuffle=self.shuffle_playlist,
             on_loop=self.cycle_loop_mode,
+            voice_channel_id=self.active_session.channel_id if self.active_session else None,
+            bot_owner_ids=self.bot.owner_ids,
         )
 
-        if files:
+        if loading_msg:
+            # Upgrade the loading message to the full now-playing widget.
+            try:
+                if files:
+                    await loading_msg.edit(content=None, view=view, attachments=files)
+                else:
+                    await loading_msg.edit(content=None, view=view)
+            except discord.HTTPException:
+                # Edit failed (message deleted, etc.) -- send fresh.
+                if files:
+                    await ctx.send(view=view, files=files)
+                else:
+                    await ctx.send(view=view)
+        elif files:
             await ctx.send(view=view, files=files)
         else:
             await ctx.send(view=view)
@@ -1295,36 +1361,58 @@ class MusicCommandsMixin:
     @music_cooldown
     async def queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for queue requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         await self._do_queue(ctx)
 
     @music_cooldown
     @requires_voice
     async def shuffle_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for shuffle toggle requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if not self.playlist:
             await ctx.send("No playlist to shuffle.")
             return
 
         self._apply_shuffle(preserve_current=True)
+        self.logger.info(f"[Play] Queue shuffled by user {ctx.author.id}: {len(self.playlist)} tracks")
         await ctx.send("🔀 Playlist shuffled!")
 
     @music_cooldown
     @requires_voice
     async def jump_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for jump requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         match = re.search(r'\b(\d+)\b', query)
         if match:
             position = int(match.group(1))
             await self._do_jump(ctx, position)
         else:
-            await ctx.send(
-                f"🎵 Currently on track **#{self.current_index + 1}** of {len(self.playlist)}.\n"
-                "Usage: `jump 5` to jump to track #5"
-            )
+            # Try name-based search
+            clean = re.sub(r'\b(jump|goto|go\s*to|to)\b', '', query, flags=re.IGNORECASE).strip()
+            if clean:
+                target_index = self._find_track_by_query(clean)
+                if target_index is not None:
+                    await self._do_jump(ctx, target_index + 1)
+                    return
+                await ctx.send(f"Couldn't find a track matching '{clean}'.")
+            else:
+                await ctx.send(
+                    f"🎵 Currently on track **#{self.current_index + 1}** of {len(self.playlist)}.\n"
+                    "Usage: `jump 5` or `jump snowfall`"
+                )
 
     @music_cooldown
     async def loop_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for loop mode requests."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         query_lower = query.lower()
         mode: Optional[LoopMode] = None
 
@@ -1358,7 +1446,11 @@ class MusicCommandsMixin:
                 self.idle_timeout_task.cancel()
                 self.idle_timeout_task = None
 
+        old_mode = self.loop_mode
         self.loop_mode = mode
+        if self._player:
+            self._player.set_repeat_one(mode == LoopMode.ONE)
+        self.logger.info(f"[Play] Loop mode changed by user {ctx.author.id}: {old_mode.display} → {mode.display}")
 
         if mode == LoopMode.OFF:
             await ctx.send(
@@ -1369,16 +1461,59 @@ class MusicCommandsMixin:
             await ctx.send(f"{self.loop_mode.emoji} Loop mode: **{self.loop_mode.display}**")
 
     @music_cooldown
-    @requires_voice
     async def leave_nlp(self, ctx: commands.Context, query: str) -> None:
-        """NLP handler for leave/disconnect requests."""
-        await self._end_session("Disconnected by user request.")
-        await ctx.send("👋 Disconnected!")
+        """NLP handler for leave/disconnect requests.
+
+        Does NOT use @requires_voice because the ghost cleanup path needs
+        to work without an active session. The normal path has an inline
+        VC check via check_voice_match() instead.
+        """
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
+
+        # Normal case: active session exists, end it properly.
+        if self.active_session:
+            passed, error_msg = check_voice_match(
+                ctx.author, self.active_session.channel_id, self.bot.owner_ids,
+            )
+            if not passed:
+                self.logger.info(f"[Music] Voice check failed for user {ctx.author.id} on leave: {error_msg}")
+                await ctx.send(error_msg)
+                return
+
+            self.logger.info(f"[Play] Leave requested by user {ctx.author.id}: disconnecting from voice")
+            await self._end_session("Disconnected by user request.")
+            await ctx.send("👋 Disconnected!")
+            return
+
+        # Ghost case: no active session but discord.py still has a VC.
+        # Permissive — anyone can clean up a ghost since it's a bug state.
+        if not ctx.guild:
+            await ctx.send("I'm not in a voice channel right now!")
+            return
+
+        for vc in self.bot.voice_clients:
+            if vc.guild and vc.guild.id == ctx.guild.id:
+                self.logger.warning(
+                    f"[Session] Ghost voice client found in {vc.channel}, cleaning up."
+                )
+                try:
+                    await vc.disconnect(force=True)
+                except Exception as e:
+                    self.logger.debug(f"[Session] Ghost disconnect error: {e}")
+                await ctx.send("Oops!~ Forgot I was in there!")
+                return
+
+        await ctx.send("I'm not in a voice channel right now!")
 
     @music_cooldown
     @requires_voice
     async def remove_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for removing tracks from the playlist."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*(remove|delete)\s*(track|song|number|#)?\s*',
             '', query, flags=re.IGNORECASE
@@ -1389,6 +1524,9 @@ class MusicCommandsMixin:
     @requires_voice
     async def move_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for moving tracks in the playlist."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*move\s*(track|song|number|#)?\s*',
             '', query, flags=re.IGNORECASE
@@ -1398,6 +1536,9 @@ class MusicCommandsMixin:
     @music_cooldown
     async def lyrics_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for lyrics search."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         clean_query = re.sub(
             r'^\s*(lyrics?\s*(for|of|to)?|find\s*lyrics?\s*(for|of|to)?|search\s*lyrics?\s*(for|of|to)?|get\s*lyrics?\s*(for|of|to)?)\s*',
             '',
@@ -1411,31 +1552,38 @@ class MusicCommandsMixin:
     @requires_voice
     async def clear_queue_nlp(self, ctx: commands.Context, query: str) -> None:
         """NLP handler for clearing the queue."""
+        if not self._cog_is_ready:
+            await self._not_ready_response(ctx)
+            return
         if not self.playlist:
             await ctx.send("The queue is already empty!")
             return
 
+        count = len(self.playlist)
         current_track = self._get_current_track()
         if current_track:
             self.playlist = [current_track]
             self.current_index = 0
             self._playlist_modified_during_session = True
             self._refresh_prefetch_if_stale()
+            self.logger.info(f"[Play] Queue cleared by user {ctx.author.id}: removed {count - 1} tracks")
             await ctx.send(f"🗑️ Queue cleared! Only **{current_track.title}** remains.")
         else:
             self.playlist = []
             self.current_index = 0
+            self.logger.info(f"[Play] Queue cleared by user {ctx.author.id}: removed {count} tracks")
             await ctx.send("🗑️ Queue cleared!")
 
     # ==========================================================================
     # MusicPlayerProtocol Implementation
     # ==========================================================================
 
-    def get_now_playing_state(self, thumbnail_url: Optional[str] = None) -> 'NowPlayingState':
+    def get_now_playing_state(self, thumbnail_url: Optional[str] = None, track: Optional[Track] = None) -> 'NowPlayingState':
         """Build current now playing state for view construction."""
         from utils.views import NowPlayingState
 
-        track = self._get_current_track()
+        if track is None:
+            track = self._get_current_track()
 
         elapsed = int(self._get_elapsed_seconds())
         elapsed_str = f"{elapsed // 60}:{elapsed % 60:02d}"
@@ -1447,6 +1595,19 @@ class MusicCommandsMixin:
         if self._player:
             is_playing = self._player.is_playing
             is_paused = self._player.is_paused
+
+        # Format view count for display
+        view_count_str = ""
+        if track and track.view_count is not None:
+            vc = track.view_count
+            if vc >= 1_000_000_000:
+                view_count_str = f"{vc / 1_000_000_000:.1f}B views"
+            elif vc >= 1_000_000:
+                view_count_str = f"{vc / 1_000_000:.1f}M views"
+            elif vc >= 1_000:
+                view_count_str = f"{vc / 1_000:.1f}K views"
+            else:
+                view_count_str = f"{vc} views"
 
         return NowPlayingState(
             track_title=track.title if track else "Unknown",
@@ -1461,6 +1622,11 @@ class MusicCommandsMixin:
             in_voice=self.active_session is not None,
             playlist_count=len(self.playlist),
             thumbnail_url=thumbnail_url,
+            # New metadata fields
+            version_label=track.version_label if track else "Video",
+            view_count_str=view_count_str,
+            album=track.album if track else None,
+            is_explicit=track.is_explicit if track else None,
         )
 
     async def toggle_playback(self) -> None:
@@ -1500,6 +1666,9 @@ class MusicCommandsMixin:
             self.loop_mode = LoopMode.OFF
         else:
             self.loop_mode = LoopMode.ALL
+
+        if self._player:
+            self._player.set_repeat_one(self.loop_mode == LoopMode.ONE)
 
     async def get_current_thumbnail(self) -> Optional[bytes]:
         """Fetch thumbnail bytes for the current track."""

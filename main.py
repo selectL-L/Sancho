@@ -77,7 +77,10 @@ def console_reader(loop: asyncio.AbstractEventLoop) -> None:
             break
 
 
-async def process_control_command(command: str, bot: Any, shutdown_handler: Any, log_path: Any) -> str:
+async def process_control_command(
+    command: str, bot: Any, shutdown_handler: Any, log_path: Any,
+    shutdown_reason_cls: Any = None
+) -> str:
     """Processes a control command and returns a response.
 
     Args:
@@ -85,6 +88,7 @@ async def process_control_command(command: str, bot: Any, shutdown_handler: Any,
         bot: The current bot instance.
         shutdown_handler: The function to call for graceful shutdown.
         log_path: Path to the current log file for finalization.
+        shutdown_reason_cls: The ShutdownReason enum class (passed from lifecycle module).
 
     Returns:
         A response string indicating the result.
@@ -93,30 +97,37 @@ async def process_control_command(command: str, bot: Any, shutdown_handler: Any,
 
     if command == 'exit':
         logging.info("'exit' command received.")
-        await shutdown_handler(signal.SIGINT, bot, is_restart=False, log_path=log_path)
+        reason = shutdown_reason_cls.MANUAL_STOP if shutdown_reason_cls else None
+        await shutdown_handler(signal.SIGINT, bot, reason=reason, log_path=log_path)
         return "OK: Shutting down"
     elif command == 'restart':
         logging.info("'restart' command received.")
         bot.restart_signal = True
-        await shutdown_handler(signal.SIGINT, bot, is_restart=True, log_path=log_path)
+        reason = shutdown_reason_cls.RESTART if shutdown_reason_cls else None
+        await shutdown_handler(signal.SIGINT, bot, reason=reason, log_path=log_path)
         return "OK: Restarting"
     elif command == 'reload':
-        logging.info("'reload' command received. Reloading cogs...")
+        logging.info("'reload' command received.")
         await bot.reload_all_cogs()
         return "OK: Cogs reloaded"
     elif command == 'status':
         return f"OK: {bot.user.name if bot.user else 'Bot'} is running"
     else:
+        logging.warning(f"Unknown control command received: '{command}'")
         return f"ERROR: Unknown command '{command}'"
 
 
-async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> None:
+async def console_consumer(
+    bot: Any, shutdown_handler: Any, log_path: Any,
+    shutdown_reason_cls: Any = None
+) -> None:
     """Consumes commands from the global console queue.
 
     Args:
         bot (CoreBot): The current bot instance.
         shutdown_handler (Callable): The function to call for graceful shutdown.
         log_path (str): Path to the current log file for finalization.
+        shutdown_reason_cls: The ShutdownReason enum class (passed from lifecycle module).
     """
     try:
         while True:
@@ -124,7 +135,9 @@ async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> No
             if not line:
                 continue
 
-            response = await process_control_command(line, bot, shutdown_handler, log_path)
+            response = await process_control_command(
+                line, bot, shutdown_handler, log_path, shutdown_reason_cls
+            )
             # For console, just print error responses (success is logged already)
             if response.startswith("ERROR"):
                 print(response)
@@ -135,7 +148,10 @@ async def console_consumer(bot: Any, shutdown_handler: Any, log_path: Any) -> No
         pass
 
 
-async def tcp_control_server(bot: Any, shutdown_handler: Any, log_path: Any, port: int) -> None:
+async def tcp_control_server(
+    bot: Any, shutdown_handler: Any, log_path: Any, port: int,
+    shutdown_reason_cls: Any = None
+) -> None:
     """Runs a TCP server on localhost for remote control commands.
 
     Accepts connections on 127.0.0.1 only. Each connection receives one command,
@@ -146,6 +162,7 @@ async def tcp_control_server(bot: Any, shutdown_handler: Any, log_path: Any, por
         shutdown_handler: The function to call for graceful shutdown.
         log_path: Path to the current log file for finalization.
         port: The TCP port to listen on.
+        shutdown_reason_cls: The ShutdownReason enum class (passed from lifecycle module).
     """
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Handles a single client connection."""
@@ -155,7 +172,9 @@ async def tcp_control_server(bot: Any, shutdown_handler: Any, log_path: Any, por
             if data:
                 command = data.decode('utf-8').strip()
                 logging.info(f"TCP control command from {addr}: {command}")
-                response = await process_control_command(command, bot, shutdown_handler, log_path)
+                response = await process_control_command(
+                    command, bot, shutdown_handler, log_path, shutdown_reason_cls
+                )
                 writer.write((response + "\n").encode('utf-8'))
                 await writer.drain()
         except asyncio.TimeoutError:
@@ -261,6 +280,54 @@ async def run_bot_lifecycle() -> None:
         # Initialize Bot (using the class from the potentially reloaded module)
         bot = mod_bot.CoreBot()
 
+        # Register signal handlers immediately after bot creation — before anything
+        # that could block or fail (database, cog loading, D-Bus, TCP server).
+        # This ensures we can catch signals and shut down gracefully even during startup.
+        # Platform behavior:
+        #   - Linux: Register SIGINT/SIGTERM/SIGUSR1 handlers for graceful shutdown
+        #     SIGTERM = stop or system shutdown (reason resolved from D-Bus flags)
+        #     SIGUSR1 = restart (via RestartKillSignal in systemd unit file) — process exits
+        #     SIGINT  = Ctrl+C (dev convenience, treated as manual stop)
+        #   - Windows: Skip (no add_signal_handler support); relies on KeyboardInterrupt for Ctrl+C
+        if sys.platform != "win32":
+            # SIGINT and SIGTERM: reason resolved at handler time from D-Bus flags
+            for s in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.remove_signal_handler(s)  # Clear old handlers
+                    loop.add_signal_handler(
+                        s,
+                        lambda s=s, _lifecycle=mod_lifecycle, _bot=bot, _log=log_path: asyncio.create_task(
+                            _lifecycle.shutdown_handler(s, _bot, reason=None, log_path=_log)
+                        )
+                    )
+                except NotImplementedError:
+                    pass
+
+            # SIGUSR1: deterministic restart signal from systemd RestartKillSignal.
+            # Does NOT set restart_signal — systemd expects the process to die so it
+            # can spawn a fresh instance. Soft restart (restart_signal=True) is only
+            # for the TCP/console "restart" command.
+            # Reason is NOT hardcoded — lifecycle auto-resolves SIGUSR1 to either
+            # RESTART or UPGRADE_RESTART by checking apt-daily-upgrade.service state.
+            try:
+                loop.remove_signal_handler(signal.SIGUSR1)
+
+                def _sigusr1_handler(_lifecycle=mod_lifecycle, _bot=bot, _log=log_path) -> None:
+                    # Store reference on bot to prevent GC before completion (RUF006)
+                    _bot._shutdown_task = asyncio.create_task(
+                        _lifecycle.shutdown_handler(
+                            signal.SIGUSR1, _bot,
+                            reason=None,
+                            log_path=_log
+                        )
+                    )
+
+                loop.add_signal_handler(signal.SIGUSR1, _sigusr1_handler)
+            except (NotImplementedError, OSError):
+                pass
+
+            logging.info("Registered signal handlers: SIGINT, SIGTERM, SIGUSR1")
+
         # Initialize and attach resource tracker
         resource_tracker = mod_logging.ResourceTracker(interval_minutes=config.RESOURCE_TRACK_INTERVAL)
         bot.resource_tracker = resource_tracker
@@ -290,30 +357,22 @@ async def run_bot_lifecycle() -> None:
                         logging.error(f"  ✗ {cog_name} - Failed to load", exc_info=True)
 
                 # Start Console Consumer
-                consumer_task = loop.create_task(console_consumer(bot, mod_lifecycle.shutdown_handler, log_path))
+                consumer_task = loop.create_task(console_consumer(
+                    bot, mod_lifecycle.shutdown_handler, log_path, mod_lifecycle.ShutdownReason
+                ))
 
                 # Start TCP Control Server (if configured)
                 tcp_task = None
                 if config.CONTROL_PORT:
-                    tcp_task = loop.create_task(tcp_control_server(bot, mod_lifecycle.shutdown_handler, log_path, config.CONTROL_PORT))
+                    tcp_task = loop.create_task(tcp_control_server(
+                        bot, mod_lifecycle.shutdown_handler, log_path, config.CONTROL_PORT,
+                        mod_lifecycle.ShutdownReason
+                    ))
 
-                # Setup signal handlers for this iteration
-                # Platform behavior:
-                #   - Linux: Register SIGINT/SIGTERM handlers for graceful shutdown (systemd sends SIGTERM)
-                #   - Windows: Skip (no add_signal_handler support); relies on KeyboardInterrupt for Ctrl+C
-                if sys.platform != "win32":
-                    for s in (signal.SIGINT, signal.SIGTERM):
-                        try:
-                            loop.remove_signal_handler(s)  # Clear old handlers
-                            loop.add_signal_handler(
-                                s,
-                                # Capture all variables by value (not by name) to avoid stale references after restart
-                                lambda s=s, _lifecycle=mod_lifecycle, _bot=bot, _log=log_path: asyncio.create_task(
-                                    _lifecycle.shutdown_handler(s, _bot, is_restart=False, log_path=_log)
-                                )
-                            )
-                        except NotImplementedError:
-                            pass
+                # Setup D-Bus shutdown detection (logind PrepareForShutdown listener).
+                # Must happen after event loop is running but before bot.start().
+                # Bot reference passed for pre-SIGTERM Discord messaging (upgrade notifications).
+                await mod_lifecycle.setup_shutdown_detection(bot)
 
                 # Connect to Discord (CONNECT/READY/POST-READY phases handled in lifecycle.startup_handler)
                 try:
@@ -345,6 +404,10 @@ async def run_bot_lifecycle() -> None:
         if bot.restart_signal:
             logging.info("Restart signal received. Purging modules...")
             mod_logging.stop_queue_listener()  # Clean up before purge to avoid orphaned thread
+            # teardown_shutdown_detection already called in shutdown_handler,
+            # but call again defensively in case shutdown_handler didn't run
+            # (e.g. crash path). Safe to call multiple times.
+            await mod_lifecycle.teardown_shutdown_detection()
             mod_lifecycle.purge_modules()
             restart_count += 1
             # Loop continues -> Modules re-imported -> New Bot made

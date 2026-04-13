@@ -47,7 +47,7 @@ def get_internal_path() -> str:
     as the application path.
     """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        return sys._MEIPASS  # type: ignore
+        return sys._MEIPASS  # type: ignore[attr-defined,return-value]
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -82,9 +82,20 @@ def check_and_create_env_file() -> None:
         "BOT_NAME": "NoName",
         "OWNER_ID": "",
         "AMBIENCE_ENABLED": "True",
+        "DEFAULT_VISIBILITY": "online",
+        "THEME_COLOR": "",
         # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID": "",
         "CONTROL_PORT": "",
+        # WEB SERVER
+        "WEB_ENABLED": "False",
+        "WEB_PORT": "8000",
+        "WEB_HOST": "0.0.0.0",
+        "WEB_SESSION_SECRET": "",
+        "OAUTH_CLIENT_ID": "",
+        "OAUTH_CLIENT_SECRET": "",
+        "OAUTH_REDIRECT_URI": "",
+        "WEB_MOCK_DATA": "False",
         # DEBUGGING
         "DEV_MODE": "False",
         "DEV_GUILD": "",
@@ -111,6 +122,11 @@ def check_and_create_env_file() -> None:
         "SYSTEM_CHANNEL_ID": (
             "# ═══════════════════════════════════════════════════════════════════════════════\n"
             "#  SYSTEM COMMUNICATION\n"
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+        ),
+        "WEB_ENABLED": (
+            "# ═══════════════════════════════════════════════════════════════════════════════\n"
+            "#  WEB SERVER\n"
             "# ═══════════════════════════════════════════════════════════════════════════════\n"
         ),
         "DEV_MODE": (
@@ -153,6 +169,13 @@ def check_and_create_env_file() -> None:
         "AMBIENCE_ENABLED":
             "# (Optional) Enable personality-driven responses (greetings, mood-based replies).\n"
             "# Default: True. Set to False to disable without removing ambience.toml.",
+        "DEFAULT_VISIBILITY":
+            "# (Optional) Initial Discord presence status on startup.\n"
+            "# Options: online, idle, dnd, invisible. Default: online.\n"
+            "# Useful for dev bots to start invisible and avoid online/offline spam.",
+        "THEME_COLOR":
+            "# (Optional) Hex color for the web UI theme (e.g., #9333ea for purple).\n"
+            "# If empty, the web UI defaults to green.",
         # SYSTEM COMMUNICATION
         "SYSTEM_CHANNEL_ID":
             "# (Optional) Channel ID for bot status messages (startup, errors).\n"
@@ -160,6 +183,33 @@ def check_and_create_env_file() -> None:
         "CONTROL_PORT":
             "# (Optional) TCP port for remote control commands (exit, restart, reload).\n"
             "# Binds to localhost only. If empty, TCP control is disabled.",
+        # WEB SERVER
+        "WEB_ENABLED":
+            "# (Optional) Enable the web server for bot web features (schedule, calculator, etc.).\n"
+            "# Default: False. Set to True to start the web UI.",
+        "WEB_PORT":
+            "# (Optional) Port for the web server.\n"
+            "# Default: 8000.",
+        "WEB_HOST":
+            "# (Optional) Host to bind the web server.\n"
+            "# Default: 0.0.0.0 (all interfaces). Use 127.0.0.1 for local only.",
+        "WEB_SESSION_SECRET":
+            "# (Required if WEB_ENABLED) Random secret for signing session cookies.\n"
+            "# Generate with: python -c \"import secrets; print(secrets.token_hex(32))\"",
+        "OAUTH_CLIENT_ID":
+            "# (Required if WEB_ENABLED) Discord application client ID.\n"
+            "# Found in Discord Developer Portal > Your App > OAuth2.",
+        "OAUTH_CLIENT_SECRET":
+            "# (Required if WEB_ENABLED) Discord application client secret.\n"
+            "# Found in Discord Developer Portal > Your App > OAuth2.",
+        "OAUTH_REDIRECT_URI":
+            "# (Required if WEB_ENABLED) OAuth callback URL.\n"
+            "# Must match exactly in Discord Developer Portal.\n"
+            "# Example: http://localhost:8000/auth/callback",
+        "WEB_MOCK_DATA":
+            "# (Optional) Return mock/fake data from web APIs for UI testing.\n"
+            "# Separate from DEV_MODE so you can have debug logging without mock data.\n"
+            "# Default: False. Only set True when testing the web UI without real data.",
         # DEBUGGING
         "DEV_MODE":
             "# (Optional) Developer mode restricts the bot to OWNER_ID only.\n"
@@ -215,6 +265,7 @@ def check_and_create_env_file() -> None:
             logging.critical(f"Failed to create {ENV_PATH}: {e}")
             sys.exit(f"Exiting: Failed to create {ENV_PATH}.")
 
+        # TODO: Route through logger once startup ordering allows logging before config load
         # This message is critical for the user to see on the first run.
         print(f"'{os.path.basename(ENV_PATH)}' was not found.")
         print(f"A new one has been created at: {ENV_PATH}")
@@ -291,6 +342,12 @@ OWNER_IDS: set[int] = {
 raw_ambience_enabled = os.getenv('AMBIENCE_ENABLED', 'True')
 AMBIENCE_ENABLED = raw_ambience_enabled.lower() in ('true', '1', 't')
 
+# Default visibility on startup. Valid: online, idle, dnd, invisible
+raw_default_visibility = os.getenv('DEFAULT_VISIBILITY', 'online').lower()
+DEFAULT_VISIBILITY = raw_default_visibility if raw_default_visibility in ('online', 'idle', 'dnd', 'invisible') else 'online'
+
+THEME_COLOR = os.getenv('THEME_COLOR', '')  # Empty = web UI defaults to green
+
 # =============================================================================
 # ENVIRONMENT VARIABLES - System Communication
 # =============================================================================
@@ -301,10 +358,38 @@ raw_control_port = os.getenv('CONTROL_PORT')
 CONTROL_PORT: Optional[int] = int(raw_control_port) if raw_control_port and raw_control_port.isdigit() else None
 
 # =============================================================================
+# ENVIRONMENT VARIABLES - Web Server
+# =============================================================================
+# Availability scheduler web UI with Discord OAuth authentication.
+# Requires: WEB_ENABLED=True + all OAuth fields configured.
+raw_web_enabled = os.getenv('WEB_ENABLED', 'False')
+WEB_ENABLED = raw_web_enabled.lower() in ('true', '1', 't')
+
+raw_web_port = os.getenv('WEB_PORT', '8000')
+WEB_PORT = int(raw_web_port) if raw_web_port.isdigit() else 8000
+
+WEB_HOST = os.getenv('WEB_HOST', '0.0.0.0')
+WEB_SESSION_SECRET = os.getenv('WEB_SESSION_SECRET', '')
+OAUTH_CLIENT_ID = os.getenv('OAUTH_CLIENT_ID', '')
+OAUTH_CLIENT_SECRET = os.getenv('OAUTH_CLIENT_SECRET', '')
+OAUTH_REDIRECT_URI = os.getenv('OAUTH_REDIRECT_URI', '')
+
+# Validate web configuration - key fields required if enabled
+_web_required = [WEB_SESSION_SECRET, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI]
+if WEB_ENABLED and not all(_web_required):
+    print("WARNING: WEB_ENABLED is True but OAuth configuration is incomplete.")
+    print("Required: WEB_SESSION_SECRET, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI")
+    print("Web server is DISABLED.")
+    WEB_ENABLED = False
+
+# =============================================================================
 # ENVIRONMENT VARIABLES - Debugging
 # =============================================================================
 raw_dev_mode = os.getenv('DEV_MODE', 'False')
 DEV_MODE = raw_dev_mode.lower() in ('true', '1', 't')
+
+raw_web_mock = os.getenv('WEB_MOCK_DATA', 'False')
+WEB_MOCK_DATA = raw_web_mock.lower() in ('true', '1', 't')
 
 raw_dev_guild = os.getenv('DEV_GUILD')
 DEV_GUILD: Optional[int] = int(raw_dev_guild) if raw_dev_guild and raw_dev_guild.isdigit() else None
@@ -328,11 +413,13 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(funcName)s:
 # =============================================================================
 # ENVIRONMENT VARIABLES - Music (YouTube Authentication)
 # =============================================================================
-# PO Token Provider - HTTP server that generates proof-of-origin tokens for YouTube.
-# This helps bypass 403 errors on datacenter IPs. The server is started/stopped with the bot.
-# One-time setup: clone repo to <venv>/utils/pot_provider, run npm install && npx tsc
-# Uses sys.prefix to find the venv directory (keeps JS code away from Python code).
-POT_PROVIDER_PATH = os.path.join(sys.prefix, 'utils', 'pot_provider', 'server', 'build', 'main.js')
+# PO Token Provider — compiled Deno binary that generates proof-of-origin tokens for YouTube.
+# Helps bypass 403 errors on datacenter IPs. Started/stopped with the bot.
+# Setup: compile with deno and place the binary in the bot's venv root.
+
+_POT_BINARY_NAME = 'pot-server.exe' if os.name == 'nt' else 'pot-server'
+_pot_candidate = os.path.join(sys.prefix, _POT_BINARY_NAME)
+POT_PROVIDER_PATH: Optional[str] = _pot_candidate if os.path.isfile(_pot_candidate) else None
 
 raw_pot_port = os.getenv('POT_PROVIDER_PORT')
 POT_PROVIDER_PORT: Optional[int] = int(raw_pot_port) if raw_pot_port and raw_pot_port.isdigit() else None
@@ -371,12 +458,27 @@ LOGS_DIR = os.path.join(APP_PATH, 'logs')
 COGS_PATH = os.path.join(INTERNAL_PATH, 'cogs')
 MUSIC_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'music')
 YTDLP_CACHE_PATH = os.path.join(MUSIC_CACHE_PATH, 'ytdlp')  # yt-dlp's cache (OAuth tokens, etc.)
+TRANSFORM_CACHE_PATH = os.path.join(APP_PATH, 'cache', 'transform')  # Temp files for file conversion
+
+# =============================================================================
+# FILE CONVERSION LIMITS
+# =============================================================================
+CONVERT_MAX_FILE_SIZE_MB = 25        # Max input/output file size in MB
+CONVERT_MAX_VIDEO_DURATION = 300     # Max video duration in seconds (5 minutes)
+CONVERT_MAX_AUDIO_DURATION = 900     # Max audio duration in seconds (15 minutes)
+CONVERT_MAX_CONCURRENT = 10          # Max global concurrent conversions
+CONVERT_FFMPEG_TIMEOUT = 120         # Kill FFmpeg after this many seconds
 
 # =============================================================================
 # DATABASE PATH DISCOVERY
 # =============================================================================
 # We scan for an existing .db file to use, regardless of its name.
 # This strictly enforces a "Single Database" rule.
+if not os.path.isdir(ASSETS_PATH):
+    print(f"CRITICAL ERROR: Required assets directory not found: {ASSETS_PATH}")
+    print("Please restore the assets folder before starting the bot.")
+    sys.exit("Exiting: Missing assets directory.")
+
 found_dbs = [f for f in os.listdir(ASSETS_PATH) if f.endswith('.db')]
 
 if len(found_dbs) == 0:
@@ -422,8 +524,9 @@ else:
 NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
     # Math Group
     [
-        # Limbus Company coin flip
-        ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Math', 'limbus_roll_nlp'),
+        # Limbus Company — \blimbus\b catches named skill rolls ("limbus roll Yi Sang S1"),
+        # \bcoin\s.*flip\b catches manual coin flip requests ("coin flip 4 bp 3 cp")
+        ((r'\blimbus\b', r'\bcoin\s.*flip\b'), 'Limbus', 'limbus_roll_nlp'),
         # Dice rolling (should be checked before basic calculation)
         ((r'\broll\b', r'\bdice\b'), 'Math', 'roll'),
         # Basic calculation
@@ -459,16 +562,16 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         # Setting reminders
         ((r'^\s*(remind|reminder|remember|set\s+a\s+reminder|set\s.*reminder)\b',), 'Reminders', 'remind'),
     ],
-    # Image Group
+    # Files Group
     [
         # Profile picture / avatar
-        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r'\b(show|get)\s.*(pfp|avatar)\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'ImageCog', 'pfp'),
+        ((r'\bpfp\b', r'\bavatar\b', r'\bprofile\s*pic(ture)?\b', r'\b(show|get)\s.*(pfp|avatar)\b', r"what('?s| is)\s+(their|his|her|my)\s+(pfp|avatar)\b"), 'FilesCog', 'pfp'),
         # Banner
-        ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'ImageCog', 'banner'),
+        ((r'\bbanner\b', r'\bprofile\s*banner\b', r"what('?s| is)\s+(their|his|her|my)\s+banner\b"), 'FilesCog', 'banner'),
         # Resize image
-        ((r'\bresize\b', r'\bscale\b'), 'ImageCog', 'resize'),
+        ((r'\bresize\b', r'\bscale\b'), 'FilesCog', 'resize'),
         # Convert image format
-        ((r'\bconvert\b', r'\bchange to\b'), 'ImageCog', 'convert'),
+        ((r'\bconvert\b', r'\bchange to\b'), 'FilesCog', 'convert'),
     ],
     # Fun Group - Complex commands only (BOD fate system)
     # Simple Fun commands (including yujin_quotes) are registered dynamically by the Fun cog
@@ -511,5 +614,17 @@ NLP_COMMANDS: List[List[Tuple[Tuple[str, ...], str, str]]] = [
         ((r'\bmove\b',), 'Music', 'move_nlp'),
         # Leave / disconnect
         ((r'\bleave\b', r'\bdisconnect\b', r'\bstop\s*music\b'), 'Music', 'leave_nlp'),
+    ],
+    # Schedule Group - Weekly availability scheduler
+    [
+        # Check availability for mentioned user(s) - REQUIRES a mention to avoid false positives
+        # "when is @user free", "is @user available", "are @user @user2 free saturday 3pm"
+        ((r'\b(when|is|are)\b.*<@!?\d+>.*\b(free|available)\b', r'\b(free|available)\b.*<@!?\d+>'), 'Schedule', 'check_availability_nlp'),
+        # Who's available query (reverse: time → people)
+        # "who's free", "who is available saturday", "whos free at 3pm"
+        ((r"\bwho('?s| is| are)\s*(free|available)\b",), 'Schedule', 'who_available_nlp'),
+        # Get schedule link
+        # "schedule link", "schedule url", "edit my availability", "set my schedule"
+        ((r'\bschedule\s*(link|url)\b', r'\b(edit|set|update)\s+(my\s+)?(availability|schedule)\b'), 'Schedule', 'schedule_link_nlp'),
     ],
 ]

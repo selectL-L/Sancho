@@ -13,6 +13,7 @@ All external dependencies (Discord voice, yt-dlp, FFmpeg) are mocked.
 The test verifies that internal state transitions correctly at each step.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -22,13 +23,12 @@ from discord.ext import commands
 from cogs.music import Music
 from utils.musicutils import (
     ActiveSession,
-    AudioFetcher,
-    FetchContext,
     LoopMode,
     PlaybackState,
+    SearchResult,
     Track,
 )
-from utils.musicutils.music_auth import AudioFetchResult
+from utils.musicutils.source_acquisition import PlayableSource
 
 
 # =============================================================================
@@ -166,7 +166,6 @@ def music_cog(mock_bot):
         cog.loop_mode = LoopMode.OFF
         cog.active_session = None
         cog._playback = PlaybackState()
-        cog._audio_fetcher = AudioFetcher(cog.cache_manager, cog.logger)
 
         # Mock db_manager for async calls
         cog.db_manager = MagicMock()
@@ -727,13 +726,12 @@ class TestMusicSessionIntegration:
 # =============================================================================
 
 
-class TestPrefetchBufferUsage:
-    """Tests for prefetch buffer consumption in _play_current_track."""
+class TestSourceAcquisitionPlayback:
+    """Tests for _acquire_source driven playback in _play_current_track."""
 
     @pytest.mark.asyncio
-    async def test_valid_prefetch_is_used(self, music_cog, mock_voice_client):
-        """When prefetch matches next track, it should be used without re-fetching."""
-        # Setup: 3 tracks, currently on track 0
+    async def test_direct_source_is_played(self, music_cog, mock_voice_client):
+        """A URL from _acquire_source should be handed to the player."""
         music_cog.playlist = create_ambient_playlist()[:3]
         music_cog.current_index = 0
         music_cog.active_session = ActiveSession(
@@ -743,52 +741,95 @@ class TestPrefetchBufferUsage:
             origin_channel_id=777777
         )
 
-        # Setup mock player
         mock_player = MagicMock()
         mock_player.stop = MagicMock()
         mock_player.play = MagicMock()
         music_cog._player = mock_player
 
-        # Advance to track 1 (simulating track 0 ended)
         music_cog._advance_track()
-        assert music_cog.current_index == 1
-
-        # Setup: Pre-populate prefetch buffer for track 1 (current after advance)
         track_1 = music_cog.playlist[1]
-        music_cog._next_prepared = AudioFetchResult(
-            success=True,
+        source = PlayableSource(
             url="https://prefetched-url.com/audio",
             http_headers={"User-Agent": "test"},
         )
-        music_cog._next_prepared_track = track_1
 
-        # Mock AudioFetcher.fetch to track if it's called
-        fetch_called = False
-        original_fetch = music_cog._audio_fetcher.fetch
-
-        async def mock_fetch(*args, **kwargs):
-            nonlocal fetch_called
-            fetch_called = True
-            return await original_fetch(*args, **kwargs)
-
-        # Act: Play current track (should use prefetch)
-        with patch.object(music_cog._audio_fetcher, 'fetch', side_effect=mock_fetch):
+        with patch.object(
+            music_cog, '_acquire_source',
+            new=AsyncMock(return_value=source),
+        ) as acquire_mock:
             with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
                 with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
                     await music_cog._play_current_track()
 
-        # Assert: Player was called with prefetched URL
+        acquire_mock.assert_awaited_once_with(track_1)
         mock_player.play.assert_called_once()
         call_args = mock_player.play.call_args
-        assert call_args[0][1] == "https://prefetched-url.com/audio"  # audio_source arg
-
-        # Assert: AudioFetcher.fetch was NOT called (used prefetch instead)
-        assert not fetch_called, "AudioFetcher.fetch should not be called when prefetch is valid"
+        assert call_args[0][0] == track_1
+        assert call_args[0][1] == "https://prefetched-url.com/audio"
+        assert call_args[1]["http_headers"] == {"User-Agent": "test"}
 
     @pytest.mark.asyncio
-    async def test_stale_prefetch_is_discarded(self, music_cog, mock_voice_client):
-        """When prefetch doesn't match current track, it should be discarded."""
-        # Setup: 3 tracks
+    async def test_prebuffered_source_is_handed_to_player(self, music_cog, mock_voice_client):
+        """Prebuffered sources should be passed to ManagedPlayer.play(source=...)."""
+        music_cog.playlist = create_ambient_playlist()[:3]
+        music_cog.current_index = 0
+        music_cog.active_session = ActiveSession(
+            guild_id=888888,
+            channel_id=777777,
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
+        )
+
+        mock_player = MagicMock()
+        mock_player.stop = MagicMock()
+        mock_player.play = MagicMock()
+        music_cog._player = mock_player
+
+        music_cog._advance_track()
+        track_1 = music_cog.playlist[1]
+
+        mock_prebuffered = MagicMock()
+        mock_prebuffered.buffered_seconds = 30.0
+
+        source = PlayableSource(
+            url="https://prefetched-prebuffer-source.com/audio",
+            http_headers={"User-Agent": "prefetch-test"},
+            prebuffered=mock_prebuffered,
+        )
+
+        with patch.object(
+            music_cog, '_acquire_source',
+            new=AsyncMock(return_value=source),
+        ):
+            with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
+                with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
+                    await music_cog._play_current_track()
+
+        mock_player.play.assert_called_once_with(track_1, source=mock_prebuffered)
+
+    @pytest.mark.asyncio
+    async def test_cycle_loop_mode_updates_active_player_repeat_setting(self, music_cog, mock_voice_client):
+        """Loop changes should be pushed into the active player immediately."""
+        music_cog.playlist = create_ambient_playlist()[:2]
+        music_cog.active_session = ActiveSession(
+            guild_id=888888,
+            channel_id=777777,
+            voice_client=mock_voice_client,
+            origin_channel_id=777777
+        )
+
+        mock_player = MagicMock()
+        music_cog._player = mock_player
+        music_cog.loop_mode = LoopMode.ALL
+
+        await music_cog.cycle_loop_mode()
+
+        mock_player.set_repeat_one.assert_called_once_with(True)
+        assert music_cog.loop_mode == LoopMode.ONE
+
+    @pytest.mark.asyncio
+    async def test_current_playback_requests_activation_when_no_prefetch_is_tracked(self, music_cog, mock_voice_client):
+        """Without a prefetched source, playback calls _acquire_source directly."""
         music_cog.playlist = create_ambient_playlist()[:3]
         music_cog.current_index = 0
         music_cog.active_session = ActiveSession(
@@ -800,67 +841,20 @@ class TestPrefetchBufferUsage:
 
         mock_player = MagicMock()
         music_cog._player = mock_player
+        track_0 = music_cog.playlist[0]
+        source = PlayableSource(url="https://live.com/audio")
 
-        # Setup: Prefetch buffer has WRONG track (track 2, but we're playing track 0)
-        wrong_track = music_cog.playlist[2]
-        music_cog._next_prepared = AudioFetchResult(
-            success=True,
-            url="https://wrong-prefetch.com/audio",
-        )
-        music_cog._next_prepared_track = wrong_track
-
-        # Mock AudioFetcher.fetch to return a result for the correct track
-        async def mock_fetch(track, context):
-            return AudioFetchResult(
-                success=True,
-                url="https://live-fetched.com/audio",
-            )
-
-        # Act
-        with patch.object(music_cog._audio_fetcher, 'fetch', side_effect=mock_fetch) as fetch_mock:
+        with patch.object(
+            music_cog, '_acquire_source',
+            new=AsyncMock(return_value=source),
+        ) as acquire_mock:
             with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
                 with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
                     await music_cog._play_current_track()
 
-        # Assert: AudioFetcher.fetch WAS called (prefetch was stale)
-        fetch_mock.assert_called_once()
-        call_context = fetch_mock.call_args[0][1]
-        assert call_context == FetchContext.LIVE
-
-        # Assert: Player got the LIVE-fetched URL, not the stale prefetch
+        acquire_mock.assert_awaited_once_with(track_0)
         call_args = mock_player.play.call_args
-        assert call_args[0][1] == "https://live-fetched.com/audio"
-
-    @pytest.mark.asyncio
-    async def test_missing_prefetch_triggers_live_fetch(self, music_cog, mock_voice_client):
-        """When no prefetch exists, should fetch LIVE."""
-        music_cog.playlist = create_ambient_playlist()[:2]
-        music_cog.current_index = 0
-        music_cog.active_session = ActiveSession(
-            guild_id=888888,
-            channel_id=777777,
-            voice_client=mock_voice_client,
-            origin_channel_id=777777
-        )
-
-        mock_player = MagicMock()
-        music_cog._player = mock_player
-
-        # No prefetch
-        music_cog._next_prepared = None
-        music_cog._next_prepared_track = None
-
-        async def mock_fetch(track, context):
-            return AudioFetchResult(success=True, url="https://live.com/audio")
-
-        with patch.object(music_cog._audio_fetcher, 'fetch', side_effect=mock_fetch) as fetch_mock:
-            with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
-                with patch.object(music_cog, '_prefetch_next_track', new_callable=AsyncMock):
-                    await music_cog._play_current_track()
-
-        # Should have called fetch with LIVE context
-        fetch_mock.assert_called_once()
-        assert fetch_mock.call_args[0][1] == FetchContext.LIVE
+        assert call_args[0][1] == "https://live.com/audio"
 
 
 class TestPrefetchInvalidationOnMutation:
@@ -880,15 +874,13 @@ class TestPrefetchInvalidationOnMutation:
         )
 
         track_2 = music_cog.playlist[2]
-        music_cog._next_prepared = AudioFetchResult(success=True, url="https://prefetch.com")
-        music_cog._next_prepared_track = track_2
+        music_cog._prefetched_track = track_2
 
         # Act: Remove track 4 (after current and next)
         music_cog._remove_track(4)
 
         # Assert: Prefetch still valid
-        assert music_cog._next_prepared is not None
-        assert music_cog._next_prepared_track.video_id == track_2.video_id
+        assert music_cog._prefetched_track is not None and music_cog._prefetched_track.video_id == track_2.video_id
 
     @pytest.mark.asyncio
     async def test_prefetch_cleared_when_next_track_removed(self, music_cog, mock_voice_client):
@@ -904,15 +896,13 @@ class TestPrefetchInvalidationOnMutation:
         )
 
         track_2 = music_cog.playlist[2]
-        music_cog._next_prepared = AudioFetchResult(success=True, url="https://prefetch.com")
-        music_cog._next_prepared_track = track_2
+        music_cog._prefetched_track = track_2
 
         # Act: Remove track 2 (the prefetched track)
         music_cog._remove_track(2)
 
         # Assert: Prefetch cleared (next track is now different)
-        assert music_cog._next_prepared is None
-        assert music_cog._next_prepared_track is None
+        assert music_cog._prefetched_track is None
 
     @pytest.mark.asyncio
     async def test_prefetch_cleared_when_shuffle_changes_next(self, music_cog, mock_voice_client):
@@ -928,8 +918,7 @@ class TestPrefetchInvalidationOnMutation:
 
         # Prefetch for track 1
         track_1 = music_cog.playlist[1]
-        music_cog._next_prepared = AudioFetchResult(success=True, url="https://prefetch.com")
-        music_cog._next_prepared_track = track_1
+        music_cog._prefetched_track = track_1
 
         # Act: Shuffle (preserve_current moves current to front, shuffles rest)
         music_cog._apply_shuffle(preserve_current=True)
@@ -938,13 +927,13 @@ class TestPrefetchInvalidationOnMutation:
         # Note: There's a small chance shuffle produces same order, but very unlikely with 5 tracks
         # The key is that _refresh_prefetch_if_stale is called and checks video_id match
         # If by chance the same track ends up at index 1, prefetch would be kept (correct behavior)
-        next_track = music_cog._get_next_track()
+        next_track = music_cog._get_next_sequential_track()
         if next_track and next_track.video_id == track_1.video_id:
             # Rare case: shuffle happened to keep same next track
-            assert music_cog._next_prepared is not None
+            assert music_cog._prefetched_track is not None and music_cog._prefetched_track.video_id == track_1.video_id
         else:
             # Normal case: next track changed
-            assert music_cog._next_prepared is None
+            assert music_cog._prefetched_track is None
 
     @pytest.mark.asyncio
     async def test_prefetch_valid_at_end_of_playlist_loop_off(self, music_cog):
@@ -958,15 +947,13 @@ class TestPrefetchInvalidationOnMutation:
         music_cog.loop_mode = LoopMode.OFF
 
         # Prefetch exists for index 0 (next sequential after index 2)
-        music_cog._next_prepared = AudioFetchResult(success=True, url="https://prefetch.com")
-        music_cog._next_prepared_track = music_cog.playlist[0]  # Correct!
+        music_cog._prefetched_track = music_cog.playlist[0]
 
         # Act: Trigger refresh (simulating after some mutation)
         music_cog._refresh_prefetch_if_stale()
 
         # Assert: Prefetch is still valid - index 0 is next sequential
-        assert music_cog._next_prepared is not None
-        assert music_cog._next_prepared.url == "https://prefetch.com"
+        assert music_cog._prefetched_track is not None and music_cog._prefetched_track.video_id == music_cog.playlist[0].video_id
 
 
 class TestPrefetchTaskLifecycle:
@@ -987,12 +974,8 @@ class TestPrefetchTaskLifecycle:
         mock_player = MagicMock()
         music_cog._player = mock_player
 
-        # No existing prefetch
-        music_cog._next_prepared = None
         music_cog._prefetch_task = None
-
-        async def mock_fetch(track, context):
-            return AudioFetchResult(success=True, url="https://audio.com")
+        source = PlayableSource(url="https://audio.com")
 
         prefetch_called = False
 
@@ -1000,31 +983,124 @@ class TestPrefetchTaskLifecycle:
             nonlocal prefetch_called
             prefetch_called = True
 
-        with patch.object(music_cog._audio_fetcher, 'fetch', side_effect=mock_fetch):
+        with patch.object(
+            music_cog, '_acquire_source',
+            new=AsyncMock(return_value=source),
+        ):
             with patch.object(music_cog, '_update_playing_presence', new_callable=AsyncMock):
                 with patch.object(music_cog, '_prefetch_next_track', side_effect=mock_prefetch):
                     await music_cog._play_current_track()
+                    await asyncio.sleep(0)
 
         # Assert: Prefetch task was created
         assert prefetch_called or music_cog._prefetch_task is not None
 
     @pytest.mark.asyncio
     async def test_clear_prefetch_cancels_task(self, music_cog):
-        """_clear_prefetch_v2 should cancel any running prefetch task."""
-        # Create a mock task that's not done
+        """_clear_prefetch should cancel any running prefetch task."""
         mock_task = MagicMock()
         mock_task.done.return_value = False
         mock_task.cancel = MagicMock()
 
         music_cog._prefetch_task = mock_task
-        music_cog._next_prepared = AudioFetchResult(success=True, url="https://test.com")
-        music_cog._next_prepared_track = create_ambient_playlist()[0]
+        music_cog._prefetched_track = create_ambient_playlist()[0]
+        music_cog._prefetched_source = PlayableSource(url="https://stale.com")
 
         # Act
-        music_cog._clear_prefetch_v2()
+        music_cog._clear_prefetch()
 
         # Assert
         mock_task.cancel.assert_called_once()
-        assert music_cog._next_prepared is None
-        assert music_cog._next_prepared_track is None
+        assert music_cog._prefetched_track is None
+        assert music_cog._prefetched_source is None
         assert music_cog._prefetch_task is None
+
+
+class TestDurationPolicyIntegration:
+    """Integration tests for user-visible duration policy behavior."""
+
+    @pytest.mark.asyncio
+    async def test_explicit_url_over_duration_limit_uses_rejection_easter_egg(self, music_cog, mock_ctx):
+        original = SearchResult(
+            video_id="toolong001",
+            title="Ten Hour Symphony",
+            artist="Long Artist",
+            duration_seconds=36001,
+            source='youtube',
+        )
+
+        with patch.object(
+            music_cog,
+            '_search_with_ytm',
+            new=AsyncMock(return_value=(original, [], [], None)),
+        ):
+            await music_cog._do_play(mock_ctx, 'https://www.youtube.com/watch?v=toolong001')
+
+        assert mock_ctx.send.await_count == 3
+        send_messages = [call.args[0] for call in mock_ctx.send.await_args_list]
+        assert 'Checking for best version' in send_messages[0]
+        assert 'tenor.com' in send_messages[1]
+        assert "can't play anything over" in send_messages[2]
+        mock_ctx.author.voice.channel.connect.assert_not_awaited()
+
+
+class TestResumeRewindBehavior:
+    """Regression tests for pause/resume rewind semantics."""
+
+    @pytest.mark.asyncio
+    async def test_do_resume_prefers_archive_rewind_over_seek(self, music_cog):
+        mock_player = MagicMock()
+        mock_player.is_paused = True
+        mock_player.position = 42.0
+        mock_player.rewind = MagicMock(return_value=True)
+        mock_player.seek = MagicMock()
+        mock_player.resume = MagicMock()
+
+        music_cog._player = mock_player
+        music_cog._playback.paused_at_position = 42.0
+
+        result = await music_cog._do_resume()
+
+        assert result is True
+        mock_player.rewind.assert_called_once_with(1.0)
+        mock_player.seek.assert_not_called()
+        mock_player.resume.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_do_resume_at_start_clamps_cleanly_to_zero(self, music_cog):
+        mock_player = MagicMock()
+        mock_player.is_paused = True
+        mock_player.position = 0.0
+        mock_player.rewind = MagicMock(return_value=True)
+        mock_player.seek = MagicMock()
+        mock_player.resume = MagicMock()
+
+        music_cog._player = mock_player
+        music_cog._playback.paused_at_position = 0.0
+
+        result = await music_cog._do_resume()
+
+        assert result is True
+        mock_player.rewind.assert_called_once_with(1.0)
+        mock_player.seek.assert_not_called()
+        mock_player.resume.assert_called_once()
+        assert music_cog._playback.paused_at_position is None
+
+    @pytest.mark.asyncio
+    async def test_do_resume_fails_if_archive_rewind_unavailable(self, music_cog):
+        mock_player = MagicMock()
+        mock_player.is_paused = True
+        mock_player.position = 12.5
+        mock_player.rewind = MagicMock(return_value=False)
+        mock_player.seek = MagicMock()
+        mock_player.resume = MagicMock()
+
+        music_cog._player = mock_player
+        music_cog._playback.paused_at_position = 12.5
+
+        result = await music_cog._do_resume()
+
+        assert result is False
+        mock_player.rewind.assert_called_once_with(1.0)
+        mock_player.seek.assert_not_called()
+        mock_player.resume.assert_not_called()

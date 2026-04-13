@@ -9,10 +9,13 @@ Tests mock VoiceClient and SeekableAudioSource to test state logic in isolation.
 """
 
 import asyncio
+import time
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from utils.musicutils.managed_player import ManagedPlayer, PlayerState
+from utils.musicutils.music_data import AudioErrorType, FFmpegBucket, FFmpegHealth
 
 
 class MockTrack:
@@ -56,10 +59,10 @@ def callback_tracker():
     """Track callback invocations."""
     class CallbackTracker:
         def __init__(self):
-            self.calls: list[tuple[Exception | None]] = []
+            self.calls = []
 
-        def __call__(self, error: Exception | None) -> None:
-            self.calls.append((error,))
+        def __call__(self, report) -> None:
+            self.calls.append(report)
 
         @property
         def called(self) -> bool:
@@ -72,7 +75,13 @@ def callback_tracker():
         @property
         def last_error(self) -> Exception | None:
             if self.calls:
-                return self.calls[-1][0]
+                return self.calls[-1].error
+            return None
+
+        @property
+        def last_report(self):
+            if self.calls:
+                return self.calls[-1]
             return None
 
     return CallbackTracker()
@@ -87,13 +96,18 @@ def mock_source():
     source.resume = MagicMock()
     source.seek = MagicMock()
     source.cleanup = MagicMock()
+    source.build_ffmpeg_health = MagicMock(return_value=FFmpegHealth())
     return source
 
 
 @pytest.fixture
 def player(mock_voice_client, callback_tracker):
     """Create a ManagedPlayer with mocked dependencies."""
-    return ManagedPlayer(mock_voice_client, callback_tracker)
+    loop = asyncio.new_event_loop()
+    with patch('utils.musicutils.managed_player.asyncio.get_running_loop', return_value=loop):
+        p = ManagedPlayer(mock_voice_client, callback_tracker)
+    yield p
+    loop.close()
 
 
 class TestPlayerStateInit:
@@ -172,6 +186,18 @@ class TestPlayerPlay:
             player.play(track, "http://audio.url")
 
         mock_source.cleanup.assert_called_once()
+
+    def test_play_applies_repeat_one_setting_to_new_source(self, player):
+        """New sources inherit the current repeat-one setting."""
+        track = MockTrack()
+        player.set_repeat_one(True)
+
+        with patch('utils.musicutils.managed_player.SeekableAudioSource') as MockSource:
+            created_source = MagicMock(position=0.0)
+            MockSource.return_value = created_source
+            player.play(track, "http://audio.url")
+
+        created_source.set_repeat_one.assert_called_once_with(True)
 
 
 class TestPlayerPause:
@@ -258,6 +284,26 @@ class TestPlayerSeek:
         assert result is False
 
 
+class TestPlayerRewind:
+    """Tests for archive-preserving rewind()."""
+
+    def test_rewind_with_source(self, player, mock_source):
+        """rewind() delegates to source without rebuilding it."""
+        mock_source.rewind = MagicMock(return_value=True)
+        player._source = mock_source
+
+        result = player.rewind(1.0)
+
+        assert result is True
+        mock_source.rewind.assert_called_once_with(1.0)
+
+    def test_rewind_without_source(self, player):
+        """rewind() returns False when no source is loaded."""
+        result = player.rewind(1.0)
+
+        assert result is False
+
+
 class TestPlayerStop:
     """Tests for stop() method."""
 
@@ -300,6 +346,17 @@ class TestPlayerStop:
         assert callback_tracker.called is False
 
 
+class TestPlayerRepeatOne:
+    """Tests for repeat-one configuration propagation."""
+
+    def test_set_repeat_one_updates_active_source(self, player, mock_source):
+        player._source = mock_source
+
+        player.set_repeat_one(True)
+
+        mock_source.set_repeat_one.assert_called_once_with(True)
+
+
 class TestGenerationFiltering:
     """Tests for generation-based callback filtering."""
 
@@ -320,6 +377,7 @@ class TestGenerationFiltering:
         player._play_started_at = 0  # Long time ago so elapsed check passes
         player._source = MagicMock()
         player._source.cleanup = MagicMock()
+        player._source.build_ffmpeg_health = MagicMock(return_value=FFmpegHealth())
 
         # Call _after_callback with matching generation
         player._after_callback(None, callback_generation=5)
@@ -327,10 +385,10 @@ class TestGenerationFiltering:
         # Callback should have been invoked
         # Note: Since _handle_track_end is async and scheduled on event loop,
         # we need to run the loop
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(asyncio.sleep(0.1))
+        player._loop.run_until_complete(asyncio.sleep(0.1))
 
         assert callback_tracker.called is True
+        assert callback_tracker.last_report.ffmpeg.bucket == FFmpegBucket.DONE
 
     def test_play_invalidates_pending_callbacks(self, player, mock_voice_client, callback_tracker):
         """play() increments generation before stopping, so pending callbacks are invalidated."""
@@ -391,3 +449,31 @@ class TestPlayerStateEnum:
         assert PlayerState.STOPPED.value == "stopped"
         assert PlayerState.PLAYING.value == "playing"
         assert PlayerState.PAUSED.value == "paused"
+
+
+class TestPlayerFailureReports:
+    """Tests for the typed playback report produced on failures."""
+
+    def test_retryable_ffmpeg_failure_reaches_callback(self, player, callback_tracker):
+        """ManagedPlayer forwards parsed retry actions to its callback."""
+        player._generation = 7
+        player._play_started_at = time.time()
+        player._current_track = MockTrack(duration=180)
+        player._source = MagicMock()
+        player._source.cleanup = MagicMock()
+        health = FFmpegHealth()
+        health.error_type = AudioErrorType.HTTP_403
+        health.bucket = FFmpegBucket.RETRY
+        health.summary = "The remote server rejected the current signed stream URL (HTTP 403)."
+        health.error_detail = "[error] [https @ 0x1] HTTP error 403 Forbidden"
+        health.stderr_lines = ["[error] [https @ 0x1] HTTP error 403 Forbidden"]
+        player._source.build_ffmpeg_health = MagicMock(
+            return_value=health
+        )
+
+        player._after_callback(Exception("ffmpeg died"), callback_generation=7)
+        player._loop.run_until_complete(asyncio.sleep(0.1))
+
+        assert callback_tracker.called is True
+        assert callback_tracker.last_report.ffmpeg.error_type == AudioErrorType.HTTP_403
+        assert callback_tracker.last_report.ffmpeg.bucket == FFmpegBucket.RETRY

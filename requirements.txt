@@ -1,5 +1,5 @@
 # Core library for interacting with the Discord API.
-discord.py
+discord.py>=2.7.0
 
 # Used for loading environment variables (e.g., bot token) from an info.env file.
 python-dotenv
@@ -9,6 +9,15 @@ aiosqlite
 
 # Asynchronous HTTP client, used by the Starboard cog.
 aiohttp
+
+# Web framework for the Schedule cog's availability web UI.
+fastapi
+
+# ASGI server to run FastAPI, used by the Schedule cog.
+uvicorn[standard]
+
+# Cryptographic signing for session cookies in the Schedule web UI.
+itsdangerous
 
 # For parsing natural language dates and times in the Reminders cog.
 dateparser
@@ -32,6 +41,10 @@ psutil
 # For YouTube audio extraction in the Music cog.
 yt-dlp
 
+# External JavaScript runtime for yt-dlp's YouTube signature/token generation.
+# Requires Node.js (>=22.6), Deno, or Bun on the server.
+yt-dlp-ejs
+
 # PO token plugin for yt-dlp to bypass YouTube 403 errors on datacenter IPs.
 # Requires Node.js (>=18) to be installed on the server for token generation.
 bgutil-ytdlp-pot-provider
@@ -39,11 +52,32 @@ bgutil-ytdlp-pot-provider
 # For reading and writing MP3 ID3 metadata (title, artist, cover art, etc.).
 mutagen
 
+# For YouTube Music search and metadata retrieval in the Music cog.
+ytmusicapi
+
+# CJK transliteration for cross-script music search matching.
+# Japanese -> Romaji (Hepburn romanization)
+pykakasi
+
+# Chinese -> Pinyin (standard Mandarin romanization)
+pypinyin
+
+# Korean -> Romanized (Revised Romanization of Korean, official ROK standard)
+korean-romanizer
+
 # For fetching synced lyrics from LRCLIB in the Music cog.
 syncedlyrics
 
 # Required for Discord voice support (encryption).
 PyNaCl
+
+# DAVE (Discord Audio Video Encryption) protocol support for end-to-end encrypted voice.
+davey
+
+# Asyncio-native D-Bus client for deterministic shutdown detection on Linux.
+# Used to listen for logind's PrepareForShutdown signal (system reboot/poweroff).
+# No-ops gracefully on Windows or systems without D-Bus.
+dbus-fast
 
 # Testing dependencies (tests are included but these libraries are not required for normal operation).
 pytest

@@ -26,6 +26,34 @@ except ImportError:
     _commands = None  # type: ignore[assignment]
     DISCORD_AVAILABLE = False
 
+# ==========================================================================
+# PLAYBACK CONSTRAINTS
+# ==========================================================================
+
+# Hard playback policy: individual tracks above 10 hours are rejected when a
+# user actually selects/adds them.
+MAX_ACCEPTABLE_TRACK_DURATION_SECONDS = 10 * 60 * 60
+
+# Paid residential playback policy: direct playback can still try longer
+# tracks, but the paid fallback refuses anything above 15 minutes.
+MAX_RESIDENTIAL_PLAYBACK_DURATION_SECONDS = 15 * 60
+
+
+def format_duration_hms(duration_seconds: int) -> str:
+    """Format a duration as H:MM:SS when possible.
+
+    Args:
+        duration_seconds: Duration in seconds.
+
+    Returns:
+        Duration string such as ``3:42`` or ``10:00:00``.
+    """
+    hours, remainder = divmod(max(duration_seconds, 0), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
 
 # ==========================================================================
 # VIDEO ID EXTRACTION (needed by Track.from_dict)
@@ -62,17 +90,60 @@ def _extract_video_id(url: str) -> Optional[str]:
 # ==========================================================================
 
 
-class FetchContext(Enum):
-    """Context for AudioFetcher.fetch() calls.
+class AudioErrorType(Enum):
+    """Specific error parsed from FFmpeg stderr.
 
-    Tells AudioFetcher how aggressive to be with retries:
-    - PREFETCH: Background preparation, conservative - stops at direct failure
-    - LIVE: Playing now, aggressive - full retry including residential
-    - RETRY: FFmpeg failed, need fresh URL or residential
+    These are diagnostic labels for logging and debugging.  The parser
+    uses them internally but the *cog* never switches on them — it only
+    reads the ``FFmpegBucket`` that the parser assigned.
     """
-    PREFETCH = "prefetch"
-    LIVE = "live"
+    NONE = "none"              # No error detected
+    HTTP_403 = "http_403"      # Auth failure - URL expired or blocked
+    HTTP_404 = "http_404"      # Resource not found on CDN
+    HTTP_410 = "http_410"      # Resource gone on CDN
+    HTTP_416 = "http_416"      # Bad range / seek state
+    HTTP_429 = "http_429"      # Rate limiting
+    HTTP_OTHER = "http_other"  # Other HTTP error (5xx, etc.)
+    CONNECTION = "connection"  # Network failure (reset, refused, timeout)
+    TLS = "tls"                # TLS/socket-layer failure
+    FORMAT = "format"          # Corrupt or incompatible stream
+    BROKEN_PIPE = "broken_pipe"  # Caller closed the output pipe
+    UNKNOWN = "unknown"        # EOF with no clear error in stderr
+
+
+class FFmpegBucket(Enum):
+    """Coarse action bucket assigned by the FFmpeg parser.
+
+    The parser collapses many specific stderr errors into one of these
+    buckets.  The cog reads the bucket and reacts accordingly — it never
+    needs to inspect the underlying ``AudioErrorType``.
+
+    DONE    — Playback finished normally (or was intentionally cancelled).
+    RETRY   — Get a fresh URL and try again.
+    REPLAY  — The URL is probably fine, replay it.
+              (Currently mapped to RETRY; future work will add same-URL replay.)
+    SKIP    — Something is wrong with this attempt, prompt user to skip.
+    REMOVE  — Track should be removed from the queue.
+              (Nothing currently maps here; exists so the cog is ready for it.)
+    """
+    DONE = "done"
     RETRY = "retry"
+    REPLAY = "replay"
+    SKIP = "skip"
+    REMOVE = "remove"
+
+
+class TrackIssueKind(Enum):
+    """Coarse user-facing track issue categories.
+
+    UI layers use this to choose generic, non-technical wording for failure
+    prompts.  Kept deliberately broad -- the FFmpeg parser and the source
+    acquisition mixin collapse many low-level errors into one of these.
+    """
+
+    UNAVAILABLE = "unavailable"
+    TRANSIENT = "transient"
+    INTERNAL = "internal"
 
 
 class LoopMode(Enum):
@@ -118,6 +189,51 @@ class LoopMode(Enum):
         }[self]
 
 
+@dataclass
+class FFmpegHealth:
+    """Reduced FFmpeg process state and recommended action bucket.
+
+    Populated by the FFmpegStderrParser as it reads stderr.  The ``bucket``
+    field is the only thing the cog needs to read; everything else is
+    diagnostic detail for logging.
+    """
+    bucket: 'FFmpegBucket' = field(default_factory=lambda: FFmpegBucket.DONE)
+    error_type: 'AudioErrorType' = field(default_factory=lambda: AudioErrorType.NONE)
+    error_detail: Optional[str] = None  # Raw stderr line that triggered classification
+    summary: Optional[str] = None       # App-facing summary of what FFmpeg reported
+    frames_read: int = 0                # Frames successfully read before error
+    stderr_lines: list[str] = field(default_factory=list)  # All captured stderr
+    reconnect_count: int = 0
+    process_returncode: Optional[int] = None
+    saw_final_stats: bool = False
+    saw_normal_exit: bool = False
+    saw_end_of_file: bool = False
+    saw_broken_pipe: bool = False
+    used_heuristic: bool = False
+
+    @property
+    def is_healthy(self) -> bool:
+        """True if playback completed normally."""
+        return self.bucket == FFmpegBucket.DONE
+
+    @property
+    def has_error(self) -> bool:
+        """True if a failure was detected."""
+        return not self.is_healthy
+
+
+@dataclass
+class PlaybackEndReport:
+    """Typed result from ManagedPlayer when a track ends.
+
+    The cog reads ``report.ffmpeg.bucket`` to decide what to do next.
+    """
+
+    error: Optional[Exception]
+    ffmpeg: FFmpegHealth
+    elapsed: float
+
+
 # ==========================================================================
 # TRACK & LYRICS DATA
 # ==========================================================================
@@ -138,6 +254,10 @@ class Track:
     # Display metadata (from YTM when available)
     album: Optional[str] = None  # Album name (YTM songs only)
     source: str = 'youtube'  # 'ytm_song', 'ytm_video', 'youtube'
+    is_explicit: Optional[bool] = None  # True if explicit, False if clean
+    version_label: str = "Video"  # "Official Audio", "Music Video", etc.
+    view_count: Optional[int] = None  # Raw view count for display
+    video_type: Optional[str] = None  # MUSIC_VIDEO_TYPE_ATV, _OMV, _UGC, _OFFICIAL_SOURCE
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for caching.
@@ -155,6 +275,10 @@ class Track:
             'video_id': self.video_id,
             'album': self.album,
             'source': self.source,
+            'is_explicit': self.is_explicit,
+            'version_label': self.version_label,
+            'view_count': self.view_count,
+            'video_type': self.video_type,
         }
 
     @classmethod
@@ -170,6 +294,10 @@ class Track:
             video_id=data.get('video_id') or _extract_video_id(data['url']),
             album=data.get('album'),
             source=data.get('source', 'youtube'),
+            is_explicit=data.get('is_explicit'),
+            version_label=data.get('version_label', 'Video'),
+            view_count=data.get('view_count'),
+            video_type=data.get('video_type'),
         )
 
 
@@ -211,21 +339,12 @@ class ActiveSession:
 class PlaybackState:
     """Mutable state for track playback within a session.
 
-    Groups variables that track what's currently playing, timing info,
-    and pause state. Reset when session ends.
+    Groups the session-local playback state that the cog still owns.
     """
-    current_audio_url: Optional[str] = None  # Cached audio URL for current track
-    current_audio_track_url: Optional[str] = None  # YouTube URL this audio URL is for
-    current_audio_headers: Optional[Dict[str, str]] = None  # HTTP headers for current URL
-    track_started_timestamp: float = 0.0  # When FFmpeg started (for failure detection)
     paused_at_position: Optional[float] = None  # Seek position when paused, None if not paused
 
     def clear(self) -> None:
         """Reset all playback state."""
-        self.current_audio_url = None
-        self.current_audio_track_url = None
-        self.current_audio_headers = None
-        self.track_started_timestamp = 0.0
         self.paused_at_position = None
 
 
@@ -292,8 +411,6 @@ class AudioUrlResult:
     """
     url: Optional[str] = None  # Streamable audio URL
     is_unavailable: bool = False  # True if video is permanently unavailable (remove from playlist)
-    thumbnail: Optional[str] = None  # Best thumbnail URL found
-    thumbnail_is_square: bool = False  # True if thumbnail is already square
     http_headers: Optional[Dict[str, str]] = None  # Headers needed for FFmpeg
     error: Optional[str] = None  # Error message if fetch failed
 

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from discord.ext import commands
 
-from cogs.math import Math, DiceToken, DiceLexer, DiceParser, safe_eval_math
+from cogs.calc import Math, DiceToken, DiceLexer, DiceParser, safe_eval_math
 from utils.bot_class import CoreBot
 from utils.database import DatabaseManager
 
@@ -298,11 +298,24 @@ class TestDiceLexer:
         assert tokens[0].raw == "3c"
 
     def test_single_coin(self):
-        """Test lexing single coin flip."""
-        lexer = DiceLexer("c")
+        """Test lexing single coin requires explicit count."""
+        lexer = DiceLexer("1c")
         tokens = lexer.tokens
         assert tokens[0].type == DiceToken.COIN
-        assert tokens[0].raw == "c"
+        assert tokens[0].raw == "1c"
+
+    def test_bare_c_not_coin(self):
+        """Test that bare 'c' is not lexed as a coin."""
+        lexer = DiceLexer("c")
+        tokens = lexer.tokens
+        # Should only have EOF — bare 'c' is ignored
+        assert tokens[0].type == DiceToken.EOF
+
+    def test_coin_not_extracted_from_word(self):
+        """Test that 'c' inside a word like 'dice' is not lexed as a coin."""
+        lexer = DiceLexer("dice")
+        coin_tokens = [t for t in lexer.tokens if t.type == DiceToken.COIN]
+        assert len(coin_tokens) == 0
 
     def test_number(self):
         """Test lexing plain numbers."""
@@ -647,7 +660,7 @@ class TestCoinFlip:
     @pytest.mark.asyncio
     async def test_single_coin_flip(self):
         """Test single coin flip returns 0 or 1."""
-        lexer = DiceLexer("c")
+        lexer = DiceLexer("1c")
         parser = DiceParser(lexer)
         result = await parser.parse()
         assert result in [0, 1]
@@ -932,3 +945,53 @@ class TestIntegration:
                 total = int(result['total'])
                 # 10 (d20) + 2 (both coins heads at sp50 with random=0.3)
                 assert total == 12
+
+
+# =============================================================================
+# REGRESSION TESTS
+# =============================================================================
+
+
+class TestRegressions:
+    """Regression tests for previously-reported parser bugs."""
+
+    @pytest.mark.asyncio
+    async def test_dice_with_2d20_no_sp_confusion(self, math_cog):
+        """'roll me a dice with 2d20' must NOT extract 'with 2' as SP.
+
+        Previously, the SP pattern matched 'with 2' from 'with 2d20',
+        stripping it and leaving 'd20' (1d20) plus a spurious coin from 'dice'.
+        """
+        with patch('random.randint', return_value=10):
+            result = await math_cog.evaluate_roll("roll me a dice with 2d20")
+            # Should see 2d20 → two d20 rolls, no coin
+            assert result['expression'] == '2d20'
+            assert int(result['total']) == 20  # 10 + 10
+
+    @pytest.mark.asyncio
+    async def test_sp_with_standalone_number(self, math_cog):
+        """'with 80' should be recognized as SP when number is standalone."""
+        with patch('random.random', return_value=0.3):
+            result = await math_cog.evaluate_roll("3c with 80")
+            assert '80% chance' in result['context']
+
+    @pytest.mark.asyncio
+    async def test_sp_with_percent_sign(self, math_cog):
+        """'at 75%' should be recognized as SP."""
+        with patch('random.random', return_value=0.3):
+            result = await math_cog.evaluate_roll("3c at 75%")
+            assert '75% chance' in result['context']
+
+    @pytest.mark.asyncio
+    async def test_sp_not_extracted_from_dice_notation(self, math_cog):
+        """'with 2d20' should not trigger SP extraction."""
+        with patch('random.randint', return_value=10):
+            result = await math_cog.evaluate_roll("2d20 with 2d20")
+            # SP should remain default (no '% chance' in context)
+            assert 'chance' not in result['context']
+
+    def test_coin_not_lexed_from_dice_word(self):
+        """The word 'dice' must not produce a COIN token."""
+        lexer = DiceLexer("roll me a dice with 2d20")
+        coin_tokens = [t for t in lexer.tokens if t.type == DiceToken.COIN]
+        assert len(coin_tokens) == 0

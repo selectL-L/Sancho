@@ -38,7 +38,9 @@ python build.py
 This script will:
 1.  Scan the `cogs/` directory to find all extension modules.
 2.  Configure PyInstaller to include these modules as "hidden imports".
-3.  Run PyInstaller to generate the executable.
+3.  Collect data files (dictionaries, locale data, JS solvers, SSL certs) from dependencies that ship non-Python assets (e.g., `pykakasi`, `pypinyin`, `certifi`, `yt_dlp`).
+4.  Collect submodules for packages that use dynamic imports or namespace packages (e.g., `yt_dlp_plugins`, `uvicorn`).
+5.  Run PyInstaller to generate the executable.
 
 ### Step 3: Post-Build Setup
 
@@ -55,4 +57,6 @@ Without these, the bot will crash on startup.
 We use a Python script instead of a static `.spec` file or command-line arguments because this bot uses a dynamic plugin system.
 
 -   **Dynamic Cogs**: The bot loads commands from the `cogs/` folder at runtime. PyInstaller cannot detect these automatically. `build.py` scans this folder and ensures every file is included in the build, so you don't have to manually update a config file every time you add a new feature.
+-   **Package Data Files**: Several dependencies ship non-Python files (database dictionaries, JSON data, JavaScript solvers, SSL certificates, locale files). PyInstaller's static analysis misses these. `build.py` declares which packages need `--collect-data` / `--collect-submodules` so the frozen executable can find them at runtime.
+-   **Namespace Packages**: `yt_dlp_plugins` is a namespace package — plugins like `bgutil-ytdlp-pot-provider` install extractors into it. PyInstaller cannot discover namespace packages without explicit `--collect-submodules`.
 -   **Automation**: It handles the complex arguments required for PyInstaller, ensuring a consistent build every time.

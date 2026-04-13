@@ -16,7 +16,7 @@ import queue
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from typing import Any, Dict, List, Literal, Optional
 
@@ -27,6 +27,9 @@ import config
 
 # Module-level listener reference for proper cleanup
 _queue_listener: Optional[QueueListener] = None
+
+# Module-level logger for this utility module
+_logger = logging.getLogger(__name__)
 
 
 def stop_queue_listener() -> None:
@@ -61,9 +64,17 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: bold_red + format_str + reset
     }
 
+    def __init__(self):
+        super().__init__()
+        self._formatters = {
+            level: logging.Formatter(fmt)
+            for level, fmt in self.FORMATS.items()
+        }
+
     def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
+        formatter = self._formatters.get(record.levelno)
+        if formatter is None:
+            formatter = self._formatters[logging.DEBUG]
         return formatter.format(record)
 
 
@@ -133,9 +144,10 @@ class ResourceTracker:
     an in-memory history for the current session. On shutdown, the history
     is appended to the log file.
 
-    For snapshot history, CPU usage is averaged over each interval period
-    (sampled every 30 seconds) to provide a representative view of resource
-    consumption, rather than a single point-in-time measurement.
+    For snapshot history, CPU and RAM usage are averaged over each interval
+    period (sampled every SAMPLE_INTERVAL seconds). Peak values are also
+    tracked to detect spikes - if the peak exceeds the average by more than
+    SPIKE_THRESHOLD_PERCENT, it's flagged in the snapshot.
 
     Attributes:
         interval_minutes: Minutes between automatic snapshots.
@@ -143,8 +155,17 @@ class ResourceTracker:
         start_time: Timestamp when tracking began.
     """
 
-    # How often to sample CPU for averaging (in seconds)
-    CPU_SAMPLE_INTERVAL = 30
+    # How often to sample CPU/RAM for averaging (in seconds)
+    SAMPLE_INTERVAL = 10
+
+    # Spike detection thresholds — ALL conditions must be met.
+    # A spike is only flagged when the peak is a significant relative increase
+    # AND the absolute values are high enough to actually matter.
+    SPIKE_THRESHOLD_PERCENT = 50           # Peak must exceed average by this % (relative)
+    SPIKE_MIN_CPU_PEAK = 20.0              # Peak CPU must be at least this % (absolute floor)
+    SPIKE_MIN_CPU_DEVIATION = 10.0         # Peak to average must differ by at least this many pp
+    SPIKE_MIN_RAM_PEAK_MB = 1500.0         # Peak RAM must be at least this many MB (music playback can reach ~800MB)
+    SPIKE_MIN_RAM_DEVIATION_MB = 500.0     # Peak to average RAM must differ by at least this many MB
 
     def __init__(self, interval_minutes: int = 15):
         """Initializes the ResourceTracker.
@@ -159,10 +180,17 @@ class ResourceTracker:
         self.interval_minutes = interval_minutes
         self._tracking_task: Optional[asyncio.Task] = None
         self._sampling_task: Optional[asyncio.Task] = None
-        self._cpu_samples: List[float] = []  # Accumulated CPU samples for averaging
-        self._cpu_samples_lock = asyncio.Lock()
+        # Accumulated samples for averaging
+        self._cpu_samples: List[float] = []
+        self._ram_samples: List[float] = []
+        self._ram_private_samples: List[float] = []
+        self._ram_swap_samples: List[float] = []
+        # Peak tracking for spike detection
+        self._cpu_peak: float = 0.0
+        self._ram_peak: float = 0.0
+        self._samples_lock = asyncio.Lock()
         self.start_time: float = time.time()
-        self._logger = logging.getLogger("logging")
+        self._logger = logging.getLogger(__name__)
 
     def _get_instantaneous_cpu(self) -> float:
         """Gets an instantaneous CPU reading (blocking, ~0.5s).
@@ -177,108 +205,193 @@ class ResourceTracker:
         # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
         return self.process.cpu_percent(interval=0.5) / self._cpu_count
 
-    def _get_non_blocking_cpu(self) -> float:
-        """Gets CPU usage since last call (non-blocking).
+    async def _get_memory_stats_async(self) -> Dict[str, float]:
+        """Gets current memory statistics (async-safe).
 
-        Returns the CPU percentage since the previous call to any cpu_percent method.
-        Used for sampling/averaging purposes.
-
-        Returns:
-            CPU usage percentage since last measurement (normalized to 0-100% scale).
-        """
-        # Normalize to 0-100% scale (Linux reports per-core summed, e.g., 400% on 4 cores)
-        return self.process.cpu_percent(interval=None) / self._cpu_count
-
-    def get_current_usage(self) -> Dict[str, float]:
-        """Returns current RAM usage and a non-blocking CPU sample.
-
-        Note: For accurate instantaneous CPU readings, use get_current_usage_async().
-        This method is intended for internal sampling where blocking is not acceptable.
+        Runs memory_full_info() in a thread pool since it reads /proc on Linux.
 
         Returns:
-            Dict containing 'cpu' (percentage since last call) and 'ram' (MB) keys.
+            Dict with 'ram' (RSS in MB), 'ram_private' (USS in MB),
+            and 'ram_swap' (swap in MB, Linux only).
         """
-        try:
-            memory_info = self.process.memory_info()
-            cpu_usage = self._get_non_blocking_cpu()
-            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
-            return {'cpu': cpu_usage, 'ram': ram_usage}
-        except Exception as e:
-            self._logger.error(f"Error getting current usage: {e}")
-            return {'cpu': 0.0, 'ram': 0.0}
+        memory_info = await asyncio.to_thread(self.process.memory_full_info)
+        return {
+            'ram': memory_info.rss / (1024 * 1024),
+            'ram_private': memory_info.uss / (1024 * 1024),
+            'ram_swap': getattr(memory_info, 'swap', 0) / (1024 * 1024),
+        }
 
     async def get_current_usage_async(self) -> Dict[str, float]:
         """Returns LIVE, accurate CPU and RAM usage (async-safe).
 
-        This method measures CPU usage over a 0.1 second interval in a thread pool
+        This method measures CPU usage over a 0.5 second interval in a thread pool
         to avoid blocking the event loop while providing accurate readings.
 
         Returns:
-            Dict containing 'cpu' (percentage) and 'ram' (MB) keys.
+            Dict containing 'cpu' (percentage), 'ram' (RSS in MB),
+            'ram_private' (USS in MB), and 'ram_swap' (swap in MB, Linux only).
         """
         try:
-            memory_info = self.process.memory_info()
-            # Run blocking CPU measurement in thread pool
-            cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
-            ram_usage = memory_info.rss / (1024 * 1024)  # Convert bytes to MB
-            return {'cpu': cpu_usage, 'ram': ram_usage}
+            # Run both in parallel since they're independent
+            cpu_task = asyncio.to_thread(self._get_instantaneous_cpu)
+            mem_task = self._get_memory_stats_async()
+            cpu_usage, mem_stats = await asyncio.gather(cpu_task, mem_task)
+
+            return {
+                'cpu': cpu_usage,
+                **mem_stats,
+            }
         except Exception as e:
             self._logger.error(f"Error getting current usage (async): {e}")
-            return {'cpu': 0.0, 'ram': 0.0}
+            return {'cpu': 0.0, 'ram': 0.0, 'ram_private': 0.0, 'ram_swap': 0.0}
 
-    async def _sample_cpu(self) -> None:
-        """Takes a single CPU sample and adds it to the accumulator."""
+    async def _sample_resources(self) -> None:
+        """Takes a single CPU and RAM sample and adds them to the accumulators."""
         try:
-            cpu = await asyncio.to_thread(self._get_instantaneous_cpu)
-            async with self._cpu_samples_lock:
+            cpu_task = asyncio.to_thread(self._get_instantaneous_cpu)
+            mem_task = self._get_memory_stats_async()
+            cpu, mem_stats = await asyncio.gather(cpu_task, mem_task)
+
+            async with self._samples_lock:
                 self._cpu_samples.append(cpu)
+                self._ram_samples.append(mem_stats['ram'])
+                self._ram_private_samples.append(mem_stats['ram_private'])
+                self._ram_swap_samples.append(mem_stats['ram_swap'])
+                # Track peaks for spike detection
+                self._cpu_peak = max(self._cpu_peak, cpu)
+                self._ram_peak = max(self._ram_peak, mem_stats['ram'])
         except Exception as e:
-            self._logger.debug(f"Error sampling CPU: {e}")
+            self._logger.debug(f"Error sampling resources: {e}")
 
-    async def _get_averaged_cpu(self) -> float:
-        """Returns the average of accumulated CPU samples and clears them.
+    async def _get_averaged_stats(self) -> tuple[float, Dict[str, float], float, float]:
+        """Returns averaged CPU and RAM stats from accumulated samples and clears them.
 
-        If no samples are available, takes an instantaneous reading.
+        If no samples are available, takes instantaneous readings.
 
         Returns:
-            Average CPU usage percentage.
+            Tuple of (cpu_average, memory_stats_dict, cpu_peak, ram_peak).
         """
-        async with self._cpu_samples_lock:
+        async with self._samples_lock:
             if self._cpu_samples:
-                avg = sum(self._cpu_samples) / len(self._cpu_samples)
+                cpu_avg = sum(self._cpu_samples) / len(self._cpu_samples)
+                ram_avg = sum(self._ram_samples) / len(self._ram_samples)
+                ram_private_avg = sum(self._ram_private_samples) / len(self._ram_private_samples)
+                ram_swap_avg = sum(self._ram_swap_samples) / len(self._ram_swap_samples)
+                cpu_peak = self._cpu_peak
+                ram_peak = self._ram_peak
+
                 self._cpu_samples.clear()
-                return avg
-        # Fallback to instantaneous if no samples
-        return await asyncio.to_thread(self._get_instantaneous_cpu)
+                self._ram_samples.clear()
+                self._ram_private_samples.clear()
+                self._ram_swap_samples.clear()
+                self._cpu_peak = 0.0
+                self._ram_peak = 0.0
+
+                return cpu_avg, {
+                    'ram': ram_avg,
+                    'ram_private': ram_private_avg,
+                    'ram_swap': ram_swap_avg,
+                }, cpu_peak, ram_peak
+
+        # Fallback to instantaneous if no samples (no peaks to report)
+        cpu = await asyncio.to_thread(self._get_instantaneous_cpu)
+        mem_stats = await self._get_memory_stats_async()
+        return cpu, mem_stats, cpu, mem_stats['ram']
 
     async def take_snapshot_async(self, label: Optional[str] = None) -> None:
         """Records a snapshot of current resource usage to history (async).
 
-        For regular snapshots, uses averaged CPU from accumulated samples.
+        For regular snapshots, uses averaged CPU/RAM from accumulated samples.
         For labeled snapshots (Startup/Shutdown), uses instantaneous readings.
+
+        Reports both RSS (resident in physical RAM) and USS (unique private memory).
+        RSS can drop when memory is paged out under pressure, while USS stays
+        constant - useful for detecting paging vs actual leaks.
 
         Args:
             label: Optional label for the snapshot (e.g., 'Startup', 'Shutdown').
         """
         try:
-            memory_info = self.process.memory_info()
-            ram_usage = memory_info.rss / (1024 * 1024)
-
             # For labeled snapshots (startup/shutdown), use instantaneous reading
-            # For regular interval snapshots, use averaged CPU
+            # For regular interval snapshots, use averaged values with peak tracking
+            cpu_peak: Optional[float] = None
+            ram_peak: Optional[float] = None
+
             if label:
                 cpu_usage = await asyncio.to_thread(self._get_instantaneous_cpu)
+                mem_stats = await self._get_memory_stats_async()
             else:
-                cpu_usage = await self._get_averaged_cpu()
+                cpu_usage, mem_stats, cpu_peak, ram_peak = await self._get_averaged_stats()
 
-            timestamp = datetime.utcnow()
+            ram_rss = mem_stats['ram']
+            ram_private = mem_stats['ram_private']
+            ram_swap = mem_stats['ram_swap']
+
+            # Detect spikes (peak significantly exceeds average AND absolute values are meaningful)
+            threshold = self.SPIKE_THRESHOLD_PERCENT / 100
+            cpu_deviation = (cpu_peak - cpu_usage) if cpu_peak is not None else 0.0
+            ram_deviation = (ram_peak - ram_rss) if ram_peak is not None else 0.0
+
+            cpu_spike = (
+                cpu_peak is not None
+                and cpu_usage > 0
+                and cpu_deviation / cpu_usage > threshold
+                and cpu_peak >= self.SPIKE_MIN_CPU_PEAK
+                and cpu_deviation >= self.SPIKE_MIN_CPU_DEVIATION
+            )
+            ram_spike = (
+                ram_peak is not None
+                and ram_rss > 0
+                and ram_deviation / ram_rss > threshold
+                and ram_peak >= self.SPIKE_MIN_RAM_PEAK_MB
+                and ram_deviation >= self.SPIKE_MIN_RAM_DEVIATION_MB
+            )
+
+            timestamp = datetime.now(timezone.utc)
             self.usage_history.append({
                 'timestamp': timestamp,
                 'cpu': cpu_usage,
-                'ram': ram_usage,
+                'ram': ram_rss,
+                'ram_private': ram_private,
+                'ram_swap': ram_swap,
+                'cpu_peak': cpu_peak,
+                'ram_peak': ram_peak,
+                'cpu_spike': cpu_spike,
+                'ram_spike': ram_spike,
                 'label': label
             })
-            self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_usage:.2f}MB, Label={label}")
+
+            # Trim history to prevent unbounded growth.
+            # Keep: first entry (Startup), peak RAM entry, and last 288 entries (~72h at 15m intervals).
+            max_history = 288
+            if len(self.usage_history) > max_history + 2:
+                first = self.usage_history[0]
+                peak_entry = max(self.usage_history, key=lambda e: e.get('ram_peak') or e['ram'])
+                tail = self.usage_history[-(max_history):]
+                # Deduplicate: first and peak may already be in the tail
+                kept = [first]
+                if peak_entry is not first and peak_entry not in tail:
+                    kept.append(peak_entry)
+                kept.extend(tail)
+                self.usage_history = kept
+
+            # Build log message with spike indicators
+            spike_info = []
+            if cpu_spike:
+                spike_info.append(f"CPU spike: {cpu_peak:.1f}%")
+            if ram_spike:
+                spike_info.append(f"RAM spike: {ram_peak:.1f}MB")
+            spike_str = f" ⚠️ {', '.join(spike_info)}" if spike_info else ""
+
+            # Platform-aware logging:
+            # - Windows: Show private bytes (useful for paging detection)
+            # - Linux: Show swap if any (RSS vs USS gap is just shared libs)
+            if sys.platform == 'win32':
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (private: {ram_private:.2f}MB), Label={label}{spike_str}")
+            elif ram_swap > 0:
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB (paged: {ram_swap:.2f}MB), Label={label}{spike_str}")
+            else:
+                self._logger.debug(f"Resource snapshot: CPU={cpu_usage:.1f}%, RAM={ram_rss:.2f}MB, Label={label}{spike_str}")
         except Exception as e:
             self._logger.error(f"Error recording usage snapshot: {e}")
 
@@ -291,11 +404,11 @@ class ResourceTracker:
         return self.usage_history.copy()
 
     async def _sampling_loop(self) -> None:
-        """Background task that samples CPU at regular intervals for averaging."""
+        """Background task that samples CPU and RAM at regular intervals for averaging."""
         try:
             while True:
-                await self._sample_cpu()
-                await asyncio.sleep(self.CPU_SAMPLE_INTERVAL)
+                await self._sample_resources()
+                await asyncio.sleep(self.SAMPLE_INTERVAL)
         except asyncio.CancelledError:
             pass
 
@@ -321,7 +434,7 @@ class ResourceTracker:
         await self.take_snapshot_async(label="Startup")
         self._sampling_task = asyncio.create_task(self._sampling_loop())
         self._tracking_task = asyncio.create_task(self._tracking_loop())
-        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} min, sampling: {self.CPU_SAMPLE_INTERVAL}s)")
+        self._logger.info(f"ResourceTracker started (interval: {self.interval_minutes} min, sampling: {self.SAMPLE_INTERVAL}s)")
 
     async def stop(self) -> None:
         """Stops tracking and takes a final 'Shutdown' snapshot.
@@ -359,9 +472,19 @@ class ResourceTracker:
         startup = self.usage_history[0] if self.usage_history else None
         shutdown = self.usage_history[-1] if len(self.usage_history) > 1 else None
 
-        # Calculate peak values across all snapshots
-        peak_cpu = max(e['cpu'] for e in self.usage_history)
-        peak_ram = max(e['ram'] for e in self.usage_history)
+        # Calculate peak values across all snapshots (use per-interval peaks if available)
+        peak_cpu = max(
+            e.get('cpu_peak') or e['cpu']
+            for e in self.usage_history
+        )
+        peak_ram = max(
+            e.get('ram_peak') or e['ram']
+            for e in self.usage_history
+        )
+
+        # Count spikes
+        cpu_spikes = sum(1 for e in self.usage_history if e.get('cpu_spike'))
+        ram_spikes = sum(1 for e in self.usage_history if e.get('ram_spike'))
 
         # Build compact summary
         parts = [f"Snapshots: {len(self.usage_history)}"]
@@ -370,18 +493,33 @@ class ResourceTracker:
         if shutdown and shutdown != startup:
             parts.append(f"End: {shutdown['cpu']:.1f}% CPU, {shutdown['ram']:.1f}MB RAM")
         parts.append(f"Peak: {peak_cpu:.1f}% CPU, {peak_ram:.1f}MB RAM")
+        if cpu_spikes or ram_spikes:
+            parts.append(f"Spikes: {cpu_spikes} CPU, {ram_spikes} RAM")
 
         # Build detailed snapshot table with fold markers
         snapshot_lines = [
             "",
             "#region ─── ResourceTracker Snapshots ───────────────────",
-            f"  {'Timestamp':<19} | {'CPU %':>6} | {'RAM MB':>8} | Label",
-            "  " + "-" * 55
+            f"  {'Timestamp':<19} | {'CPU %':>6} | {'Peak':>6} | {'RAM MB':>8} | {'Peak':>8} | Flags",
+            "  " + "-" * 75
         ]
         for entry in self.usage_history:
             ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            label = entry.get('label') or ""
-            snapshot_lines.append(f"  {ts:<19} | {entry['cpu']:>6.1f} | {entry['ram']:>8.1f} | {label}")
+            cpu_peak_str = f"{entry['cpu_peak']:.1f}" if entry.get('cpu_peak') is not None else "-"
+            ram_peak_str = f"{entry['ram_peak']:.1f}" if entry.get('ram_peak') is not None else "-"
+
+            flags = []
+            if entry.get('label'):
+                flags.append(entry['label'])
+            if entry.get('cpu_spike'):
+                flags.append("⚠CPU")
+            if entry.get('ram_spike'):
+                flags.append("⚠RAM")
+            flags_str = " ".join(flags)
+
+            snapshot_lines.append(
+                f"  {ts:<19} | {entry['cpu']:>6.1f} | {cpu_peak_str:>6} | {entry['ram']:>8.1f} | {ram_peak_str:>8} | {flags_str}"
+            )
         snapshot_lines.append("#endregion ResourceTracker Snapshots")
         snapshot_lines.append("")  # Trailing blank line for consistency
 
@@ -396,13 +534,26 @@ class ResourceTracker:
         if not self.usage_history:
             return "No historical data recorded."
 
-        lines = [f"{'Timestamp':<25} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'Label':<15}"]
-        lines.append("-" * 70)
+        lines = [f"{'Timestamp':<25} | {'CPU (%)':>8} | {'CPU Peak':>9} | {'RAM (MB)':>9} | {'RAM Peak':>9} | Flags"]
+        lines.append("-" * 95)
 
         for entry in self.usage_history:
             ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            label = entry.get('label') or ""
-            lines.append(f"{ts:<25} | {entry['cpu']:<10.1f} | {entry['ram']:<10.2f} | {label:<15}")
+            cpu_peak_str = f"{entry['cpu_peak']:.1f}" if entry.get('cpu_peak') is not None else "-"
+            ram_peak_str = f"{entry['ram_peak']:.1f}" if entry.get('ram_peak') is not None else "-"
+
+            flags = []
+            if entry.get('label'):
+                flags.append(entry['label'])
+            if entry.get('cpu_spike'):
+                flags.append("⚠CPU")
+            if entry.get('ram_spike'):
+                flags.append("⚠RAM")
+            flags_str = " ".join(flags)
+
+            lines.append(
+                f"{ts:<25} | {entry['cpu']:>8.1f} | {cpu_peak_str:>9} | {entry['ram']:>9.2f} | {ram_peak_str:>9} | {flags_str}"
+            )
 
         return "\n".join(lines)
 
@@ -434,10 +585,10 @@ def cleanup_old_logs(logs_dir: str, retention_count: int) -> None:
         while len(completed_logs) > retention_count:
             file_to_remove = completed_logs.pop(0)
             os.remove(os.path.join(logs_dir, file_to_remove))
-            logging.info(f"Removed old log file: {file_to_remove}")
+            _logger.info(f"Removed old log file: {file_to_remove}")
 
     except Exception as e:
-        logging.error(f"Error cleaning up old logs: {e}")
+        _logger.error(f"Error cleaning up old logs: {e}")
 
 
 def _close_file_handlers() -> None:
@@ -478,7 +629,7 @@ def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
         The new log file path, or None if renaming failed.
     """
     if not os.path.exists(log_path):
-        logging.warning(f"Log file not found for finalization: {log_path}")
+        _logger.warning(f"Log file not found for finalization: {log_path}")
         return None
 
     # Close file handlers to release the file lock before renaming
@@ -495,11 +646,11 @@ def finalize_log(log_path: str, runtime_seconds: float) -> Optional[str]:
         new_path = f"{base}_runtime-{runtime_str}{ext}"
 
         os.rename(log_path, new_path)
-        logging.info(f"Log file finalized: {os.path.basename(new_path)}")
+        _logger.info(f"Log file finalized: {os.path.basename(new_path)}")
         return new_path
 
     except Exception as e:
-        logging.error(f"Error finalizing log file: {e}")
+        _logger.error(f"Error finalizing log file: {e}")
         return None
 
 
@@ -573,7 +724,7 @@ def setup_logging(
             cleanup_old_logs(logs_dir, retention_count)
 
             # Create timestamped log filename
-            timestamp_str = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
             log_filename = f"{bot_name}_{timestamp_str}.log"
             log_file_path = os.path.join(logs_dir, log_filename)
 
@@ -592,7 +743,7 @@ def setup_logging(
         # - QueueHandler puts records into a queue (fast, non-blocking)
         # - QueueListener runs in a background thread, consuming records in order
         # This preserves log ordering while not blocking the asyncio event loop.
-        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)  # Unbounded queue
+        log_queue: queue.Queue[logging.LogRecord] = queue.Queue(10_000)
         queue_handler = QueueHandler(log_queue)
         root_logger.addHandler(queue_handler)
 
@@ -604,10 +755,16 @@ def setup_logging(
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('websockets').setLevel(logging.WARNING)
     logging.getLogger('aiosqlite').setLevel(logging.WARNING)
+    # Uvicorn: errors/warnings always visible; access logs only in dev mode.
+    # Requires log_config=None in uvicorn.Config to prevent uvicorn from
+    # creating its own handlers (which would bypass the file handler pipeline).
+    logging.getLogger('uvicorn').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
+    logging.getLogger('uvicorn.access').setLevel(logging.INFO if config.DEV_MODE else logging.WARNING)
 
     # Filter out harmless asyncio noise
     logging.getLogger('asyncio').addFilter(NoisyAsyncioFilter())
 
-    root_logger.info("Logging configured with console and rotating file handlers.")
+    root_logger.info(f"Logging configured: level={level}, file={log_file_path or 'console only'}")
 
     return log_file_path

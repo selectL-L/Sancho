@@ -48,7 +48,7 @@ def fun_cog(mock_bot):
     """Create a Fun cog instance with mocked bot."""
     with patch.object(Fun, '_load_bod_quotes'):
         cog = Fun(mock_bot)
-        cog.bod_quote_triggers = {}
+        cog._cog_is_ready = True
         cog.bod_quote_display = []
         return cog
 
@@ -94,7 +94,6 @@ class TestFunCommandDataclass:
         assert cmd.content is None
         assert cmd.file is None
         assert cmd.attr is None
-        assert cmd.image_cog is None
         assert cmd.random is True
         assert cmd.require_query is False
         assert cmd.query_error == "You need to provide something!"  # Has default

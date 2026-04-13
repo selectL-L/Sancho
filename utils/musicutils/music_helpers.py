@@ -1,10 +1,9 @@
-"""yt-dlp wrappers, thumbnail processing, FFmpeg utilities, and MP3 downloads.
+"""yt-dlp wrappers, thumbnail processing, FFmpeg utilities, and M4A downloads.
 
 This module contains all the core music functionality that doesn't involve
 state management or authentication. For auth-aware operations, see music_auth.
 """
 
-from __future__ import annotations
 from .music_data import AudioUrlResult, DownloadResult, Track
 
 import asyncio
@@ -26,14 +25,10 @@ except ImportError:
     YTDLP_AVAILABLE = False
 
 try:
-    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, TRCK, TYER, TCON, COMM  # type: ignore[attr-defined]
-    from mutagen.mp3 import MP3
-    from mutagen._util import MutagenError  # type: ignore[attr-defined]
+    from mutagen.mp4 import MP4, MP4Cover  # type: ignore[attr-defined]
     MUTAGEN_AVAILABLE = True
 except ImportError:
-    APIC = ID3 = TALB = TIT2 = TPE1 = TRCK = TYER = TCON = COMM = None  # type: ignore[misc, assignment]
-    MP3 = None  # type: ignore[misc, assignment]
-    MutagenError = Exception  # type: ignore[misc, assignment]
+    MP4 = MP4Cover = None  # type: ignore[assignment,misc]
     MUTAGEN_AVAILABLE = False
 
 try:
@@ -130,6 +125,15 @@ def get_ffmpeg_path() -> str:
     return _ffmpeg_path
 
 
+def get_ffmpeg_stderr_loglevel() -> str:
+    """Return the FFmpeg stderr loglevel for the current runtime mode."""
+    import config
+
+    if config.DEV_MODE:
+        return '+repeat+level+trace'
+    return '+repeat+level+warning'
+
+
 # ==========================================================================
 # RESIDENTIAL PROXY
 # ==========================================================================
@@ -157,6 +161,37 @@ def get_residential_proxy_url() -> Optional[str]:
 
 
 # ==========================================================================
+# YT-DLP LOGGER ADAPTER
+# ==========================================================================
+
+
+class _YtdlpLoggerAdapter:
+    """Routes yt-dlp warnings and errors through our logging system.
+
+    yt-dlp calls debug(), warning(), and error() on this object.
+    With quiet=True, only warnings and errors flow through — these are
+    the only actionable signals (403s, extraction failures, plugin errors).
+    The POT HTTP provider is opaque and produces no log output on success,
+    so verbose/debug output is pure noise.
+    """
+
+    def __init__(self) -> None:
+        self._logger = logging.getLogger('yt-dlp')
+
+    def debug(self, msg: str) -> None:
+        self._logger.debug(msg)
+
+    def warning(self, msg: str) -> None:
+        self._logger.warning(msg)
+
+    def error(self, msg: str) -> None:
+        self._logger.error(msg)
+
+
+_ytdlp_logger = _YtdlpLoggerAdapter()
+
+
+# ==========================================================================
 # YT-DLP BASE OPTIONS
 # ==========================================================================
 
@@ -172,7 +207,8 @@ YTDLP_OPTIONS = {
     'ignoreerrors': True,  # Skip unavailable videos
     'logtostderr': False,
     'quiet': True,
-    'no_warnings': True,
+    'no_warnings': False,
+    'logger': _ytdlp_logger,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
@@ -287,48 +323,38 @@ def extract_video_id(url: str) -> Optional[str]:
 # ==========================================================================
 
 
-def extract_mp3_thumbnail(mp3_path: str) -> Optional[bytes]:
-    """Extracts embedded cover art from an MP3 file.
+def extract_m4a_thumbnail(m4a_path: str) -> Optional[bytes]:
+    """Extracts embedded cover art from an M4A file.
 
-    Reads the APIC (Attached Picture) frame from the MP3's ID3 tags.
-    This is used to retrieve thumbnails from cached MP3 files without
+    Reads the 'covr' atom from the MP4 container's metadata.
+    This is used to retrieve thumbnails from cached M4A files without
     hitting YouTube.
 
     Args:
-        mp3_path: Path to the MP3 file.
+        m4a_path: Path to the M4A file.
 
     Returns:
         Image bytes if found, None otherwise.
     """
-    if not MUTAGEN_AVAILABLE or not os.path.exists(mp3_path):
+    if not MUTAGEN_AVAILABLE or MP4 is None or not os.path.exists(m4a_path):
         return None
 
     try:
-        audio = MP3(mp3_path, ID3=ID3)  # type: ignore[misc]
-        if audio.tags is None:
-            logger.debug(f"[Thumbnail] No ID3 tags in {os.path.basename(mp3_path)}")
-            return None
+        audio = MP4(m4a_path)
+        covers = audio.tags.get('covr')  # type: ignore[union-attr]
+        if covers:
+            cover = covers[0]
+            logger.debug(f"[Thumbnail] Extracted {len(cover)} bytes from M4A")
+            return bytes(cover)
 
-        # Look for APIC frames (cover art)
-        for key in audio.tags.keys():
-            if key.startswith('APIC'):
-                apic = audio.tags[key]
-                if apic.data:
-                    logger.debug(f"[Thumbnail] Extracted {len(apic.data)} bytes from MP3 ({apic.mime})")
-                    return apic.data
-
-        logger.debug(f"[Thumbnail] No APIC frame in {os.path.basename(mp3_path)}")
+        logger.debug(f"[Thumbnail] No covr atom in {os.path.basename(m4a_path)}")
     except Exception as e:
-        logger.debug(f"[Thumbnail] Failed to extract from MP3: {e}")
+        logger.debug(f"[Thumbnail] Failed to extract from M4A: {e}")
 
     return None
 
 
-# Thumbnail processing lives in search.py
-from .search import (  # noqa: E402
-    extract_best_thumbnail_from_info,
-    fetch_thumbnail_bytes,
-)
+from .search import MUSIC_VIDEO_TYPE_ATV  # noqa: E402
 
 
 # ==========================================================================
@@ -338,21 +364,20 @@ from .search import (  # noqa: E402
 
 async def get_audio_url(
     track: 'Track',
-    logger: Any,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> AudioUrlResult:
     """Gets the actual streamable audio URL for a track.
 
-    NOTE: This is a low-level function. For production use with retry logic
-    and auth handling, use AudioFetcher from music_auth module instead.
+    NOTE: This is a low-level function. Production playback should go through
+    SourceAcquisitionMixin so source resolution, retries, and spending policy
+    stay centralized in one place.
 
     Args:
         track: The track to get the audio URL for.
-        logger: Logger instance for debug/error messages.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:
-        AudioUrlResult with url, availability status, thumbnail info, and headers.
+        AudioUrlResult with url, availability status, and headers.
     """
     if not yt_dlp:
         return AudioUrlResult(error="yt-dlp not available")
@@ -365,16 +390,13 @@ async def get_audio_url(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(track.url, download=False)  # type: ignore
+                return ydl.extract_info(track.url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
         if not info:
             logger.warning(f"No info returned for {track.title}")
             return AudioUrlResult(is_unavailable=True, error="No info returned")
-
-        # Extract best thumbnail - prefer square (for album art)
-        thumbnail_url, is_square = await extract_best_thumbnail_from_info(info)
 
         # Extract HTTP headers from info (needed for FFmpeg to fetch the URL)
         # yt-dlp stores these at the top level, formats may override
@@ -393,10 +415,9 @@ async def get_audio_url(
             best = max(audio_only, key=lambda f: f.get('abr') or f.get('tbr') or 0)
             # Format may have its own headers that override
             fmt_headers = best.get('http_headers', http_headers)
+            logger.info(f"[Audio] Got audio-only URL for: {track.title}")
             return AudioUrlResult(
                 url=best.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=fmt_headers or None
             )
 
@@ -413,8 +434,6 @@ async def get_audio_url(
             fmt_headers = best.get('http_headers', http_headers)
             return AudioUrlResult(
                 url=best.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=fmt_headers or None
             )
 
@@ -423,16 +442,12 @@ async def get_audio_url(
             logger.info(f"[Audio] Using direct URL fallback for {track.title}")
             return AudioUrlResult(
                 url=info.get('url'),
-                thumbnail=thumbnail_url,
-                thumbnail_is_square=is_square,
                 http_headers=http_headers or None
             )
 
         # No usable format found
         logger.warning(f"No playable format found for {track.title}")
         return AudioUrlResult(
-            thumbnail=thumbnail_url,
-            thumbnail_is_square=is_square,
             error="No playable format found"
         )
 
@@ -445,92 +460,6 @@ async def get_audio_url(
             logger.error(f"Error getting audio URL for {track.title}: {e}")
 
         return AudioUrlResult(is_unavailable=unavailable, error=str(e))
-
-
-async def search_youtube(
-    query: str,
-    max_results: int,
-    logger: Any,
-    ydl_opts: Optional[Dict[str, Any]] = None
-) -> List['Track']:
-    """Searches YouTube for tracks matching the query.
-
-    Args:
-        query: The search query string.
-        max_results: Maximum number of results to return.
-        logger: Logger instance for debug messages.
-        ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
-
-    Returns:
-        A list of Track objects representing search results.
-    """
-    if not yt_dlp:
-        logger.debug("[Search] yt-dlp not available")
-        return []
-
-    logger.debug(f"[Search] Starting search for: '{query}' (max_results={max_results})")
-
-    try:
-        if ydl_opts is None:
-            ydl_opts = {**YTDLP_OPTIONS}
-
-        ydl_opts = {
-            **ydl_opts,
-            'extract_flat': 'in_playlist',  # Only flatten playlist entries, not search
-            'noplaylist': True,  # We want individual videos from search
-        }
-
-        # Prefix with ytsearch to explicitly trigger YouTube search
-        search_query = f"ytsearch{max_results}:{query}"
-        logger.debug(f"[Search] Full search query: '{search_query}'")
-
-        def search() -> Dict[str, Any]:
-            with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(search_query, download=False)  # type: ignore
-
-        info = await asyncio.to_thread(search)
-
-        if not info:
-            logger.debug("[Search] yt-dlp returned None/empty info")
-            return []
-
-        logger.debug(f"[Search] yt-dlp returned info with keys: {list(info.keys())}")
-        logger.debug(f"[Search] extractor: {info.get('extractor', 'N/A')}, _type: {info.get('_type', 'N/A')}")
-
-        tracks: List[Track] = []
-        entries = info.get('entries', [])
-
-        # If no entries but we have direct video info, treat as single result
-        if not entries and info.get('id'):
-            logger.debug("[Search] No entries but found direct video, using as single result")
-            entries = [info]
-
-        logger.debug(f"[Search] Found {len(entries) if entries else 0} entries")
-
-        for i, entry in enumerate(entries):
-            if not entry:
-                logger.debug(f"[Search] Entry {i} is None/empty, skipping")
-                continue
-
-            logger.debug(f"[Search] Entry {i}: id={entry.get('id')}, title={entry.get('title')}, duration={entry.get('duration')}")
-
-            track = Track(
-                title=entry.get('title', 'Unknown Title'),
-                artist=entry.get('uploader', entry.get('channel', 'Unknown Artist')),
-                url=entry.get('webpage_url') or entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id', '')}",
-                duration=int(entry.get('duration', 180) or 180),
-                thumbnail=entry.get('thumbnail'),
-                user_added=True,  # Search results are always user-added
-                video_id=entry.get('id')  # Extract video ID for residential proxy fallback
-            )
-            tracks.append(track)
-
-        logger.info(f"[Search] Returning {len(tracks)} tracks for '{query}'")
-        return tracks
-
-    except Exception as e:
-        logger.error(f"Error searching YouTube: {e}", exc_info=True)
-        return []
 
 
 def detect_mix_in_url(url: str) -> tuple[bool, Optional[str], Optional[str]]:
@@ -583,7 +512,6 @@ def detect_mix_in_url(url: str) -> tuple[bool, Optional[str], Optional[str]]:
 
 async def fetch_url_info(
     url: str,
-    logger: Any,
     force_playlist: bool = False,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> tuple[List['Track'], Optional[str], Optional[str]]:
@@ -597,7 +525,6 @@ async def fetch_url_info(
 
     Args:
         url: The YouTube URL to fetch.
-        logger: Logger instance for error messages.
         force_playlist: If True, extract the playlist even if URL has a video ID.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
@@ -671,12 +598,12 @@ async def fetch_url_info(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=False)  # type: ignore
+                return ydl.extract_info(url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
         if not info:
-            return [], "Could not fetch video information. The URL may be invalid or the video unavailable.", None
+            return [], "Couldn't find anything from that URL!\nIt might be broken, private, or region-locked.", None
 
         tracks: List[Track] = []
         was_truncated = False
@@ -685,12 +612,25 @@ async def fetch_url_info(
         if info.get('_type') == 'playlist' or 'entries' in info:
             entries = info.get('entries', [])
 
-            # Check if playlist was truncated
+            # Check if playlist was truncated (before filtering)
             if playlist_limit and len(entries) >= playlist_limit:
                 was_truncated = True
 
+            # Titles yt-dlp uses for inaccessible videos
+            _DEAD_TITLES = {'[Deleted video]', '[Private video]', '[Unavailable video]'}
+
+            skipped = 0
             for entry in entries:
                 if not entry:  # Skip unavailable videos
+                    skipped += 1
+                    continue
+
+                title = entry.get('title', 'Unknown Title')
+
+                # Skip deleted/private videos — they have no usable metadata
+                # and can't be played, but yt-dlp still includes them in flat extraction
+                if title in _DEAD_TITLES:
+                    skipped += 1
                     continue
 
                 # Get video ID from entry or extract from URL
@@ -700,7 +640,7 @@ async def fetch_url_info(
                     video_id = extract_video_id(video_url)
 
                 track = Track(
-                    title=entry.get('title', 'Unknown Title'),
+                    title=title,
                     artist=entry.get('uploader', entry.get('channel', 'Unknown Artist')),
                     url=video_url,
                     duration=int(entry.get('duration', 180) or 180),
@@ -710,13 +650,21 @@ async def fetch_url_info(
                 )
                 tracks.append(track)
 
+            if skipped:
+                logger.info(f"[URL] Skipped {skipped} unavailable entries from playlist")
+
             if not tracks:
                 return [], "The playlist is empty or all videos are unavailable.", None
 
             logger.info(f"[URL] Fetched playlist with {len(tracks)} tracks")
 
-            # Return warning if playlist was truncated
+            # Don't report truncation if we only "lost" dead entries
             warning = None
+            if was_truncated and skipped and playlist_limit:
+                # yt-dlp counted dead entries against our limit, so we got fewer
+                # playable tracks than intended — don't blame the limit
+                was_truncated = len(tracks) >= playlist_limit
+
             if was_truncated:
                 if is_mix_playlist:
                     warning = (
@@ -757,7 +705,6 @@ async def fetch_url_info(
 
 async def fetch_playlist_metadata(
     playlist_url: str,
-    logger: Any,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> List['Track']:
     """Fetches playlist metadata from YouTube using yt-dlp (flat extraction).
@@ -767,7 +714,6 @@ async def fetch_playlist_metadata(
 
     Args:
         playlist_url: The YouTube playlist URL to fetch.
-        logger: Logger instance for info/error messages.
         ydl_opts: Optional yt-dlp options dict. If None, uses YTDLP_OPTIONS.
 
     Returns:
@@ -784,7 +730,7 @@ async def fetch_playlist_metadata(
 
         def extract() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(playlist_url, download=False)  # type: ignore
+                return ydl.extract_info(playlist_url, download=False)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(extract)
 
@@ -795,8 +741,15 @@ async def fetch_playlist_metadata(
         tracks: List[Track] = []
         entries = info.get('entries', [])
 
+        # Titles yt-dlp uses for inaccessible videos
+        _DEAD_TITLES = {'[Deleted video]', '[Private video]', '[Unavailable video]'}
+
         for entry in entries:
             if not entry:  # Skip unavailable videos
+                continue
+
+            title = entry.get('title', 'Unknown Title')
+            if title in _DEAD_TITLES:
                 continue
 
             # Get video ID from entry or extract from URL
@@ -824,7 +777,104 @@ async def fetch_playlist_metadata(
 
 
 # ==========================================================================
-# MP3 DOWNLOAD WITH METADATA
+# AMBIENT FILENAME GENERATION
+# ==========================================================================
+
+# Maximum filename length in bytes (Linux ext4 limit)
+_MAX_FILENAME_BYTES = 255
+
+# Characters unsafe for filenames on Windows and Linux
+_UNSAFE_FILENAME_CHARS = frozenset('/\\:*?"<>|')
+
+
+def generate_ambient_filename(
+    title: str,
+    video_id: str,
+    video_type: str,
+    artist: Optional[str] = None,
+) -> tuple[str, bool, Optional[str]]:
+    """Generate a human-readable M4A filename for an ambient track.
+
+    Produces filenames in the form:
+        ATV:       "Artist - Title [video_id].m4a"
+        UGC/OMV:   "Title [video_id].m4a"
+
+    The video ID is always present in square brackets for collision immunity
+    and manual traceability. Filenames are sanitized for both Linux and
+    Windows filesystem safety.
+
+    Args:
+        title: Track title.
+        video_id: Full 11-char YouTube video ID.
+        video_type: One of MUSIC_VIDEO_TYPE_ATV, _OMV, _UGC, _OFFICIAL_SOURCE.
+        artist: Artist name (included in filename only for ATV video types).
+
+    Returns:
+        Tuple of (filename, was_modified, original_unsanitized_name_portion).
+        original_unsanitized_name_portion is the "Artist - Title" or "Title"
+        string before sanitization, or None if no modification was needed.
+    """
+    # Build base name depending on video type
+    if video_type == MUSIC_VIDEO_TYPE_ATV and artist:
+        original_base = f"{artist} - {title}"
+    else:
+        original_base = title
+
+    # Sanitize: strip unsafe characters (not replace)
+    sanitized_base = ''.join(c for c in original_base if c not in _UNSAFE_FILENAME_CHARS)
+    # Remove control characters
+    sanitized_base = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', sanitized_base)
+    # Strip leading/trailing whitespace and dots
+    sanitized_base = sanitized_base.strip(' .')
+
+    if not sanitized_base:
+        sanitized_base = 'untitled'
+
+    # Build full filename
+    suffix = f" [{video_id}].m4a"  # " [xxxxxxxxxxx].m4a" = 18 bytes for ASCII ID
+    filename = f"{sanitized_base}{suffix}"
+
+    # Check byte length and truncate title portion if needed
+    truncated = False
+    while len(filename.encode('utf-8')) > _MAX_FILENAME_BYTES:
+        truncated = True
+        # For ATVs, only truncate the title part, keep artist intact
+        if video_type == MUSIC_VIDEO_TYPE_ATV and artist:
+            sanitized_artist = ''.join(c for c in artist if c not in _UNSAFE_FILENAME_CHARS).strip(' .')
+            artist_prefix = f"{sanitized_artist} - "
+            # Calculate how many bytes are available for the title
+            prefix_bytes = len(artist_prefix.encode('utf-8'))
+            suffix_bytes = len(suffix.encode('utf-8'))
+            available = _MAX_FILENAME_BYTES - prefix_bytes - suffix_bytes
+            if available < 10:
+                # Artist itself is too long, truncate the whole base
+                sanitized_base = sanitized_base[:-1].rstrip(' .')
+            else:
+                sanitized_title = sanitized_base[len(artist_prefix):]
+                # Trim one character at a time from the title end
+                while len(sanitized_title.encode('utf-8')) > available and sanitized_title:
+                    sanitized_title = sanitized_title[:-1]
+                sanitized_title = sanitized_title.rstrip(' .')
+                sanitized_base = f"{artist_prefix}{sanitized_title}"
+        else:
+            # Non-ATV: trim the whole base
+            sanitized_base = sanitized_base[:-1].rstrip(' .')
+
+        filename = f"{sanitized_base}{suffix}"
+
+        if not sanitized_base:
+            sanitized_base = 'untitled'
+            filename = f"{sanitized_base}{suffix}"
+            break
+
+    was_modified = (sanitized_base != original_base) or truncated
+    original_if_modified = original_base if was_modified else None
+
+    return filename, was_modified, original_if_modified
+
+
+# ==========================================================================
+# M4A DOWNLOAD WITH METADATA
 # ==========================================================================
 
 
@@ -854,41 +904,112 @@ def sanitize_filename(name: str, max_length: int = 200) -> str:
     return name or 'untitled'
 
 
-async def download_track_as_mp3(
+def ytdlp_temp_finder(output_dir: str, video_id: str, ext: str) -> Optional[str]:
+    """Find yt-dlp temp output file for a given video ID and extension.
+
+    Args:
+        output_dir: Directory where yt-dlp writes temp files.
+        video_id: YouTube video ID.
+        ext: File extension (e.g., ".mp3", ".m4a").
+
+    Returns:
+        Full path to the temp file if found, None otherwise.
+    """
+    temp_path = os.path.join(output_dir, f"temp_{video_id}{ext}")
+    if os.path.exists(temp_path):
+        return temp_path
+
+    for filename in os.listdir(output_dir):
+        if filename.startswith(f"temp_{video_id}") and filename.endswith(ext):
+            return os.path.join(output_dir, filename)
+
+    return None
+
+
+def ytdlp_move_temp_file(
+    temp_path: str,
+    final_path: str,
+    *,
+    overwrite: bool,
+) -> bool:
+    """Move a yt-dlp temp file to its final destination.
+
+    Args:
+        temp_path: Full path to the temp file.
+        final_path: Destination path for the final file.
+        overwrite: Whether to overwrite an existing final file.
+
+    Returns:
+        True if the move succeeded, False otherwise.
+    """
+    try:
+        if temp_path != final_path:
+            if overwrite and os.path.exists(final_path):
+                os.remove(final_path)
+            os.rename(temp_path, final_path)
+        return True
+    except OSError as e:
+        logger.warning(f"[Download] Failed to move temp file: {e}")
+        return False
+
+
+def ytdlp_cleanup_temp_files(output_dir: str, video_id: str, keep_ext: str) -> None:
+    """Remove leftover yt-dlp temp files for a video ID.
+
+    Args:
+        output_dir: Directory where yt-dlp wrote temp files.
+        video_id: YouTube video ID.
+        keep_ext: Extension to keep (e.g., ".mp3", ".m4a").
+    """
+    for filename in os.listdir(output_dir):
+        if filename.startswith(f"temp_{video_id}") and not filename.endswith(keep_ext):
+            try:
+                os.remove(os.path.join(output_dir, filename))
+            except OSError as e:
+                logger.debug(f"Failed to cleanup temp file {filename}: {e}")
+
+
+async def download_track_as_m4a(
     url: str,
     output_dir: str,
-    logger: Any,
     custom_title: Optional[str] = None,
     custom_artist: Optional[str] = None,
     custom_album: Optional[str] = None,
+    custom_album_artist: Optional[str] = None,
     custom_genre: Optional[str] = None,
     custom_year: Optional[str] = None,
-    custom_track_num: Optional[str] = None,
+    custom_track_num: Optional[tuple[int, int]] = None,
     custom_comment: Optional[str] = None,
-    embed_thumbnail: bool = True,
+    is_explicit: Optional[bool] = None,
+    thumbnail_bytes: Optional[bytes] = None,
+    target_filename: Optional[str] = None,
     proxy: Optional[str] = None,
     ydl_opts: Optional[Dict[str, Any]] = None
 ) -> DownloadResult:
-    """Downloads a track from YouTube as MP3 with full metadata.
+    """Downloads a track from YouTube as M4A with full MP4 metadata.
 
-    Downloads audio from a YouTube URL, converts to MP3, and embeds
-    ID3 metadata including cover art. Metadata can be customized or
-    auto-populated from YouTube.
+    Downloads audio from a YouTube URL, produces an M4A file (AAC in MP4
+    container), and embeds metadata via MP4 atoms. If the source audio is
+    already AAC, yt-dlp remuxes (no quality loss). If Opus/WebM, yt-dlp
+    transcodes to AAC.
 
     Args:
         url: YouTube URL to download.
-        output_dir: Directory to save the MP3 file.
-        logger: Logger instance for messages.
+        output_dir: Directory to save the M4A file.
         custom_title: Override the track title (None = use YouTube title).
         custom_artist: Override the artist (None = use uploader/channel).
-        custom_album: Album name to embed (None = use YouTube album if available).
+        custom_album: Album name to embed.
+        custom_album_artist: Album artist to embed.
         custom_genre: Genre tag to embed.
         custom_year: Year tag to embed (None = auto-detect from upload date).
-        custom_track_num: Track number tag (e.g., "1" or "1/12").
+        custom_track_num: Track number as (track, total) tuple.
         custom_comment: Comment tag to embed.
-        embed_thumbnail: Whether to embed the thumbnail as cover art.
+        is_explicit: Explicit content flag (True/False/None).
+        thumbnail_bytes: Pre-processed PNG thumbnail bytes to embed as cover art.
+        target_filename: Exact filename for the output (e.g., 'Artist - Title [id].m4a').
+            If None, uses yt-dlp's default Artist - Title naming.
         proxy: Optional proxy URL for the download (e.g., residential proxy).
-        ydl_opts: Optional base yt-dlp options dict.
+        ydl_opts: Optional base yt-dlp options dict for auth keys.
 
     Returns:
         DownloadResult with success status, file path, and metadata.
@@ -899,36 +1020,31 @@ async def download_track_as_mp3(
             error_message="yt-dlp is not installed. Install with: pip install yt-dlp"
         )
 
-    if not MUTAGEN_AVAILABLE:
+    if not MUTAGEN_AVAILABLE or MP4 is None or MP4Cover is None:
         return DownloadResult(
             success=False,
             error_message="mutagen is not installed. Install with: pip install mutagen"
         )
 
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
+    await asyncio.to_thread(os.makedirs, output_dir, exist_ok=True)
 
-    # Temporary file template - we'll rename after getting metadata
     temp_template = os.path.join(output_dir, 'temp_%(id)s.%(ext)s')
 
     download_opts: Dict[str, Any] = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': temp_template,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
+            'preferredcodec': 'm4a',
             'preferredquality': '320',
         }],
-        'writethumbnail': embed_thumbnail,  # Download thumbnail for manual embedding
         'nocheckcertificate': True,
         'logtostderr': False,
         'quiet': True,
         'no_warnings': True,
     }
 
-    # Merge base options if provided
     if ydl_opts:
-        # Copy auth-related options
         for key in ['cookiefile', 'cookiesfrombrowser', 'extractor_args']:
             if key in ydl_opts:
                 download_opts[key] = ydl_opts[key]
@@ -936,15 +1052,14 @@ async def download_track_as_mp3(
     if proxy:
         download_opts['proxy'] = proxy
 
-    # Track video_id for cleanup - we may not get it if download fails early
     video_id: Optional[str] = None
 
     try:
-        logger.info(f"[Download] Starting download: {url}")
+        logger.info(f"[Download] Starting M4A download: {url}")
 
         def do_download() -> Dict[str, Any]:
             with yt_dlp.YoutubeDL(cast(Any, download_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=True)  # type: ignore
+                return ydl.extract_info(url, download=True)  # type: ignore[return-value]
 
         info = await asyncio.to_thread(do_download)
 
@@ -954,234 +1069,133 @@ async def download_track_as_mp3(
                 error_message="Failed to extract video information."
             )
 
-        # Extract metadata from yt-dlp info
-        video_id = info.get('id', 'unknown')
+        video_id_str: str = info.get('id') or 'unknown'
+        video_id = video_id_str
         yt_title = info.get('title', 'Unknown Title')
         yt_artist = info.get('artist') or info.get('uploader') or info.get('channel', 'Unknown Artist')
         yt_album = info.get('album')
         yt_duration = info.get('duration', 0)
         yt_year = None
         if info.get('upload_date'):
-            yt_year = info['upload_date'][:4]  # YYYYMMDD -> YYYY
+            yt_year = info['upload_date'][:4]
 
-        # Apply custom metadata or use YouTube defaults
         final_title = custom_title or yt_title
         final_artist = custom_artist or yt_artist
         final_album = custom_album or yt_album
         final_year = custom_year or yt_year
 
-        # Find the downloaded MP3 file
-        temp_mp3_path = os.path.join(output_dir, f'temp_{video_id}.mp3')
+        # Post-download: find temp file, rename, embed metadata, cleanup.
+        # All of these are blocking I/O (filesystem + mutagen), so bundle
+        # them into a sync helper and run in a thread.
+        def _post_download_process() -> DownloadResult:
+            """Sync helper for post-download file operations.
 
-        if not os.path.exists(temp_mp3_path):
-            # Sometimes yt-dlp uses different naming
-            for f in os.listdir(output_dir):
-                if f.startswith(f'temp_{video_id}') and f.endswith('.mp3'):
-                    temp_mp3_path = os.path.join(output_dir, f)
-                    break
-
-        if not os.path.exists(temp_mp3_path):
-            return DownloadResult(
-                success=False,
-                error_message=f"Downloaded file not found. Expected: temp_{video_id}.mp3"
-            )
-
-        # Generate final filename
-        safe_artist = sanitize_filename(final_artist, 60)
-        safe_title = sanitize_filename(final_title, 120)
-        final_filename = f"{safe_artist} - {safe_title}.mp3"
-        final_path = os.path.join(output_dir, final_filename)
-
-        # Handle filename collision
-        counter = 1
-        while os.path.exists(final_path):
-            final_filename = f"{safe_artist} - {safe_title} ({counter}).mp3"
-            final_path = os.path.join(output_dir, final_filename)
-            counter += 1
-
-        # Rename temp file to final name
-        os.rename(temp_mp3_path, final_path)
-        logger.info(f"[Download] MP3 saved as: {final_filename}")
-
-        # Embed metadata using mutagen
-        thumbnail_embedded = False
-        try:
-            audio = MP3(final_path, ID3=ID3)  # type: ignore[misc]
-
-            # Create ID3 tag if it doesn't exist
-            try:
-                audio.add_tags()
-            except MutagenError:
-                pass  # Tags already exist - expected
-
-            # Set metadata tags
-            audio.tags.add(TIT2(encoding=3, text=final_title))  # type: ignore[misc]  # Title
-            audio.tags.add(TPE1(encoding=3, text=final_artist))  # type: ignore[misc]  # Artist
-
-            if final_album:
-                audio.tags.add(TALB(encoding=3, text=final_album))  # type: ignore[misc]  # Album
-
-            if final_year:
-                audio.tags.add(TYER(encoding=3, text=final_year))  # type: ignore[misc]  # Year
-
-            if custom_genre:
-                audio.tags.add(TCON(encoding=3, text=custom_genre))  # type: ignore[misc]  # Genre
-
-            if custom_track_num:
-                audio.tags.add(TRCK(encoding=3, text=custom_track_num))  # type: ignore[misc]  # Track number
-
-            if custom_comment:
-                audio.tags.add(COMM(encoding=3, lang='eng', desc='', text=custom_comment))  # type: ignore[misc]  # Comment
-
-            # Embed thumbnail as cover art
-            if embed_thumbnail:
-                assert video_id is not None  # Guaranteed by info.get('id', 'unknown') above
-                thumbnail_embedded = await _embed_thumbnail_in_mp3(
-                    audio, info, output_dir, video_id, logger
+            Handles temp file discovery, rename, MP4 tag embedding, and
+            cleanup. Runs via asyncio.to_thread to avoid blocking the
+            event loop.
+            """
+            # Find the downloaded M4A file
+            temp_m4a_path = ytdlp_temp_finder(output_dir, video_id_str, '.m4a')
+            if not temp_m4a_path:
+                return DownloadResult(
+                    success=False,
+                    error_message=f"Downloaded file not found. Expected: temp_{video_id_str}.m4a"
                 )
 
-            audio.save()
-            logger.info("[Download] Metadata embedded successfully")
+            # Determine final path
+            if target_filename:
+                final_path = os.path.join(output_dir, target_filename)
+            else:
+                safe_artist = sanitize_filename(final_artist, 60)
+                safe_title = sanitize_filename(final_title, 120)
+                final_filename = f"{safe_artist} - {safe_title}.m4a"
+                final_path = os.path.join(output_dir, final_filename)
 
-        except Exception as e:
-            logger.warning(f"[Download] Failed to embed some metadata: {e}")
+            # Rename temp file to final path
+            if not ytdlp_move_temp_file(
+                temp_m4a_path,
+                final_path,
+                overwrite=True,
+            ):
+                return DownloadResult(
+                    success=False,
+                    error_message=f"Failed to move temp file for {video_id_str}"
+                )
+            logger.info(f"[Download] M4A saved as: {os.path.basename(final_path)}")
 
-        # Cleanup thumbnail files
-        for f in os.listdir(output_dir):
-            if f.startswith(f'temp_{video_id}') and not f.endswith('.mp3'):
-                try:
-                    os.remove(os.path.join(output_dir, f))
-                except OSError as e:
-                    logger.debug(f"Failed to cleanup temp file {f}: {e}")
+            # Embed metadata via MP4 atoms
+            _thumbnail_embedded = False
+            try:
+                assert MP4 is not None and MP4Cover is not None  # Guarded by early return above
+                audio = MP4(final_path)
+                if audio.tags is None:
+                    audio.add_tags()
 
-        return DownloadResult(
-            success=True,
-            file_path=final_path,
-            title=final_title,
-            artist=final_artist,
-            album=final_album,
-            duration=yt_duration,
-            thumbnail_embedded=thumbnail_embedded
-        )
+                assert audio.tags is not None  # Guaranteed by add_tags() above
+                tags = audio.tags
+
+                # Text atoms
+                tags['\xa9nam'] = [final_title]
+                tags['\xa9ART'] = [final_artist]
+
+                if custom_album_artist:
+                    tags['aART'] = [custom_album_artist]
+
+                if final_album:
+                    tags['\xa9alb'] = [final_album]
+
+                if final_year:
+                    tags['\xa9day'] = [final_year]
+
+                if custom_genre:
+                    tags['\xa9gen'] = [custom_genre]
+
+                if custom_track_num is not None:
+                    tags['trkn'] = [custom_track_num]
+
+                if custom_comment:
+                    tags['\xa9cmt'] = [custom_comment]
+
+                # Explicit flag (rtng atom: 0=clean, 1=explicit)
+                if is_explicit is not None:
+                    tags['rtng'] = [1 if is_explicit else 0]
+
+                # Cover art (PNG)
+                if thumbnail_bytes:
+                    tags['covr'] = [
+                        MP4Cover(thumbnail_bytes, imageformat=MP4Cover.FORMAT_PNG)
+                    ]
+                    _thumbnail_embedded = True
+                    logger.debug(f"[Download] Embedded {len(thumbnail_bytes)} bytes PNG cover art")
+
+                audio.save()
+                logger.info("[Download] M4A metadata embedded successfully")
+
+            except Exception as e:
+                logger.warning(f"[Download] Failed to embed some M4A metadata: {e}")
+
+            # Cleanup temp files
+            ytdlp_cleanup_temp_files(output_dir, video_id_str, '.m4a')
+
+            return DownloadResult(
+                success=True,
+                file_path=final_path,
+                title=final_title,
+                artist=final_artist,
+                album=final_album,
+                duration=yt_duration,
+                thumbnail_embedded=_thumbnail_embedded
+            )
+
+        return await asyncio.to_thread(_post_download_process)
 
     except Exception as e:
-        logger.error(f"[Download] Error: {e}", exc_info=True)
+        logger.error(f"[Download] M4A download error: {e}", exc_info=True)
 
-        # Cleanup temp files for THIS download only
         try:
             if os.path.isdir(output_dir) and video_id:
-                for f in os.listdir(output_dir):
-                    if f.startswith(f'temp_{video_id}'):
-                        try:
-                            os.remove(os.path.join(output_dir, f))
-                        except OSError as cleanup_err:
-                            logger.debug(f"Failed to cleanup temp file {f} after error: {cleanup_err}")
+                await asyncio.to_thread(ytdlp_cleanup_temp_files, output_dir, video_id, '.m4a')
         except OSError as cleanup_err:
             logger.debug(f"Error cleanup failed (masking original error): {cleanup_err}")
 
         return DownloadResult(success=False, error_message=format_youtube_error(e))
-
-
-async def _embed_thumbnail_in_mp3(
-    audio: Any,
-    info: Dict[str, Any],
-    output_dir: str,
-    video_id: str,
-    logger: Any
-) -> bool:
-    """Embeds thumbnail as cover art in an MP3 file.
-
-    Uses _extract_best_thumbnail() for proper thumbnail selection (prefers square),
-    then fetch_thumbnail_bytes() for download.
-
-    Args:
-        audio: Mutagen MP3 object with ID3 tags.
-        info: yt-dlp extraction info dict.
-        output_dir: Directory where temp files are stored.
-        video_id: YouTube video ID.
-        logger: Logger for debug messages.
-
-    Returns:
-        True if thumbnail was embedded, False otherwise.
-    """
-    thumbnail_data = None
-
-    # Use extract_best_thumbnail_from_info for proper thumbnail selection
-    # This prefers square album art over 16:9 video thumbnails
-    try:
-        thumbnail_url, is_square = await extract_best_thumbnail_from_info(info)
-        if thumbnail_url:
-            thumbnail_data = await fetch_thumbnail_bytes(thumbnail_url)
-            if thumbnail_data:
-                logger.debug(f"[Download] Thumbnail: {thumbnail_url[:50]}... (square={is_square})")
-    except Exception as e:
-        logger.debug(f"[Download] Failed to process thumbnail: {e}")
-
-    if thumbnail_data:
-        try:
-            audio.tags.add(APIC(  # type: ignore[misc]
-                encoding=3,
-                mime='image/jpeg',  # fetch_thumbnail_bytes returns original format
-                type=3,  # Front cover
-                desc='Cover',
-                data=thumbnail_data
-            ))
-            return True
-        except Exception as e:
-            logger.warning(f"[Download] Failed to embed thumbnail: {e}")
-
-    return False
-
-
-async def get_track_info_for_download(
-    url: str,
-    logger: Any,
-    ydl_opts: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
-    """Gets track metadata without downloading, for preview purposes.
-
-    Useful for showing the user what will be downloaded before committing.
-
-    Args:
-        url: YouTube URL to inspect.
-        logger: Logger instance.
-        ydl_opts: Optional yt-dlp options dict.
-
-    Returns:
-        Dict with title, artist, album, duration, thumbnail, or None on failure.
-    """
-    if not YTDLP_AVAILABLE:
-        return None
-
-    try:
-        if ydl_opts is None:
-            ydl_opts = {**YTDLP_OPTIONS}
-
-        ydl_opts = {
-            **ydl_opts,
-            'extract_flat': False,
-            'skip_download': True,
-        }
-
-        def extract() -> Dict[str, Any]:
-            with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:  # type: ignore[union-attr]
-                return ydl.extract_info(url, download=False)  # type: ignore
-
-        info = await asyncio.to_thread(extract)
-
-        if not info:
-            return None
-
-        return {
-            'title': info.get('title', 'Unknown Title'),
-            'artist': info.get('artist') or info.get('uploader') or info.get('channel', 'Unknown Artist'),
-            'album': info.get('album'),
-            'duration': info.get('duration', 0),
-            'thumbnail': info.get('thumbnail'),
-            'upload_date': info.get('upload_date'),
-            'url': url,
-        }
-
-    except Exception as e:
-        logger.error(f"[Download] Error getting track info: {e}")
-        return None

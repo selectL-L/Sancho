@@ -1,0 +1,819 @@
+/*
+ * calculator.css — Limbus Company Damage Calculator
+ * Layout and calculator-specific styling only.
+ * Colors, buttons, inputs come from shared/css/variables.css and components.css.
+ *
+ * Sizing reference (schedule baseline):
+ *   Labels/small: 0.6875rem   Buttons: 0.8125rem   Inputs: 0.875rem
+ *   Section heads: 0.75rem    Body text: 0.875rem   Headings: 1.0625rem+
+ */
+
+/* ══════════════════════════════════════════════════════════
+   CALCULATOR-LOCAL SEMANTIC COLORS
+   These are data-display colors unique to the calculator.
+   ══════════════════════════════════════════════════════════ */
+
+:root {
+  /* Positive damage / success values */
+  --calc-green: #6fcf97;
+  --calc-green-dim: rgba(111, 207, 151, 0.08);
+  --calc-green-strong: rgba(111, 207, 151, 0.18);
+
+  /* Section labels / secondary accent */
+  --calc-purple: #a89cd6;
+  --calc-purple-dim: rgba(168, 156, 214, 0.07);
+
+  /* Monospace font for data display */
+  --calc-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+}
+
+/* ══════════════════════════════════════════════════════════
+   PAGE LAYOUT
+   ══════════════════════════════════════════════════════════ */
+
+body {
+  overflow: auto;
+  height: auto;
+}
+
+.app-container {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+  min-height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.app-header-title {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header h1 {
+  font-size: 1.375rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.app-header .bot-credit {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ══════════════════════════════════════════════════════════
+   CARDS — the primary container
+   ══════════════════════════════════════════════════════════ */
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--card-radius);
+  padding: 1rem;
+  margin-bottom: 0.875rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.section-title {
+  font-size: 0.75rem;
+  color: var(--calc-purple);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* ══════════════════════════════════════════════════════════
+   PICKER — identity/skill selection
+   ══════════════════════════════════════════════════════════ */
+
+.picker-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field label {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════════════
+   CALCULATOR BUTTONS — extending shared .btn
+   The shared .btn base has no background/border.
+   Calculator buttons need a default ghost-like appearance.
+   ══════════════════════════════════════════════════════════ */
+
+/* Default style for plain .btn (no variant) and .btn-secondary */
+.app-container .btn:not(.btn-primary):not(.btn-danger):not(.btn-ghost) {
+  background: transparent;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+.app-container .btn:not(.btn-primary):not(.btn-danger):not(.btn-ghost):hover:not(:disabled) {
+  background: var(--bg-card-elevated);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.app-container .btn:not(.btn-primary):not(.btn-danger):not(.btn-ghost):disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.125rem;
+  line-height: 1;
+  padding: 0.1875rem 0.375rem;
+  border-radius: 0.25rem;
+  font-family: inherit;
+  transition: all 0.1s;
+}
+.btn-icon:hover {
+  color: var(--danger-text);
+  background: var(--danger-bg);
+}
+
+.btn-group {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.btn-save {
+  font-family: inherit;
+  font-size: 0.6875rem;
+  padding: 0.1875rem 0.625rem;
+  border-radius: 0.25rem;
+  border: 1px solid rgba(111, 207, 151, 0.2);
+  background: var(--calc-green-dim);
+  color: var(--calc-green);
+  cursor: pointer;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: all 0.1s;
+}
+.btn-save:hover { background: var(--calc-green-strong); }
+
+/* ══════════════════════════════════════════════════════════
+   CALCULATOR INPUTS
+   ══════════════════════════════════════════════════════════ */
+
+.app-container select, .select-sm {
+  font-family: inherit;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+  color: var(--text-primary);
+  padding: 0.4375rem 0.625rem;
+  font-size: 0.875rem;
+  transition: border-color 0.15s;
+}
+.app-container select:focus, .select-sm:focus {
+  outline: none;
+  border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+}
+
+.input-sm {
+  font-family: inherit;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.25rem;
+  color: var(--text-primary);
+  padding: 0.375rem 0.5rem;
+  font-size: 0.875rem;
+  transition: border-color 0.15s;
+}
+.input-sm:focus {
+  outline: none;
+  border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+}
+
+.input-num {
+  width: 3.5rem;
+  font-family: var(--calc-mono);
+  text-align: right;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.input-name {
+  width: 8rem;
+}
+
+/* Remove number spinners for cleaner look */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; }
+
+/* ══════════════════════════════════════════════════════════
+   BUFF BAR — compact inline layout
+   ══════════════════════════════════════════════════════════ */
+
+.buff-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.buff-row {
+  display: flex;
+  gap: 0.625rem;
+  align-items: center;
+  padding: 0.4375rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.buff-row:last-child { border-bottom: none; }
+
+.buff-field {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+.buff-combined {
+  font-size: 0.8125rem;
+  color: var(--calc-purple);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--calc-mono);
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════════════
+   SETTINGS — inline grid
+   ══════════════════════════════════════════════════════════ */
+
+.settings-grid {
+  display: flex;
+  gap: 0.875rem;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.settings-grid label {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+/* ── Resistance input with chips ── */
+
+.resist-input {
+  display: flex;
+  align-items: center;
+  gap: 0.4375rem;
+  flex-wrap: wrap;
+}
+
+.input-resist {
+  width: 3.75rem;
+  font-family: var(--calc-mono);
+  text-align: right;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.resist-x {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  font-family: var(--calc-mono);
+  margin-right: 0.25rem;
+}
+
+.resist-chips {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.chip {
+  font-family: var(--calc-mono);
+  font-size: 0.75rem;
+  padding: 0.1875rem 0.4375rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.1s;
+  font-weight: 600;
+}
+.chip:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.chip.active {
+  border-color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.10);
+}
+
+/* ── Bottom actions ── */
+
+.bottom-actions {
+  display: flex;
+  gap: 0.625rem;
+  margin-bottom: 0.625rem;
+}
+
+.footer-note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0.625rem 0 0.375rem;
+  border-top: 1px solid var(--border-subtle);
+  letter-spacing: 0.02em;
+}
+
+/* ══════════════════════════════════════════════════════════
+   COMPARISON TABLE — the visual hero
+   ══════════════════════════════════════════════════════════ */
+
+.comparison-table {
+  background: var(--bg-card-elevated);
+  border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.18);
+  position: relative;
+  overflow: hidden;
+}
+.comparison-table::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent,
+    rgb(var(--theme-r), var(--theme-g), var(--theme-b)),
+    transparent
+  );
+}
+
+.table-grid {
+  display: grid;
+  gap: 0 1rem;
+  font-size: 0.9375rem;
+  font-family: var(--calc-mono);
+  line-height: 1.8;
+}
+
+.table-grid.cols-2 { grid-template-columns: 2fr 1fr; }
+.table-grid.cols-3 { grid-template-columns: 2fr 1fr 1fr; }
+.table-grid.cols-4 { grid-template-columns: 2fr 1fr 1fr 1fr; }
+.table-grid.cols-5 { grid-template-columns: 2fr 1fr 1fr 1fr 1fr; }
+
+.th {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding-bottom: 0.3125rem;
+  border-bottom: 1px solid var(--border-default);
+  font-family: inherit;
+  font-weight: 700;
+  line-height: 2;
+}
+
+.right { text-align: right; }
+.accent { color: var(--calc-green); }
+.mono { font-family: var(--calc-mono); }
+.muted { color: var(--text-muted); }
+.bold { font-weight: 700; }
+
+/* ══════════════════════════════════════════════════════════
+   BUCKETS — named groups of skill cards
+   ══════════════════════════════════════════════════════════ */
+
+.bucket {
+  border-color: var(--border-default);
+}
+
+.bucket-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.18);
+}
+
+.bucket-name-input {
+  background: none;
+  border: none;
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  font-size: 0.9375rem;
+  font-weight: 700;
+  font-family: inherit;
+  padding: 0.0625rem 0;
+  letter-spacing: 0.04em;
+  width: 12rem;
+}
+.bucket-name-input:focus { outline: none; }
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  text-align: center;
+  padding: 1.25rem;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 0.5rem;
+}
+
+/* ══════════════════════════════════════════════════════════
+   SKILL CARDS — always-editable data display
+   ══════════════════════════════════════════════════════════ */
+
+.skill-card {
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.625rem;
+  transition: border-color 0.15s;
+}
+.skill-card:hover {
+  border-color: var(--border-default);
+}
+
+.skill-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.1875rem;
+}
+
+.skill-header-actions {
+  display: flex;
+  gap: 0.3125rem;
+  align-items: center;
+}
+
+.skill-identity {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 85%;
+}
+
+/* ── Skill title (label + editable name) ── */
+
+.skill-title {
+  display: flex;
+  gap: 0.625rem;
+  align-items: baseline;
+  margin-bottom: 0.625rem;
+}
+
+.skill-label-lg {
+  font-size: 1.0625rem;
+  font-weight: 800;
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  font-family: var(--calc-mono);
+  white-space: nowrap;
+}
+
+.skill-name-lg {
+  background: none;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: var(--text-primary);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  font-family: inherit;
+  padding: 0.0625rem 0;
+  flex: 1;
+  min-width: 8rem;
+  transition: border-color 0.15s;
+}
+.skill-name-lg:hover { border-bottom-color: var(--border-subtle); }
+.skill-name-lg:focus {
+  outline: none;
+  border-bottom-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+}
+
+/* ── Larger stat inputs ── */
+
+.stat-row-lg {
+  display: flex;
+  gap: 0.625rem;
+  flex-wrap: wrap;
+  align-items: end;
+  margin-bottom: 0.4375rem;
+}
+
+.stat-field-lg {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1875rem;
+  font-weight: 600;
+}
+
+.stat-input {
+  font-family: var(--calc-mono);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.25rem;
+  color: var(--text-primary);
+  padding: 0.4375rem 0.625rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  width: 4rem;
+  text-align: right;
+  transition: border-color 0.15s;
+}
+.stat-input:focus {
+  outline: none;
+  border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.5);
+}
+
+/* Remove number spinners */
+.stat-input::-webkit-outer-spin-button,
+.stat-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.stat-input { -moz-appearance: textfield; }
+
+.skill-inputs {
+  margin: 0.3125rem 0 0.4375rem;
+}
+
+.skill-formula {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  font-family: var(--calc-mono);
+  margin-bottom: 0.4375rem;
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════════════
+   DAMAGE TABLES — editable + buff side-by-side
+   ══════════════════════════════════════════════════════════ */
+
+.tables-wrap {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 0.4375rem;
+}
+
+.dtbl {
+  flex: 1;
+  min-width: 22rem;
+}
+
+.dtbl-title {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  margin-bottom: 0.4375rem;
+  padding-bottom: 0.3125rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.dtbl-title.purple { color: var(--calc-purple); }
+
+.dtbl-grid {
+  display: grid;
+  column-gap: 0.4375rem;
+  row-gap: 0;
+  font-family: var(--calc-mono);
+  font-size: 0.875rem;
+  line-height: 2;
+  align-items: center;
+}
+
+/* 7 cols: #, Base, Coin(narrow), Raw, +Dmg%(narrow), Total%(flexible), Dmg */
+.dtbl-cols-7 { grid-template-columns: 1.5rem 2.5rem 2.5rem 2.5rem 2.5rem minmax(3rem, auto) 3rem; }
+/* 8 cols: #, Base, Coin(narrow), Raw, +Dmg%(narrow), Total%(flexible), ×Wt, Dmg */
+.dtbl-cols-8 { grid-template-columns: 1.5rem 2.5rem 2.5rem 2.5rem 2.5rem minmax(3rem, auto) 2.25rem 3rem; }
+
+.dtbl-hdr {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-family: inherit;
+  font-weight: 700;
+  padding: 0.1875rem 0 0.3125rem;
+  line-height: 1;
+}
+
+/* Full-width separator after headers — spans all columns */
+.dtbl-sep {
+  grid-column: 1 / -1;
+  height: 0;
+  border-top: 1px solid var(--border-subtle);
+  margin-bottom: 0.1875rem;
+}
+
+.dtbl-sep-tot {
+  grid-column: 1 / -1;
+  height: 0;
+  border-top: 1px solid var(--border-default);
+  margin-top: 0.1875rem;
+  margin-bottom: 0.1875rem;
+}
+
+/* Inputs inside damage table grids — override default stat-input sizing */
+.dtbl-grid .fg-input,
+.dtbl-grid .stat-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font-size: 0.875rem;
+  padding: 0.1875rem 0.3125rem;
+}
+
+.dtbl-tot {
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.fg-buff-val {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.coin-num {
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  font-weight: 700;
+  font-size: 0.9375rem;
+}
+
+/* ── Picker popup ── */
+
+.tier-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.3125rem;
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  padding: 0.3125rem;
+  z-index: 100;
+  display: flex;
+  gap: 0.25rem;
+  box-shadow: var(--shadow-soft);
+}
+
+.tier-btn {
+  font-family: inherit;
+  font-size: 0.8125rem;
+  padding: 0.3125rem 0.875rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.1s;
+}
+.tier-btn:hover {
+  border-color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.10);
+}
+
+.picker-actions {
+  display: flex;
+  gap: 0.3125rem;
+  align-items: end;
+  padding-bottom: 0.0625rem;
+  position: relative;
+  flex-wrap: wrap;
+}
+
+/* ══════════════════════════════════════════════════════════
+   DRAG AND DROP
+   ══════════════════════════════════════════════════════════ */
+
+.skill-card[draggable="true"] {
+  cursor: grab;
+}
+.skill-card[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.skill-card.dragging {
+  opacity: 0.35;
+  border-color: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+  box-shadow: 0 0 0 1px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.10);
+}
+
+.drop-target {
+  outline: 2px dashed rgb(var(--theme-r), var(--theme-g), var(--theme-b)) !important;
+  outline-offset: -2px;
+  background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.06) !important;
+}
+
+.skill-list {
+  min-height: 0.25rem;
+}
+
+/* ══════════════════════════════════════════════════════════
+   ERROR + UTILITIES
+   ══════════════════════════════════════════════════════════ */
+
+.error {
+  color: var(--danger-text);
+  text-align: center;
+  padding: 2rem;
+  font-size: 0.875rem;
+}
+
+/* ══════════════════════════════════════════════════════════
+   THEME TOGGLE — matches schedule pages
+   ══════════════════════════════════════════════════════════ */
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  padding: 0.4375rem;
+  cursor: pointer;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 150ms ease;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-card-elevated);
+  color: var(--text-primary);
+}
+
+.theme-toggle svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.icon-sun { display: none; }
+.icon-moon { display: block; }
+.light .icon-sun { display: block; }
+.light .icon-moon { display: none; }
+
+/* ══════════════════════════════════════════════════════════
+   RESPONSIVE
+   ══════════════════════════════════════════════════════════ */
+
+@media (max-width: 640px) {
+  .app-container { padding: 0.875rem 0.75rem 2rem; }
+  .picker-row { flex-direction: column; gap: 0.625rem; }
+  .settings-grid { gap: 0.625rem; }
+  .stat-row-lg { gap: 0.375rem; }
+  .skill-identity { max-width: 70%; }
+  .tables-wrap { flex-direction: column; }
+  .dtbl { min-width: 0; }
+}

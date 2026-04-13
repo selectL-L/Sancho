@@ -5,7 +5,6 @@ viewing bot status and managing configurations.
 """
 
 import asyncio
-import logging
 import os
 import platform
 import shutil
@@ -14,7 +13,7 @@ import tempfile
 import time
 import typing
 from datetime import timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
@@ -27,14 +26,14 @@ from utils.extensions import discover_cogs
 from utils.musicutils import (
     MUTAGEN_AVAILABLE,
     YTDLP_AVAILABLE,
-    DownloadResult,
     MusicCacheManager,
-    download_track_as_mp3,
-    get_track_info_for_download,
     get_youtube_auth_status,
 )
-from utils.musicutils.music_auth import _detect_youtube_auth
+from utils.musicutils.music_auth import detect_youtube_auth
 from utils.views import get_selection, show_dashboard, show_status, StatusData, StatusHealth
+
+if TYPE_CHECKING:
+    from cogs.limbus import Limbus
 
 
 class AdminCog(BaseCog):
@@ -72,6 +71,7 @@ class AdminCog(BaseCog):
             return
         await self.db_manager.set_skill_limit(limit)
         await ctx.send(f"✅ The global skill limit has been updated to **{limit}** per user.")
+        self.logger.warning(f"Admin {ctx.author} set global skill limit to {limit}.")
 
     @commands.hybrid_command(
         name="user_limit",
@@ -97,6 +97,7 @@ class AdminCog(BaseCog):
             return
         await self.db_manager.set_user_skill_limit(user.id, limit)
         await ctx.send(f"✅ {user.mention}'s skill limit has been updated to **{limit}**.")
+        self.logger.warning(f"Admin {ctx.author} set skill limit for {user} ({user.id}) to {limit}.")
 
     @commands.hybrid_command(
         name="report",
@@ -118,10 +119,6 @@ class AdminCog(BaseCog):
             all_reminders = await self.db_manager.get_all_reminders()
 
             # --- Helper Functions ---
-            def chunk_list(lst, n):
-                for i in range(0, len(lst), n):
-                    yield lst[i:i + n]
-
             def get_user_display(user_id: int) -> str:
                 """Get display name for a user, falling back to ID if not cached."""
                 user = self.bot.get_user(user_id)
@@ -328,141 +325,33 @@ class AdminCog(BaseCog):
                     f.write("\n".join(report_lines))
                     temp_path = f.name
 
-                await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
-                os.remove(temp_path)
-
-            # 4. Define Database Dump Callback (full SQLite export for migrations)
-            async def dump_db_callback(interaction_ctx):
-                assert config.BOT_NAME is not None
-                import json
-                import shutil
-
-                # Create a temp directory for the dump
-                dump_dir = tempfile.mkdtemp(prefix="db_dump_")
                 try:
-                    # Copy the actual SQLite database file
-                    db_path = self.db_manager.db_path
-                    db_copy_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_database.db")
-                    shutil.copy2(db_path, db_copy_path)
-
-                    # Also create a JSON export of all data for easy inspection
-                    json_data = {
-                        "exported_at": str(discord.utils.utcnow()),
-                        "bot_name": config.BOT_NAME,
-                        "tables": {}
-                    }
-
-                    # Export all tables as JSON
-                    tables_to_export = [
-                        ("skills", all_skills),
-                        ("reminders", all_reminders),
-                    ]
-
-                    # Get additional tables
-                    try:
-                        skill_aliases = await self.db_manager.db_fetchall("SELECT * FROM skill_aliases")
-                        tables_to_export.append(
-                            ("skill_aliases", [dict(row) for row in skill_aliases]))
-                    except Exception as e:
-                        self.logger.debug(f"Table skill_aliases not available for export: {e}")
-
-                    try:
-                        user_settings = await self.db_manager.db_fetchall("SELECT * FROM user_settings")
-                        tables_to_export.append(
-                            ("user_settings", [dict(row) for row in user_settings]))
-                    except Exception as e:
-                        self.logger.debug(f"Table user_settings not available for export: {e}")
-
-                    try:
-                        bot_settings = await self.db_manager.db_fetchall("SELECT * FROM bot_settings")
-                        tables_to_export.append(
-                            ("bot_settings", [dict(row) for row in bot_settings]))
-                    except Exception as e:
-                        self.logger.debug(f"Table bot_settings not available for export: {e}")
-
-                    try:
-                        guild_settings = await self.db_manager.db_fetchall("SELECT * FROM guild_settings")
-                        tables_to_export.append(
-                            ("guild_settings", [dict(row) for row in guild_settings]))
-                    except Exception as e:
-                        self.logger.debug(f"Table guild_settings not available for export: {e}")
-
-                    try:
-                        starboard_entries = await self.db_manager.db_fetchall("SELECT * FROM starboard_entries")
-                        tables_to_export.append(
-                            ("starboard_entries", [dict(row) for row in starboard_entries]))
-                    except Exception as e:
-                        self.logger.debug(f"Table starboard_entries not available for export: {e}")
-
-                    try:
-                        bod_usage = await self.db_manager.db_fetchall("SELECT * FROM bod_usage")
-                        tables_to_export.append(
-                            ("bod_usage", [dict(row) for row in bod_usage]))
-                    except Exception as e:
-                        self.logger.debug(f"Table bod_usage not available for export: {e}")
-
-                    try:
-                        bod_leaderboard = await self.db_manager.db_fetchall("SELECT * FROM bod_leaderboard")
-                        tables_to_export.append(
-                            ("bod_leaderboard", [dict(row) for row in bod_leaderboard]))
-                    except Exception as e:
-                        self.logger.debug(f"Table bod_leaderboard not available for export: {e}")
-
-                    for table_name, data in tables_to_export:
-                        json_data["tables"][table_name] = {
-                            "count": len(data),
-                            "rows": data
-                        }
-
-                    json_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_database.json")
-                    with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(json_data, f, indent=2, default=str)
-
-                    # Create a zip archive containing both files
-                    import zipfile
-                    zip_path = os.path.join(
-                        dump_dir, f"{config.BOT_NAME}_db_dump.zip")
-                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.write(
-                            db_copy_path, os.path.basename(db_copy_path))
-                        zipf.write(json_path, os.path.basename(json_path))
-
-                    await interaction_ctx.send(
-                        "**Full database dump attached.**\nContains:\n"
-                        "• `.db` - SQLite database file (for migrations)\n"
-                        "• `.json` - Human-readable JSON export",
-                        file=discord.File(
-                            zip_path, filename=f"{config.BOT_NAME}_db_dump.zip")
-                    )
+                    await interaction_ctx.send("Database report attached:", file=discord.File(temp_path, filename="db_report.txt"))
                 finally:
-                    # Cleanup temp directory
-                    shutil.rmtree(dump_dir, ignore_errors=True)
+                    os.remove(temp_path)
 
-            # 5. Create Dashboard Embed
+            # 4. Create Dashboard Embed
             dashboard_embed = discord.Embed(
                 title="Admin Dashboard",
                 description="Select a category to view database entries.\n\n"
-                            "**💾 Export to File** - Human-readable text report\n"
-                            "**🗄️ Dump Database** - Full SQLite + JSON export for migrations",
+                            "**💾 Export to File** - Human-readable text report",
                 color=discord.Color.dark_grey()
             )
             dashboard_embed.add_field(
                 name="Stats", value=f"Skills: **{len(all_skills)}**\nReminders: **{len(all_reminders)}**")
 
-            # 6. Launch Dashboard
+            # 5. Launch Dashboard
+            self.logger.warning(f"Admin {ctx.author.id} opened dashboard ({len(all_skills)} skills, {len(all_reminders)} reminders).")
             await show_dashboard(
                 ctx=ctx,
                 skill_pages=skill_pages,
                 reminder_pages=reminder_pages,
                 report_file_callback=export_callback,
-                dump_db_callback=dump_db_callback,
                 dashboard_embed=dashboard_embed
             )
 
         except Exception as e:
-            logging.error("Error generating dashboard:", exc_info=True)
+            self.logger.error(f"Error generating dashboard: {e}", exc_info=True)
             await ctx.send(f"An error occurred: {e}")
 
     @commands.hybrid_command(
@@ -543,6 +432,7 @@ class AdminCog(BaseCog):
                     if msg.content.lower() in ['yes', 'y']:
                         await self.db_manager.delete_skill(skill['user_id'], entry_id)
                         await ctx.send("✅ Skill deleted.")
+                        self.logger.warning(f"Admin {ctx.author} deleted skill #{entry_id} (user={skill['user_id']}, name={skill['name']}).")
                         return
                     else:
                         await ctx.send("Deletion cancelled.")
@@ -551,6 +441,7 @@ class AdminCog(BaseCog):
                 if updates:
                     await self.db_manager.update_skill(entry_id, skill['user_id'], updates)
                     await ctx.send("✅ Skill updated.")
+                    self.logger.warning(f"Admin {ctx.author} updated skill #{entry_id}: {updates}")
 
             elif entry_type == 'reminder':
                 # --- EDIT REMINDER ---
@@ -589,8 +480,11 @@ class AdminCog(BaseCog):
                     # we can just use dateparser directly or ask them to be precise.
                     # For simplicity in this admin tool, we'll assume they know what they are doing or use a simple parser.
                     import dateparser
-                    dt = dateparser.parse(msg.content.strip(), languages=[
-                                          'en'], settings={'PREFER_DATES_FROM': 'future'})
+                    from typing import cast, Any as TypingAny
+                    dt = await asyncio.to_thread(
+                        dateparser.parse, msg.content.strip(),
+                        languages=['en'], settings=cast(TypingAny, {'PREFER_DATES_FROM': 'future'})
+                    )
                     if dt:
                         updates['reminder_time'] = int(dt.timestamp())
                     else:
@@ -602,6 +496,7 @@ class AdminCog(BaseCog):
                     if msg.content.lower() in ['yes', 'y']:
                         await self.db_manager.delete_reminders([entry_id])
                         await ctx.send("✅ Reminder deleted.")
+                        self.logger.warning(f"Admin {ctx.author} deleted reminder #{entry_id} (user={rem['user_id']}).")
                         return
                     else:
                         await ctx.send("Deletion cancelled.")
@@ -610,11 +505,15 @@ class AdminCog(BaseCog):
                 if updates:
                     await self.db_manager.update_reminder(entry_id, rem['user_id'], updates)
                     await ctx.send("✅ Reminder updated.")
+                    self.logger.warning(f"Admin {ctx.author} updated reminder #{entry_id}: {updates}")
 
+        except asyncio.TimeoutError:
+            self.logger.debug(f"Admin {ctx.author.id} timed out during edit_entry ({entry_type} #{entry_id}).")
+            await ctx.send("Edit timed out.")
         except Exception as e:
-            logging.error(
-                f"Error editing entry {entry_id}: {e}", exc_info=True)
-            await ctx.send(f"An error occurred: {e}")
+            self.logger.error(
+                f"Error editing {entry_type} #{entry_id}: {e}", exc_info=True)
+            await ctx.send("An error occurred. Check logs for details.")
 
     @commands.hybrid_command(
         name="mood",
@@ -706,8 +605,9 @@ class AdminCog(BaseCog):
             new_activity = ambience.get_current_activity()
             activity_info = f" (now: {new_activity.status})" if new_activity else ""
             await ctx.send(f"✅ Mood changed to `{mood_name}`{activity_info}")
-            self.logger.info(f"Mood changed to {mood_name} by {ctx.author}")
+            self.logger.warning(f"Admin {ctx.author} changed mood to {mood_name}.")
         else:
+            self.logger.warning(f"Admin {ctx.author.id} attempted mood change to {mood_name} but set_mood() returned False.")
             await ctx.send(f"❌ Failed to set mood to `{mood_name}`.")
 
     @commands.hybrid_command(
@@ -756,6 +656,7 @@ class AdminCog(BaseCog):
 
             await ctx.send("Historical resource usage attached:", file=discord.File(temp_path, filename="usage_history.txt"))
             os.remove(temp_path)
+            self.logger.info(f"Admin {ctx.author.id} requested resource usage history export.")
             return
 
         # Send initial message
@@ -771,7 +672,7 @@ class AdminCog(BaseCog):
         # Delete the loading message and show the status view
         await message.delete()
         await show_status(ctx, data, refresh_callback=refresh_callback)
-        logging.info(f"Status command used by {ctx.author}.")
+        self.logger.info(f"Admin {ctx.author.id} ran status check.")
 
     async def _gather_status_data(self, ctx: commands.Context, message: Optional[discord.Message] = None) -> StatusData:
         """Gather all data needed for the status view.
@@ -809,9 +710,13 @@ class AdminCog(BaseCog):
             usage = await resource_tracker.get_current_usage_async()
             cpu_percent = usage['cpu']
             ram_mb = usage['ram']
+            ram_private_mb = usage['ram_private']
+            ram_swap_mb = usage['ram_swap']
         else:
             cpu_percent = 0.0
             ram_mb = 0.0
+            ram_private_mb = 0.0
+            ram_swap_mb = 0.0
 
         # =====================================================================
         # UPTIME
@@ -842,7 +747,8 @@ class AdminCog(BaseCog):
         # =====================================================================
 
         # Force refresh POT server status before reading
-        _detect_youtube_auth()
+        # detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(detect_youtube_auth, 'status_command')
         auth_status = get_youtube_auth_status()
         auth_method = auth_status.auth_method
         pot_server_running = auth_status.pot_server_running
@@ -851,7 +757,7 @@ class AdminCog(BaseCog):
         # Cookie age
         cookie_age_days: Optional[int] = None
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
-        if cookie_path and os.path.isfile(cookie_path):
+        if cookie_path and await asyncio.to_thread(os.path.isfile, cookie_path):
             file_age = now - os.path.getmtime(cookie_path)
             cookie_age_days = int(file_age / 86400)
 
@@ -908,6 +814,11 @@ class AdminCog(BaseCog):
         cache_residential_mb = 0.0
         cache_residential_cost = 0.0
         cache_last_refresh_ago: Optional[float] = None
+        cache_ytm_resolved = 0
+        cache_ytdlp_fallback = 0
+        cache_unresolved = 0
+        cache_filenames_modified = 0
+        cache_pending_downloads = 0
 
         if cache_manager:
             stats = cache_manager.get_stats()
@@ -918,6 +829,11 @@ class AdminCog(BaseCog):
             cache_orphaned_count = stats.get('orphaned_tracks', 0)
             cache_orphaned_mb = stats.get('orphaned_size_mb', 0.0)
             cache_last_refresh_ago = stats.get('last_refresh_ago')
+            cache_ytm_resolved = stats.get('ytm_resolved_count', 0)
+            cache_ytdlp_fallback = stats.get('ytdlp_fallback_count', 0)
+            cache_unresolved = stats.get('unresolved_count', 0)
+            cache_filenames_modified = stats.get('filenames_modified_count', 0)
+            cache_pending_downloads = stats.get('pending_download_count', 0)
 
             residential_stats = cache_manager.get_residential_stats()
             cache_residential_count = residential_stats.get('file_count', 0)
@@ -985,6 +901,8 @@ class AdminCog(BaseCog):
             db_latency=db_latency,
             cpu_percent=cpu_percent,
             ram_mb=ram_mb,
+            ram_private_mb=ram_private_mb,
+            ram_swap_mb=ram_swap_mb,
             # Uptime
             start_timestamp=start_timestamp,
             uptime_str=uptime_str,
@@ -1020,6 +938,12 @@ class AdminCog(BaseCog):
             cache_residential_mb=cache_residential_mb,
             cache_residential_cost=cache_residential_cost,
             cache_last_refresh_ago=cache_last_refresh_ago,
+            # Cache Provenance
+            cache_ytm_resolved=cache_ytm_resolved,
+            cache_ytdlp_fallback=cache_ytdlp_fallback,
+            cache_unresolved=cache_unresolved,
+            cache_filenames_modified=cache_filenames_modified,
+            cache_pending_downloads=cache_pending_downloads,
             # Database
             db_size_mb=db_size_mb,
             # Next Reminder
@@ -1035,190 +959,6 @@ class AdminCog(BaseCog):
             # Snapshot
             snapshot_timestamp=snapshot_timestamp,
         )
-
-    # ==========================================================================
-    # MUSIC DOWNLOAD COMMAND
-    # ==========================================================================
-
-    @commands.hybrid_command(
-        name="download-mp3",
-        hidden=True,
-        description="Downloads a YouTube video as MP3 with full metadata.",
-        help="Downloads a YouTube video as MP3 with full metadata including cover art."
-    )
-    @commands.is_owner()
-    @app_commands.describe(
-        url="YouTube URL to download",
-        title="Override the track title (optional)",
-        artist="Override the artist name (optional)",
-        album="Album name to embed (optional)",
-        genre="Genre tag to embed (optional)",
-        year="Year tag to embed (optional)",
-        track_num="Track number (e.g., '1' or '1/12') (optional)"
-    )
-    async def download_mp3(
-        self,
-        ctx: commands.Context,
-        url: str,
-        title: Optional[str] = None,
-        artist: Optional[str] = None,
-        album: Optional[str] = None,
-        genre: Optional[str] = None,
-        year: Optional[str] = None,
-        track_num: Optional[str] = None
-    ) -> None:
-        """Downloads a YouTube video as MP3 with full embedded metadata.
-
-        The file is saved to the music cache directory with embedded ID3 tags
-        including cover art. Metadata can be customized or auto-populated from
-        the source video.
-
-        Args:
-            ctx: The command context.
-            url: YouTube URL to download.
-            title: Override the track title.
-            artist: Override the artist name.
-            album: Album name to embed.
-            genre: Genre tag to embed.
-            year: Year tag to embed.
-            track_num: Track number to embed.
-        """
-        # Check dependencies
-        if not YTDLP_AVAILABLE:
-            await ctx.send("❌ **yt-dlp** is not installed. Install with: `pip install yt-dlp`")
-            return
-
-        if not MUTAGEN_AVAILABLE:
-            await ctx.send("❌ **mutagen** is not installed. Install with: `pip install mutagen`")
-            return
-
-        # Validate URL (basic check)
-        if not any(domain in url.lower() for domain in ['youtube.com', 'youtu.be', 'music.youtube.com']):
-            await ctx.send("❌ Please provide a valid YouTube URL.")
-            return
-
-        # Download directory - use a dedicated downloads folder
-        download_dir = os.path.join(config.APP_PATH, 'downloads', 'music')
-
-        # Show preview first
-        status_msg = await ctx.send("🔍 **Fetching track info...**")
-
-        track_info = await get_track_info_for_download(url, self.logger)
-        if not track_info:
-            await status_msg.edit(content="❌ Could not fetch track information. The video may be unavailable.")
-            return
-
-        # Build preview embed
-        preview_embed = discord.Embed(
-            title="📥 Download Preview",
-            color=discord.Color.blue()
-        )
-
-        # Show what metadata will be used
-        final_title = title or track_info['title']
-        final_artist = artist or track_info['artist']
-        final_album = album or track_info.get('album') or '*Not available*'
-        final_year = year
-        if not final_year and track_info.get('upload_date'):
-            final_year = track_info['upload_date'][:4]
-
-        preview_embed.add_field(
-            name="Title",
-            value=f"`{final_title}`",
-            inline=True
-        )
-        preview_embed.add_field(
-            name="Artist",
-            value=f"`{final_artist}`",
-            inline=True
-        )
-        preview_embed.add_field(
-            name="Album",
-            value=f"`{final_album}`",
-            inline=True
-        )
-
-        if final_year:
-            preview_embed.add_field(name="Year", value=f"`{final_year}`", inline=True)
-        if genre:
-            preview_embed.add_field(name="Genre", value=f"`{genre}`", inline=True)
-        if track_num:
-            preview_embed.add_field(name="Track #", value=f"`{track_num}`", inline=True)
-
-        # Duration
-        if track_info.get('duration'):
-            mins, secs = divmod(track_info['duration'], 60)
-            preview_embed.add_field(name="Duration", value=f"`{mins}:{secs:02d}`", inline=True)
-
-        # Thumbnail preview
-        if track_info.get('thumbnail'):
-            preview_embed.set_thumbnail(url=track_info['thumbnail'])
-
-        preview_embed.set_footer(text="Starting download...")
-
-        await status_msg.edit(content=None, embed=preview_embed)
-
-        # Start the download
-        await status_msg.edit(content="⏳ **Downloading and converting to MP3...**", embed=preview_embed)
-
-        result: DownloadResult = await download_track_as_mp3(
-            url=url,
-            output_dir=download_dir,
-            logger=self.logger,
-            custom_title=title,
-            custom_artist=artist,
-            custom_album=album,
-            custom_genre=genre,
-            custom_year=year,
-            custom_track_num=track_num,
-            embed_thumbnail=True
-        )
-
-        if not result.success:
-            error_embed = discord.Embed(
-                title="❌ Download Failed",
-                description=result.error_message or "Unknown error occurred.",
-                color=discord.Color.red()
-            )
-            await status_msg.edit(content=None, embed=error_embed)
-            return
-
-        # Success embed
-        success_embed = discord.Embed(
-            title="✅ Download Complete",
-            color=discord.Color.green()
-        )
-        success_embed.add_field(name="Title", value=f"`{result.title}`", inline=True)
-        success_embed.add_field(name="Artist", value=f"`{result.artist}`", inline=True)
-
-        if result.album:
-            success_embed.add_field(name="Album", value=f"`{result.album}`", inline=True)
-
-        if result.duration:
-            mins, secs = divmod(result.duration, 60)
-            success_embed.add_field(name="Duration", value=f"`{mins}:{secs:02d}`", inline=True)
-
-        success_embed.add_field(
-            name="Cover Art",
-            value="✅ Embedded" if result.thumbnail_embedded else "❌ Not embedded",
-            inline=True
-        )
-        success_embed.add_field(
-            name="File",
-            value=f"```{result.filename}```",
-            inline=False
-        )
-        success_embed.add_field(
-            name="Location",
-            value=f"```{result.file_path}```",
-            inline=False
-        )
-
-        if track_info.get('thumbnail'):
-            success_embed.set_thumbnail(url=track_info['thumbnail'])
-
-        await status_msg.edit(content=None, embed=success_embed)
-        self.logger.info(f"[Download] Completed download: {result.filename}")
 
     # ==========================================================================
     # MUSIC CACHE MANAGEMENT COMMANDS
@@ -1282,6 +1022,7 @@ class AdminCog(BaseCog):
             if str(reaction.emoji) == "✅":
                 deleted = await cache_manager.clear_orphaned()
                 await confirm_msg.edit(content=f"✅ Cleared {deleted} orphaned files.")
+                self.logger.warning(f"Admin {ctx.author} cleared {deleted} orphaned music files.")
             else:
                 await confirm_msg.edit(content="❌ Clear cancelled.")
         except TimeoutError:
@@ -1315,16 +1056,17 @@ class AdminCog(BaseCog):
             cache_manager.cancel_refresh_timer()
 
             # Refresh all playlists
-            playlists = await cache_manager.refresh_all_playlists()
+            playlists, old_membership = await cache_manager.refresh_all_playlists()
 
             if not playlists:
+                self.logger.warning(f"Admin {ctx.author.id} ran cache refresh but no playlists were found in ambience.toml.")
                 await status_msg.edit(content="⚠️ No playlists found in ambience.toml or all failed to fetch.")
                 cache_manager.start_refresh_timer()
                 return
 
             # Reconcile downloads
             await status_msg.edit(content="🔄 **Reconciling downloads...**")
-            await cache_manager.reconcile_downloads(playlists)
+            await cache_manager.reconcile_downloads(playlists, old_membership)
 
             # Cleanup expired orphans
             expired = await cache_manager.cleanup_expired_orphans()
@@ -1364,6 +1106,10 @@ class AdminCog(BaseCog):
             )
 
             await status_msg.edit(content=None, embed=result_embed)
+            self.logger.warning(
+                f"Admin {ctx.author.id} ran cache refresh: {len(playlists)} playlists, "
+                f"{queued} queued, {expired} expired orphans cleaned."
+            )
 
         except Exception as e:
             self.logger.error(f"Cache refresh error: {e}", exc_info=True)
@@ -1428,10 +1174,11 @@ class AdminCog(BaseCog):
         )
 
         # Check current status
-        _detect_youtube_auth()  # Refresh before reading
+        # detect_youtube_auth is sync (socket.connect_ex with 0.5s timeout)
+        await asyncio.to_thread(detect_youtube_auth, 'cookie_info')
         auth_status = get_youtube_auth_status()
         cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
-        if cookie_path and os.path.isfile(cookie_path):
+        if cookie_path and await asyncio.to_thread(os.path.isfile, cookie_path):
             file_age = time.time() - os.path.getmtime(cookie_path)
             age_days = int(file_age / 86400)
             embed.add_field(
@@ -1482,6 +1229,7 @@ class AdminCog(BaseCog):
         """
         # Validate file
         if not attachment.filename.endswith('.txt'):
+            self.logger.warning(f"Admin {ctx.author.id} attempted cookie upload with invalid file: {attachment.filename}")
             msg = "❌ File must be a `.txt` file (Netscape cookie format)"
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1490,6 +1238,7 @@ class AdminCog(BaseCog):
             return
 
         if attachment.size > 100_000:  # 100KB should be way more than enough
+            self.logger.warning(f"Admin {ctx.author.id} attempted cookie upload but file too large: {attachment.size} bytes ({attachment.filename})")
             msg = "❌ File too large. Cookie files are typically under 10KB."
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1511,6 +1260,7 @@ class AdminCog(BaseCog):
 
         # Basic validation - should contain youtube.com cookies
         if 'youtube.com' not in text.lower() and '.youtube.com' not in text:
+            self.logger.warning(f"Admin {ctx.author.id} uploaded file that does not appear to contain YouTube cookies: {attachment.filename}")
             msg = "❌ File doesn't appear to contain YouTube cookies."
             if status_msg:
                 await status_msg.edit(content=msg, embed=None)
@@ -1524,26 +1274,26 @@ class AdminCog(BaseCog):
             cookie_path = os.path.join(config.APP_PATH, 'youtube_cookies.txt')
 
         try:
-            # Backup existing file if present
-            if os.path.isfile(cookie_path):
-                backup_path = cookie_path + '.backup'
-                shutil.copy2(cookie_path, backup_path)
-                self.logger.info(f"Backed up existing cookies to {backup_path}")
+            # Backup and write in thread — shutil.copy2 and open() are blocking I/O
+            def _save_cookie_file() -> None:
+                if os.path.isfile(cookie_path):
+                    backup_path = cookie_path + '.backup'
+                    shutil.copy2(cookie_path, backup_path)
 
-            # Write new cookies
-            with open(cookie_path, 'w', encoding='utf-8') as f:
-                f.write(text)
+                with open(cookie_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
 
-            self.logger.info(f"Saved YouTube cookies to {cookie_path}")
+            await asyncio.to_thread(_save_cookie_file)
+
+            self.logger.warning(f"Admin {ctx.author} uploaded YouTube cookies to {cookie_path}.")
 
             # Reset auth detection cache
             auth_status = get_youtube_auth_status()
             auth_status.last_check = 0
             auth_status.auth_method = None
 
-            # Force re-detection
-            from utils.musicutils.music_auth import _detect_youtube_auth
-            _detect_youtube_auth()
+            # Force re-detection (detect_youtube_auth is sync with socket timeout)
+            await asyncio.to_thread(detect_youtube_auth, 'cookie_upload')
 
             # Success message
             embed = discord.Embed(
@@ -1584,142 +1334,202 @@ class AdminCog(BaseCog):
             else:
                 await ctx.send(msg)
 
-    # ==========================================================================
-    # BOD Fate System Commands
-    # ==========================================================================
-
     @commands.hybrid_command(
-        name="bod_bless",
+        name="visibility",
         hidden=True,
-        description="Silently add fate to a user's BOD bank."
+        description="Set bot visibility status (online/idle/dnd/invisible).",
+        help=(
+            "Set the bot's Discord visibility status.\n\n"
+            "Useful for dev bots to go invisible during testing to avoid "
+            "online/offline notification spam. Music presence will not "
+            "override an invisible status."
+        )
     )
     @commands.is_owner()
     @app_commands.describe(
-        user="The user to bless.",
-        tier="Fate tier: LUCKY, BLESSED, or GUARANTEED.",
-        count="Amount of fate to add (default 1)."
+        status="The visibility status to set."
     )
-    async def bod_bless(
+    @app_commands.choices(status=[
+        app_commands.Choice(name="Online", value="online"),
+        app_commands.Choice(name="Idle", value="idle"),
+        app_commands.Choice(name="Do Not Disturb", value="dnd"),
+        app_commands.Choice(name="Invisible", value="invisible"),
+    ])
+    async def visibility(
         self,
         ctx: commands.Context,
-        user: discord.Member,
-        tier: str,
-        count: int = 1
+        status: str
     ) -> None:
-        """Silently add fate to a user's BOD bank.
+        """Set the bot's Discord visibility status.
+
+        Useful for dev bots to go invisible during testing to avoid
+        online/offline notification spam. Music presence will not
+        override an invisible status.
 
         Args:
             ctx: The command context.
-            user: The target user.
-            tier: LUCKY, BLESSED, or GUARANTEED.
-            count: Amount to add.
+            status: One of 'online', 'idle', 'dnd', 'invisible'.
         """
-        tier_upper = tier.upper()
-        if tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
-            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
-            return
-
-        if count < 1:
-            await ctx.send("❌ Count must be at least 1.", ephemeral=True)
-            return
-
-        try:
-            await self.db_manager.add_bod_fate(user.id, tier_upper, count)
-            await ctx.send(f"✅ Added {count}x {tier_upper} fate to {user.display_name}.", ephemeral=True)
-            self.logger.info(f"Admin {ctx.author} blessed {user} with {count}x {tier_upper} fate.")
-        except Exception as e:
-            await ctx.send(f"❌ Failed to add fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to add fate: {e}", exc_info=True)
-
-    @commands.hybrid_command(
-        name="bod_fate",
-        hidden=True,
-        description="View a user's BOD fate bank."
-    )
-    @commands.is_owner()
-    @app_commands.describe(
-        user="The user to check (default: yourself)."
-    )
-    async def bod_fate(
-        self,
-        ctx: commands.Context,
-        user: Optional[discord.Member] = None
-    ) -> None:
-        """View a user's BOD fate bank.
-
-        Args:
-            ctx: The command context.
-            user: User to check, or self if None.
-        """
-        target = user or ctx.author
-        if not isinstance(target, discord.Member):
-            await ctx.send("❌ Could not resolve user.", ephemeral=True)
-            return
-
-        try:
-            fate = await self.db_manager.get_bod_fate(target.id)
-
-            embed = discord.Embed(
-                title=f"BOD Fate Bank: {target.display_name}",
-                color=discord.Color.purple()
+        status_lower = status.lower()
+        if await self.bot.set_visibility(status_lower):
+            status_emoji = {
+                'online': '🟢',
+                'idle': '🌙',
+                'dnd': '⛔',
+                'invisible': '👻'
+            }
+            emoji = status_emoji.get(status_lower, '')
+            await ctx.send(f"{emoji} Visibility set to **{status_lower}**.", ephemeral=True)
+            self.logger.warning(f"Admin {ctx.author} set visibility to {status_lower}.")
+        else:
+            await ctx.send(
+                "❌ Invalid status. Use: online, idle, dnd, invisible.",
+                ephemeral=True
             )
 
-            fate_lines = [
-                f"⚡ **Guaranteed** (100%): {fate.get('guaranteed', 0)}",
-                f"🌟 **Blessed** (75%): {fate.get('blessed', 0)}",
-                f"✨ **Lucky** (50%): {fate.get('lucky', 0)}",
-            ]
-            embed.description = "\n".join(fate_lines)
 
-            total = sum(fate.values())
-            if total == 0:
-                embed.set_footer(text="No fate stored - rolls will be normal (25%)")
-            else:
-                embed.set_footer(text=f"Total fate charges: {total}")
-
-            await ctx.send(embed=embed, ephemeral=True)
-        except Exception as e:
-            await ctx.send(f"❌ Failed to get fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to get fate: {e}", exc_info=True)
+    # ========== LIMBUS DATA MANAGEMENT ==========
 
     @commands.hybrid_command(
-        name="bod_clear",
+        name="limbus-rescrape",
         hidden=True,
-        description="Clear fate from a user's BOD bank."
+        description="Re-scrape Limbus identity data from the wiki.",
+        help="Re-scrape Limbus identity data. Mode: 'parse' (cache only) or 'full' (re-download + parse).",
     )
     @commands.is_owner()
     @app_commands.describe(
-        user="The user to clear.",
-        tier="Specific tier to clear, or leave empty for all."
+        mode="'parse' (from cache, default) or 'full' (re-download + parse)"
     )
-    async def bod_clear(
-        self,
-        ctx: commands.Context,
-        user: discord.Member,
-        tier: Optional[str] = None
-    ) -> None:
-        """Clear fate from a user's BOD bank.
+    async def limbus_rescrape(self, ctx: commands.Context, mode: str = "parse") -> None:
+        """Re-scrape Limbus identity data.
 
         Args:
             ctx: The command context.
-            user: The target user.
-            tier: Specific tier or None for all.
+            mode: 'parse' to parse from cache, 'full' to re-download and parse.
         """
-        tier_upper = tier.upper() if tier else None
-        if tier_upper and tier_upper not in ('LUCKY', 'BLESSED', 'GUARANTEED'):
-            await ctx.send("❌ Invalid tier. Use LUCKY, BLESSED, or GUARANTEED.", ephemeral=True)
+        mode = mode.lower()
+        if mode not in ("parse", "full"):
+            await ctx.send("Mode must be 'parse' (cache only) or 'full' (re-download + parse).")
             return
 
+        limbus_cog: Limbus | None = self.bot.get_cog("Limbus")  # type: ignore[assignment]
+        if not limbus_cog:
+            await ctx.send("Limbus cog is not loaded.")
+            return
+
+        redownload = mode == "full"
+        label = "full re-download + parse" if redownload else "parse from cache"
+        status_msg = await ctx.send(f"Rescraping identity data ({label})...")
+
+        log_lines: list[str] = []
+
+        def log_fn(msg: str) -> None:
+            log_lines.append(msg)
+
         try:
-            await self.db_manager.clear_bod_fate(user.id, tier_upper)
-            if tier_upper:
-                await ctx.send(f"✅ Cleared {tier_upper} fate from {user.display_name}.", ephemeral=True)
-            else:
-                await ctx.send(f"✅ Cleared all fate from {user.display_name}.", ephemeral=True)
-            self.logger.info(f"Admin {ctx.author} cleared {'all' if not tier_upper else tier_upper} fate from {user}.")
+            downloaded, parsed, restored = await limbus_cog.rescrape(
+                redownload=redownload, log=log_fn
+            )
+
+            summary_parts = []
+            if redownload:
+                summary_parts.append(f"{downloaded} pages downloaded")
+            summary_parts.append(f"{parsed} identities parsed")
+            if restored:
+                summary_parts.append(f"{restored} manual edits preserved")
+
+            await status_msg.edit(content=f"Rescrape complete: {', '.join(summary_parts)}.")
+            self.logger.warning(f"Admin {ctx.author.id} ran limbus rescrape ({mode}): {summary_parts}")
+
         except Exception as e:
-            await ctx.send(f"❌ Failed to clear fate: {e}", ephemeral=True)
-            self.logger.error(f"Failed to clear fate: {e}", exc_info=True)
+            self.logger.error(f"Limbus rescrape failed: {e}", exc_info=True)
+            tail = "\n".join(log_lines[-5:]) if log_lines else "No log output"
+            await status_msg.edit(content=f"Rescrape failed: {e}\n```\n{tail}\n```")
+
+    @commands.hybrid_command(
+        name="limbus-edit",
+        hidden=True,
+        description="Edit a Limbus identity's skill data.",
+        help="Edit a Limbus identity's skill data. Search by name.",
+    )
+    @commands.is_owner()
+    @app_commands.describe(
+        query="Identity name (or part of it) to search for."
+    )
+    async def limbus_edit(self, ctx: commands.Context, *, query: str) -> None:
+        """Edit a Limbus identity's skill data via an interactive editor.
+
+        Args:
+            ctx: The command context.
+            query: Identity name to search for.
+        """
+        limbus_cog: Limbus | None = self.bot.get_cog("Limbus")  # type: ignore[assignment]
+        if not limbus_cog:
+            await ctx.send("Limbus cog is not loaded.")
+            return
+
+        matches = limbus_cog._search_identities(query)
+        if not matches:
+            await ctx.send(f"No identities matching '{query}'.")
+            return
+
+        # If multiple matches, let admin pick
+        if len(matches) > 1:
+            top = matches[:5]
+            options = {
+                f"{m['name']} ({m['sinner']})": m["id"]
+                for m in top
+            }
+            embed = discord.Embed(
+                title="Multiple identities found",
+                description="Select the identity to edit:",
+                color=discord.Color.blue(),
+            )
+            for m in top:
+                embed.add_field(
+                    name=m["name"],
+                    value=m["sinner"],
+                    inline=False,
+                )
+
+            selected_id = await get_selection(ctx, embed, options)
+            if not selected_id:
+                await ctx.send("Edit cancelled.")
+                return
+
+            identity = limbus_cog.get_identity(selected_id)
+        else:
+            identity = matches[0]
+
+        if not identity or not identity.get("skills"):
+            await ctx.send("Identity has no skills to edit.")
+            return
+
+        from utils.views import SkillEditorState, show_skill_editor
+
+        state = SkillEditorState(
+            identity_id=identity["id"],
+            identity_name=identity["name"],
+            sinner=identity["sinner"],
+            skills=identity["skills"],
+        )
+
+        async def save_callback(identity_id: str, skill_label: str, updates: dict) -> bool:
+            result = limbus_cog.update_skill(identity_id, skill_label, updates)
+            if result:
+                self.logger.warning(
+                    f"Admin {ctx.author.id} saved skill edit: identity={identity_id}, "
+                    f"skill={skill_label}, updates={list(updates.keys())}"
+                )
+            else:
+                self.logger.warning(
+                    f"Admin {ctx.author.id} attempted skill edit but update_skill() returned False: "
+                    f"identity={identity_id}, skill={skill_label}"
+                )
+            return result
+
+        await show_skill_editor(ctx, state, save_callback)
+        self.logger.debug(f"Admin {ctx.author.id} opened skill editor for {identity['name']} ({identity['id']})")
 
 
 async def setup(bot: CoreBot) -> None:

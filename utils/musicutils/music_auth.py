@@ -1,36 +1,26 @@
-"""YouTube authentication and audio fetching with retry orchestration.
+"""YouTube authentication helpers and low-level source resolution.
 
 Handles:
-- YouTube authentication detection (PO Token Server, Cookies)
+- YouTube authentication detection (PO Token Server, cookies)
 - 403 error tracking and alerting
-- AudioFetcher class: context-aware retry orchestration (Phase 12)
-
-AudioFetcher Architecture:
-- Cog owns buffer storage (knows playlist context for ambient cache)
-- AudioFetcher owns retry strategy (tracks attempts per video_id)
-- FetchContext enum communicates intent: PREFETCH (conservative) vs LIVE/RETRY (aggressive)
+- yt-dlp option construction for authenticated extraction
+- Single-attempt source resolution for the track coordinator
 """
 
-from __future__ import annotations
-
-import asyncio
 import logging
 import os
-import shutil
 import time
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Optional, Tuple, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .music_data import Track
 
-from .music_data import FetchContext
 from .music_helpers import (
     YTDLP_OPTIONS,
     get_audio_url,
     get_residential_proxy_url,
     is_403_error,
-    is_video_unavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,22 +31,10 @@ logger = logging.getLogger(__name__)
 # ==========================================================================
 
 
-def _check_pot_plugin_installed() -> bool:
-    """Check if the bgutil PO token plugin is installed via pip."""
-    try:
-        # Check via pip metadata (works for yt-dlp plugins that register via entry points)
-        from importlib.metadata import distributions
-        for dist in distributions():
-            if dist.metadata.get('Name', '').lower() == 'bgutil-ytdlp-pot-provider':
-                return True
-        return False
-    except Exception as e:
-        logger.debug(f"PO token plugin check failed: {e}")
-        return False
-
-
 def _check_pot_server_running(port: int = 4416) -> bool:
-    """Check if the POT HTTP server is responding.
+    """Check if the POT server is accepting TCP connections.
+
+    This is the single probe function for POT server liveness.
 
     Args:
         port: The port to check (default 4416).
@@ -76,50 +54,70 @@ def _check_pot_server_running(port: int = 4416) -> bool:
         return False
 
 
-def _check_pot_provider_script() -> bool:
-    """Check if the POT provider script exists (for setup detection)."""
-    import config
-    pot_script = getattr(config, 'POT_PROVIDER_PATH', None)
-    return pot_script is not None and os.path.isfile(pot_script)
+# Cached result for plugin installation check (cannot change at runtime)
+_pot_plugin_installed_cache: Optional[bool] = None
 
 
-def _check_node_available() -> bool:
-    """Check if Node.js is available in PATH."""
-    return shutil.which('node') is not None
+def _check_pot_system_functional(auth_status: 'YouTubeAuthStatus') -> None:
+    """Run all POT system diagnostics and update auth_status in-place.
 
+    Checks (in order): port configured, server responding, plugin installed,
+    binary exists. Sets pot_server_running, pot_plugin_installed,
+    pot_provider_ready, and pot_plugin_error on the auth_status object.
 
-def _check_pot_system_functional() -> Tuple[bool, Optional[str]]:
-    """Check if the PO token system can work.
+    Plugin installation is cached after the first successful detection
+    since packages aren't installed/uninstalled at runtime.
 
-    Checks for: pip plugin installed, Node.js available, provider script exists,
-    and HTTP server responding.
-
-    Returns:
-        Tuple of (is_functional, error_message or status).
+    Args:
+        auth_status: The YouTubeAuthStatus instance to update.
     """
+    global _pot_plugin_installed_cache
     import config
+
     pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
 
     # If port not configured, POT system is disabled
     if pot_port is None:
-        return False, "Port not configured"
+        auth_status.pot_plugin_installed = False
+        auth_status.pot_server_running = False
+        auth_status.pot_provider_ready = False
+        auth_status.pot_plugin_error = "Port not configured"
+        return
 
-    # Check if server is already running (best case)
-    if _check_pot_server_running(pot_port):
-        return True, None
+    # TCP probe
+    running = _check_pot_server_running(pot_port)
+    auth_status.update_pot_health(running)
 
-    # Server not running - diagnose why
-    if not _check_pot_plugin_installed():
-        return False, "pip plugin not installed"
+    # Plugin installed check (cached after first True)
+    if _pot_plugin_installed_cache is True:
+        auth_status.pot_plugin_installed = True
+    else:
+        try:
+            from importlib.metadata import distributions
+            found = any(
+                dist.metadata.get('Name', '').lower() == 'bgutil-ytdlp-pot-provider'
+                for dist in distributions()
+            )
+            auth_status.pot_plugin_installed = found
+            if found:
+                _pot_plugin_installed_cache = True
+        except Exception as e:
+            logger.debug(f"PO token plugin check failed: {e}")
+            auth_status.pot_plugin_installed = False
 
-    if not _check_node_available():
-        return False, "Node.js not found"
+    # Binary exists check
+    pot_binary = getattr(config, 'POT_PROVIDER_PATH', None)
+    auth_status.pot_provider_ready = pot_binary is not None and os.path.isfile(pot_binary)
 
-    if not _check_pot_provider_script():
-        return False, "Provider script not built"
-
-    # Everything looks set up but server isn't running
-    return False, "Server not running (will start with bot)"
+    # Determine error message
+    if auth_status.pot_server_running:
+        auth_status.pot_plugin_error = None
+    elif not auth_status.pot_plugin_installed:
+        auth_status.pot_plugin_error = "yt-dlp plugin not installed"
+    elif not auth_status.pot_provider_ready:
+        auth_status.pot_plugin_error = "Binary not found"
+    else:
+        auth_status.pot_plugin_error = "Server not running"
 
 
 # ==========================================================================
@@ -137,10 +135,14 @@ class YouTubeAuthStatus:
         self.cache_dir: Optional[str] = None  # yt-dlp cache directory
         self.pot_plugin_installed: bool = False  # bgutil pip plugin installed?
         self.pot_server_running: bool = False  # POT HTTP server responding?
-        self.pot_provider_ready: bool = False  # Script built and ready?
+        self.pot_provider_ready: bool = False  # Binary exists and ready?
         self.pot_plugin_error: Optional[str] = None  # Why plugin isn't working
         self.last_check: float = 0.0  # Timestamp of last auth file check
         self.check_interval: float = 300.0  # Re-check auth files every 5 minutes
+        self.last_pot_confirmed: float = 0.0  # Timestamp of last confirmed POT health
+
+        # Internal state for transition detection
+        self._was_pot_healthy: Optional[bool] = None
 
         # 403 tracking for alerting
         self._403_timestamps: List[float] = []  # Recent 403 occurrences
@@ -180,6 +182,32 @@ class YouTubeAuthStatus:
         """Clears 403 history (e.g., after auth refresh)."""
         self._403_timestamps.clear()
 
+    def update_pot_health(self, running: bool) -> Optional[bool]:
+        """Update POT server running state and detect transitions.
+
+        Args:
+            running: Whether the server is currently responding.
+
+        Returns:
+            True if server just died (was healthy, now dead).
+            False if server just recovered (was dead, now healthy).
+            None if no transition (state unchanged or first check).
+        """
+        self.pot_server_running = running
+        if running:
+            self.last_pot_confirmed = time.time()
+
+        previous = self._was_pot_healthy
+        self._was_pot_healthy = running
+
+        if previous is None:
+            return None  # First check, no transition
+        if previous and not running:
+            return True  # Just died
+        if not previous and running:
+            return False  # Just recovered
+        return None  # No change
+
 
 # Global auth status tracker
 _youtube_auth = YouTubeAuthStatus()
@@ -195,122 +223,90 @@ def get_youtube_auth_status() -> YouTubeAuthStatus:
 # ==========================================================================
 
 
-def _detect_youtube_auth() -> Dict[str, Any]:
-    """Detects available YouTube authentication and returns yt-dlp options.
+def detect_youtube_auth(reason: str = 'periodic') -> None:
+    """Detects available YouTube authentication and updates global state.
 
-    Checks for PO token HTTP server first (auto-generates tokens), then cookie file.
-    Results are cached for 5 minutes to avoid excessive filesystem access.
+    Runs a fresh POT system probe and checks for cookie/PO token files.
+    Cookie file checks are cached for 5 minutes to avoid excessive
+    filesystem access. POT checks always run fresh (the caller decides
+    when to call this).
 
     Priority: PO Token Server > Cookies > No auth
 
-    Returns:
-        Dict of yt-dlp options to merge with YTDLP_OPTIONS.
+    Args:
+        reason: Why this probe was triggered (for logging). Common values:
+            'status_command', 'cookie_upload', 'cookie_info'.
     """
+    logger.debug(f"YouTube auth probe triggered (reason={reason})")
     # Import here to avoid circular dependency
     import config
 
     now = time.time()
-    pot_port = getattr(config, 'POT_PROVIDER_PORT', None)
 
-    # Get ytdlp cache directory and ensure it exists
+    # Ensure cache directory exists
     ytdlp_cache = getattr(config, 'YTDLP_CACHE_PATH', None)
     if ytdlp_cache:
         os.makedirs(ytdlp_cache, exist_ok=True)
         _youtube_auth.cache_dir = ytdlp_cache
 
-    # Check POT system status only if port is configured
-    # If POT_PROVIDER_PORT is None/empty, the POT system is disabled
-    if pot_port is not None:
-        _youtube_auth.pot_plugin_installed = _check_pot_plugin_installed()
-        _youtube_auth.pot_server_running = _check_pot_server_running(pot_port)
-        _youtube_auth.pot_provider_ready = _check_pot_provider_script()
-
-        # Determine POT system error message
-        if _youtube_auth.pot_server_running:
-            _youtube_auth.pot_plugin_error = None  # Working!
-        elif not _youtube_auth.pot_plugin_installed:
-            _youtube_auth.pot_plugin_error = "pip plugin not installed"
-        elif not _check_node_available():
-            _youtube_auth.pot_plugin_error = "Node.js not found"
-        elif not _youtube_auth.pot_provider_ready:
-            _youtube_auth.pot_plugin_error = "Provider script not built"
-        else:
-            _youtube_auth.pot_plugin_error = "Server not running"
-    else:
-        # POT system not configured - skip all checks
-        _youtube_auth.pot_plugin_installed = False
-        _youtube_auth.pot_server_running = False
-        _youtube_auth.pot_provider_ready = False
-        _youtube_auth.pot_plugin_error = "Port not configured"
-
-    # Use cached result if recent enough (for cookie file checks)
-    if now - _youtube_auth.last_check < _youtube_auth.check_interval and _youtube_auth.auth_method is not None:
-        opts: Dict[str, Any] = {}
-        if ytdlp_cache:
-            opts['cachedir'] = ytdlp_cache
-        if _youtube_auth.auth_method == 'pot_server':
-            # Server handles everything automatically
-            return opts
-        elif _youtube_auth.auth_method == 'cookies' and _youtube_auth.auth_path:
-            opts['cookiefile'] = _youtube_auth.auth_path
-            if _youtube_auth.po_token:
-                opts['extractor_args'] = {'youtube': {'po_token': [f'web+{_youtube_auth.po_token}']}}
-            return opts
-        return opts if ytdlp_cache else {}
-
-    _youtube_auth.last_check = now
-    auth_opts: Dict[str, Any] = {}
-
-    # Always set cache directory if configured
-    if ytdlp_cache:
-        auth_opts['cachedir'] = ytdlp_cache
+    # Fresh POT system probe
+    _check_pot_system_functional(_youtube_auth)
 
     # Check for manual PO token file (legacy, used with cookies)
-    po_token_path = getattr(config, 'YOUTUBE_PO_TOKEN_PATH', None)
-    if po_token_path and os.path.isfile(po_token_path):
-        try:
-            with open(po_token_path, 'r', encoding='utf-8') as f:
-                po_token = f.read().strip()
-                if po_token:
-                    _youtube_auth.po_token = po_token
-                    logging.getLogger('music_auth').debug(f"YouTube auth: Loaded manual PO token from {po_token_path}")
-        except Exception as e:
-            logging.getLogger('music_auth').warning(f"Failed to read PO token: {e}")
-            _youtube_auth.po_token = None
-    else:
-        _youtube_auth.po_token = None
+    # Only re-check files if cache interval has elapsed
+    if now - _youtube_auth.last_check >= _youtube_auth.check_interval or _youtube_auth.auth_method is None:
+        _youtube_auth.last_check = now
 
+        po_token_path = getattr(config, 'YOUTUBE_PO_TOKEN_PATH', None)
+        if po_token_path and os.path.isfile(po_token_path):
+            try:
+                with open(po_token_path, 'r', encoding='utf-8') as f:
+                    po_token = f.read().strip()
+                    if po_token:
+                        _youtube_auth.po_token = po_token
+                        logger.debug(f"YouTube auth: Loaded manual PO token from {po_token_path}")
+            except Exception as e:
+                logger.warning(f"Failed to read PO token: {e}")
+                _youtube_auth.po_token = None
+        else:
+            _youtube_auth.po_token = None
+
+    # Determine auth method
     # Priority 1: PO Token Server (if running)
     # The server auto-generates tokens - no extra yt-dlp options needed, plugin connects automatically
     if _youtube_auth.pot_server_running:
         _youtube_auth.auth_method = 'pot_server'
         _youtube_auth.auth_path = None
-        logging.getLogger('music_auth').debug("YouTube auth: Using PO token server (auto-generation)")
-        return auth_opts
+        logger.debug("YouTube auth: Using PO token server (auto-generation)")
+        logger.info("[Auth] YouTube auth method selected: pot_server (auth_path=none, pot_server=True)")
+        return
 
     # Priority 2: Cookie file (fallback)
     cookie_path = getattr(config, 'YOUTUBE_COOKIE_PATH', None)
     if cookie_path and os.path.isfile(cookie_path):
         _youtube_auth.auth_method = 'cookies'
         _youtube_auth.auth_path = cookie_path
-        auth_opts['cookiefile'] = cookie_path
-        # Add manual PO token if available (helps with datacenter IPs)
         if _youtube_auth.po_token:
-            auth_opts['extractor_args'] = {'youtube': {'po_token': [f'web+{_youtube_auth.po_token}']}}
-            logging.getLogger('music_auth').debug("YouTube auth: Using cookies + manual PO token")
+            logger.debug("YouTube auth: Using cookies + manual PO token")
         else:
-            logging.getLogger('music_auth').debug(f"YouTube auth: Using cookies from {cookie_path}")
-        return auth_opts
+            logger.debug(f"YouTube auth: Using cookies from {cookie_path}")
+        logger.info(f"[Auth] YouTube auth method selected: cookies (auth_path={cookie_path}, pot_server=False)")
+        return
 
     # No auth available
     _youtube_auth.auth_method = None
     _youtube_auth.auth_path = None
-    logging.getLogger('music_auth').debug("YouTube auth: No authentication configured")
-    return auth_opts
+    logger.debug("YouTube auth: No authentication configured")
+    logger.info("[Auth] YouTube auth method selected: none (auth_path=none, pot_server=False)")
 
 
 def get_ytdlp_options(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Returns yt-dlp options with authentication merged in.
+
+    Reads cached auth state — does not probe. State is kept current by:
+    - Startup initialization (detect_youtube_auth in cog_ready)
+    - Background health watchdog (every 30 minutes)
+    - Explicit calls (status command, cookie upload)
 
     Args:
         extra_opts: Additional options to merge (overrides base options).
@@ -319,382 +315,88 @@ def get_ytdlp_options(extra_opts: Optional[Dict[str, Any]] = None) -> Dict[str, 
         Complete yt-dlp options dict ready to use.
     """
     opts = {**YTDLP_OPTIONS}
-    auth_opts = _detect_youtube_auth()
-    opts.update(auth_opts)
+
+    # Add cache directory if configured
+    if _youtube_auth.cache_dir:
+        opts['cachedir'] = _youtube_auth.cache_dir
+
+    # Add auth based on cached state
+    if _youtube_auth.auth_method == 'pot_server':
+        # Plugin handles everything automatically, no extra options needed
+        pass
+    elif _youtube_auth.auth_method == 'cookies' and _youtube_auth.auth_path:
+        opts['cookiefile'] = _youtube_auth.auth_path
+        if _youtube_auth.po_token:
+            opts['extractor_args'] = {'youtube': {'po_token': [f'web+{_youtube_auth.po_token}']}}
+
     if extra_opts:
         opts.update(extra_opts)
 
-    # Log what auth method is being used for debugging
-    logger = logging.getLogger('music_auth')
-    if _youtube_auth.auth_method == 'pot_server':
-        logger.debug(f"yt-dlp: Using POT server (pot_server_running={_youtube_auth.pot_server_running})")
-    elif _youtube_auth.auth_method == 'cookies':
-        logger.debug(f"yt-dlp: Using cookies from {_youtube_auth.auth_path}")
-    else:
-        logger.debug("yt-dlp: No auth method active")
-
+    logger.debug(
+        f"yt-dlp options: auth={_youtube_auth.auth_method}, "
+        f"pot_running={_youtube_auth.pot_server_running}"
+    )
     return opts
 
 
-# ==========================================================================
-# AUDIO FETCHER WITH RETRY ORCHESTRATION
-# ==========================================================================
-
-
 @dataclass
-class AudioFetchResult:
-    """Result from AudioFetcher.fetch().
+class SourceResolutionResult:
+    """Result from a single yt-dlp resolution attempt."""
 
-    Contains everything the Music cog needs to play audio or handle failures.
-    Enriched with failure details so cog knows what happened.
-    """
-    success: bool
-    url: Optional[str] = None  # Direct streaming URL
+    has_source: bool
+    direct_url: Optional[str] = None
     http_headers: Optional[Dict[str, str]] = None
-    local_path: Optional[str] = None  # Residential/ambient cache path
-    thumbnail: Optional[str] = None
-    thumbnail_is_square: bool = False
-    thumbnail_bytes: Optional[bytes] = None  # Pre-fetched thumbnail
-
-    # Failure details
-    is_unavailable: bool = False  # Track permanently gone (remove from playlist)
-    is_auth_failure: bool = False  # yt-dlp 403 - auth issue, not stale URL
-    residential_used: bool = False  # Did we use residential proxy?
-    residential_bytes: int = 0  # Bytes downloaded (for cost tracking)
-    error: Optional[str] = None
-
-    def __bool__(self) -> bool:
-        """Allow `if result:` to check success."""
-        return self.success
+    unavailable: bool = False
+    is_auth_failure: bool = False
+    summary: Optional[str] = None
 
 
-@dataclass
-class TrackFetchState:
-    """Per-track state tracked by AudioFetcher.
+async def resolve_track_source(
+    track: 'Track',
+    *,
+    use_residential_ytdlp: bool,
+) -> SourceResolutionResult:
+    """Resolve a fresh direct media source for a track.
 
-    Tracks what has been attempted for a specific video_id so that
-    subsequent fetch() calls know where to pick up.
+    This helper does not own retry policy. It performs a single yt-dlp
+    extraction attempt using either the normal network path or the residential
+    proxy path and reports whether a source was found.
+
+    Args:
+        track: Track to resolve.
+        use_residential_ytdlp: Whether to route yt-dlp through the configured
+            residential proxy.
+
+    Returns:
+        A reduced source-resolution result for coordinator policy.
     """
-    video_id: str
-    direct_attempts: int = 0
-    auth_failed: bool = False  # yt-dlp 403 (not FFmpeg stale)
-    residential_attempts: int = 0
-
-
-@dataclass
-class AudioFetcher:
-    """Context-aware audio URL fetcher with retry orchestration.
-
-    Design (Phase 12):
-    - Cog owns buffer storage (knows playlist context)
-    - AudioFetcher owns retry strategy (tracks attempts per video_id)
-    - FetchContext tells AudioFetcher how aggressive to be:
-        - PREFETCH: Conservative - stops at direct failure, no residential
-        - LIVE: Aggressive - full retry including residential
-        - RETRY: Aggressive - FFmpeg failed, need fresh URL or residential
-
-    Usage:
-        # Prefetch (background, conservative)
-        result = await fetcher.fetch(track, FetchContext.PREFETCH)
-
-        # Live play (aggressive, full retry)
-        result = await fetcher.fetch(track, FetchContext.LIVE)
-
-        # Retry after FFmpeg 403 (aggressive)
-        result = await fetcher.fetch(track, FetchContext.RETRY)
-
-    The cog stores results and decides when to use them. AudioFetcher
-    just executes the fetch with appropriate retry strategy.
-
-    Residential Callback:
-        Set `on_residential_attempt` to receive notification BEFORE residential
-        proxy is attempted. This allows the cog to notify users that an
-        alternative method is being tried. Signature: async def callback(track_title: str)
-    """
-    # Class-level constants
-    DIRECT_MAX: ClassVar[int] = 2  # Max direct (yt-dlp) attempts
-    RESIDENTIAL_MAX: ClassVar[int] = 3  # Max residential proxy attempts
-    RESIDENTIAL_MIN_DELAY: ClassVar[float] = 2.0  # Min seconds between residential
-
-    # Instance fields
-    cache_manager: Any = field(repr=False)  # MusicCacheManager
-    logger: Any = field(repr=False)
-
-    # Optional callback fired BEFORE residential proxy attempt (not after)
-    # Signature: async def callback(track_title: str) -> None
-    on_residential_attempt: Optional[Callable[[str], Awaitable[None]]] = field(default=None, repr=False)
-
-    # Per-track state (keyed by video_id)
-    _track_states: Dict[str, TrackFetchState] = field(default_factory=dict, init=False)
-
-    # Cross-track rate limiting for residential
-    _last_residential_time: float = field(default=0.0, init=False)
-
-    def _get_state(self, video_id: str) -> TrackFetchState:
-        """Get or create state for a track."""
-        if video_id not in self._track_states:
-            self._track_states[video_id] = TrackFetchState(video_id=video_id)
-        return self._track_states[video_id]
-
-    def clear_state(self, video_id: Optional[str] = None) -> None:
-        """Clear state for a track (or all tracks).
-
-        Args:
-            video_id: Specific track to clear, or None to clear all.
-        """
-        if video_id:
-            self._track_states.pop(video_id, None)
-        else:
-            self._track_states.clear()
-
-    def reset(self) -> None:
-        """Reset all fetcher state. Alias for clear_state()."""
-        self.clear_state()
-
-    async def fetch(
-        self,
-        track: 'Track',
-        context: FetchContext
-    ) -> AudioFetchResult:
-        """Get playable audio URL or path for a track.
-
-        Priority order (quality-first strategy):
-        1. Ambient cache - High quality local files (playlist downloads)
-        2. YouTube direct - Best quality streaming
-        3. Residential cache - Lower quality fallback (already downloaded)
-        4. Residential download - Last resort, costs bandwidth
-
-        Args:
-            track: Track to get audio for.
-            context: PREFETCH (conservative), LIVE (aggressive), or RETRY (aggressive).
-
-        Returns:
-            AudioFetchResult with url/local_path on success, failure details otherwise.
-        """
-        if not track.video_id:
-            return AudioFetchResult(
-                success=False,
-                error="Track has no video_id"
-            )
-
-        state = self._get_state(track.video_id)
-
-        self.logger.debug(
-            f"[AudioFetcher] fetch({context.value}) for {track.title[:30]}... "
-            f"(direct={state.direct_attempts}, residential={state.residential_attempts})"
-        )
-
-        # ---------------------------------------------------------------------
-        # Priority 1: Ambient cache (HIGH QUALITY)
-        # Check playlist downloads and orphaned files first - these are the
-        # best quality local files we have. Orphaned files have limited lifetime
-        # but are still usable while they exist.
-        # ---------------------------------------------------------------------
-        any_cached = self.cache_manager.get_any_local_path(track.video_id)
-        if any_cached:
-            self.logger.info(f"[AudioFetcher] Ambient cache hit: {track.title}")
-            self.clear_state(track.video_id)  # Clean up - no retry state needed
-            return AudioFetchResult(success=True, local_path=any_cached)
-
-        # ---------------------------------------------------------------------
-        # Priority 2: YouTube direct streaming (BEST QUALITY)
-        # Try to stream directly from YouTube - this gives the best audio
-        # quality without using local storage or proxy bandwidth.
-        # ---------------------------------------------------------------------
-        if state.direct_attempts < self.DIRECT_MAX:
-            state.direct_attempts += 1
-            self.logger.info(
-                f"[AudioFetcher] Direct fetch attempt {state.direct_attempts}/{self.DIRECT_MAX}: {track.title}"
-            )
-            result = await self._try_direct(track)
-
-            if result.success:
-                # PREFETCH: Keep state - URL might go stale before playback
-                # LIVE/RETRY: Clear state - we're actually playing now
-                if context != FetchContext.PREFETCH:
-                    self.clear_state(track.video_id)
-                return result
-
-            # Unavailable video - no point checking cache or trying residential
-            if result.is_unavailable:
-                self.clear_state(track.video_id)
-                return result
-
-            if result.is_auth_failure:
-                state.auth_failed = True
-                # Track 403 for alerting
-                should_alert = _youtube_auth.record_403()
-                if should_alert:
-                    self.logger.warning(
-                        "[AudioFetcher] High 403 rate detected - check YouTube auth"
-                    )
-
-        # ---------------------------------------------------------------------
-        # Priority 3: Residential cache (LOWER QUALITY FALLBACK)
-        # If direct failed, check if we have a residential-downloaded file.
-        # These are lower quality but instant - no download needed.
-        # Note: No "having trouble" message here - cache hit is instant,
-        # we don't want users expecting residential downloads to be fast.
-        # ---------------------------------------------------------------------
-        cached = self.cache_manager.check_residential(track.video_id)
-        if cached:
-            self.logger.info(f"[AudioFetcher] Residential cache hit: {track.title}")
-            self.clear_state(track.video_id)  # Clean up - no retry state needed
-            return AudioFetchResult(success=True, local_path=cached)
-
-        # ---------------------------------------------------------------------
-        # PREFETCH stops here - we've checked all local/free sources.
-        # Don't spend proxy bandwidth on speculative prefetching.
-        # ---------------------------------------------------------------------
-        if context == FetchContext.PREFETCH:
-            self.logger.info(
-                "[AudioFetcher] PREFETCH mode - no local cache, stopping (will retry LIVE if played)"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_auth_failure=state.auth_failed,
-                error="No local cache available (PREFETCH mode)"
-            )
-
-        # ---------------------------------------------------------------------
-        # Priority 4: Residential proxy download (LAST RESORT)
-        # LIVE/RETRY contexts only. This costs proxy bandwidth, so we only
-        # do it when the track is actually being played, not for prefetch.
-        # The "having trouble" notification fires inside _try_residential().
-        # ---------------------------------------------------------------------
-        if context in (FetchContext.LIVE, FetchContext.RETRY):
-            return await self._try_residential(track, state)
-
-        # Shouldn't reach here, but handle gracefully
-        return AudioFetchResult(
-            success=False,
-            is_auth_failure=state.auth_failed,
-            error="All fetch methods exhausted"
-        )
-
-    async def _try_direct(self, track: 'Track') -> AudioFetchResult:
-        """Attempt yt-dlp fetch."""
-        ydl_opts = get_ytdlp_options({'extract_flat': False})
-
-        try:
-            result = await get_audio_url(track, self.logger, ydl_opts)
-
-            if result.success:
-                self.logger.info(f"[AudioFetcher] Direct fetch success: {track.title}")
-                return AudioFetchResult(
-                    success=True,
-                    url=result.url,
-                    http_headers=result.http_headers,
-                    thumbnail=result.thumbnail,
-                    thumbnail_is_square=result.thumbnail_is_square,
-                )
-
-            # No URL but no exception - likely unavailable or extraction failed
-            is_auth = not result.is_unavailable  # If not unavailable, assume auth issue
-            self.logger.info(
-                f"[AudioFetcher] Direct fetch failed: {track.title} "
-                f"(unavailable={result.is_unavailable}, auth_issue={is_auth})"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_unavailable=result.is_unavailable,
-                is_auth_failure=is_auth,
-                error=result.error or "Failed to get audio URL"
-            )
-
-        except Exception as e:
-            is_auth = is_403_error(e)
-            is_gone = is_video_unavailable(e)
-            self.logger.info(
-                f"[AudioFetcher] Direct fetch exception: {track.title} "
-                f"(403={is_auth}, unavailable={is_gone}, error={str(e)[:100]})"
-            )
-            return AudioFetchResult(
-                success=False,
-                is_auth_failure=is_auth,
-                is_unavailable=is_gone,
-                error=str(e)
-            )
-
-    async def _try_residential(
-        self,
-        track: 'Track',
-        state: TrackFetchState
-    ) -> AudioFetchResult:
-        """Attempt residential proxy download."""
-        # Check attempt limit
-        if state.residential_attempts >= self.RESIDENTIAL_MAX:
-            self.logger.debug(
-                f"[AudioFetcher] Residential exhausted ({state.residential_attempts}/{self.RESIDENTIAL_MAX})"
-            )
-            return AudioFetchResult(
-                success=False,
-                residential_used=True,
-                error="Residential retries exhausted"
-            )
-
-        # Check if proxy is configured
+    if use_residential_ytdlp:
         proxy_url = get_residential_proxy_url()
         if not proxy_url:
-            self.logger.warning("[AudioFetcher] Residential proxy not configured")
-            return AudioFetchResult(
-                success=False,
-                error="Residential proxy not configured"
+            return SourceResolutionResult(
+                has_source=False,
+                summary='Residential proxy is not configured.',
             )
+        ydl_opts = get_ytdlp_options({'extract_flat': False, 'proxy': proxy_url})
+    else:
+        ydl_opts = get_ytdlp_options({'extract_flat': False})
 
-        # Rate limiting between residential attempts (cross-track)
-        elapsed = time.time() - self._last_residential_time
-        if elapsed < self.RESIDENTIAL_MIN_DELAY and self._last_residential_time > 0:
-            delay = self.RESIDENTIAL_MIN_DELAY - elapsed
-            self.logger.debug(f"[AudioFetcher] Rate limiting: waiting {delay:.1f}s")
-            await asyncio.sleep(delay)
+    result = await get_audio_url(track, ydl_opts)
 
-        state.residential_attempts += 1
-        self._last_residential_time = time.time()
-
-        self.logger.info(
-            f"[AudioFetcher] Residential download {state.residential_attempts}/{self.RESIDENTIAL_MAX}: {track.title}"
+    if result.success and result.url:
+        return SourceResolutionResult(
+            has_source=True,
+            direct_url=result.url,
+            http_headers=result.http_headers,
+            summary='Resolved a direct media source for playback.',
         )
 
-        # Notify cog BEFORE attempting residential (so user sees "trying another way" BEFORE success/failure)
-        if self.on_residential_attempt and state.residential_attempts == 1:
-            try:
-                await self.on_residential_attempt(track.title)
-            except Exception as e:
-                self.logger.debug(f"[AudioFetcher] Residential callback error: {e}")
+    is_auth = bool(result.error and is_403_error(Exception(result.error)))
+    summary = result.error or 'yt-dlp could not resolve a playable source.'
 
-        # Download via cache_manager
-        success, error_msg, bytes_downloaded, cached_path = await self.cache_manager.download_residential(
-            track
-        )
-
-        if success and cached_path:
-            self.logger.info(
-                f"[AudioFetcher] Residential success: {track.title} "
-                f"({bytes_downloaded / 1024 / 1024:.2f} MB)"
-            )
-            self.clear_state(track.video_id)  # Clean up - fetch succeeded
-            return AudioFetchResult(
-                success=True,
-                local_path=cached_path,
-                residential_used=True,
-                residential_bytes=bytes_downloaded,
-            )
-
-        self.logger.info(
-            f"[AudioFetcher] Residential failed: {track.title} - {error_msg}"
-        )
-        return AudioFetchResult(
-            success=False,
-            residential_used=True,
-            error=error_msg or "Residential download failed"
-        )
-
-    def get_state_info(self, video_id: str) -> Optional[TrackFetchState]:
-        """Get state info for debugging/logging."""
-        return self._track_states.get(video_id)
-
-    @property
-    def active_tracks(self) -> int:
-        """Number of tracks with state being tracked."""
-        return len(self._track_states)
+    return SourceResolutionResult(
+        has_source=False,
+        unavailable=result.is_unavailable,
+        is_auth_failure=is_auth,
+        summary=summary,
+    )

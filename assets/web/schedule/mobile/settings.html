@@ -1,0 +1,1450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Settings</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+  <!-- External CSS -->
+  <link rel="stylesheet" href="/shared/css/variables.css">
+  <link rel="stylesheet" href="/shared/css/components.css">
+  <link rel="stylesheet" href="/schedule/css/mobile.css">
+  <style>
+    /* Mobile-settings-specific styles */
+    .grid-cell.available {
+      background: var(--heatmap-available);
+    }
+
+    .grid-cell.unavailable {
+      background: transparent;
+    }
+
+    .grid-cell.pulse {
+      animation: cellPulse 0.2s ease-out;
+    }
+
+    @keyframes cellPulse {
+      0% { transform: scale(1.1); }
+      100% { transform: scale(1); }
+    }
+
+    /* Back button */
+    .back-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 0.5rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+
+    .back-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+      color: var(--text-primary);
+    }
+
+    .back-btn svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+
+    /* Page header left with back button */
+    .page-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    /* Drawer user pill - matches desktop user-pill styling */
+    .drawer-user-pill {
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.06)
+      );
+      border: 1px solid rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2);
+      border-radius: 2.5rem;
+      padding: 0.375rem 1.25rem 0.375rem 0.375rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+      cursor: pointer;
+      transition: all 250ms ease;
+    }
+
+    .drawer-user-pill:active {
+      background: linear-gradient(135deg,
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.2),
+        rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.12)
+      );
+      border-color: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.35);
+    }
+
+    .drawer-avatar {
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 50%;
+      background: var(--bg-input);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      overflow: hidden;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 2px rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+    }
+
+    .drawer-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 50%;
+    }
+
+    .drawer-user-text {
+      flex: 1;
+      font-size: 1.1rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .drawer-section {
+      margin-bottom: 1.25rem;
+    }
+
+    .drawer-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.375rem;
+    }
+
+    .drawer-section-header h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .drawer-section-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .drawer-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    /* List items */
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem;
+      border-radius: 0.375rem;
+      transition: background 0.15s;
+    }
+
+    .list-item:hover {
+      background: var(--bg-card-elevated);
+    }
+
+    .list-item-left {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      min-width: 0;
+    }
+
+    .list-item-icon {
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      background: var(--bg-card-elevated);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.625rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .list-item-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 50%;
+    }
+
+    .list-item-name {
+      font-size: 0.8125rem;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .list-empty {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 1rem;
+    }
+
+    /* Action buttons */
+    .action-btn {
+      padding: 0.25rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      border-radius: 0.25rem;
+      border: 1px solid var(--border-default);
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .action-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .action-btn.danger {
+      color: var(--danger-text);
+      border-color: var(--danger-border);
+    }
+
+    .action-btn.danger:hover {
+      background: var(--danger-bg);
+    }
+
+    /* Danger section */
+    .drawer-danger-section h3 {
+      color: var(--danger-text);
+    }
+
+    .drawer-danger-btn {
+      width: 100%;
+      margin-top: 0.5rem;
+    }
+
+    /* Toggle switch */
+    .toggle-switch {
+      width: 2.5rem;
+      height: 1.5rem;
+      background: var(--bg-input);
+      border-radius: 0.75rem;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+
+    .toggle-switch::after {
+      content: '';
+      position: absolute;
+      top: 0.125rem;
+      left: 0.125rem;
+      width: 1.25rem;
+      height: 1.25rem;
+      background: var(--text-muted);
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+
+    .toggle-switch.active {
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.3);
+    }
+
+    .toggle-switch.active::after {
+      transform: translateX(1rem);
+      background: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+    }
+
+    /* Drawer peek buttons */
+    .drawer-peek-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex: 1;
+      justify-content: flex-end;
+    }
+
+    .drawer-peek-actions .btn {
+      padding: 0.5rem 1rem;
+      font-size: 0.8125rem;
+    }
+
+    /* Session modal options */
+    .session-options {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .session-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.125rem;
+      padding: 0.75rem 1rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-default);
+      border-radius: 0.5rem;
+      cursor: pointer;
+      transition: all 0.15s;
+      width: 100%;
+      text-align: left;
+    }
+
+    .session-btn:hover {
+      background: var(--bg-card-elevated);
+      border-color: var(--border-strong);
+    }
+
+    .session-btn-danger {
+      border-color: var(--danger-border);
+    }
+
+    .session-btn-danger:hover {
+      background: var(--danger-bg);
+    }
+
+    .session-btn-title {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .session-btn-danger .session-btn-title {
+      color: var(--danger-text);
+    }
+
+    .session-btn-subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    /* Login redirect overlay */
+    .login-redirect-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-page);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+
+    .login-redirect-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .login-redirect-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: 1rem;
+      padding: 2rem;
+      text-align: center;
+      max-width: 90%;
+      width: 20rem;
+    }
+
+    .login-redirect-card h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
+    }
+
+    .login-redirect-card p {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+      line-height: 1.5;
+    }
+
+    .login-redirect-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.25rem;
+      background: rgba(var(--theme-r), var(--theme-g), var(--theme-b), 0.9);
+      color: white;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border-radius: 0.5rem;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+
+    .login-redirect-btn:hover {
+      background: rgb(var(--theme-r), var(--theme-g), var(--theme-b));
+    }
+
+    .login-redirect-btn svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+  </style>
+</head>
+<body class="dark settings-page">
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Login Redirect Overlay -->
+  <div class="login-redirect-overlay" id="login-redirect-overlay">
+    <div class="login-redirect-card">
+      <h2>Oops, you're not logged in!</h2>
+      <p>You landed on the settings page without logging in first. Please return to the main page to log in with Discord.</p>
+      <a href="/index.html" class="login-redirect-btn">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+        </svg>
+        Go to Availability Tracker
+      </a>
+    </div>
+  </div>
+
+  <!-- Main Page -->
+  <div class="page" id="main-page">
+
+    <!-- Page Header (Two-Row Mobile Layout) -->
+    <header class="page-header">
+      <!-- Row 1: Back + Title -->
+      <div class="page-header-left">
+        <a href="/index.html" class="back-btn" id="back-link" onclick="return handleBackClick(event)">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+        </a>
+        <div class="page-header-title">
+          <h1>Settings</h1>
+          <span class="bot-credit" id="bot-credit"></span>
+        </div>
+      </div>
+
+      <!-- Row 2: Controls -->
+      <div class="page-header-controls">
+        <!-- TZ badge with icon -->
+        <div class="mobile-tz-badge" id="tz-badge">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 1rem; height: 1rem; margin-right: 0.375rem;">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <span id="tz-label">Local</span>
+        </div>
+
+        <!-- Zoom controls -->
+        <div class="mobile-zoom-controls">
+          <button class="mobile-zoom-btn" onclick="zoomOut()">−</button>
+          <button class="mobile-zoom-btn" onclick="zoomIn()">+</button>
+        </div>
+
+        <!-- Theme toggle -->
+        <button class="theme-toggle" id="theme-toggle" onclick="handleThemeToggle()" title="Toggle theme">
+          <svg class="icon-sun" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+          <svg class="icon-moon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-unit">
+      <div class="unit-inner">
+
+        <!-- Grid Card -->
+        <div class="grid-card" id="grid-card">
+
+          <!-- Grid Header -->
+          <div class="grid-header" id="grid-header">
+            <div class="header-cell time-corner"></div>
+            <!-- Day headers generated by JS -->
+          </div>
+
+          <!-- Grid Scroll Container -->
+          <div class="grid-scroll" id="grid-scroll">
+            <div class="grid-body" id="grid-body">
+              <!-- Cells generated by JS -->
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Mobile Drawer -->
+        <div class="mobile-drawer peek" id="mobile-drawer">
+          <div class="drawer-header">
+            <span class="drawer-title">One finger to paint, Two to scroll</span>
+            <div class="drawer-peek-actions">
+              <button class="btn btn-discard" id="mobile-discard-btn" onclick="handleDiscard()" disabled>Discard</button>
+              <button class="btn btn-primary" id="mobile-save-btn" onclick="handleSave()" disabled>Save</button>
+            </div>
+            <button class="drawer-expand-btn" id="drawer-expand-btn" onclick="toggleDrawer()">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="drawer-scroll" id="drawer-content">
+            <!-- User Pill -->
+            <div class="drawer-user-pill" id="mobile-user-pill" onclick="showSessionModal()">
+              <!-- Populated by JS -->
+            </div>
+
+            <!-- Guild Visibility Section -->
+            <div class="drawer-section">
+              <div class="drawer-section-header">
+                <h3>Guild Visibility</h3>
+              </div>
+              <p class="drawer-section-subtitle">Control which servers can see your availability</p>
+              <div class="drawer-list" id="mobile-guild-list">
+                <!-- Generated by JS -->
+              </div>
+            </div>
+
+            <!-- Blocked Users Section -->
+            <div class="drawer-section">
+              <div class="drawer-section-header">
+                <h3>Blocked Users</h3>
+                <button class="action-btn" onclick="showAddBlockModal()">+ Add</button>
+              </div>
+              <p class="drawer-section-subtitle">Cannot see your availability</p>
+              <div class="drawer-list" id="mobile-blacklist">
+                <!-- Generated by JS -->
+              </div>
+            </div>
+
+            <!-- Danger Zone Section -->
+            <div class="drawer-section drawer-danger-section">
+              <div class="drawer-section-header">
+                <h3>Danger Zone</h3>
+              </div>
+              <p class="drawer-section-subtitle">Permanent actions that cannot be undone</p>
+              <button onclick="showDeleteDataModal()" class="btn btn-danger btn-sm drawer-danger-btn">Delete all my data</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+
+  </div>
+
+  <!-- Delete All Data Modal -->
+  <div id="delete-data-modal" class="modal-backdrop">
+    <div class="modal danger">
+      <h3 class="modal-title">Delete all your data?</h3>
+      <p class="modal-description">This will permanently delete your availability, guild settings, and blocked users. This action cannot be undone.</p>
+      <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Type <strong style="color: var(--text-primary);">DELETE</strong> to confirm:</p>
+      <input type="text" id="delete-confirm-input" placeholder="Type DELETE" class="input" autocomplete="off">
+      <div class="modal-actions">
+        <button onclick="hideDeleteDataModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="confirmDeleteAllData()" class="btn btn-danger" id="delete-confirm-btn" disabled>Delete everything</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Block Modal -->
+  <div id="add-block-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Block a user</h3>
+      <p class="modal-description">They won't be able to see your availability</p>
+      <input type="text" id="block-username-input" placeholder="Username or user ID" class="input">
+      <div class="modal-actions">
+        <button onclick="hideAddBlockModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="addToBlacklist()" class="btn btn-primary">Block user</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Modal -->
+  <div id="session-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="modal-title" style="color: var(--text-primary);">Session</h3>
+      <p class="modal-description">Manage your login session</p>
+      <div class="session-options">
+        <button onclick="doLogout()" class="session-btn">
+          <span class="session-btn-title">Log out</span>
+          <span class="session-btn-subtitle">I'll still try to remember you!</span>
+        </button>
+        <button onclick="doClearSession()" class="session-btn session-btn-danger">
+          <span class="session-btn-title">Clear cookies and log out</span>
+          <span class="session-btn-subtitle">I won't know who you are!</span>
+        </button>
+      </div>
+      <div class="modal-actions">
+        <button onclick="hideSessionModal()" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Core JS modules -->
+  <script type="module">
+    import * as api from '/schedule/js/api.js';
+    import { initTheme, toggleTheme, setThemeColor } from '/shared/js/theme.js';
+    import { escapeHtml } from '/schedule/js/utils.js';
+
+    // ========== DOM CACHE ==========
+    const $toastContainer = document.getElementById('toast-container');
+    const $botCredit = document.getElementById('bot-credit');
+    const $loginRedirectOverlay = document.getElementById('login-redirect-overlay');
+    const $gridHeader = document.getElementById('grid-header');
+    const $gridBody = document.getElementById('grid-body');
+    const $gridScroll = document.getElementById('grid-scroll');
+    const $mobileSaveBtn = document.getElementById('mobile-save-btn');
+    const $mobileDiscardBtn = document.getElementById('mobile-discard-btn');
+    const $mobileDrawer = document.getElementById('mobile-drawer');
+    const $drawerExpandBtn = document.getElementById('drawer-expand-btn');
+    const $mobileUserPill = document.getElementById('mobile-user-pill');
+    const $tzLabel = document.getElementById('tz-label');
+    const $mobileGuildList = document.getElementById('mobile-guild-list');
+    const $mobileBlacklist = document.getElementById('mobile-blacklist');
+    const $deleteDataModal = document.getElementById('delete-data-modal');
+    const $deleteConfirmInput = document.getElementById('delete-confirm-input');
+    const $deleteConfirmBtn = document.getElementById('delete-confirm-btn');
+    const $addBlockModal = document.getElementById('add-block-modal');
+    const $blockUsernameInput = document.getElementById('block-username-input');
+    const $sessionModal = document.getElementById('session-modal');
+
+    // ========== TOAST ==========
+    function showToast(message, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      const icons = {
+        success: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>',
+        error: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+        info: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+      };
+      toast.innerHTML = icons[type] || icons.info;
+      const span = document.createElement('span');
+      span.textContent = message;
+      toast.appendChild(span);
+      $toastContainer.appendChild(toast);
+      setTimeout(() => {
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 200);
+      }, 3000);
+    }
+
+    // ========== CONFIG ==========
+    let botName = 'Bot';
+
+    async function initConfig() {
+      try {
+        const cfg = await api.getConfig();
+        if (cfg) {
+          botName = cfg.botName || 'Bot';
+          $botCredit.textContent = `served to you by ${botName}`;
+          if (cfg.themeColor) {
+            setThemeColor(cfg.themeColor);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load config:', e);
+      }
+    }
+
+    async function loadCurrentUser() {
+      try {
+        const user = await api.getMe();
+        if (!user) {
+          $loginRedirectOverlay.classList.add('visible');
+          return null;
+        }
+        if (!user.hasTimezone) {
+          window.location.href = 'index.html';
+          return null;
+        }
+        return user;
+      } catch (e) {
+        console.error('Failed to load current user:', e);
+        $loginRedirectOverlay.classList.add('visible');
+        return null;
+      }
+    }
+
+    // ========== STATE ==========
+    let currentUser = null;
+    let myAvailability = new Set();
+    let originalAvailability = new Set();
+    let guilds = [];
+    let blacklist = [];
+    let hasUnsavedChanges = false;
+    let drawerExpanded = false;
+
+    // Zoom state
+    let zoomLevel = 1; // 0=7days, 1=3days, 2=1day
+    const ZOOM_TIERS = [
+      { days: 7, label: '7 days' },
+      { days: 3, label: '3 days' },
+      { days: 1, label: '1 day' }
+    ];
+
+    // ========== TIME DATA ==========
+    const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+    const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+    const TIME_SLOTS = [];
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < 60; m += 15) {
+        TIME_SLOTS.push({
+          key: `${h.toString().padStart(2, '0')}${m.toString().padStart(2, '0')}`,
+          hour: h,
+          minute: m,
+          label: m === 0 ? formatHour(h) : ''
+        });
+      }
+    }
+
+    function formatHour(h) {
+      if (h === 0) return '12am';
+      if (h === 12) return '12pm';
+      return h > 12 ? `${h - 12}pm` : `${h}am`;
+    }
+
+    // ========== DRAG STATE ==========
+    let isDragging = false;
+    let dragMode = null;
+    let lastPaintedCell = null;
+
+    // ========== TWO-FINGER SCROLL STATE ==========
+    let isScrolling = false;
+    let scrollStartY = 0;
+    let scrollStartScrollTop = 0;
+
+    // ========== BUILD DAY HEADERS ==========
+    function buildDayHeaders() {
+      const header = $gridHeader;
+      const now = new Date();
+      const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
+
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - todayIdx);
+
+      DAY_NAMES.forEach((day, i) => {
+        const date = new Date(monday);
+        date.setDate(monday.getDate() + i);
+
+        const cell = document.createElement('div');
+        cell.className = 'header-cell day-header';
+        cell.dataset.dayIdx = i;
+
+        const isToday = i === todayIdx;
+
+        cell.innerHTML = `
+          <span class="today-tag">${isToday ? 'Today' : ''}</span>
+          <span class="day-name">${day}</span>
+          <span class="day-date">${date.getDate()}/${date.getMonth() + 1}</span>
+        `;
+
+        header.appendChild(cell);
+      });
+    }
+
+    // ========== BUILD GRID ==========
+    function buildGrid() {
+      const body = $gridBody;
+      const now = new Date();
+      const currentSlot = now.getHours() * 4 + Math.floor(now.getMinutes() / 15);
+      const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
+
+      TIME_SLOTS.forEach((slot, slotIdx) => {
+        // Time label
+        const label = document.createElement('div');
+        label.className = 'time-label';
+        if (slot.minute === 0) {
+          label.classList.add('hour');
+          label.textContent = slot.label;
+        }
+        body.appendChild(label);
+
+        // Day cells
+        DAYS.forEach((day, dayIdx) => {
+          const key = `${day}-${slot.key}`;
+          const cell = document.createElement('div');
+          cell.className = 'grid-cell';
+          cell.dataset.key = key;
+          cell.dataset.slotIdx = slotIdx;
+          cell.dataset.dayIdx = dayIdx;
+
+          if (slot.minute === 0 && slotIdx > 0) {
+            cell.classList.add('hour-start');
+          } else if (slot.minute === 30) {
+            cell.classList.add('half-hour');
+          }
+
+          if (myAvailability.has(key)) {
+            cell.classList.add('available');
+          } else {
+            cell.classList.add('unavailable');
+          }
+
+          if (slotIdx === currentSlot && dayIdx === todayIdx) {
+            const indicator = document.createElement('div');
+            indicator.className = 'time-indicator';
+            cell.appendChild(indicator);
+          }
+
+          // Touch/mouse handlers
+          cell.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isDragging = true;
+            const isAvailable = myAvailability.has(key);
+            dragMode = isAvailable ? 'remove' : 'add';
+            lastPaintedCell = { slotIdx, dayIdx };
+            toggleCell(cell, key);
+          });
+
+          cell.addEventListener('touchstart', (e) => {
+            // Two or more fingers = scroll mode
+            if (e.touches.length >= 2) {
+              e.preventDefault();
+              isScrolling = true;
+              isDragging = false;
+              const avgY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+              scrollStartY = avgY;
+              scrollStartScrollTop = $gridScroll.scrollTop;
+              return;
+            }
+            // Single finger = paint mode
+            e.preventDefault();
+            isScrolling = false;
+            isDragging = true;
+            const isAvailable = myAvailability.has(key);
+            dragMode = isAvailable ? 'remove' : 'add';
+            lastPaintedCell = { slotIdx, dayIdx };
+            toggleCell(cell, key);
+          }, { passive: false });
+
+          body.appendChild(cell);
+        });
+      });
+
+      // Drag interpolation (Bresenham)
+      $gridBody.addEventListener('mousemove', handleDragMove);
+      $gridBody.addEventListener('touchmove', handleTouchMove, { passive: false });
+
+      document.addEventListener('mouseup', () => {
+        isDragging = false;
+        dragMode = null;
+        lastPaintedCell = null;
+      });
+
+      document.addEventListener('touchend', () => {
+        isDragging = false;
+        isScrolling = false;
+        dragMode = null;
+        lastPaintedCell = null;
+      });
+    }
+
+    function handleDragMove(e) {
+      if (!isDragging || !lastPaintedCell) return;
+      
+      const target = e.target.closest('.grid-cell');
+      if (!target || !target.dataset.slotIdx) return;
+      
+      interpolatePaint(parseInt(target.dataset.slotIdx), parseInt(target.dataset.dayIdx));
+    }
+
+    function handleTouchMove(e) {
+      e.preventDefault();
+      
+      // Two-finger scroll mode
+      if (isScrolling && e.touches.length >= 2) {
+        const avgY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const deltaY = scrollStartY - avgY;
+        $gridScroll.scrollTop = scrollStartScrollTop + deltaY;
+        return;
+      }
+      
+      // If second finger added during drag, switch to scroll
+      if (e.touches.length >= 2) {
+        isDragging = false;
+        isScrolling = true;
+        const avgY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        scrollStartY = avgY;
+        scrollStartScrollTop = $gridScroll.scrollTop;
+        return;
+      }
+      
+      // Single finger paint mode
+      if (!isDragging || !lastPaintedCell) return;
+      
+      const touch = e.touches[0];
+      const target = document.elementFromPoint(touch.clientX, touch.clientY);
+      if (!target) return;
+      
+      const cell = target.closest('.grid-cell');
+      if (!cell || !cell.dataset.slotIdx) return;
+      
+      interpolatePaint(parseInt(cell.dataset.slotIdx), parseInt(cell.dataset.dayIdx));
+    }
+
+    function interpolatePaint(slotIdx, dayIdx) {
+      if (slotIdx === lastPaintedCell.slotIdx && dayIdx === lastPaintedCell.dayIdx) return;
+      
+      const cells = Array.from(document.querySelectorAll('.grid-cell'));
+      const startSlot = lastPaintedCell.slotIdx;
+      const startDay = lastPaintedCell.dayIdx;
+      
+      const dSlot = Math.abs(slotIdx - startSlot);
+      const dDay = Math.abs(dayIdx - startDay);
+      const sSlot = startSlot < slotIdx ? 1 : -1;
+      const sDay = startDay < dayIdx ? 1 : -1;
+      let err = dSlot - dDay;
+      let curSlot = startSlot;
+      let curDay = startDay;
+      
+      while (true) {
+        if (curSlot !== startSlot || curDay !== startDay) {
+          const idx = curSlot * 7 + curDay;
+          const cell = cells[idx];
+          if (cell) {
+            const key = cell.dataset.key;
+            if (dragMode === 'add' && !myAvailability.has(key)) {
+              toggleCell(cell, key);
+            } else if (dragMode === 'remove' && myAvailability.has(key)) {
+              toggleCell(cell, key);
+            }
+          }
+        }
+        
+        if (curSlot === slotIdx && curDay === dayIdx) break;
+        
+        const e2 = 2 * err;
+        if (e2 > -dDay) {
+          err -= dDay;
+          curSlot += sSlot;
+        }
+        if (e2 < dSlot) {
+          err += dSlot;
+          curDay += sDay;
+        }
+      }
+      
+      lastPaintedCell = { slotIdx, dayIdx };
+    }
+
+    function toggleCell(cell, key) {
+      cell.classList.remove('pulse');
+      void cell.offsetWidth;
+      cell.classList.add('pulse');
+
+      if (myAvailability.has(key)) {
+        myAvailability.delete(key);
+        cell.classList.remove('available');
+        cell.classList.add('unavailable');
+      } else {
+        myAvailability.add(key);
+        cell.classList.remove('unavailable');
+        cell.classList.add('available');
+      }
+      
+      markUnsavedChanges();
+    }
+
+    // ========== CHANGE TRACKING ==========
+    function markUnsavedChanges() {
+      if (myAvailability.size !== originalAvailability.size) {
+        hasUnsavedChanges = true;
+      } else {
+        hasUnsavedChanges = ![...myAvailability].every(s => originalAvailability.has(s));
+      }
+      updateSaveButtons();
+    }
+
+    function updateSaveButtons() {
+      if ($mobileSaveBtn) $mobileSaveBtn.disabled = !hasUnsavedChanges;
+      if ($mobileDiscardBtn) $mobileDiscardBtn.disabled = !hasUnsavedChanges;
+    }
+
+    // ========== SAVE / DISCARD ==========
+    window.handleSave = async function() {
+      try {
+        await api.saveAvailability(Array.from(myAvailability));
+        const count = myAvailability.size;
+        const hours = (count * 15 / 60).toFixed(1);
+        showToast(`Saved! ${hours} hours per week`, 'success');
+
+        originalAvailability = new Set(myAvailability);
+        hasUnsavedChanges = false;
+        updateSaveButtons();
+      } catch (e) {
+        console.error('Failed to save availability:', e);
+        showToast('Failed to save availability', 'error');
+      }
+    };
+
+    window.handleDiscard = function() {
+      if (!confirm('Discard all changes?')) return;
+      
+      myAvailability = new Set(originalAvailability);
+      hasUnsavedChanges = false;
+      
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const key = cell.dataset.key;
+        if (myAvailability.has(key)) {
+          cell.classList.add('available');
+          cell.classList.remove('unavailable');
+        } else {
+          cell.classList.remove('available');
+          cell.classList.add('unavailable');
+        }
+      });
+      
+      updateSaveButtons();
+      showToast('Changes discarded');
+    };
+
+    // ========== ZOOM ==========
+    window.zoomIn = function() {
+      if (zoomLevel < ZOOM_TIERS.length - 1) {
+        zoomLevel++;
+        applyZoom();
+      }
+    };
+
+    window.zoomOut = function() {
+      if (zoomLevel > 0) {
+        zoomLevel--;
+        applyZoom();
+      }
+    };
+
+    function applyZoom() {
+      const tier = ZOOM_TIERS[zoomLevel];
+      const visibleDays = tier.days;
+      
+      const today = new Date().getDay();
+      const todayIndex = today === 0 ? 6 : today - 1;
+      
+      let startDay, endDay;
+      if (visibleDays >= 7) {
+        startDay = 0;
+        endDay = 6;
+      } else {
+        const half = Math.floor(visibleDays / 2);
+        startDay = Math.max(0, todayIndex - half);
+        endDay = startDay + visibleDays - 1;
+        if (endDay > 6) {
+          endDay = 6;
+          startDay = Math.max(0, 7 - visibleDays);
+        }
+      }
+      
+      const visibleCols = endDay - startDay + 1;
+      
+      // Update CSS variable for grid templates
+      document.documentElement.style.setProperty('--mobile-visible-days', visibleCols);
+      
+      // Update header - hide non-visible day headers
+      const headers = document.querySelectorAll('.day-header');
+      headers.forEach((header, index) => {
+        header.style.display = (index >= startDay && index <= endDay) ? '' : 'none';
+      });
+      
+      // Update grid-header template
+      if ($gridHeader) {
+        $gridHeader.style.gridTemplateColumns = `var(--mobile-time-label-width) repeat(${visibleCols}, 1fr)`;
+      }
+      
+      // Update grid-body template
+      if ($gridBody) {
+        $gridBody.style.gridTemplateColumns = `var(--mobile-time-label-width) repeat(${visibleCols}, 1fr)`;
+      }
+      
+      // Hide non-visible cells
+      const cells = document.querySelectorAll('.grid-cell');
+      cells.forEach(cell => {
+        const dayIndex = parseInt(cell.dataset.dayIdx, 10);
+        cell.style.display = (dayIndex >= startDay && dayIndex <= endDay) ? '' : 'none';
+      });
+    }
+
+    // ========== DRAWER ==========
+    window.toggleDrawer = function() {
+      const gridCard = document.querySelector('.grid-card');
+      
+      drawerExpanded = !drawerExpanded;
+      
+      if (drawerExpanded) {
+        $mobileDrawer.classList.remove('peek');
+        $mobileDrawer.classList.add('expanded');
+        if (gridCard) gridCard.classList.add('inactive');
+        $drawerExpandBtn.innerHTML = '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>';
+      } else {
+        $mobileDrawer.classList.remove('expanded');
+        $mobileDrawer.classList.add('peek');
+        if (gridCard) gridCard.classList.remove('inactive');
+        $drawerExpandBtn.innerHTML = '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>';
+      }
+    };
+
+    // ========== TZ BADGE ==========
+    function updateTzBadge() {
+      const tz = (currentUser && currentUser.timezone) || 'Local';
+      if ($tzLabel) $tzLabel.textContent = tz;
+    }
+
+    // ========== USER PILL ==========
+    function updateUserPill(user) {
+      if (!$mobileUserPill || !user) return;
+      
+      const avatarDiv = document.createElement('div');
+      avatarDiv.className = 'drawer-avatar';
+      
+      if (user.avatar) {
+        const img = document.createElement('img');
+        img.src = user.avatar;
+        img.alt = '';
+        img.onerror = () => {
+          img.style.display = 'none';
+          avatarDiv.textContent = (user.username || '?').charAt(0).toUpperCase();
+        };
+        avatarDiv.appendChild(img);
+      } else {
+        avatarDiv.textContent = (user.username || '?').charAt(0).toUpperCase();
+      }
+      
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'drawer-user-text';
+      nameSpan.textContent = user.username || 'Unknown';
+      
+      $mobileUserPill.innerHTML = '';
+      $mobileUserPill.appendChild(avatarDiv);
+      $mobileUserPill.appendChild(nameSpan);
+    }
+
+    // ========== GUILDS ==========
+    async function loadGuilds() {
+      try {
+        const data = await api.getGuilds();
+        guilds = data.guilds || [];
+        buildGuildList();
+      } catch (e) {
+        console.error('Failed to load guilds:', e);
+        showToast('Failed to load servers', 'error');
+      }
+    }
+
+    function buildGuildList() {
+      if (!$mobileGuildList) return;
+      
+      if (guilds.length === 0) {
+        $mobileGuildList.innerHTML = '<p class="list-empty">No shared servers</p>';
+        return;
+      }
+      
+      $mobileGuildList.innerHTML = guilds.map(g => `
+        <div class="list-item" data-guild-id="${g.id}">
+          <div class="list-item-left">
+            <div class="list-item-icon">${g.icon ? `<img src="${escapeHtml(g.icon)}" alt="" data-fallback="${escapeHtml(g.name.charAt(0))}">` : escapeHtml(g.name.charAt(0))}</div>
+            <span class="list-item-name">${escapeHtml(g.name)}</span>
+          </div>
+          <div class="toggle-switch ${g.enabled ? 'active' : ''}" data-toggle-guild="${g.id}"></div>
+        </div>
+      `).join('');
+      // Attach error handlers for guild icons
+      $mobileGuildList.querySelectorAll('img[data-fallback]').forEach(img => {
+        img.onerror = () => {
+          img.style.display = 'none';
+          img.parentElement.textContent = img.dataset.fallback;
+        };
+      });
+    }
+
+    // Event delegation for guild toggles
+    $mobileGuildList?.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-toggle-guild]');
+      if (toggle) {
+        toggleGuild(toggle.dataset.toggleGuild);
+      }
+    });
+
+    window.toggleGuild = async function(id) {
+      const guild = guilds.find(g => g.id === id);
+      if (!guild) return;
+
+      const toggle = document.querySelector(`[data-guild-id="${id}"] .toggle-switch`);
+      const newState = !guild.enabled;
+
+      toggle.classList.toggle('active', newState);
+
+      try {
+        await api.setGuildVisibility(id, newState);
+        guild.enabled = newState;
+        showToast(`${escapeHtml(guild.name)} ${newState ? 'enabled' : 'disabled'}`, 'success');
+      } catch (e) {
+        console.error('Failed to toggle guild:', e);
+        toggle.classList.toggle('active', guild.enabled);
+        showToast('Failed to update visibility', 'error');
+      }
+    };
+
+    // ========== BLACKLIST ==========
+    async function loadBlacklist() {
+      try {
+        const data = await api.getBlacklist();
+        blacklist = data.blacklist || [];
+        buildBlacklist();
+      } catch (e) {
+        console.error('Failed to load blacklist:', e);
+        showToast('Failed to load blocked users', 'error');
+      }
+    }
+
+    function buildBlacklist() {
+      if (!$mobileBlacklist) return;
+      
+      if (blacklist.length === 0) {
+        $mobileBlacklist.innerHTML = '<p class="list-empty">No blocked users</p>';
+        return;
+      }
+      
+      $mobileBlacklist.innerHTML = blacklist.map(u => `
+        <div class="list-item" data-user-id="${u.id}">
+          <div class="list-item-left">
+            <div class="list-item-icon">${u.avatar ? `<img src="${escapeHtml(u.avatar)}" alt="" data-fallback="${escapeHtml((u.username || '?').charAt(0).toUpperCase())}">` : escapeHtml((u.username || '?').charAt(0).toUpperCase())}</div>
+            <span class="list-item-name">${escapeHtml(u.username || u.id)}</span>
+          </div>
+          <button class="action-btn danger" data-unblock="${u.id}">Unblock</button>
+        </div>
+      `).join('');
+      // Attach error handlers for avatar icons
+      $mobileBlacklist.querySelectorAll('img[data-fallback]').forEach(img => {
+        img.onerror = () => {
+          img.style.display = 'none';
+          img.parentElement.textContent = img.dataset.fallback;
+        };
+      });
+    }
+
+    // Event delegation for unblock buttons
+    $mobileBlacklist?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-unblock]');
+      if (btn) {
+        removeFromBlacklist(btn.dataset.unblock);
+      }
+    });
+
+    window.removeFromBlacklist = async function(id) {
+      const user = blacklist.find(u => u.id === id);
+      if (!user) return;
+
+      try {
+        await api.unblockUser(id);
+        blacklist = blacklist.filter(u => u.id !== id);
+        buildBlacklist();
+        showToast(`${escapeHtml(user.username)} unblocked`, 'success');
+      } catch (e) {
+        console.error('Failed to remove from blacklist:', e);
+        showToast('Failed to unblock user', 'error');
+      }
+    };
+
+    // ========== AVAILABILITY ==========
+    async function loadAvailability() {
+      if (!currentUser) return;
+      try {
+        const data = await api.getUserAvailability(currentUser.id);
+        myAvailability = new Set(data.slots || []);
+        originalAvailability = new Set(myAvailability);
+        renderAvailabilityGrid();
+      } catch (e) {
+        console.error('Failed to load availability:', e);
+        showToast('Failed to load availability', 'error');
+      }
+    }
+
+    function renderAvailabilityGrid() {
+      document.querySelectorAll('.grid-cell').forEach(cell => {
+        const slot = cell.dataset.key;
+        if (myAvailability.has(slot)) {
+          cell.classList.add('available');
+          cell.classList.remove('unavailable');
+        } else {
+          cell.classList.remove('available');
+          cell.classList.add('unavailable');
+        }
+      });
+    }
+
+    // ========== MODALS ==========
+    window.showDeleteDataModal = function() {
+      $deleteDataModal.classList.add('visible');
+      $deleteConfirmInput.value = '';
+      $deleteConfirmBtn.disabled = true;
+      $deleteConfirmInput.focus();
+    };
+
+    window.hideDeleteDataModal = function() {
+      $deleteDataModal.classList.remove('visible');
+    };
+
+    $deleteConfirmInput?.addEventListener('input', (e) => {
+      $deleteConfirmBtn.disabled = e.target.value !== 'DELETE';
+    });
+
+    window.confirmDeleteAllData = async function() {
+      if ($deleteConfirmInput.value !== 'DELETE') return;
+      hideDeleteDataModal();
+
+      try {
+        await api.deleteAccount();
+        showToast('All data deleted. Redirecting...', 'success');
+        setTimeout(() => {
+          document.cookie.split(';').forEach(c => {
+            document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+          });
+          window.location.href = '/auth/logout?clear=true';
+        }, 1500);
+      } catch (e) {
+        console.error('Failed to delete account data:', e);
+        showToast('Failed to delete data', 'error');
+      }
+    };
+
+    window.showAddBlockModal = function() {
+      $addBlockModal.classList.add('visible');
+      $blockUsernameInput.value = '';
+      $blockUsernameInput.focus();
+    };
+
+    window.hideAddBlockModal = function() {
+      $addBlockModal.classList.remove('visible');
+    };
+
+    window.showSessionModal = function() {
+      $sessionModal.classList.add('visible');
+    };
+
+    window.hideSessionModal = function() {
+      $sessionModal.classList.remove('visible');
+    };
+
+    window.doLogout = function() {
+      api.logout();
+    };
+
+    window.doClearSession = function() {
+      document.cookie.split(';').forEach(c => {
+        document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/');
+      });
+      api.logout(true);
+    };
+
+    window.addToBlacklist = async function() {
+      const username = $blockUsernameInput.value.trim();
+      if (!username) return;
+
+      try {
+        const user = await api.blockUser(username);
+        blacklist.push(user);
+        buildBlacklist();
+        hideAddBlockModal();
+        showToast(`${username} blocked`, 'success');
+      } catch (e) {
+        if (e.message?.includes('404')) {
+          showToast('User not found', 'error');
+        } else {
+          showToast('Failed to block user', 'error');
+        }
+      }
+    };
+
+    // Close modals on backdrop click
+    document.querySelectorAll('.modal-backdrop').forEach(modal => {
+      modal.addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) {
+          modal.classList.remove('visible');
+        }
+      });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-backdrop.visible').forEach(m => m.classList.remove('visible'));
+      }
+    });
+
+    // ========== NAVIGATION ==========
+    function handleBeforeUnload(e) {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    }
+
+    window.handleBackClick = function(event) {
+      if (hasUnsavedChanges) {
+        event.preventDefault();
+        if (confirm('You have unsaved changes. Are you sure you want to leave?')) {
+          hasUnsavedChanges = false;
+          window.location.href = 'index.html';
+        }
+        return false;
+      }
+      return true;
+    };
+
+    // ========== THEME ==========
+    window.handleThemeToggle = toggleTheme;
+
+    // ========== INIT ==========
+    async function init() {
+      initTheme();
+      await initConfig();
+      
+      const user = await loadCurrentUser();
+      if (!user) return;
+
+      currentUser = user;
+      updateTzBadge();
+      updateUserPill(user);
+
+      buildDayHeaders();
+      buildGrid();
+
+      await Promise.all([
+        loadGuilds(),
+        loadBlacklist(),
+        loadAvailability()
+      ]);
+      
+      applyZoom();
+      window.addEventListener('beforeunload', handleBeforeUnload);
+    }
+
+    init();
+  </script>
+
+</body>
+</html>
